@@ -37,10 +37,20 @@ class AgentSettings(BaseModel):
     max_wall_time_ms: int = Field(120000, description="Maximum execution time in ms")
 
 
+class ContainerSettings(BaseModel):
+    """Settings for Docker container sandboxes."""
+    
+    max_memory: str = Field("512m", description="Max memory per container")
+    cpus: float = Field(0.5, description="Number of CPUs per container")
+    idle_timeout_seconds: int = Field(600, description="Time before idle container is removed")
+    max_per_user: int = Field(1, description="Max containers per user")
+
+
 class Settings(BaseSettings):
     """Main application settings."""
 
     llm: LLMSettings = Field(default_factory=LLMSettings)
     agent: AgentSettings = Field(default_factory=AgentSettings)
+    container: ContainerSettings = Field(default_factory=ContainerSettings)
 
     model_config = {"env_nested_delimiter": "__"}

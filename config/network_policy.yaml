@@ -1,0 +1,4 @@
+allowlist:
+  - "api.anthropic.com"
+  - "localhost:11434"
+  - "api.github.com"

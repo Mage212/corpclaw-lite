@@ -1,0 +1,50 @@
+import os
+import time
+from typing import Any
+import pytest
+from corpclaw_lite.security.ipc_auth import IPCAuth, IPCAuthError
+
+def test_ipc_auth_verify_success():
+    auth = IPCAuth(secret="test_secret", nonce_ttl_seconds=10)
+    payload = {"command": "do_something", "args": {"x": 1}}
+    
+    signed = auth.sign(payload)
+    
+    assert "signature" in signed
+    assert "nonce" in signed
+    assert "timestamp" in signed
+    
+    verified_payload = auth.verify(signed)
+    assert verified_payload == payload
+
+def test_ipc_auth_detects_tampering():
+    auth = IPCAuth(secret="test_secret", nonce_ttl_seconds=10)
+    payload = {"command": "do_something"}
+    signed = auth.sign(payload)
+    
+    # Tamper payload
+    signed["payload"] = {"command": "do_evil_things"}
+    
+    with pytest.raises(IPCAuthError, match="Invalid signature"):
+        auth.verify(signed)
+
+def test_ipc_auth_detects_replay():
+    auth = IPCAuth(secret="test_secret", nonce_ttl_seconds=10)
+    payload = {"command": "test"}
+    signed = auth.sign(payload)
+    
+    auth.verify(signed) # first time okay
+    
+    with pytest.raises(IPCAuthError, match="Replay attack detected"):
+        auth.verify(signed) # second time fails
+
+def test_ipc_auth_ttl_expiration():
+    auth = IPCAuth(secret="test_secret", nonce_ttl_seconds=0) # Expires immediately
+    payload = {"command": "test"}
+    signed = auth.sign(payload)
+    
+    # ensure it's "old"
+    time.sleep(0.01)
+    
+    with pytest.raises(IPCAuthError, match="expired"):
+        auth.verify(signed)

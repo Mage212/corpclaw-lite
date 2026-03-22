@@ -1,0 +1,12 @@
+id: filesystem-agent
+name: "Filesystem & Search Agent"
+description: "Ekspert po rabote s failovoi sistemoy i poiskom. Otlicno podhodit dlya analiza code base i navigacii."
+capabilities:
+  - "Reading files"
+  - "Listing directories"
+  - "Searching with regex"
+allowed_tools:
+  - read_file
+  - list_files
+  - search_files
+prompt_path: "config/bootstrap/subagents/filesystem.md"

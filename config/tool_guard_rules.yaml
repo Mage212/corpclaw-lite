@@ -1,0 +1,27 @@
+rules:
+  # Blocking dangerous system removals
+  - id: DANGEROUS_RM
+    description: "Attempting to run rm -rf which is highly dangerous."
+    tool: "exec_script"
+    severity: CRITICAL
+    match_param: "script"
+    match_pattern: "rm\\s+-rf\\s+/"
+    require_approval: false
+
+  # Preventing directory traversal attacks  
+  - id: PATH_TRAVERSAL
+    description: "Path traversal detected."
+    tool: "read_file"
+    severity: HIGH
+    match_param: "path"
+    match_pattern: "\\.\\./"
+    require_approval: true
+
+  # Detecting secrets passed in arguments  
+  - id: SECRET_IN_ARGS
+    description: "Potential secret API key passed in tool arguments."
+    tool: "*"
+    severity: HIGH
+    match_param: "script"
+    match_pattern: "(sk-[a-zA-Z0-9]{20,}|ghp_[a-zA-Z0-9]{20,})"
+    require_approval: true

@@ -1,0 +1,11 @@
+id: execution-agent
+name: "Code Execution Agent"
+description: "Vypolnyaet skripty, testy i compiliruet kod. Otlicno podhodit dlya zapuska bash komand i skriptov."
+capabilities:
+  - "Executing shell commands"
+  - "Running python scripts"
+  - "Running tests"
+allowed_tools:
+  - exec_script
+  - read_file
+prompt_path: "config/bootstrap/subagents/execution.md"

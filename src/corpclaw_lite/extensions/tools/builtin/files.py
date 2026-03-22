@@ -105,7 +105,11 @@ class EditFileTool(Tool):
         old_text = kwargs.get("old_text")
         new_text = kwargs.get("new_text")
 
-        if not isinstance(path, str) or not isinstance(old_text, str) or not isinstance(new_text, str):
+        if (
+            not isinstance(path, str)
+            or not isinstance(old_text, str)
+            or not isinstance(new_text, str)
+        ):
             return "Error: missing required params 'path', 'old_text', 'new_text'"
 
         try:
