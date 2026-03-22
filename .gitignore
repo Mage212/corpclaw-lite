@@ -1,0 +1,30 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.mypy_cache/
+.pytest_cache/
+.pytest-temp/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Virtual environments
+.venv
+.env
+
+# Project-specific
+data/
+logs/
+workspace/
+workspaces/
+.claude/
+.agents/
+token_usage.json
+*.log
+.python-version
+
+# MacOS
+.DS_Store

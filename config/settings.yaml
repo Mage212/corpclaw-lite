@@ -1,0 +1,25 @@
+llm:
+  default: "local"
+  named:
+    local:
+      type: "openai"
+      model: "qwen2.5-7b-instruct"
+      base_url: "${LLM_BASE_URL:-http://localhost:11434/v1}"
+    vision:
+      type: "openai"
+      model: "${VISION_MODEL:-qwen2.5-vl-7b}"
+      base_url: "${VISION_LLM_BASE_URL:-http://localhost:11434/v1}"
+    cloud:
+      type: "anthropic"
+      model: "claude-3-5-sonnet-20241022"
+      api_key: "${ANTHROPIC_API_KEY:-}"
+  routing:
+    - task_kind: "vision"
+      provider: "vision"
+    - subagent_id: "execution-agent"
+      provider: "cloud"
+
+agent:
+  max_steps: 15
+  max_tool_calls: 30
+  max_wall_time_ms: 120000
