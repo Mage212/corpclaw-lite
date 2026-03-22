@@ -1,10 +1,11 @@
 # pyright: reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false
+import asyncio
 import logging
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 from telegram.constants import ParseMode
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
@@ -12,6 +13,8 @@ from corpclaw_lite.channels.base import Channel
 from corpclaw_lite.users.models import User
 
 logger = logging.getLogger(__name__)
+
+_APPROVAL_TIMEOUT = 300.0  # seconds
 
 
 class TelegramChannel(Channel):
@@ -28,6 +31,8 @@ class TelegramChannel(Channel):
         self.token = token
         self._app: Application | None = None  # type: ignore
         self._on_message = message_handler
+        # message_id → Future[bool] for pending inline approvals
+        self._pending_approvals: dict[str, asyncio.Future[bool]] = {}
 
     async def start(self) -> None:
         """Initialize the Telegram bot application."""
@@ -81,33 +86,36 @@ class TelegramChannel(Channel):
 
     async def request_approval(self, user: User, action: str, details: str) -> bool:
         """
-        Send a message with inline buttons for approval.
-        Wait for callback response.
+        Send a message with Approve/Deny inline buttons and wait for the user's tap.
+        Returns True if approved, False if denied or timed out.
         """
-        # Note: Implementing a true async block for an inline button response
-        # requires tracking futures per message_id.
-        # For simplicity in this mock protocol, we return False for now until
-        # full Future routing is implemented.
-        logger.warning("Inline approval requested but blocking await not fully implemented.")
+        if not self._app or not self._app.bot or not user.telegram_id:
+            return False
+
         keyboard = [
             [
-                InlineKeyboardButton("Approve", callback_data=f"approve_{action}"),
-                InlineKeyboardButton("Deny", callback_data=f"deny_{action}"),
+                InlineKeyboardButton("✅ Approve", callback_data="approve"),
+                InlineKeyboardButton("❌ Deny", callback_data="deny"),
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        if self._app and self._app.bot:
-            await self._app.bot.send_message(
-                chat_id=user.telegram_id,
-                text=f"<b>Approval Required:</b> {action}\n\n<i>{details}</i>",
-                parse_mode=ParseMode.HTML,
-                reply_markup=reply_markup,
-            )
+        sent: Message = await self._app.bot.send_message(
+            chat_id=user.telegram_id,
+            text=f"<b>⚠️ Approval Required</b>\n\n<b>Action:</b> {action}\n\n<i>{details}</i>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=reply_markup,
+        )
 
-        # Returning false immediately to prevent hangs in Phase 2 skeleton.
-        # This will be replaced with a proper asyncio.Future wait.
-        return False
+        future: asyncio.Future[bool] = asyncio.get_event_loop().create_future()
+        self._pending_approvals[str(sent.message_id)] = future
+
+        try:
+            return await asyncio.wait_for(future, timeout=_APPROVAL_TIMEOUT)
+        except TimeoutError:
+            logger.warning("Approval request timed out for action '%s'", action)
+            self._pending_approvals.pop(str(sent.message_id), None)
+            return False
 
     async def _handle_start(self, update: Update, context: Any) -> None:
         if update.effective_chat:
@@ -120,7 +128,18 @@ class TelegramChannel(Channel):
 
     async def _handle_callback(self, update: Update, context: Any) -> None:
         query = update.callback_query
-        if query:
-            await query.answer()
-            # We would resolve the waiting Future here
-            await query.edit_message_text(text=f"Action chosen: {query.data}")
+        if not query or not query.message:
+            return
+
+        await query.answer()
+
+        msg_id = str(query.message.message_id)
+        future = self._pending_approvals.pop(msg_id, None)
+
+        approved = query.data == "approve"
+
+        if future and not future.done():
+            future.set_result(approved)
+
+        label = "✅ Approved" if approved else "❌ Denied"
+        await query.edit_message_text(text=f"{label}")

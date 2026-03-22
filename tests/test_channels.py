@@ -1,7 +1,10 @@
+import asyncio
 import pytest
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 from corpclaw_lite.channels.cli import CLIChannel
+from corpclaw_lite.channels.telegram_channel import TelegramChannel
 from corpclaw_lite.users.models import User
 
 @pytest.fixture
@@ -34,3 +37,57 @@ async def test_cli_channel(capsys: pytest.CaptureFixture[str], test_user: User) 
     await channel.stop()
     out, err = capsys.readouterr()
     assert "CLI Channel stopped" in out
+
+
+@pytest.mark.asyncio
+async def test_telegram_approval_approved(test_user: User) -> None:
+    """Approval future resolves True when callback fires with 'approve'."""
+    channel = TelegramChannel(token="test-token", message_handler=AsyncMock())
+
+    # Mock bot.send_message to return a message with a known message_id
+    sent_msg = MagicMock()
+    sent_msg.message_id = 42
+
+    mock_bot = AsyncMock()
+    mock_bot.send_message = AsyncMock(return_value=sent_msg)
+
+    mock_app = MagicMock()
+    mock_app.bot = mock_bot
+    channel._app = mock_app
+
+    # Schedule the callback resolution slightly after request_approval starts
+    async def _fire_callback() -> None:
+        await asyncio.sleep(0.05)
+        future = channel._pending_approvals.get("42")
+        if future and not future.done():
+            future.set_result(True)
+
+    asyncio.create_task(_fire_callback())
+    result = await channel.request_approval(test_user, "delete_file", "Delete /tmp/test.txt")
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_telegram_approval_denied(test_user: User) -> None:
+    """Approval future resolves False when callback fires with 'deny'."""
+    channel = TelegramChannel(token="test-token", message_handler=AsyncMock())
+
+    sent_msg = MagicMock()
+    sent_msg.message_id = 99
+
+    mock_bot = AsyncMock()
+    mock_bot.send_message = AsyncMock(return_value=sent_msg)
+
+    mock_app = MagicMock()
+    mock_app.bot = mock_bot
+    channel._app = mock_app
+
+    async def _fire_callback() -> None:
+        await asyncio.sleep(0.05)
+        future = channel._pending_approvals.get("99")
+        if future and not future.done():
+            future.set_result(False)
+
+    asyncio.create_task(_fire_callback())
+    result = await channel.request_approval(test_user, "exec_script", "Run install.sh")
+    assert result is False
