@@ -21,6 +21,9 @@ dependencies = [
     "watchdog>=6.0.0",
 ]
 
+[project.scripts]
+corpclaw-lite = "corpclaw_lite.cli:main"
+
 [tool.pyright]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
