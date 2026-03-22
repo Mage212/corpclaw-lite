@@ -59,14 +59,29 @@ class ContextBuilder:
         )
 
     @classmethod
-    def build_initial(cls, user: User, message: str, registry: ToolRegistry) -> ContextBuilder:
-        """Build the initial context for a new user message."""
-        # For Phase 1, just a hardcoded basic system prompt
-        system = (
+    def build_initial(
+        cls,
+        user: User,
+        message: str,
+        registry: ToolRegistry,
+        history: list[dict[str, Any]] | None = None,
+        system_prompt_override: str | None = None,
+    ) -> ContextBuilder:
+        """Build the initial context for a new user message.
+
+        History (if provided) is inserted before the current message so the LLM
+        sees: [system, ...history..., current_user_message].
+        """
+        system = system_prompt_override or (
             f"You are CorpClaw Lite, a helpful assistant. "
             f"You are talking to {user.name} from the {user.department} department. "
             f"Use the available tools to help the user. If a tool returns an error, try to fix it."
         )
         builder = cls(system_prompt=system)
+        for item in history or []:
+            if item["role"] == "user":
+                builder.add_user_message(str(item["content"]))
+            else:
+                builder.add_assistant_message(str(item["content"]))
         builder.add_user_message(message)
         return builder

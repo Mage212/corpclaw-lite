@@ -40,15 +40,18 @@ class UserManager:
         department: str,
         name: str = "",
     ) -> User:
-        """Insert a new user and return it."""
+        """Insert a new user (if not exists) and return the DB record."""
         with sqlite3.connect(self._db) as conn:
-            cursor = conn.execute(
+            conn.execute(
                 "INSERT OR IGNORE INTO users (telegram_id, name, department) VALUES (?,?,?)",
                 (telegram_id, name or f"user_{telegram_id}", department),
             )
-            row_id = cursor.lastrowid or self._get_id_by_telegram(telegram_id)
+        # Always read back the actual DB state (handles duplicate insert gracefully)
+        existing = self.get_by_telegram_id(telegram_id)
+        if existing:
+            return existing
         return User(
-            id=row_id,
+            id=0,
             name=name or f"user_{telegram_id}",
             department=department,
             telegram_id=telegram_id,

@@ -3,7 +3,6 @@ from typing import Any
 
 import pytest
 
-from corpclaw_lite.agent.guards import BudgetExceededError
 from corpclaw_lite.agent.loop import AgentLoop
 from corpclaw_lite.config.settings import AgentSettings
 from corpclaw_lite.extensions.tools.registry import ToolRegistry
@@ -86,11 +85,12 @@ async def test_agent_loop_tool_call(test_user: User, empty_registry: ToolRegistr
 
 
 @pytest.mark.asyncio
-async def test_agent_loop_budget_guard(test_user: User, empty_registry: ToolRegistry) -> None:
-    # Set max steps to 2
+async def test_agent_loop_budget_exceeded_returns_string(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """BudgetExceededError is caught internally — run() returns a string, not raises."""
     settings = AgentSettings(max_steps=2)
 
-    # Provider always returns tool calls -> infinite loop
     provider = MockProvider(
         responses=[
             LLMResponse(content="", tool_calls=[ToolCall(id="1", name="no_tool", arguments={})]),
@@ -100,7 +100,39 @@ async def test_agent_loop_budget_guard(test_user: User, empty_registry: ToolRegi
     )
     loop = AgentLoop(provider, empty_registry, settings)
 
-    with pytest.raises(BudgetExceededError):
-        await loop.run(test_user, "Loop")
-    
+    result = await loop.run(test_user, "Loop forever")
+    assert isinstance(result, str)
+    assert "resource limit" in result.lower() or "budget" in result.lower()
     assert provider.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_history_order(test_user: User, empty_registry: ToolRegistry) -> None:
+    """History messages must appear BEFORE the current user message in context."""
+    from corpclaw_lite.memory.sqlite import SQLiteMemory
+    from unittest.mock import MagicMock
+
+    # Mock memory returning 2 history entries
+    memory = MagicMock(spec=SQLiteMemory)
+    memory.get_history.return_value = [
+        {"role": "user", "content": "old question"},
+        {"role": "assistant", "content": "old answer"},
+    ]
+
+    captured_messages: list[list[dict]] = []
+
+    class CapturingProvider(MockProvider):
+        async def chat(self, messages, tools=None, system=None):  # type: ignore[override]
+            captured_messages.append(list(messages))
+            return LLMResponse(content="done")
+
+    provider = CapturingProvider(responses=[])
+    loop = AgentLoop(provider, empty_registry, AgentSettings(), memory=memory)
+    await loop.run(test_user, "new question")
+
+    msgs = captured_messages[0]
+    # Find positions
+    roles = [(m.get("role"), m.get("content")) for m in msgs]
+    user_contents = [c for r, c in roles if r == "user"]
+    # "old question" must come before "new question"
+    assert user_contents.index("old question") < user_contents.index("new question")

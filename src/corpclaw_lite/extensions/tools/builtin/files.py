@@ -24,8 +24,8 @@ def resolve_and_validate_path(path_str: str) -> Path:
 
     resolved = target_path.resolve()
 
-    # Path traversal check
-    if not str(resolved).startswith(str(workspace_root)):
+    # Path traversal check (string startswith is bypassable — compare parents instead)
+    if not (resolved == workspace_root or workspace_root in resolved.parents):
         raise PermissionError(
             f"Access denied: Path '{path_str}' is outside of workspace '{workspace_root}'."
         )

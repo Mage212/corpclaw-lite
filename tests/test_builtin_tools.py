@@ -65,6 +65,22 @@ async def test_path_traversal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r
 
 
 @pytest.mark.asyncio
+async def test_path_traversal_same_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, registry: ToolRegistry
+) -> None:
+    """A directory whose name starts with workspace_root string must be blocked."""
+    monkeypatch.chdir(tmp_path)
+    # Create a sibling directory with a name that is a prefix extension of tmp_path
+    sibling = tmp_path.parent / (tmp_path.name + "_evil")
+    sibling.mkdir(exist_ok=True)
+    evil_file = sibling / "secret.txt"
+    evil_file.write_text("evil content")
+    res = await registry.execute("read_file", {"path": str(evil_file)})
+    assert "Error" in res
+    assert "outside of workspace" in res or "PermissionError" in res
+
+
+@pytest.mark.asyncio
 async def test_list_and_search(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, registry: ToolRegistry) -> None:
     monkeypatch.chdir(tmp_path)
 

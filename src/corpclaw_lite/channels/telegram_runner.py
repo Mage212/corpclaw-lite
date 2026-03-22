@@ -12,16 +12,21 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+from pathlib import Path
+
+from corpclaw_lite.agent.loop import AgentLoop
+from corpclaw_lite.users.manager import UserManager
 
 logger = logging.getLogger(__name__)
 
 
-def _build_agent_loop() -> tuple[object, object]:
+def _build_agent_loop() -> tuple[AgentLoop, UserManager]:
     """Build and return (AgentLoop, UserManager) using env/config settings."""
     import os
 
-    from corpclaw_lite.agent.loop import AgentLoop
     from corpclaw_lite.config.settings import AgentSettings, LLMSettings, ProviderSettings
+    from corpclaw_lite.departments.manager import DepartmentManager
+    from corpclaw_lite.departments.permissions import PermissionChecker
     from corpclaw_lite.extensions.tools.builtin.files import (
         EditFileTool,
         ListFilesTool,
@@ -31,7 +36,7 @@ def _build_agent_loop() -> tuple[object, object]:
     )
     from corpclaw_lite.extensions.tools.registry import ToolRegistry
     from corpclaw_lite.memory.sqlite import SQLiteMemory
-    from corpclaw_lite.users.manager import UserManager
+    from corpclaw_lite.security.tool_guard import ToolGuard
 
     # ── Provider ──────────────────────────────────────────────────────────────
     api_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -63,6 +68,18 @@ def _build_agent_loop() -> tuple[object, object]:
     for tool in builtin_tools:
         registry.register(tool)
 
+    # ── Security ──────────────────────────────────────────────────────────────
+    guard = ToolGuard()
+    guard_rules = Path("config/tool_guard_rules.yaml")
+    if guard_rules.exists():
+        guard.load_file(guard_rules)
+
+    dept_manager = DepartmentManager()
+    dept_config = Path("config/departments.yaml")
+    if dept_config.exists():
+        dept_manager.load_file(dept_config)
+    permission_checker = PermissionChecker(dept_manager)
+
     # ── Memory ────────────────────────────────────────────────────────────────
     memory = SQLiteMemory()
 
@@ -75,6 +92,9 @@ def _build_agent_loop() -> tuple[object, object]:
         registry=registry,
         settings=agent_settings,
         memory=memory,
+        tool_guard=guard,
+        permission_checker=permission_checker,
+        # approval_callback set later in run_telegram_bot() after channel is created
     )
     user_manager = UserManager()
     return loop, user_manager
@@ -82,13 +102,10 @@ def _build_agent_loop() -> tuple[object, object]:
 
 async def run_telegram_bot(token: str) -> None:
     """Start the Telegram bot and run until interrupted."""
-    from corpclaw_lite.agent.loop import AgentLoop
     from corpclaw_lite.channels.telegram_channel import TelegramChannel
-    from corpclaw_lite.users.manager import UserManager
+    from corpclaw_lite.users.models import User
 
     agent_loop, user_manager = _build_agent_loop()
-    assert isinstance(agent_loop, AgentLoop)
-    assert isinstance(user_manager, UserManager)
 
     async def _handle_message(telegram_id: str, message: str) -> str:
         tid = int(telegram_id)
@@ -105,10 +122,16 @@ async def run_telegram_bot(token: str) -> None:
 
     channel = TelegramChannel(token=token, message_handler=_handle_message)
 
+    # Wire approval_callback to the channel (needs user lookup by telegram_id)
+    async def _approval_callback(action: str, details: str) -> bool:
+        # approval_callback is called from within _handle_message where tid is in scope
+        # For a simple implementation, we raise without user context — future improvement
+        return False
+
+    agent_loop._approval_callback = _approval_callback  # type: ignore[assignment]
+
     # Wire send_message back into the handler so agent can reply
     async def _handle_and_reply(telegram_id: str, message: str) -> None:
-        from corpclaw_lite.users.models import User
-
         tid = int(telegram_id)
         user = user_manager.get_by_telegram_id(tid) or User(
             id=0, name=f"user_{tid}", department="default", telegram_id=tid

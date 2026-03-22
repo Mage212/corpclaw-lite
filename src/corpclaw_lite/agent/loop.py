@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Any
 
 from corpclaw_lite.agent.context import ContextBuilder
 from corpclaw_lite.agent.guards import (
+    BudgetExceededError,
     SimpleBudgetGuard,
     SimpleBudgetGuardConfig,
     SimpleProgressGuard,
@@ -31,6 +33,7 @@ class AgentLoop:
         permission_checker: PermissionChecker | None = None,
         tool_guard: ToolGuard | None = None,
         memory: SQLiteMemory | None = None,
+        approval_callback: Callable[[str, str], Awaitable[bool]] | None = None,
     ):
         self._provider = provider
         self._registry = registry
@@ -38,19 +41,27 @@ class AgentLoop:
         self._permission_checker = permission_checker
         self._tool_guard = tool_guard
         self._memory = memory
+        self._approval_callback = approval_callback
 
-    async def run(self, user: User, message: str) -> str:
+    async def run(
+        self,
+        user: User,
+        message: str,
+        system_prompt: str | None = None,
+    ) -> str:
         """Run the ReAct loop until a final answer is given or limits are reached."""
-        context = ContextBuilder.build_initial(user, message, self._registry)
-
-        # Load history
+        # Load history BEFORE building context so it precedes the current message
+        history: list[dict[str, Any]] = []
         if self._memory:
-            history = self._memory.get_history(str(user.id), limit=self._settings.max_steps)
-            for item in history:
-                if item["role"] == "user":
-                    context.add_user_message(item["content"])
-                else:
-                    context.add_assistant_message(item["content"])
+            history = self._memory.get_history(str(user.id), limit=self._settings.max_history)
+
+        context = ContextBuilder.build_initial(
+            user,
+            message,
+            self._registry,
+            history=history,
+            system_prompt_override=system_prompt,
+        )
 
         # Save new user message
         if self._memory:
@@ -67,73 +78,80 @@ class AgentLoop:
             )
         )
         budget = SimpleBudgetGuard(guard_config)
-
         progress = SimpleProgressGuard()
-
         tools_schema = self._registry.to_schemas()
 
-        while True:
-            budget.check()
-            budget.consume_iteration()
+        try:
+            while True:
+                budget.check()
+                budget.consume_iteration()
 
-            response = await self._provider.chat(
-                messages=context.messages,
-                tools=tools_schema,
-            )
+                response = await self._provider.chat(
+                    messages=context.messages,
+                    tools=tools_schema,
+                )
 
-            if not response.tool_calls:
-                # Agent provided text directly — save and return
-                final = response.content if response.content else "Agent provided no response."
-                if self._memory:
-                    self._memory.add_message(str(user.id), "assistant", final)
-                return final
+                if not response.tool_calls:
+                    # Agent provided text directly — save and return
+                    final = response.content if response.content else "Agent provided no response."
+                    if self._memory:
+                        self._memory.add_message(str(user.id), "assistant", final)
+                    return final
 
-            # Agent requested tools
-            if response.content:
-                context.add_assistant_message(response.content)
+                # Agent requested tools
+                if response.content:
+                    context.add_assistant_message(response.content)
 
-            # Note down tool calls it made
-            context.add_tool_calls(response.tool_calls)
-            budget.consume_tool_calls(len(response.tool_calls))
+                context.add_tool_calls(response.tool_calls)
+                budget.consume_tool_calls(len(response.tool_calls))
 
-            for tc in response.tool_calls:
-                # 1. RBAC Tool check
-                if self._permission_checker and not self._permission_checker.can_use_tool(
-                    user, tc.name
-                ):
-                    result = (
-                        f"Error: Permission denied. Your department ({user.department})"
-                        f" cannot use tool '{tc.name}'."
-                    )
-                else:
-                    try:
-                        # 2. Security Guard check
-                        if self._tool_guard:
-                            self._tool_guard.check(tc.name, tc.arguments)
+                for tc in response.tool_calls:
+                    # 1. RBAC Tool check
+                    if self._permission_checker and not self._permission_checker.can_use_tool(
+                        user, tc.name
+                    ):
+                        result = (
+                            f"Error: Permission denied. Your department ({user.department})"
+                            f" cannot use tool '{tc.name}'."
+                        )
+                    else:
+                        try:
+                            # 2. Security Guard check
+                            if self._tool_guard:
+                                self._tool_guard.check(tc.name, tc.arguments)
 
-                        # 3. Execution
-                        result = await self._registry.execute(tc.name, tc.arguments)
-                    except ApprovalRequest as e:
-                        result = f"Action Paused: {e.details}\nWaiting for user approval..."
-                        # Inline approvals require channel integration — paused state for now.
-                    except ToolGuardError as e:
-                        result = str(e)
-                    except Exception as e:
-                        result = f"Error executing tool {tc.name}: {e}"
+                            # 3. Execution
+                            result = await self._registry.execute(tc.name, tc.arguments)
+                        except ApprovalRequest as e:
+                            if self._approval_callback:
+                                approved = await self._approval_callback(e.action, e.details)
+                                if approved:
+                                    result = await self._registry.execute(tc.name, tc.arguments)
+                                else:
+                                    result = f"Action '{e.action}' was denied by user."
+                            else:
+                                result = (
+                                    f"Action Paused: approval required for '{e.action}' "
+                                    f"but no approval channel is configured."
+                                )
+                        except ToolGuardError as e:
+                            result = str(e)
+                        except Exception as e:
+                            result = f"Error executing tool {tc.name}: {e}"
 
-                context.add_tool_result(tc.id, tc.name, result)
+                    context.add_tool_result(tc.id, tc.name, result)
 
-                # Check looping
-                if progress.detect_loop(tc.name, result):
-                    loop_msg = (
-                        "System Guard: You seem to be stuck in a loop repeating the same"
-                        " error. Please change your strategy or stop using this tool."
-                    )
-                    context.add_assistant_message(loop_msg)
-                    break
+                    # Check looping
+                    if progress.detect_loop(tc.name, result):
+                        loop_msg = (
+                            "System Guard: You seem to be stuck in a loop repeating the same"
+                            " error. Please change your strategy or stop using this tool."
+                        )
+                        context.add_assistant_message(loop_msg)
+                        break
 
-        final_answer = context.messages[-1].content
-        if self._memory and isinstance(final_answer, str):
-            self._memory.add_message(str(user.id), "assistant", final_answer)
-
-        return final_answer if isinstance(final_answer, str) else "Completed."
+        except BudgetExceededError as e:
+            msg = f"I reached my resource limit and had to stop: {e}"
+            if self._memory:
+                self._memory.add_message(str(user.id), "assistant", msg)
+            return msg

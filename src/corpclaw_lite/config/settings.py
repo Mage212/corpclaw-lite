@@ -35,6 +35,7 @@ class AgentSettings(BaseModel):
     max_steps: int = 15
     max_tool_calls: int = 30
     max_wall_time_ms: int = 120000
+    max_history: int = 20
 
 
 class ContainerSettings(BaseModel):

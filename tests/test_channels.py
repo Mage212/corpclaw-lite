@@ -60,9 +60,11 @@ async def test_telegram_approval_approved(test_user: User) -> None:
     # Schedule the callback resolution slightly after request_approval starts
     async def _fire_callback() -> None:
         await asyncio.sleep(0.05)
-        future = channel._pending_approvals.get("42")
-        if future and not future.done():
-            future.set_result(True)
+        entry = channel._pending_approvals.get("42")
+        if entry:
+            future, _ = entry
+            if not future.done():
+                future.set_result(True)
 
     asyncio.create_task(_fire_callback())
     result = await channel.request_approval(test_user, "delete_file", "Delete /tmp/test.txt")
@@ -86,10 +88,64 @@ async def test_telegram_approval_denied(test_user: User) -> None:
 
     async def _fire_callback() -> None:
         await asyncio.sleep(0.05)
-        future = channel._pending_approvals.get("99")
-        if future and not future.done():
-            future.set_result(False)
+        entry = channel._pending_approvals.get("99")
+        if entry:
+            future, _ = entry
+            if not future.done():
+                future.set_result(False)
 
     asyncio.create_task(_fire_callback())
     result = await channel.request_approval(test_user, "exec_script", "Run install.sh")
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_approval_wrong_user_rejected(test_user: User) -> None:
+    """Callback from a different Telegram user_id must NOT resolve the future."""
+    channel = TelegramChannel(token="test-token", message_handler=AsyncMock())
+
+    sent_msg = MagicMock()
+    sent_msg.message_id = 77
+
+    mock_bot = AsyncMock()
+    mock_bot.send_message = AsyncMock(return_value=sent_msg)
+
+    mock_app = MagicMock()
+    mock_app.bot = mock_bot
+    channel._app = mock_app
+
+    # Fire callback from a DIFFERENT user (uid=999999, expected=123456789)
+    async def _fire_wrong_user_callback() -> None:
+        await asyncio.sleep(0.05)
+        from unittest.mock import MagicMock as MM
+        from telegram import Update
+
+        query = MM()
+        query.message = MM()
+        query.message.message_id = 77
+        query.from_user = MM()
+        query.from_user.id = 999999  # wrong user
+        query.data = "approve"
+        query.answer = AsyncMock()
+        query.edit_message_text = AsyncMock()
+
+        update = MM(spec=Update)
+        update.callback_query = query
+        await channel._handle_callback(update, None)
+
+    # Fire a correct callback after 0.15s to actually resolve
+    async def _fire_correct_callback() -> None:
+        await asyncio.sleep(0.15)
+        entry = channel._pending_approvals.get("77")
+        if entry:
+            future, _ = entry
+            if not future.done():
+                future.set_result(False)
+
+    asyncio.create_task(_fire_wrong_user_callback())
+    asyncio.create_task(_fire_correct_callback())
+
+    result = await channel.request_approval(test_user, "risky_action", "details")
+    # Future was NOT resolved by wrong-user callback (at 0.05s),
+    # but was resolved by correct callback (at 0.15s) with False
     assert result is False

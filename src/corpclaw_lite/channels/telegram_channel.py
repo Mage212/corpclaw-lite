@@ -31,8 +31,8 @@ class TelegramChannel(Channel):
         self.token = token
         self._app: Application | None = None  # type: ignore
         self._on_message = message_handler
-        # message_id → Future[bool] for pending inline approvals
-        self._pending_approvals: dict[str, asyncio.Future[bool]] = {}
+        # message_id → (Future[bool], expected_telegram_user_id)
+        self._pending_approvals: dict[str, tuple[asyncio.Future[bool], int]] = {}
 
     async def start(self) -> None:
         """Initialize the Telegram bot application."""
@@ -107,8 +107,8 @@ class TelegramChannel(Channel):
             reply_markup=reply_markup,
         )
 
-        future: asyncio.Future[bool] = asyncio.get_event_loop().create_future()
-        self._pending_approvals[str(sent.message_id)] = future
+        future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+        self._pending_approvals[str(sent.message_id)] = (future, user.telegram_id or 0)
 
         try:
             return await asyncio.wait_for(future, timeout=_APPROVAL_TIMEOUT)
@@ -134,11 +134,20 @@ class TelegramChannel(Channel):
         await query.answer()
 
         msg_id = str(query.message.message_id)
-        future = self._pending_approvals.pop(msg_id, None)
+        entry = self._pending_approvals.get(msg_id)
+        if not entry:
+            return
 
+        future, expected_uid = entry
+        caller_uid = query.from_user.id if query.from_user else None
+        if caller_uid != expected_uid:
+            await query.answer("This approval request is not addressed to you.", show_alert=True)
+            return
+
+        self._pending_approvals.pop(msg_id)
         approved = query.data == "approve"
 
-        if future and not future.done():
+        if not future.done():
             future.set_result(approved)
 
         label = "✅ Approved" if approved else "❌ Denied"

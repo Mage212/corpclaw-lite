@@ -22,7 +22,7 @@ class IPCAuth:
     def __init__(self, secret: str | None = None, nonce_ttl_seconds: int = 300) -> None:
         _raw = secret or os.environ.get("CORPCLAW_IPC_SECRET")
         if not _raw:
-            raise ValueError("CORPCLAW_IPC_SECRET is required to secure IPC channels")
+            raise IPCAuthError("CORPCLAW_IPC_SECRET is required to secure IPC channels")
         self._secret: str = _raw
 
         self.nonce_ttl = nonce_ttl_seconds

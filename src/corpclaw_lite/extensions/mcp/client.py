@@ -55,7 +55,7 @@ class MCPClient:
             *command,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
         )
         logger.info("MCP server started: %s", " ".join(command))
 

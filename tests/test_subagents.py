@@ -85,10 +85,10 @@ async def test_subagent_prompt_loading(tmp_path: Path) -> None:
     )
     user = User(id=1, name="User", department="dev")
 
-    captured_message: list[str] = []
+    captured_system: list[str] = []
 
-    async def _capture_run(u: object, msg: str) -> str:
-        captured_message.append(msg)
+    async def _capture_run(u: object, msg: str, system_prompt: str | None = None) -> str:
+        captured_system.append(system_prompt or "")
         return "done"
 
     with patch("corpclaw_lite.agent.subagent.AgentLoop") as MockLoop:
@@ -97,10 +97,10 @@ async def test_subagent_prompt_loading(tmp_path: Path) -> None:
 
         await dispatcher.dispatch(spec, user, "Do something")
 
-    # The full_message should start with the loaded prompt, not the fallback
-    assert captured_message
-    assert "# Test Agent" in captured_message[0]
-    assert "Fallback description" not in captured_message[0]
+    # system_prompt kwarg should contain the loaded file content, not the fallback
+    assert captured_system
+    assert "# Test Agent" in captured_system[0]
+    assert "Fallback description" not in captured_system[0]
 
 
 @pytest.mark.asyncio
@@ -124,10 +124,10 @@ async def test_subagent_prompt_fallback_when_missing() -> None:
     )
     user = User(id=1, name="User", department="dev")
 
-    captured_message: list[str] = []
+    captured_system: list[str] = []
 
-    async def _capture_run(u: object, msg: str) -> str:
-        captured_message.append(msg)
+    async def _capture_run(u: object, msg: str, system_prompt: str | None = None) -> str:
+        captured_system.append(system_prompt or "")
         return "done"
 
     with patch("corpclaw_lite.agent.subagent.AgentLoop") as MockLoop:
@@ -136,5 +136,45 @@ async def test_subagent_prompt_fallback_when_missing() -> None:
 
         await dispatcher.dispatch(spec, user, "Do something")
 
-    assert captured_message
-    assert "Fallback description here" in captured_message[0]
+    assert captured_system
+    assert "Fallback description here" in captured_system[0]
+
+
+@pytest.mark.asyncio
+async def test_subagent_system_prompt_passed_as_kwarg() -> None:
+    """system_prompt is passed as a named kwarg to loop.run(), not concatenated into msg."""
+    registry = ToolRegistry()
+    registry.register(DummyToolA())
+
+    dispatcher = SubagentDispatcher(
+        provider=DummyProvider(),  # type: ignore
+        main_registry=registry,
+        settings=AgentSettings(),
+    )
+
+    spec = SubagentSpec(
+        id="kwarg_agent",
+        name="Kwarg Agent",
+        description="Specialized instructions",
+        allowed_tools=["*"],
+    )
+    user = User(id=1, name="User", department="dev")
+
+    captured_args: list[tuple[str, str | None]] = []
+
+    async def _capture(u: object, msg: str, system_prompt: str | None = None) -> str:
+        captured_args.append((msg, system_prompt))
+        return "done"
+
+    with patch("corpclaw_lite.agent.subagent.AgentLoop") as MockLoop:
+        mock_loop_instance = MockLoop.return_value
+        mock_loop_instance.run = AsyncMock(side_effect=_capture)
+
+        await dispatcher.dispatch(spec, user, "Actual task text")
+
+    assert captured_args
+    task_msg, sys_prompt = captured_args[0]
+    # task context goes into msg, system prompt goes into system_prompt kwarg
+    assert task_msg == "Actual task text"
+    assert sys_prompt is not None
+    assert "Kwarg Agent" in sys_prompt or "Specialized instructions" in sys_prompt

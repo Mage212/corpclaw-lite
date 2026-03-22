@@ -43,9 +43,16 @@ def test_ipc_auth_ttl_expiration():
     auth = IPCAuth(secret="test_secret", nonce_ttl_seconds=0) # Expires immediately
     payload = {"command": "test"}
     signed = auth.sign(payload)
-    
+
     # ensure it's "old"
     time.sleep(0.01)
-    
+
     with pytest.raises(IPCAuthError, match="expired"):
         auth.verify(signed)
+
+
+def test_ipc_auth_missing_secret_raises_ipc_auth_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Missing CORPCLAW_IPC_SECRET must raise IPCAuthError, not ValueError."""
+    monkeypatch.delenv("CORPCLAW_IPC_SECRET", raising=False)
+    with pytest.raises(IPCAuthError):
+        IPCAuth(secret=None)
