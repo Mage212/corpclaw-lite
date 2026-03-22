@@ -1,0 +1,120 @@
+# Department definitions and RBAC tool permissions
+#
+# Each department defines:
+#   allowed_tools: tools this department can use (["*"] = all)
+#   budget: optional override for agent loop limits
+#
+# Built-in tool names:
+#   read_file, write_file, edit_file, list_files, search_files,
+#   memory_store, memory_recall, web_fetch, read_image, exec_script (disabled by default)
+
+departments:
+  default:
+    description: "Default department for unclassified users"
+    allowed_tools:
+      - read_file
+      - list_files
+      - search_files
+      - memory_store
+      - memory_recall
+    budget:
+      max_iterations: 10
+      max_tool_calls: 20
+      max_time_ms: 60000
+
+  engineering:
+    description: "Software engineering and IT teams"
+    allowed_tools:
+      - "*"
+    budget:
+      max_iterations: 20
+      max_tool_calls: 50
+      max_time_ms: 120000
+
+  it:
+    description: "IT support and infrastructure"
+    allowed_tools:
+      - read_file
+      - write_file
+      - edit_file
+      - list_files
+      - search_files
+      - memory_store
+      - memory_recall
+    budget:
+      max_iterations: 15
+      max_tool_calls: 30
+      max_time_ms: 90000
+
+  marketing:
+    description: "Marketing and communications"
+    allowed_tools:
+      - read_file
+      - write_file
+      - list_files
+      - memory_store
+      - memory_recall
+      - web_fetch
+    budget:
+      max_iterations: 10
+      max_tool_calls: 20
+      max_time_ms: 60000
+
+  finance:
+    description: "Finance and accounting"
+    allowed_tools:
+      - read_file
+      - write_file
+      - edit_file
+      - list_files
+      - search_files
+      - memory_store
+      - memory_recall
+    budget:
+      max_iterations: 10
+      max_tool_calls: 20
+      max_time_ms: 60000
+
+  hr:
+    description: "Human resources"
+    allowed_tools:
+      - read_file
+      - write_file
+      - list_files
+      - memory_store
+      - memory_recall
+    budget:
+      max_iterations: 10
+      max_tool_calls: 20
+      max_time_ms: 60000
+
+  analytics:
+    description: "Data analytics and BI"
+    allowed_tools:
+      - read_file
+      - write_file
+      - edit_file
+      - list_files
+      - search_files
+      - memory_store
+      - memory_recall
+      - web_fetch
+    budget:
+      max_iterations: 15
+      max_tool_calls: 30
+      max_time_ms: 90000
+
+  product:
+    description: "Product management"
+    allowed_tools:
+      - read_file
+      - write_file
+      - list_files
+      - search_files
+      - memory_store
+      - memory_recall
+      - web_fetch
+    budget:
+      max_iterations: 10
+      max_tool_calls: 20
+      max_time_ms: 60000
