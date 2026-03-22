@@ -1,13 +1,13 @@
 from pathlib import Path
+
 import pytest
-from typing import Any
 
 from corpclaw_lite.security.tool_guard import (
+    ApprovalRequest,
     ToolGuard,
     ToolGuardError,
-    ApprovalRequest,
-    RuleSeverity,
 )
+
 
 def test_tool_guard_load_and_evaluate(tmp_path: Path):
     rules_file = tmp_path / "rules.yaml"

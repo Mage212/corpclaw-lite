@@ -36,11 +36,21 @@ class SubagentDispatcher:
             if "*" in spec.allowed_tools or tool_name in spec.allowed_tools:
                 isolated_registry.register(tool)
 
-        # Read the prompt for this subagent if available
+        # Load system prompt from prompt_path if provided, else fall back to description
         system_prompt = f"You are a specialized subagent: {spec.name}.\n{spec.description}\n"
         if spec.prompt_path:
-            # We assume prompt_path is absolute or handled elsewhere, for simplicity
-            pass  # TODO: load from prompt_path
+            from pathlib import Path
+
+            prompt_file = Path(spec.prompt_path)
+            if prompt_file.exists() and prompt_file.is_file():
+                system_prompt = prompt_file.read_text(encoding="utf-8")
+                logger.debug("Loaded prompt for subagent %s from %s", spec.id, prompt_file)
+            else:
+                logger.warning(
+                    "Subagent %s prompt_path '%s' not found, using description fallback",
+                    spec.id,
+                    spec.prompt_path,
+                )
 
         # Setup isolated loop
         loop = AgentLoop(

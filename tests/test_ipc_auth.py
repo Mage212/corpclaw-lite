@@ -1,8 +1,9 @@
-import os
 import time
-from typing import Any
+
 import pytest
+
 from corpclaw_lite.security.ipc_auth import IPCAuth, IPCAuthError
+
 
 def test_ipc_auth_verify_success():
     auth = IPCAuth(secret="test_secret", nonce_ttl_seconds=10)

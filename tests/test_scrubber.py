@@ -1,5 +1,7 @@
 import logging
+
 from corpclaw_lite.security.credential_scrubber import CredentialScrubber
+
 
 def test_credential_scrubber():
     scrubber = CredentialScrubber()

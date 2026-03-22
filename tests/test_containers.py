@@ -1,8 +1,10 @@
-import pytest
 from unittest.mock import MagicMock, patch
 
-from corpclaw_lite.container.manager import ContainerManager, ContainerManagerError
+import pytest
+
 from corpclaw_lite.config.settings import ContainerSettings
+from corpclaw_lite.container.manager import ContainerManager
+
 
 @pytest.fixture
 def mock_docker():

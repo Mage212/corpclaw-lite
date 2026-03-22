@@ -1,12 +1,14 @@
+from unittest.mock import AsyncMock
+
 import pytest
-from unittest.mock import AsyncMock, patch
 
 from corpclaw_lite.agent.loop import AgentLoop
 from corpclaw_lite.config.settings import AgentSettings
 from corpclaw_lite.extensions.tools.registry import ToolRegistry
-from corpclaw_lite.llm.base import Provider, LLMResponse
-from corpclaw_lite.users.models import User
+from corpclaw_lite.llm.base import LLMResponse, Provider
 from corpclaw_lite.memory.sqlite import SQLiteMemory
+from corpclaw_lite.users.models import User
+
 
 @pytest.fixture
 def mock_provider():

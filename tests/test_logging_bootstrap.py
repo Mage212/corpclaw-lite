@@ -1,10 +1,10 @@
-import pytest
-from pathlib import Path
-from corpclaw_lite.config.bootstrap import BootstrapLoader
-from corpclaw_lite.logging.agent_logger import AgentLogger
-from corpclaw_lite.extensions.skills.watcher import SkillHotReloader
-from corpclaw_lite.extensions.skills.registry import SkillRegistry
 
+import pytest
+
+from corpclaw_lite.config.bootstrap import BootstrapLoader
+from corpclaw_lite.extensions.skills.registry import SkillRegistry
+from corpclaw_lite.extensions.skills.watcher import SkillHotReloader
+from corpclaw_lite.logging.agent_logger import AgentLogger
 
 # ──────────────────────────────────────────────────────────────────────────────
 # BootstrapLoader

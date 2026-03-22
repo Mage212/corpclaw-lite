@@ -1,5 +1,7 @@
 from pathlib import Path
+
 from corpclaw_lite.security.network_policy import NetworkPolicy
+
 
 def test_network_policy(tmp_path: Path):
     yaml_file = tmp_path / "network.yaml"

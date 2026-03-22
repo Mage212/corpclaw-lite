@@ -2,8 +2,6 @@ import os
 import tempfile
 from pathlib import Path
 
-import pytest
-
 from corpclaw_lite.config.loader import load_settings
 
 

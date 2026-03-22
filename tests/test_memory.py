@@ -1,5 +1,7 @@
 import pytest
+
 from corpclaw_lite.memory.sqlite import SQLiteMemory
+
 
 @pytest.fixture
 def memory(tmp_path):
