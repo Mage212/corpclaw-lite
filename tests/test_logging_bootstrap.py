@@ -4,7 +4,8 @@ import pytest
 from corpclaw_lite.config.bootstrap import BootstrapLoader
 from corpclaw_lite.extensions.skills.registry import SkillRegistry
 from corpclaw_lite.extensions.skills.watcher import SkillHotReloader
-from corpclaw_lite.logging.agent_logger import AgentLogger
+from corpclaw_lite.logging.agent_logger import AgentLogger, setup_logging
+from corpclaw_lite.logging import health
 
 # ──────────────────────────────────────────────────────────────────────────────
 # BootstrapLoader
@@ -59,6 +60,37 @@ def test_render_skills_section():
     section = loader.render_skills_section([("data_analysis", "Analyse tables")])
     assert "data_analysis" in section
     assert "Analyse tables" in section
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# AgentLogger
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_setup_logging_creates_files(tmp_path):
+    setup_logging(log_dir=tmp_path)
+    assert (tmp_path / "corpclaw.log").exists()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Health
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_health_increment_and_get_stats():
+    health._counters.clear()
+    health.increment("requests", 3)
+    health.increment("errors")
+    stats = health.get_stats()
+    assert stats["status"] == "ok"
+    assert stats["requests"] == 3
+    assert stats["errors"] == 1
+    assert stats["uptime_seconds"] >= 0
+
+
+def test_health_get_stats_defaults():
+    health._counters.clear()
+    stats = health.get_stats()
+    assert stats["tool_calls"] == 0
+    assert stats["requests"] == 0
 
 
 # ──────────────────────────────────────────────────────────────────────────────
