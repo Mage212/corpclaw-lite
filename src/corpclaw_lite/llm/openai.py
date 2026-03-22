@@ -81,6 +81,46 @@ class OpenAIProvider(Provider):
 
         return LLMResponse(content=content, tool_calls=tool_calls, usage=usage)
 
+    async def chat_with_image(
+        self,
+        image_data: str,
+        image_media_type: str,
+        prompt: str,
+        system: str | None = None,
+    ) -> LLMResponse:
+        """Send a chat request with an inline base64 image (OpenAI format)."""
+        messages: list[dict[str, Any]] = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{image_media_type};base64,{image_data}",
+                        },
+                    },
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ]
+        if system:
+            messages.insert(0, {"role": "system", "content": system})
+
+        response = await self._client.chat.completions.create(
+            model=self._model,
+            messages=messages,  # type: ignore[arg-type]
+        )
+        choice = response.choices[0]
+        content = choice.message.content or ""
+
+        usage = {}
+        if response.usage:
+            usage = {
+                "input_tokens": response.usage.prompt_tokens,
+                "output_tokens": response.usage.completion_tokens,
+            }
+        return LLMResponse(content=content, usage=usage)
+
     async def stream(
         self,
         messages: list[dict[str, Any]],

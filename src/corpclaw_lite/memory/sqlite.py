@@ -38,6 +38,24 @@ class SQLiteMemory:
                     ON messages(user_id, timestamp)
                     """
                 )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS memory_facts (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id TEXT NOT NULL,
+                        key TEXT NOT NULL,
+                        value TEXT NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(user_id, key)
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_memory_facts_user
+                    ON memory_facts(user_id)
+                    """
+                )
         except Exception as e:
             logger.error("Failed to initialize SQLite Memory: %s", e)
 
@@ -95,3 +113,61 @@ class SQLiteMemory:
                 conn.execute("DELETE FROM messages WHERE user_id = ?", (str(user_id),))
         except Exception as e:
             logger.error("Failed to clear memory for user %s: %s", user_id, e)
+
+    # ── Fact storage ─────────────────────────────────────────────────────────
+
+    def store_fact(self, user_id: str, key: str, value: str) -> None:
+        """Upsert a key-value fact for a user."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO memory_facts (user_id, key, value)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(user_id, key)
+                    DO UPDATE SET value = excluded.value,
+                                  created_at = CURRENT_TIMESTAMP
+                    """,
+                    (str(user_id), key, value),
+                )
+        except Exception as e:
+            logger.error("Failed to store fact for user %s: %s", user_id, e)
+
+    def recall_facts(
+        self, user_id: str, query: str | None = None, limit: int = 10
+    ) -> list[dict[str, str]]:
+        """Recall facts for a user, optionally filtered by LIKE search on key and value."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                if query:
+                    like = f"%{query}%"
+                    cursor = conn.execute(
+                        """
+                        SELECT key, value FROM memory_facts
+                        WHERE user_id = ? AND (key LIKE ? OR value LIKE ?)
+                        ORDER BY created_at DESC LIMIT ?
+                        """,
+                        (str(user_id), like, like, limit),
+                    )
+                else:
+                    cursor = conn.execute(
+                        """
+                        SELECT key, value FROM memory_facts
+                        WHERE user_id = ?
+                        ORDER BY created_at DESC LIMIT ?
+                        """,
+                        (str(user_id), limit),
+                    )
+                return [{"key": r["key"], "value": r["value"]} for r in cursor.fetchall()]
+        except Exception as e:
+            logger.error("Failed to recall facts for user %s: %s", user_id, e)
+            return []
+
+    def clear_facts(self, user_id: str) -> None:
+        """Delete all facts for a user."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("DELETE FROM memory_facts WHERE user_id = ?", (str(user_id),))
+        except Exception as e:
+            logger.error("Failed to clear facts for user %s: %s", user_id, e)

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel
 
@@ -47,4 +47,19 @@ class Provider(Protocol):
         system: str | None = None,
     ) -> AsyncIterator[StreamChunk]:
         """Stream a chat request from the LLM."""
+        ...
+
+
+@runtime_checkable
+class VisionProvider(Protocol):
+    """Protocol for providers that support image input."""
+
+    async def chat_with_image(
+        self,
+        image_data: str,
+        image_media_type: str,
+        prompt: str,
+        system: str | None = None,
+    ) -> LLMResponse:
+        """Send a chat request with an inline base64 image."""
         ...

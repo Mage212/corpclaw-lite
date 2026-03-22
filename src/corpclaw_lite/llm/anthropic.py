@@ -76,6 +76,51 @@ class AnthropicProvider(Provider):
 
         return LLMResponse(content=content, tool_calls=tool_calls, usage=usage)
 
+    async def chat_with_image(
+        self,
+        image_data: str,
+        image_media_type: str,
+        prompt: str,
+        system: str | None = None,
+    ) -> LLMResponse:
+        """Send a chat request with an inline base64 image."""
+        messages: list[dict[str, Any]] = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": image_media_type,
+                            "data": image_data,
+                        },
+                    },
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ]
+        kwargs: dict[str, Any] = {
+            "model": self._model,
+            "messages": messages,
+            "max_tokens": 4096,
+        }
+        if system:
+            kwargs["system"] = system
+
+        response = await self._client.messages.create(**kwargs)
+
+        content = ""
+        for block in response.content:
+            if block.type == "text":
+                content += block.text
+
+        usage = {
+            "input_tokens": response.usage.input_tokens,
+            "output_tokens": response.usage.output_tokens,
+        }
+        return LLMResponse(content=content, usage=usage)
+
     async def stream(
         self,
         messages: list[dict[str, Any]],

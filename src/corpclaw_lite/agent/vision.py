@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+import base64
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -8,33 +11,63 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_MEDIA_TYPES: dict[str, str] = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".bmp": "image/bmp",
+}
+
 
 class VisionProcessor:
     """Handles image reading via a dedicated LLM call with a vision model."""
 
-    def __init__(self, provider: "Provider") -> None:
+    def __init__(self, provider: Provider) -> None:
         self._provider = provider
 
-    async def describe(self, path: Path, prompt: str, user: "User | None" = None) -> str:
+    async def describe(self, path: Path, prompt: str, user: User | None = None) -> str:
         """Read an image and get a description/analysis from the vision model."""
         if not path.exists() or not path.is_file():
-            return f"Error: Image File not found: {path}"
+            return f"Error: Image file not found: {path}"
 
-        # In a real implementation this would encode the image as base64
-        # and attach it to the message according to provider specs.
-        # Anthropic and OpenAI expect different formats (e.g. image_url vs base64 block)
+        media_type = _MEDIA_TYPES.get(path.suffix.lower())
+        if not media_type:
+            return f"Error: Unsupported image format '{path.suffix}'."
 
-        # For Phase 1 / Phase 2 skeleton, we just mock the vision response
-        logger.info(f"VisionProcessor describing image {path} with prompt: {prompt}")
+        # Encode image as base64
+        try:
+            raw = path.read_bytes()
+            image_data = base64.b64encode(raw).decode("ascii")
+        except Exception as e:
+            return f"Error reading image file: {e}"
 
+        logger.info("VisionProcessor describing %s (%s, %d bytes)", path.name, media_type, len(raw))
+
+        # Try vision-aware provider first
+        from corpclaw_lite.llm.base import LLMResponse, VisionProvider
+
+        if isinstance(self._provider, VisionProvider):
+            try:
+                result: LLMResponse = await self._provider.chat_with_image(
+                    image_data=image_data,
+                    image_media_type=media_type,
+                    prompt=prompt,
+                )
+                if result.content:
+                    return result.content
+                return "Vision model returned no description."
+            except Exception as e:
+                return f"Error communicating with vision model: {e}"
+
+        # Fallback: text-only call (no actual image sent)
+        logger.warning("Provider does not support vision; falling back to text-only call")
         messages: list[dict[str, Any]] = [
             {"role": "user", "content": f"[Attached Image: {path.name}]\n\n{prompt}"}
         ]
-
         try:
             response = await self._provider.chat(messages=messages)
-            if response.content:
-                return response.content
-            return "Vision model returned no text description."
+            return response.content if response.content else "Vision model returned no description."
         except Exception as e:
             return f"Error communicating with vision model: {e}"

@@ -13,15 +13,19 @@ import asyncio
 import logging
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from corpclaw_lite.agent.loop import AgentLoop
 from corpclaw_lite.users.manager import UserManager
 
+if TYPE_CHECKING:
+    from corpclaw_lite.extensions.tools.registry import ToolRegistry
+
 logger = logging.getLogger(__name__)
 
 
-def _build_agent_loop() -> tuple[AgentLoop, UserManager]:
-    """Build and return (AgentLoop, UserManager) using env/config settings."""
+def _build_agent_loop() -> tuple[AgentLoop, UserManager, ToolRegistry]:
+    """Build and return (AgentLoop, UserManager, ToolRegistry) using env/config settings."""
     import os
 
     from corpclaw_lite.agent.subagent import SubagentDispatcher
@@ -71,6 +75,15 @@ def _build_agent_loop() -> tuple[AgentLoop, UserManager]:
     for tool in builtin_tools:
         registry.register(tool)
 
+    # ── Memory tools ───────────────────────────────────────────────────────────
+    # ── Vision / ReadImage ─────────────────────────────────────────────────────
+    from corpclaw_lite.agent.vision import VisionProcessor
+    from corpclaw_lite.extensions.tools.builtin.image import ReadImageTool
+    from corpclaw_lite.extensions.tools.builtin.memory import MemoryRecallTool, MemoryStoreTool
+
+    # ── Web tool ───────────────────────────────────────────────────────────────
+    from corpclaw_lite.extensions.tools.builtin.web import WebFetchTool
+
     # ── Security ──────────────────────────────────────────────────────────────
     guard = ToolGuard()
     guard_rules = Path("config/tool_guard_rules.yaml")
@@ -105,6 +118,15 @@ def _build_agent_loop() -> tuple[AgentLoop, UserManager]:
 
     # ── Memory ────────────────────────────────────────────────────────────────
     memory = SQLiteMemory()
+    registry.register(MemoryStoreTool(memory))
+    registry.register(MemoryRecallTool(memory))
+
+    # ── Web ────────────────────────────────────────────────────────────────────
+    registry.register(WebFetchTool())
+
+    # ── Vision ─────────────────────────────────────────────────────────────────
+    vision = VisionProcessor(provider)
+    registry.register(ReadImageTool(vision))
 
     # ── Settings ──────────────────────────────────────────────────────────────
     agent_settings = AgentSettings()
@@ -120,7 +142,7 @@ def _build_agent_loop() -> tuple[AgentLoop, UserManager]:
         # approval_callback set later in run_telegram_bot() after channel is created
     )
     user_manager = UserManager()
-    return loop, user_manager
+    return loop, user_manager, registry
 
 
 async def run_telegram_bot(token: str) -> None:
@@ -129,7 +151,7 @@ async def run_telegram_bot(token: str) -> None:
     from corpclaw_lite.config.bootstrap import BootstrapLoader
     from corpclaw_lite.users.models import User
 
-    agent_loop, user_manager = _build_agent_loop()
+    agent_loop, user_manager, tool_registry = _build_agent_loop()
     bootstrap = BootstrapLoader(Path("config/bootstrap"))
 
     async def _handle_message(telegram_id: str, message: str) -> str:
@@ -158,6 +180,15 @@ async def run_telegram_bot(token: str) -> None:
 
     channel = TelegramChannel(token=token, message_handler=_handle_message)
 
+    # ── SendFile tool (needs channel reference) ───────────────────────────────
+    from corpclaw_lite.extensions.tools.builtin.send_file import SendFileTool
+
+    async def _send_file_cb(path: Path, user: User, caption: str) -> str:
+        await channel.send_file(user, path, caption)
+        return f"File '{path.name}' sent to user."
+
+    tool_registry.register(SendFileTool(_send_file_cb))
+
     # Wire send_message back so agent can reply; per-request closure captures user + channel
     async def _handle_and_reply(telegram_id: str, message: str) -> None:
         tid = int(telegram_id)
@@ -169,6 +200,15 @@ async def run_telegram_bot(token: str) -> None:
 
     # Replace handler with the reply-capable version
     channel._on_message = _handle_and_reply  # type: ignore[assignment]
+
+    # ── Health endpoint ────────────────────────────────────────────────────────
+    try:
+        from corpclaw_lite.logging import health
+
+        asyncio.create_task(health.run_health_server())
+        logger.info("Health endpoint started on :8080/health")
+    except ImportError:
+        logger.info("aiohttp not installed — health endpoint disabled")
 
     logger.info("Starting Telegram bot...")
     try:

@@ -13,6 +13,7 @@ from corpclaw_lite.agent.guards import (
 from corpclaw_lite.config.settings import AgentSettings
 from corpclaw_lite.extensions.tools.registry import ToolRegistry
 from corpclaw_lite.llm.base import Provider
+from corpclaw_lite.logging import health
 from corpclaw_lite.memory.sqlite import SQLiteMemory
 from corpclaw_lite.security.tool_guard import ApprovalRequest, ToolGuardError
 from corpclaw_lite.users.models import User
@@ -85,6 +86,7 @@ class AgentLoop:
         budget = SimpleBudgetGuard(guard_config)
         progress = SimpleProgressGuard()
         tools_schema = self._registry.to_schemas()
+        health.increment("requests")
 
         try:
             while True:
@@ -109,6 +111,7 @@ class AgentLoop:
 
                 context.add_tool_calls(response.tool_calls)
                 budget.consume_tool_calls(len(response.tool_calls))
+                health.increment("tool_calls", len(response.tool_calls))
 
                 for tc in response.tool_calls:
                     # 1. RBAC Tool check
@@ -158,6 +161,7 @@ class AgentLoop:
                         break
 
         except BudgetExceededError as e:
+            health.increment("errors")
             msg = f"I reached my resource limit and had to stop: {e}"
             if self._memory:
                 self._memory.add_message(str(user.id), "assistant", msg)
