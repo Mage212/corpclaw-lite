@@ -48,8 +48,14 @@ class AgentLoop:
         user: User,
         message: str,
         system_prompt: str | None = None,
+        approval_callback: Callable[[str, str], Awaitable[bool]] | None = None,
     ) -> str:
         """Run the ReAct loop until a final answer is given or limits are reached."""
+        # Per-call callback takes priority over the instance-level default
+        _approval_cb = (
+            approval_callback if approval_callback is not None else self._approval_callback
+        )
+
         # Load history BEFORE building context so it precedes the current message
         history: list[dict[str, Any]] = []
         if self._memory:
@@ -58,7 +64,6 @@ class AgentLoop:
         context = ContextBuilder.build_initial(
             user,
             message,
-            self._registry,
             history=history,
             system_prompt_override=system_prompt,
         )
@@ -121,12 +126,14 @@ class AgentLoop:
                                 self._tool_guard.check(tc.name, tc.arguments)
 
                             # 3. Execution
-                            result = await self._registry.execute(tc.name, tc.arguments)
+                            result = await self._registry.execute(tc.name, tc.arguments, user=user)
                         except ApprovalRequest as e:
-                            if self._approval_callback:
-                                approved = await self._approval_callback(e.action, e.details)
+                            if _approval_cb:
+                                approved = await _approval_cb(e.action, e.details)
                                 if approved:
-                                    result = await self._registry.execute(tc.name, tc.arguments)
+                                    result = await self._registry.execute(
+                                        tc.name, tc.arguments, user=user
+                                    )
                                 else:
                                     result = f"Action '{e.action}' was denied by user."
                             else:

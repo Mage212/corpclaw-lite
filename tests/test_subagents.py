@@ -178,3 +178,76 @@ async def test_subagent_system_prompt_passed_as_kwarg() -> None:
     assert task_msg == "Actual task text"
     assert sys_prompt is not None
     assert "Kwarg Agent" in sys_prompt or "Specialized instructions" in sys_prompt
+
+
+# ── DispatchSubagentTool tests ────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_dispatch_subagent_tool_unknown_id() -> None:
+    """Unknown subagent_id returns Error string listing available IDs."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from corpclaw_lite.extensions.subagents.base import SubagentSpec
+    from corpclaw_lite.extensions.subagents.registry import SubagentRegistry
+    from corpclaw_lite.extensions.tools.builtin.dispatch import DispatchSubagentTool
+
+    registry = SubagentRegistry()
+    registry.register(SubagentSpec(id="known", name="Known", description="desc", allowed_tools=["*"]))
+
+    dispatcher = MagicMock()
+    dispatcher.dispatch = AsyncMock(return_value="ok")
+
+    tool = DispatchSubagentTool(dispatcher, registry)
+    user = User(id=1, name="U", department="dev")
+
+    result = await tool.execute(subagent_id="unknown_id", task="do it", user=user)
+
+    assert "Error" in result
+    assert "unknown_id" in result
+    assert "known" in result
+
+
+@pytest.mark.asyncio
+async def test_dispatch_subagent_tool_no_user() -> None:
+    """user=None returns Error string."""
+    from unittest.mock import MagicMock
+
+    from corpclaw_lite.extensions.subagents.base import SubagentSpec
+    from corpclaw_lite.extensions.subagents.registry import SubagentRegistry
+    from corpclaw_lite.extensions.tools.builtin.dispatch import DispatchSubagentTool
+
+    registry = SubagentRegistry()
+    registry.register(SubagentSpec(id="agent", name="Agent", description="desc", allowed_tools=["*"]))
+
+    tool = DispatchSubagentTool(MagicMock(), registry)
+
+    result = await tool.execute(subagent_id="agent", task="do it", user=None)
+
+    assert "Error" in result
+    assert "User context" in result or "user" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_subagent_tool_dispatches() -> None:
+    """Valid call delegates to SubagentDispatcher.dispatch() and returns its result."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from corpclaw_lite.extensions.subagents.base import SubagentSpec
+    from corpclaw_lite.extensions.subagents.registry import SubagentRegistry
+    from corpclaw_lite.extensions.tools.builtin.dispatch import DispatchSubagentTool
+
+    spec = SubagentSpec(id="worker", name="Worker", description="desc", allowed_tools=["*"])
+    registry = SubagentRegistry()
+    registry.register(spec)
+
+    dispatcher = MagicMock()
+    dispatcher.dispatch = AsyncMock(return_value="subagent result")
+
+    tool = DispatchSubagentTool(dispatcher, registry)
+    user = User(id=1, name="U", department="dev")
+
+    result = await tool.execute(subagent_id="worker", task="do the work", user=user)
+
+    assert result == "subagent result"
+    dispatcher.dispatch.assert_called_once_with(spec, user, "do the work")

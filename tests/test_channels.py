@@ -149,3 +149,41 @@ async def test_approval_wrong_user_rejected(test_user: User) -> None:
     # Future was NOT resolved by wrong-user callback (at 0.05s),
     # but was resolved by correct callback (at 0.15s) with False
     assert result is False
+
+
+@pytest.mark.asyncio
+async def test_handle_callback_wrong_user_shows_alert(test_user: User) -> None:
+    """Wrong user callback: answer() must be called exactly once with show_alert=True."""
+    from unittest.mock import MagicMock as MM
+    from telegram import Update
+
+    channel = TelegramChannel(token="test-token", message_handler=AsyncMock())
+
+    # Pre-populate a pending approval for message_id=55, expected user=123456789
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[bool] = loop.create_future()
+    channel._pending_approvals["55"] = (future, 123456789)
+
+    answer_mock = AsyncMock()
+
+    query = MM()
+    query.message = MM()
+    query.message.message_id = 55
+    query.from_user = MM()
+    query.from_user.id = 999999  # wrong user
+    query.data = "approve"
+    query.answer = answer_mock
+    query.edit_message_text = AsyncMock()
+
+    update = MM(spec=Update)
+    update.callback_query = query
+
+    await channel._handle_callback(update, None)
+
+    # answer() called exactly once, with show_alert=True
+    answer_mock.assert_called_once()
+    _, kwargs = answer_mock.call_args
+    assert kwargs.get("show_alert") is True, "show_alert must be True for wrong-user rejection"
+
+    # Future must NOT be resolved
+    assert not future.done(), "Future must remain unresolved after wrong-user callback"

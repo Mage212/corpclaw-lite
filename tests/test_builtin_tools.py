@@ -96,3 +96,32 @@ async def test_list_and_search(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, 
     res_s = await registry.execute("search_files", {"path": ".", "pattern": "keyword_\\w+"})
     assert "keyword_test" in res_s
     assert "dir1/f1.txt" in res_s
+
+
+@pytest.mark.asyncio
+async def test_registry_execute_passes_user_kwarg(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ToolRegistry.execute() must forward the user kwarg into tool.execute()."""
+    from typing import Any
+    from corpclaw_lite.extensions.tools.base import RiskLevel, Tool
+    from corpclaw_lite.users.models import User
+
+    received_user: list[Any] = []
+
+    class UserCapturingTool(Tool):
+        name = "capture_user"
+        description = "Captures the user kwarg"
+        params = []
+        risk_level = RiskLevel.LOW
+
+        async def execute(self, *, user: Any = None, **kwargs: Any) -> str:
+            received_user.append(user)
+            return "ok"
+
+    r = ToolRegistry()
+    r.register(UserCapturingTool())
+
+    user = User(id=42, name="Test", department="qa")
+    result = await r.execute("capture_user", {}, user=user)
+
+    assert result == "ok"
+    assert received_user == [user], "user kwarg was not forwarded to tool.execute()"

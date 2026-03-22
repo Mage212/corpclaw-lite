@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from corpclaw_lite.extensions.tools.base import Tool
+
+if TYPE_CHECKING:
+    from corpclaw_lite.users.models import User
 
 
 class ToolRegistry:
@@ -25,14 +28,25 @@ class ToolRegistry:
         """List all registered tools."""
         return list(self._tools.values())
 
-    async def execute(self, name: str, arguments: dict[str, Any]) -> str:
-        """Execute a tool by name with arguments."""
+    async def execute(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        user: User | None = None,
+    ) -> str:
+        """Execute a tool by name with arguments.
+
+        ``user`` is passed as a keyword argument so tools that need user context
+        (e.g. DispatchSubagentTool, ReadImageTool) can receive it without the
+        LLM having to supply it explicitly.  Tools that do not need it simply
+        absorb it via ``**kwargs``.
+        """
         tool = self.get(name)
         if not tool:
             return f"Error: Tool '{name}' not found."
 
         try:
-            return await tool.execute(**arguments)
+            return await tool.execute(**arguments, user=user)
         except Exception as e:
             return f"Error executing '{name}': {e}"
 

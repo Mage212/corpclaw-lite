@@ -24,9 +24,12 @@ def _build_agent_loop() -> tuple[AgentLoop, UserManager]:
     """Build and return (AgentLoop, UserManager) using env/config settings."""
     import os
 
+    from corpclaw_lite.agent.subagent import SubagentDispatcher
     from corpclaw_lite.config.settings import AgentSettings, LLMSettings, ProviderSettings
     from corpclaw_lite.departments.manager import DepartmentManager
     from corpclaw_lite.departments.permissions import PermissionChecker
+    from corpclaw_lite.extensions.subagents.registry import SubagentRegistry
+    from corpclaw_lite.extensions.tools.builtin.dispatch import DispatchSubagentTool
     from corpclaw_lite.extensions.tools.builtin.files import (
         EditFileTool,
         ListFilesTool,
@@ -80,6 +83,26 @@ def _build_agent_loop() -> tuple[AgentLoop, UserManager]:
         dept_manager.load_file(dept_config)
     permission_checker = PermissionChecker(dept_manager)
 
+    # ── Subagents ─────────────────────────────────────────────────────────────
+    subagent_registry = SubagentRegistry()
+    subagent_dir = Path("config/subagents")
+    if subagent_dir.exists():
+        subagent_registry.load_directory(subagent_dir)
+
+    if subagent_registry.list_all():
+        dispatcher = SubagentDispatcher(
+            provider=provider,
+            main_registry=registry,
+            settings=AgentSettings(),
+            tool_guard=guard,
+            permission_checker=permission_checker,
+        )
+        registry.register(DispatchSubagentTool(dispatcher, subagent_registry))
+        logger.info(
+            "dispatch_subagent registered (%d subagents available)",
+            len(subagent_registry.list_all()),
+        )
+
     # ── Memory ────────────────────────────────────────────────────────────────
     memory = SQLiteMemory()
 
@@ -103,9 +126,11 @@ def _build_agent_loop() -> tuple[AgentLoop, UserManager]:
 async def run_telegram_bot(token: str) -> None:
     """Start the Telegram bot and run until interrupted."""
     from corpclaw_lite.channels.telegram_channel import TelegramChannel
+    from corpclaw_lite.config.bootstrap import BootstrapLoader
     from corpclaw_lite.users.models import User
 
     agent_loop, user_manager = _build_agent_loop()
+    bootstrap = BootstrapLoader(Path("config/bootstrap"))
 
     async def _handle_message(telegram_id: str, message: str) -> str:
         tid = int(telegram_id)
@@ -114,23 +139,26 @@ async def run_telegram_bot(token: str) -> None:
             user = user_manager.create_user(telegram_id=tid, department="default")
             logger.info("Auto-registered new user telegram_id=%d", tid)
 
+        # Build system prompt: bootstrap base + user context (fallback to default if dir empty)
+        base_prompt = bootstrap.get_system_prompt()
+        user_context = f"You are talking to {user.name} from the {user.department} department."
+        system_prompt: str | None = f"{base_prompt}\n\n{user_context}" if base_prompt else None
+
+        # Per-request closure — captures this user and channel; thread-safe (no shared mutation)
+        async def approval_cb(action: str, details: str) -> bool:
+            return await channel.request_approval(user, action, details)
+
         try:
-            return await agent_loop.run(user, message)
+            return await agent_loop.run(
+                user, message, system_prompt=system_prompt, approval_callback=approval_cb
+            )
         except Exception as e:
             logger.error("AgentLoop error for user %d: %s", tid, e)
             return f"Sorry, I encountered an error: {e}"
 
     channel = TelegramChannel(token=token, message_handler=_handle_message)
 
-    # Wire approval_callback to the channel (needs user lookup by telegram_id)
-    async def _approval_callback(action: str, details: str) -> bool:
-        # approval_callback is called from within _handle_message where tid is in scope
-        # For a simple implementation, we raise without user context — future improvement
-        return False
-
-    agent_loop._approval_callback = _approval_callback  # type: ignore[assignment]
-
-    # Wire send_message back into the handler so agent can reply
+    # Wire send_message back so agent can reply; per-request closure captures user + channel
     async def _handle_and_reply(telegram_id: str, message: str) -> None:
         tid = int(telegram_id)
         user = user_manager.get_by_telegram_id(tid) or User(

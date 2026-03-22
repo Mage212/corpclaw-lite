@@ -49,3 +49,55 @@ def test_tool_guard_load_and_evaluate(tmp_path: Path):
     # 4. Success for benign calls
     guard.check("exec_script", {"script": "ls -la"})
     guard.check("read_file", {"path": "/var/log/syslog"})
+
+
+def test_critical_after_medium_approval_blocks(tmp_path: Path) -> None:
+    """CRITICAL rule listed AFTER a MEDIUM+require_approval rule must still block."""
+    rules_file = tmp_path / "rules.yaml"
+    rules_file.write_text(
+        "rules:\n"
+        "  - id: MEDIUM_WARN\n"
+        "    severity: MEDIUM\n"
+        "    tool: exec_script\n"
+        "    match_param: script\n"
+        "    match_pattern: rm\n"
+        "    require_approval: true\n"
+        "  - id: CRITICAL_BLOCK\n"
+        "    severity: CRITICAL\n"
+        "    tool: exec_script\n"
+        "    match_param: script\n"
+        "    match_pattern: rm\\s+-rf\n"
+        "    require_approval: false\n"
+    )
+    guard = ToolGuard()
+    guard.load_file(rules_file)
+
+    # Both rules match "rm -rf /tmp". CRITICAL hard-block must win over MEDIUM approval.
+    with pytest.raises(ToolGuardError, match="CRITICAL_BLOCK"):
+        guard.check("exec_script", {"script": "rm -rf /tmp"})
+
+
+def test_medium_without_approval_continues_to_critical(tmp_path: Path) -> None:
+    """MEDIUM rule without require_approval must not stop CRITICAL from being evaluated."""
+    rules_file = tmp_path / "rules.yaml"
+    rules_file.write_text(
+        "rules:\n"
+        "  - id: MEDIUM_LOG\n"
+        "    severity: MEDIUM\n"
+        "    tool: exec_script\n"
+        "    match_param: script\n"
+        "    match_pattern: rm\n"
+        "    require_approval: false\n"
+        "  - id: CRITICAL_BLOCK\n"
+        "    severity: CRITICAL\n"
+        "    tool: exec_script\n"
+        "    match_param: script\n"
+        "    match_pattern: rm\\s+-rf\n"
+        "    require_approval: false\n"
+    )
+    guard = ToolGuard()
+    guard.load_file(rules_file)
+
+    # MEDIUM without require_approval logs only; CRITICAL must still block.
+    with pytest.raises(ToolGuardError, match="CRITICAL_BLOCK"):
+        guard.check("exec_script", {"script": "rm -rf /tmp"})

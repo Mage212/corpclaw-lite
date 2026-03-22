@@ -136,3 +136,56 @@ async def test_history_order(test_user: User, empty_registry: ToolRegistry) -> N
     user_contents = [c for r, c in roles if r == "user"]
     # "old question" must come before "new question"
     assert user_contents.index("old question") < user_contents.index("new question")
+
+
+@pytest.mark.asyncio
+async def test_approval_callback_per_call_takes_priority(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """approval_callback passed to run() must override the instance-level default."""
+    from corpclaw_lite.security.tool_guard import ApprovalRequest, ToolGuard
+
+    # ToolGuard rule that always raises ApprovalRequest for exec_tool
+    class AlwaysApprovalGuard(ToolGuard):
+        def check(self, tool_name: str, arguments: Any) -> None:  # type: ignore[override]
+            raise ApprovalRequest(action="exec_tool", details="test")
+
+    # A fake tool so it can execute after approval
+    class FakeTool:
+        name = "exec_tool"
+        description = ""
+        params = []
+        async def execute(self, **kwargs: Any) -> str:
+            return "executed"
+
+    empty_registry._tools["exec_tool"] = FakeTool()  # type: ignore
+
+    instance_called: list[bool] = []
+    per_call_called: list[bool] = []
+
+    async def instance_cb(action: str, details: str) -> bool:
+        instance_called.append(True)
+        return False  # would deny
+
+    async def per_call_cb(action: str, details: str) -> bool:
+        per_call_called.append(True)
+        return True  # approve
+
+    provider = MockProvider(
+        responses=[
+            LLMResponse(content="", tool_calls=[ToolCall(id="1", name="exec_tool", arguments={})]),
+            LLMResponse(content="done"),
+        ]
+    )
+    loop = AgentLoop(
+        provider, empty_registry, AgentSettings(),
+        tool_guard=AlwaysApprovalGuard(),
+        approval_callback=instance_cb,  # instance-level cb would deny
+    )
+
+    result = await loop.run(test_user, "run it", approval_callback=per_call_cb)
+
+    # Per-call callback must have been used (approved → executed)
+    assert per_call_called, "per-call callback was not called"
+    assert not instance_called, "instance-level callback must not be called when per-call is given"
+    assert result == "done"

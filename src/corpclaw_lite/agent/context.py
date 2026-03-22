@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from corpclaw_lite.extensions.tools.registry import ToolRegistry
 from corpclaw_lite.llm.base import ToolCall
 from corpclaw_lite.users.models import User
 
@@ -63,7 +62,6 @@ class ContextBuilder:
         cls,
         user: User,
         message: str,
-        registry: ToolRegistry,
         history: list[dict[str, Any]] | None = None,
         system_prompt_override: str | None = None,
     ) -> ContextBuilder:

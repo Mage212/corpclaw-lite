@@ -62,6 +62,14 @@ class GuardRule:
         return not self.match_param and not self.match_pattern
 
 
+_SEVERITY_RANK: dict[str, int] = {
+    RuleSeverity.INFO: 0,
+    RuleSeverity.MEDIUM: 1,
+    RuleSeverity.HIGH: 2,
+    RuleSeverity.CRITICAL: 3,
+}
+
+
 class ToolGuard:
     """Security guard that intercepts tool calls and applies YAML policies (CoPaw pattern)."""
 
@@ -88,17 +96,38 @@ class ToolGuard:
 
     def check(self, tool_name: str, arguments: dict[str, Any]) -> None:
         """
-        Evaluate all rules against the tool call.
-        Raises ToolGuardError if blocked completely.
-        Raises ApprovalRequest if user approval is needed.
+        Evaluate ALL rules against the tool call, then apply the strictest matching action.
+
+        Priority order:
+        1. CRITICAL/HIGH without require_approval → unconditional ToolGuardError
+        2. Any require_approval rule (highest severity of those) → ApprovalRequest
+        3. MEDIUM/INFO without require_approval → log only, execution continues
         """
-        for rule in self._rules:
-            if rule.evaluate(tool_name, arguments):
-                msg = f"Security Rule '{rule.id}' triggered ({rule.severity}): {rule.description}"
-                logger.warning("ToolGuard: %s for tool %s", msg, tool_name)
+        matches = [r for r in self._rules if r.evaluate(tool_name, arguments)]
+        if not matches:
+            return
 
-                if rule.require_approval:
-                    raise ApprovalRequest(action=rule.id, details=msg)
+        # Log every match
+        for rule in matches:
+            msg = f"Security Rule '{rule.id}' triggered ({rule.severity}): {rule.description}"
+            logger.warning("ToolGuard: %s for tool %s", msg, tool_name)
 
-                if rule.severity in (RuleSeverity.CRITICAL, RuleSeverity.HIGH):
-                    raise ToolGuardError(f"Blocked by ToolGuard: {msg}")
+        # 1. Hard blocks — CRITICAL or HIGH without require_approval
+        hard_blocks = [
+            r
+            for r in matches
+            if r.severity in (RuleSeverity.CRITICAL, RuleSeverity.HIGH) and not r.require_approval
+        ]
+        if hard_blocks:
+            worst = max(hard_blocks, key=lambda r: _SEVERITY_RANK.get(r.severity, 0))
+            msg = f"Security Rule '{worst.id}' triggered ({worst.severity}): {worst.description}"
+            raise ToolGuardError(f"Blocked by ToolGuard: {msg}")
+
+        # 2. Approval requests — pick the highest-severity one
+        approval_rules = [r for r in matches if r.require_approval]
+        if approval_rules:
+            worst = max(approval_rules, key=lambda r: _SEVERITY_RANK.get(r.severity, 0))
+            msg = f"Security Rule '{worst.id}' triggered ({worst.severity}): {worst.description}"
+            raise ApprovalRequest(action=worst.id, details=msg)
+
+        # 3. MEDIUM/INFO without require_approval — already logged above, allow execution

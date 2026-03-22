@@ -69,7 +69,7 @@ class TelegramChannel(Channel):
                 chat_id=user.telegram_id, text=text, parse_mode=ParseMode.HTML
             )
         except Exception as e:
-            logger.error(f"Failed to send Telegram message to {user.telegram_id}: {e}")
+            logger.error("Failed to send Telegram message to %s: %s", user.telegram_id, e)
 
     async def send_file(self, user: User, path: Path, caption: str = "") -> None:
         """Send a document wrapper."""
@@ -82,7 +82,7 @@ class TelegramChannel(Channel):
                     chat_id=user.telegram_id, document=f, caption=caption
                 )
         except Exception as e:
-            logger.error(f"Failed to send file to {user.telegram_id}: {e}")
+            logger.error("Failed to send file to %s: %s", user.telegram_id, e)
 
     async def request_approval(self, user: User, action: str, details: str) -> bool:
         """
@@ -131,16 +131,16 @@ class TelegramChannel(Channel):
         if not query or not query.message:
             return
 
-        await query.answer()
-
         msg_id = str(query.message.message_id)
         entry = self._pending_approvals.get(msg_id)
         if not entry:
+            await query.answer()  # silent ack for unrelated / expired callbacks
             return
 
         future, expected_uid = entry
         caller_uid = query.from_user.id if query.from_user else None
         if caller_uid != expected_uid:
+            # First and only answer() call — show the alert
             await query.answer("This approval request is not addressed to you.", show_alert=True)
             return
 
@@ -150,5 +150,6 @@ class TelegramChannel(Channel):
         if not future.done():
             future.set_result(approved)
 
+        await query.answer()  # silent ack after resolving the future
         label = "✅ Approved" if approved else "❌ Denied"
-        await query.edit_message_text(text=f"{label}")
+        await query.edit_message_text(text=label)
