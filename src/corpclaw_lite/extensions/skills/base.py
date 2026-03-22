@@ -5,7 +5,7 @@ from pathlib import Path
 @dataclass(frozen=True)
 class Skill:
     """Core skill representation - pure data, no logic.
-    
+
     Attributes:
         id: Unique identifier
         description: Short summary of what this skill does
@@ -14,6 +14,7 @@ class Skill:
         path: Optional file path where this skill was loaded from
         version: Skill version string
     """
+
     id: str
     description: str
     allowed_for: list[str]

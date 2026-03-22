@@ -17,16 +17,11 @@ class OpenAIProvider(Provider):
 
     def __init__(self, settings: ProviderSettings):
         self._model = settings.model
-        kwargs: dict[str, str] = {}
-        if settings.api_key:
-            kwargs["api_key"] = settings.api_key
-        else:
-            kwargs["api_key"] = "dummy"  # needed for local models if client requires it
-
+        api_key = settings.api_key or "dummy"  # local models may not need a real key
         if settings.base_url:
-            kwargs["base_url"] = settings.base_url
-
-        self._client = openai.AsyncOpenAI(**kwargs)
+            self._client = openai.AsyncOpenAI(api_key=api_key, base_url=settings.base_url)
+        else:
+            self._client = openai.AsyncOpenAI(api_key=api_key)
 
     async def chat(
         self,

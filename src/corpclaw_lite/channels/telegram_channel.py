@@ -1,3 +1,4 @@
+# pyright: reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false
 import logging
 from collections.abc import Callable
 from pathlib import Path
@@ -25,30 +26,30 @@ class TelegramChannel(Channel):
             message_handler: Callback async function(telegram_id: str, message_text: str)
         """
         self.token = token
-        self._app: Application | None = None # type: ignore
+        self._app: Application | None = None  # type: ignore
         self._on_message = message_handler
 
     async def start(self) -> None:
         """Initialize the Telegram bot application."""
         self._app = Application.builder().token(self.token).build()
-        
+
         # Handlers
         self._app.add_handler(CommandHandler("start", self._handle_start))
         self._app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_text))
         self._app.add_handler(CallbackQueryHandler(self._handle_callback))
-        
+
         logger.info("Initializing Telegram application...")
         await self._app.initialize()
         await self._app.start()
-        
+
         # Start background polling (could also be webhooks in prod)
-        await self._app.updater.start_polling() # type: ignore
+        await self._app.updater.start_polling()  # type: ignore
         logger.info("Telegram channel started.")
 
     async def stop(self) -> None:
         """Stop polling and close the Telegram bot."""
         if self._app:
-            await self._app.updater.stop() # type: ignore
+            await self._app.updater.stop()  # type: ignore
             await self._app.stop()
             await self._app.shutdown()
             logger.info("Telegram channel stopped.")
@@ -57,12 +58,10 @@ class TelegramChannel(Channel):
         """Send a message to a user via Telegram."""
         if not self._app or not self._app.bot:
             return
-            
+
         try:
             await self._app.bot.send_message(
-                chat_id=user.telegram_id, 
-                text=text, 
-                parse_mode=ParseMode.HTML
+                chat_id=user.telegram_id, text=text, parse_mode=ParseMode.HTML
             )
         except Exception as e:
             logger.error(f"Failed to send Telegram message to {user.telegram_id}: {e}")
@@ -71,13 +70,11 @@ class TelegramChannel(Channel):
         """Send a document wrapper."""
         if not self._app or not self._app.bot:
             return
-            
+
         try:
             with open(path, "rb") as f:
                 await self._app.bot.send_document(
-                    chat_id=user.telegram_id,
-                    document=f,
-                    caption=caption
+                    chat_id=user.telegram_id, document=f, caption=caption
                 )
         except Exception as e:
             logger.error(f"Failed to send file to {user.telegram_id}: {e}")
@@ -87,8 +84,8 @@ class TelegramChannel(Channel):
         Send a message with inline buttons for approval.
         Wait for callback response.
         """
-        # Note: Implementing a true async block for an inline button response 
-        # requires tracking futures per message_id. 
+        # Note: Implementing a true async block for an inline button response
+        # requires tracking futures per message_id.
         # For simplicity in this mock protocol, we return False for now until
         # full Future routing is implemented.
         logger.warning("Inline approval requested but blocking await not fully implemented.")
@@ -99,15 +96,15 @@ class TelegramChannel(Channel):
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        
+
         if self._app and self._app.bot:
             await self._app.bot.send_message(
                 chat_id=user.telegram_id,
                 text=f"<b>Approval Required:</b> {action}\n\n<i>{details}</i>",
                 parse_mode=ParseMode.HTML,
-                reply_markup=reply_markup
+                reply_markup=reply_markup,
             )
-        
+
         # Returning false immediately to prevent hangs in Phase 2 skeleton.
         # This will be replaced with a proper asyncio.Future wait.
         return False

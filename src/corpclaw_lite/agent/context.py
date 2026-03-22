@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 from corpclaw_lite.extensions.tools.registry import ToolRegistry
+from corpclaw_lite.llm.base import ToolCall
 from corpclaw_lite.users.models import User
 
 
@@ -24,10 +25,9 @@ class ContextBuilder:
         """Add an assistant text message."""
         self.messages.append({"role": "assistant", "content": content})
 
-    def add_tool_calls(self, tool_calls: list[Any]) -> None:
+    def add_tool_calls(self, tool_calls: list[ToolCall]) -> None:
         """Add tool calls made by the assistant."""
-        # For pure dicts compatibility
-        calls = []
+        calls: list[dict[str, Any]] = []
         for tc in tool_calls:
             calls.append(
                 {
@@ -35,9 +35,7 @@ class ContextBuilder:
                     "type": "function",
                     "function": {
                         "name": tc.name,
-                        "arguments": json.dumps(tc.arguments)
-                        if isinstance(tc.arguments, dict)
-                        else tc.arguments,
+                        "arguments": json.dumps(tc.arguments),
                     },
                 }
             )

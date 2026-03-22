@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 class PluginRegistry:
     """Manages loaded complete plugins and access control."""
-    
+
     def __init__(self) -> None:
         self._plugins: dict[str, Plugin] = {}
 
@@ -28,21 +28,21 @@ class PluginRegistry:
                 if plugin:
                     self.register(plugin)
                     loaded_count += 1
-                    
+
         logger.info(f"Loaded {loaded_count} plugins from {dir_path}")
-        
+
     def register(self, plugin: Plugin) -> None:
         self._plugins[plugin.manifest.name] = plugin
-        
+
     def get_plugin(self, name: str) -> Plugin | None:
         return self._plugins.get(name)
-        
+
     def list_all(self) -> list[Plugin]:
         return list(self._plugins.values())
 
     def get_allowed_plugins(self, user: User) -> list[Plugin]:
         """Return plugins this user has department access to."""
-        allowed = []
+        allowed: list[Plugin] = []
         for plugin in self._plugins.values():
             allowed_depts = plugin.manifest.allowed_departments
             if "*" in allowed_depts or user.department in allowed_depts:

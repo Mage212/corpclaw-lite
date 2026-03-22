@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 class IPCAuthError(Exception):
     """Raised when IPC authentication fails."""
+
     pass
 
 
@@ -19,10 +20,11 @@ class IPCAuth:
     """Provides HMAC-SHA256 authentication with nonce to prevent replay attacks."""
 
     def __init__(self, secret: str | None = None, nonce_ttl_seconds: int = 300) -> None:
-        self._secret = secret or os.environ.get("CORPCLAW_IPC_SECRET")
-        if not self._secret:
+        _raw = secret or os.environ.get("CORPCLAW_IPC_SECRET")
+        if not _raw:
             raise ValueError("CORPCLAW_IPC_SECRET is required to secure IPC channels")
-        
+        self._secret: str = _raw
+
         self.nonce_ttl = nonce_ttl_seconds
         self._seen_nonces: dict[str, float] = {}
 
@@ -37,13 +39,13 @@ class IPCAuth:
         """Sign a payload dict and return the wrapped message."""
         nonce = str(uuid.uuid4())
         timestamp = time.time()
-        
+
         # Consistent JSON stringification for hashing
-        payload_str = json.dumps(payload, sort_keys=True, separators=(',', ':'))
-        
+        payload_str = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
         msg = f"{nonce}:{timestamp}:{payload_str}"
         signature = hmac.new(self._secret.encode(), msg.encode(), hashlib.sha256).hexdigest()
-        
+
         return {
             "signature": signature,
             "nonce": nonce,
@@ -57,25 +59,25 @@ class IPCAuth:
         nonce = message.get("nonce")
         timestamp = message.get("timestamp")
         payload = message.get("payload")
-        
+
         if not signature or not nonce or not timestamp or payload is None:
             raise IPCAuthError("Missing authentication fields in message")
-            
+
         now = time.time()
         if now - timestamp > self.nonce_ttl:
             raise IPCAuthError("Message timestamp too old (expired)")
-            
+
         self._cleanup_nonces()
         if nonce in self._seen_nonces:
             raise IPCAuthError("Replay attack detected (nonce already seen)")
-            
-        payload_str = json.dumps(payload, sort_keys=True, separators=(',', ':'))
+
+        payload_str = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         msg = f"{nonce}:{timestamp}:{payload_str}"
-        
+
         expected_sig = hmac.new(self._secret.encode(), msg.encode(), hashlib.sha256).hexdigest()
-        
+
         if not hmac.compare_digest(signature, expected_sig):
             raise IPCAuthError("Invalid signature")
-            
+
         self._seen_nonces[nonce] = now
         return payload

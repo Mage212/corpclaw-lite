@@ -78,7 +78,7 @@ class PluginLoader:
                 try:
                     module_name = f"plugin_{manifest.name}_tool"
                     spec = importlib.util.spec_from_file_location(module_name, tool_path)
-                    
+
                     if spec and spec.loader:
                         module = importlib.util.module_from_spec(spec)
                         sys.modules[module_name] = module
@@ -88,8 +88,8 @@ class PluginLoader:
                         for attr_name in dir(module):
                             attr = getattr(module, attr_name)
                             if (
-                                isinstance(attr, type) 
-                                and issubclass(attr, Tool) 
+                                isinstance(attr, type)
+                                and issubclass(attr, Tool)
                                 and attr is not Tool
                             ):
                                 plugin_tools.append(attr())
@@ -99,9 +99,9 @@ class PluginLoader:
         # Load script if defined
         script_filename = manifest.components.get("script")
         if script_filename:
-           script_path = plugin_dir / script_filename
-           if script_path.exists():
-               plugin_scripts.append(script_path)
+            script_path = plugin_dir / script_filename
+            if script_path.exists():
+                plugin_scripts.append(script_path)
 
         return Plugin(
             manifest=manifest,

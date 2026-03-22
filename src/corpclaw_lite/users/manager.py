@@ -47,8 +47,12 @@ class UserManager:
                 (telegram_id, name or f"user_{telegram_id}", department),
             )
             row_id = cursor.lastrowid or self._get_id_by_telegram(telegram_id)
-        return User(id=row_id, name=name or f"user_{telegram_id}", department=department,
-                    telegram_id=telegram_id)
+        return User(
+            id=row_id,
+            name=name or f"user_{telegram_id}",
+            department=department,
+            telegram_id=telegram_id,
+        )
 
     def get_by_telegram_id(self, telegram_id: int) -> User | None:
         """Look up a user by their Telegram ID."""

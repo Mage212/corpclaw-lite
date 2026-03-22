@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
 class RiskLevel(StrEnum):
@@ -19,11 +19,11 @@ class RiskLevel(StrEnum):
 class ToolParam(BaseModel):
     """Parameter definition for a tool."""
 
-    name: str = Field(..., description="Name of the parameter")
-    type: str = Field(..., description="Type of the parameter (e.g., string, boolean)")
-    description: str = Field(..., description="Description of the parameter")
-    required: bool = Field(True, description="Whether the parameter is required")
-    enum: list[str] | None = Field(None, description="Allowed values if restricted")
+    name: str
+    type: str
+    description: str
+    required: bool = True
+    enum: list[str] | None = None
 
 
 class Tool(ABC):

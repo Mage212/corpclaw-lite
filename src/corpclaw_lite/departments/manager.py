@@ -1,6 +1,6 @@
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import yaml
 
@@ -20,7 +20,7 @@ class DepartmentConfig:
         self.allowed_plugins: list[str] = data.get("allowed_plugins", ["*"])
         self.allowed_subagents: list[str] = data.get("allowed_subagents", ["*"])
         self.allowed_mcp: list[str] = data.get("allowed_mcp", ["*"])
-        
+
         budget_data = data.get("budget", {})
         self.budget = SimpleBudgetGuardConfig(
             max_iterations=budget_data.get("max_steps", 15),
@@ -40,15 +40,15 @@ class DepartmentManager:
         if not file_path.exists():
             logger.warning(f"Departments config not found: {file_path}")
             return
-            
+
         try:
             with open(file_path, encoding="utf-8") as f:
-                data = yaml.safe_load(f) or {}
-                
-            depts = data.get("departments", {})
+                data = cast(dict[str, Any], yaml.safe_load(f) or {})
+
+            depts = cast(dict[str, Any], data.get("departments", {}))
             for slug, dept_data in depts.items():
-                self._departments[slug] = DepartmentConfig(dept_data)
-                
+                self._departments[str(slug)] = DepartmentConfig(cast(dict[str, Any], dept_data))
+
             logger.info(f"Loaded {len(self._departments)} departments")
         except Exception as e:
             logger.error(f"Failed to load departments from {file_path}: {e}")

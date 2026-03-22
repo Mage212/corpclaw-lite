@@ -10,7 +10,7 @@ from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 
 
-def _resolve_and_validate_path(path_str: str) -> Path:
+def resolve_and_validate_path(path_str: str) -> Path:
     """Resolve path to absolute and ensure it exists within allowed workspace boundaries.
     For Phase 1 (CLI mode), we allow access to CWD and its subdirectories.
     """
@@ -49,7 +49,7 @@ class ReadFileTool(Tool):
             return "Error: missing required parameter 'path'"
 
         try:
-            resolved = _resolve_and_validate_path(path)
+            resolved = resolve_and_validate_path(path)
             if not resolved.exists():
                 return f"Error: File '{resolved}' does not exist."
             if not resolved.is_file():
@@ -80,7 +80,7 @@ class WriteFileTool(Tool):
             return "Error: missing required 'path' or 'content'"
 
         try:
-            resolved = _resolve_and_validate_path(path)
+            resolved = resolve_and_validate_path(path)
             resolved.parent.mkdir(parents=True, exist_ok=True)
             resolved.write_text(content, encoding="utf-8")
             return f"Successfully wrote {len(content)} chars to '{resolved}'"
@@ -113,7 +113,7 @@ class EditFileTool(Tool):
             return "Error: missing required params 'path', 'old_text', 'new_text'"
 
         try:
-            resolved = _resolve_and_validate_path(path)
+            resolved = resolve_and_validate_path(path)
             if not resolved.exists():
                 return f"Error: File '{resolved}' does not exist."
 
@@ -144,11 +144,11 @@ class ListFilesTool(Tool):
         path = kwargs.get("path", ".")
 
         try:
-            resolved = _resolve_and_validate_path(path)
+            resolved = resolve_and_validate_path(path)
             if not resolved.exists() or not resolved.is_dir():
                 return f"Error: '{resolved}' is not a valid directory."
 
-            items = []
+            items: list[str] = []
             for item in resolved.iterdir():
                 type_name = "DIR" if item.is_dir() else "FILE"
                 items.append(f"[{type_name}] {item.name}")
@@ -175,12 +175,12 @@ class SearchFilesTool(Tool):
             return "Error: 'pattern' and 'path' must be strings."
 
         try:
-            resolved = _resolve_and_validate_path(path)
+            resolved = resolve_and_validate_path(path)
             if not resolved.exists() or not resolved.is_dir():
                 return f"Error: '{resolved}' is not a valid directory."
 
             regex = re.compile(pattern)
-            results = []
+            results: list[str] = []
 
             for root, _, files in os.walk(resolved):
                 for file_name in files:
@@ -194,7 +194,7 @@ class SearchFilesTool(Tool):
 
                     try:
                         content = file_path.read_text(encoding="utf-8", errors="ignore")
-                        matches = []
+                        matches: list[str] = []
                         for i, line in enumerate(content.splitlines(), start=1):
                             if regex.search(line):
                                 matches.append(f"{i}: {line.strip()[:100]}")

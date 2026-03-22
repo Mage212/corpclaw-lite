@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import yaml
 
@@ -15,9 +15,9 @@ _ENV_PATTERN = re.compile(r"\$\{([^}]+)\}")
 def _expand_env_vars(node: Any) -> Any:
     """Expand ${VAR:-default} and ${VAR} in strings within YAML config."""
     if isinstance(node, dict):
-        return {k: _expand_env_vars(v) for k, v in node.items()}
+        return {str(k): _expand_env_vars(v) for k, v in cast(dict[Any, Any], node).items()}
     elif isinstance(node, list):
-        return [_expand_env_vars(item) for item in node]
+        return [_expand_env_vars(item) for item in cast(list[Any], node)]
     elif isinstance(node, str):
         if not node:
             return node
@@ -43,7 +43,7 @@ def load_settings(path: Path | str) -> Settings:
 
     try:
         with open(config_path, encoding="utf-8") as f:
-            raw_yaml = yaml.safe_load(f) or {}
+            raw_yaml = cast(dict[str, Any], yaml.safe_load(f) or {})
     except Exception as e:
         raise ValueError(f"Failed to load config {path}: {e}") from e
 

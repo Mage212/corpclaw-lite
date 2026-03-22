@@ -6,7 +6,7 @@ from corpclaw_lite.agent.vision import VisionProcessor
 from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
 from corpclaw_lite.extensions.tools.builtin.files import (
     IMAGE_EXTENSIONS,
-    _resolve_and_validate_path,
+    resolve_and_validate_path,
 )
 
 if TYPE_CHECKING:
@@ -17,7 +17,7 @@ class ReadImageTool(Tool):
     """Tool to read the contents of an image file and get a description from the vision model."""
 
     name = "read_image"
-    description = "Read an image file (e.g. .png, .jpg) and return a textual description of its contents."
+    description = "Read an image file (.png, .jpg, etc.) and return a textual description."
     params = [
         ToolParam(
             name="path",
@@ -38,15 +38,15 @@ class ReadImageTool(Tool):
     async def execute(self, user: User | None = None, **kwargs: Any) -> str:
         path = kwargs.get("path")
         prompt = kwargs.get("prompt", "Describe this image in detail.")
-        
+
         if not isinstance(path, str) or not isinstance(prompt, str):
             return "Error: missing required parameter 'path' or 'prompt'"
 
         try:
-            resolved = _resolve_and_validate_path(path)
+            resolved = resolve_and_validate_path(path)
             if not resolved.exists() or not resolved.is_file():
                 return f"Error: Image File '{resolved}' does not exist or is not a file."
-            
+
             if resolved.suffix.lower() not in IMAGE_EXTENSIONS:
                 return f"Error: read_image only accepts image files: {IMAGE_EXTENSIONS}"
 

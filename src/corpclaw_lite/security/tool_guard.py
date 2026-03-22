@@ -4,7 +4,7 @@ import logging
 import re
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import yaml
 
@@ -76,9 +76,9 @@ class ToolGuard:
 
         try:
             with open(file_path, encoding="utf-8") as f:
-                data = yaml.safe_load(f) or {}
+                data = cast(dict[str, Any], yaml.safe_load(f) or {})
 
-            rules_data = data.get("rules", [])
+            rules_data = cast(list[dict[str, Any]], data.get("rules", []))
             for r in rules_data:
                 self._rules.append(GuardRule(r))
 

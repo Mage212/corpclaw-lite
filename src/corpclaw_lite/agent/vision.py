@@ -19,18 +19,18 @@ class VisionProcessor:
         """Read an image and get a description/analysis from the vision model."""
         if not path.exists() or not path.is_file():
             return f"Error: Image File not found: {path}"
-            
-        # In a real implementation this would encode the image as base64 
+
+        # In a real implementation this would encode the image as base64
         # and attach it to the message according to provider specs.
         # Anthropic and OpenAI expect different formats (e.g. image_url vs base64 block)
-        
+
         # For Phase 1 / Phase 2 skeleton, we just mock the vision response
         logger.info(f"VisionProcessor describing image {path} with prompt: {prompt}")
-        
+
         messages: list[dict[str, Any]] = [
             {"role": "user", "content": f"[Attached Image: {path.name}]\n\n{prompt}"}
         ]
-        
+
         try:
             response = await self._provider.chat(messages=messages)
             if response.content:

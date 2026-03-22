@@ -1,33 +1,38 @@
-import argparse
 import asyncio
 import logging
 import sys
 
 from corpclaw_lite.channels.telegram_channel import TelegramChannel
 
+logger = logging.getLogger(__name__)
 
-# This is a placeholder for the actual agent routing
-async def handle_telegram_message(telegram_id: str, message: str) -> None:
-    print(f"Received from {telegram_id}: {message}")
-    # Integration with AgentLoop happens here
 
-async def main() -> None:
-    logging.basicConfig(level=logging.INFO)
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--telegram-token", type=str, required=True, help="Telegram Bot Token")
-    args = parser.parse_args()
+async def _handle_message(telegram_id: str, message: str) -> str:
+    """Default message handler stub — returns echo until AgentLoop is wired in."""
+    logger.info("Message from %s: %s", telegram_id, message)
+    return f"[echo] {message}"
 
-    channel = TelegramChannel(token=args.telegram_token, message_handler=handle_telegram_message)
-    
+
+async def run_telegram_bot(token: str) -> None:
+    """Start the Telegram bot and run until interrupted."""
+    channel = TelegramChannel(token=token, message_handler=_handle_message)
     try:
         await channel.start()
-        # Keep process alive
+        # Keep process alive until KeyboardInterrupt
         while True:
             await asyncio.sleep(3600)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        pass
+    finally:
         await channel.stop()
+
 
 if __name__ == "__main__":
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    asyncio.run(main())
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--telegram-token", type=str, required=True)
+    args = parser.parse_args()
+    asyncio.run(run_telegram_bot(args.telegram_token))

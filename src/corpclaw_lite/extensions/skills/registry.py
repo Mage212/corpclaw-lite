@@ -27,7 +27,7 @@ class SkillRegistry:
             if skill:
                 self.register(skill)
                 loaded_count += 1
-                
+
         logger.info(f"Loaded {loaded_count} skills from {dir_path}")
 
     def register(self, skill: Skill) -> None:
@@ -41,10 +41,10 @@ class SkillRegistry:
     def list_all(self) -> list[Skill]:
         """List all loaded skills."""
         return list(self._skills.values())
-        
+
     def get_allowed_skills(self, user: User) -> list[Skill]:
         """Return only the skills the user is allowed to see (based on their department)."""
-        allowed = []
+        allowed: list[Skill] = []
         for skill in self._skills.values():
             if "*" in skill.allowed_for or user.department in skill.allowed_for:
                 allowed.append(skill)

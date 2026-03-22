@@ -18,6 +18,7 @@ Usage:
     uv run corpclaw-lite generate skill <name>
     uv run corpclaw-lite generate plugin <name>
 """
+
 from __future__ import annotations
 
 import argparse
@@ -25,10 +26,10 @@ import asyncio
 import os
 import sys
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 def _require_env(name: str) -> str:
     value = os.environ.get(name)
@@ -52,8 +53,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("telegram", help="Start the Telegram bot (polling)")
 
     # user
-    user_p = sub.add_parser("user-list", help="List all registered users")
-    user_p  # noqa: B018
+    sub.add_parser("user-list", help="List all registered users")
 
     create_p = sub.add_parser("user-create", help="Create a new user")
     create_p.add_argument("-t", "--telegram-id", type=int, required=True, help="Telegram user ID")
@@ -83,22 +83,21 @@ def _build_parser() -> argparse.ArgumentParser:
 # Command handlers
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 def cmd_chat() -> None:
     """Launch an interactive CLI chat loop."""
     import asyncio
 
-    from corpclaw_lite.config.loader import load_settings
     from corpclaw_lite.logging.agent_logger import setup_logging
 
     setup_logging()
-    settings = load_settings()
 
     async def _run() -> None:
         from corpclaw_lite.channels.cli import CLIChannel
         from corpclaw_lite.users.models import User
 
         # Minimal bootstrap: create a local CLI user
-        user = User(id=0, name="cli-user", department=settings.default_department)
+        user = User(id=0, name="cli-user", department="default", telegram_id=None)
         channel = CLIChannel()
         await channel.start()
         print("CorpClaw Lite – CLI chat (Ctrl+C to quit)")
@@ -121,15 +120,18 @@ def cmd_telegram() -> None:
     _require_env("CORPCLAW_IPC_SECRET")  # fail fast
 
     from corpclaw_lite.logging.agent_logger import setup_logging
+
     setup_logging()
 
     from corpclaw_lite.channels.telegram_runner import run_telegram_bot
+
     asyncio.run(run_telegram_bot(token))
 
 
 def cmd_user_list() -> None:
     """Print all registered users from the SQLite DB."""
     from corpclaw_lite.users.manager import UserManager
+
     manager = UserManager()
     users = manager.list_users()
     if not users:
@@ -144,6 +146,7 @@ def cmd_user_list() -> None:
 def cmd_user_create(telegram_id: int, department: str, name: str) -> None:
     """Register a new user."""
     from corpclaw_lite.users.manager import UserManager
+
     manager = UserManager()
     user = manager.create_user(telegram_id=telegram_id, department=department, name=name)
     print(f"Created user #{user.id}: {user.name} ({user.department})")
@@ -152,7 +155,9 @@ def cmd_user_create(telegram_id: int, department: str, name: str) -> None:
 def cmd_containers() -> None:
     """List active Docker sandbox containers."""
     import asyncio
+
     from corpclaw_lite.container.manager import ContainerManager
+
     mgr = ContainerManager()
     containers = asyncio.run(mgr.list_active())
     if not containers:
@@ -165,7 +170,9 @@ def cmd_containers() -> None:
 def cmd_prune() -> None:
     """Stop and remove idle containers."""
     import asyncio
+
     from corpclaw_lite.container.manager import ContainerManager
+
     mgr = ContainerManager()
     removed = asyncio.run(mgr.prune_idle())
     print(f"Pruned {removed} container(s).")
@@ -174,6 +181,7 @@ def cmd_prune() -> None:
 def cmd_skill_list() -> None:
     """List all loaded skills from the skills/ directory."""
     from corpclaw_lite.extensions.skills.registry import SkillRegistry
+
     registry = SkillRegistry()
     registry.load_directory("skills")
     skills = registry.list_all()
@@ -190,6 +198,7 @@ def cmd_skill_list() -> None:
 def cmd_plugin_list() -> None:
     """List all loaded plugins from the plugins/ directory."""
     from corpclaw_lite.extensions.plugins.registry import PluginRegistry
+
     registry = PluginRegistry()
     registry.load_directory("plugins")
     plugins = registry.list_all()
@@ -275,6 +284,7 @@ prompt_path: config/bootstrap/SOUL.md
 def cmd_generate(ext_type: str, name: str) -> None:
     """Scaffold a new skill, plugin, or subagent."""
     from pathlib import Path
+
     title = name.replace("_", " ").replace("-", " ").title()
 
     if ext_type == "skill":
@@ -304,6 +314,7 @@ def cmd_generate(ext_type: str, name: str) -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 # Entry point
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 def main() -> None:
     parser = _build_parser()

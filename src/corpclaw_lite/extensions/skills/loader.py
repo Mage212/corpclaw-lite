@@ -15,7 +15,7 @@ class SkillLoader:
     @classmethod
     def load_from_file(cls, path: Path) -> Skill | None:
         """Parse a markdown file and return a Skill object.
-        
+
         Expected format:
         ---
         id: my_skill
@@ -30,7 +30,7 @@ class SkillLoader:
             return None
 
         content = path.read_text(encoding="utf-8")
-        
+
         if not content.startswith("---"):
             logger.warning(f"Skill file {path.name} missing YAML frontmatter.")
             return None

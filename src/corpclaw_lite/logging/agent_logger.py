@@ -25,9 +25,7 @@ def setup_logging(log_dir: Path | str = "logs") -> None:
         encoding="utf-8",
     )
     text_handler.setLevel(logging.DEBUG)
-    text_handler.setFormatter(
-        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-    )
+    text_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
 
     root = logging.getLogger()
     root.setLevel(logging.DEBUG)

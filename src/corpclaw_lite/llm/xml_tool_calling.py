@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from typing import Any, cast
 
 from corpclaw_lite.llm.base import ToolCall
 
@@ -64,7 +65,7 @@ def parse_xml_tool_call(
             error_message=f"Tool {name!r} is not in the allowed tool set.",
         )
     try:
-        parsed = json.loads(raw_arguments) if raw_arguments else {}
+        raw_parsed: Any = json.loads(raw_arguments) if raw_arguments else {}
     except json.JSONDecodeError:
         return XMLToolCallParseResult(
             status="invalid_arguments",
@@ -79,7 +80,7 @@ def parse_xml_tool_call(
                 },
             ),
         )
-    if not isinstance(parsed, dict):
+    if not isinstance(raw_parsed, dict):
         return XMLToolCallParseResult(
             status="invalid_arguments",
             error_code="expected_object",
@@ -93,6 +94,7 @@ def parse_xml_tool_call(
                 },
             ),
         )
+    parsed = cast(dict[str, Any], raw_parsed)
     return XMLToolCallParseResult(
         status="valid",
         tool_call=ToolCall(id="xml-tool-call", name=name, arguments=parsed),

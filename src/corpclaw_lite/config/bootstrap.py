@@ -10,9 +10,9 @@ Markdown files in config/bootstrap/:
 Hot-reload: BootstrapLoader caches file contents by modification time.
 Calling get_system_prompt() again after a file changes returns the fresh content.
 """
+
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 

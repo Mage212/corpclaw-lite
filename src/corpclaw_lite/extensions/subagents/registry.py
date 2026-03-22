@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 class SubagentRegistry:
     """Loads and manages Subagent specifications from YAML files."""
-    
+
     def __init__(self) -> None:
         self._subagents: dict[str, SubagentSpec] = {}
 
@@ -27,7 +27,7 @@ class SubagentRegistry:
             try:
                 with open(yaml_file, encoding="utf-8") as f:
                     data: dict[str, Any] = yaml.safe_load(f) or {}
-                
+
                 spec = SubagentSpec(
                     id=data.get("id", yaml_file.stem),
                     name=data.get("name", yaml_file.stem),

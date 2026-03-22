@@ -11,43 +11,36 @@ registry = ToolRegistry()
 
 logging.basicConfig(level=logging.ERROR)
 
+
 def process_request() -> None:
     """Read from stdin, verify, execute tool, sign response, print to stdout."""
     # 1. Read input
     input_data = sys.stdin.read()
     if not input_data:
         return
-        
+
+    response_payload: dict[str, str] = {"status": "error", "error": "Unknown error"}
     try:
         req = json.loads(input_data)
-        
-        # 2. Verify
-        # In the container environment we assume CORPCLAW_IPC_SECRET is injected
+
+        # 2. Verify — in the container env, CORPCLAW_IPC_SECRET is injected
         auth = IPCAuth()
         payload = auth.verify(req)
-        
+
         if payload.get("type") != "tool_call":
             raise ValueError("Unknown payload type")
-            
+
         tool_name = payload.get("tool")
         args = payload.get("args", {})
-        
-        # 3. Execute
-        # Here we mock the async execution
-        # result = asyncio.run(registry.execute(tool_name, args))
+
+        # 3. Execute (mock for now)
         result = f"Mock execution of {tool_name} with {args} inside container"
-        
-        response_payload = {
-            "status": "success",
-            "result": result
-        }
-        
+
+        response_payload = {"status": "success", "result": result}
+
     except Exception as e:
-        response_payload = {
-            "status": "error",
-            "error": str(e)
-        }
-        
+        response_payload = {"status": "error", "error": str(e)}
+
     finally:
         # 4. Sign and respond
         try:
@@ -55,11 +48,20 @@ def process_request() -> None:
             signed_resp = auth.sign(response_payload)
             print(json.dumps(signed_resp))
         except Exception:
-            # Fatal error, can't even sign the error
-            print(json.dumps({
-                "signature": "", "nonce": "", "timestamp": 0, 
-                "payload": {"status": "error", "error": "Fatal IPC auth error in container"}
-            }))
+            print(
+                json.dumps(
+                    {
+                        "signature": "",
+                        "nonce": "",
+                        "timestamp": "0",
+                        "payload": {
+                            "status": "error",
+                            "error": "Fatal IPC auth error in container",
+                        },
+                    }
+                )
+            )
+
 
 if __name__ == "__main__":
     process_request()
