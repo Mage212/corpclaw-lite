@@ -5,7 +5,6 @@ description = "CorpClaw Lite - streamlined agent project"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "aiosqlite>=0.22.1",
     "anthropic>=0.84.0",
     "anyio>=4.12.1",
     "docker>=7.1.0",

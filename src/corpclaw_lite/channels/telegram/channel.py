@@ -7,12 +7,12 @@ from pathlib import Path
 from typing import Any
 
 import anyio
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
-from telegram.constants import ParseMode
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
 from corpclaw_lite.channels.base import Channel
 from corpclaw_lite.users.models import User
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
+from telegram.constants import ParseMode
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
 logger = logging.getLogger(__name__)
 

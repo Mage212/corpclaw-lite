@@ -155,7 +155,7 @@ def _build_agent_loop() -> tuple[AgentLoop, UserManager, ToolRegistry]:
 
 async def run_telegram_bot(token: str) -> None:
     """Start the Telegram bot and run until interrupted."""
-    from corpclaw_lite.channels.telegram_channel import TelegramChannel
+    from corpclaw_lite.channels.telegram.channel import TelegramChannel
     from corpclaw_lite.config.bootstrap import BootstrapLoader
     from corpclaw_lite.users.models import User
 

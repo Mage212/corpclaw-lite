@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from corpclaw_lite.channels.cli import CLIChannel
-from corpclaw_lite.channels.telegram_channel import TelegramChannel
+from corpclaw_lite.channels.telegram.channel import TelegramChannel
 from corpclaw_lite.users.models import User
 
 

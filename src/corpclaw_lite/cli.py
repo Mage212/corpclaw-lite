@@ -123,7 +123,7 @@ def cmd_telegram() -> None:
 
     setup_logging()
 
-    from corpclaw_lite.channels.telegram_runner import run_telegram_bot
+    from corpclaw_lite.channels.telegram.runner import run_telegram_bot
 
     asyncio.run(run_telegram_bot(token))
 
