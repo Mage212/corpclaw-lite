@@ -17,6 +17,8 @@ dependencies = [
     "python-telegram-bot>=22.6",
     "pyyaml>=6.0.3",
     "rich>=14.3.3",
+    "telegramify-markdown>=0.1.0",
+    "mistletoe>=1.4.0",
 ]
 
 [project.scripts]

@@ -272,3 +272,42 @@ async def test_approval_callback_per_call_takes_priority(
     assert per_call_called, "per-call callback was not called"
     assert not instance_called, "instance-level callback must not be called when per-call is given"
     assert result == "done"
+
+
+@pytest.mark.asyncio
+async def test_on_tool_start_callback_called(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """on_tool_start callback must fire for each tool call."""
+
+    class FakeTool:
+        name = "read_file"
+        description = ""
+        params = []  # type: ignore[var-annotated]
+
+        async def execute(self, **kwargs: Any) -> str:
+            return "content"
+
+    empty_registry._tools["read_file"] = FakeTool()  # type: ignore
+
+    provider = MockProvider(
+        responses=[
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCall(id="1", name="read_file", arguments={}),
+                    ToolCall(id="2", name="read_file", arguments={}),
+                ],
+            ),
+            LLMResponse(content="Done."),
+        ]
+    )
+    loop = AgentLoop(provider, empty_registry, AgentSettings())
+
+    started_tools: list[str] = []
+    result = await loop.run(
+        test_user, "read two files", on_tool_start=lambda name: started_tools.append(name)
+    )
+
+    assert result == "Done."
+    assert started_tools == ["read_file", "read_file"]

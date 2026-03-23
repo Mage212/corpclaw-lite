@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings
 
@@ -49,11 +51,19 @@ class ContainerSettings(BaseModel):
     max_per_user: int = 1
 
 
+class TelegramSettings(BaseModel):
+    """Settings for Telegram channel."""
+
+    workspace_base: Path = Path("workspaces")
+    rate_limit_per_minute: int = 10
+
+
 class Settings(BaseSettings):
     """Main application settings."""
 
     llm: LLMSettings = LLMSettings()
     agent: AgentSettings = AgentSettings()
     container: ContainerSettings = ContainerSettings()
+    telegram: TelegramSettings = TelegramSettings()
 
     model_config = {"env_nested_delimiter": "__"}

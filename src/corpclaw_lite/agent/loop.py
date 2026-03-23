@@ -54,6 +54,7 @@ class AgentLoop:
         message: str,
         system_prompt: str | None = None,
         approval_callback: Callable[[str, str], Awaitable[bool]] | None = None,
+        on_tool_start: Callable[[str], None] | None = None,
     ) -> str:
         """Run the ReAct loop until a final answer is given or limits are reached."""
         # Per-call callback takes priority over the instance-level default
@@ -142,7 +143,11 @@ class AgentLoop:
                             if self._tool_guard:
                                 self._tool_guard.check(tc.name, tc.arguments)
 
-                            # 3. Execution
+                            # 3. Progress callback
+                            if on_tool_start:
+                                on_tool_start(tc.name)
+
+                            # 4. Execution
                             result = await self._registry.execute(tc.name, tc.arguments, user=user)
                         except ApprovalRequest as e:
                             if _approval_cb:

@@ -22,11 +22,16 @@ logger = logging.getLogger(__name__)
 async def run_telegram_bot(token: str) -> None:
     """Start the Telegram bot and run until interrupted."""
     from corpclaw_lite.channels.telegram.channel import TelegramChannel
+    from corpclaw_lite.channels.telegram.progress import StatusMessageSession
+    from corpclaw_lite.channels.telegram.rate_limit import RateLimiter
     from corpclaw_lite.config.bootstrap import BootstrapLoader
+    from corpclaw_lite.config.settings import TelegramSettings
     from corpclaw_lite.users.models import User
 
     agent_loop, user_manager, tool_registry = build_agent_stack()
     bootstrap = BootstrapLoader(Path("config/bootstrap"))
+    tg_settings = TelegramSettings()
+    rate_limiter = RateLimiter(max_per_minute=tg_settings.rate_limit_per_minute)
 
     async def _handle_message(telegram_id: str, message: str) -> str:
         tid = int(telegram_id)
@@ -55,7 +60,11 @@ async def run_telegram_bot(token: str) -> None:
             logger.error("AgentLoop error for user %d: %s", tid, e)
             return f"Sorry, I encountered an error: {e}"
 
-    channel = TelegramChannel(token=token, message_handler=_handle_message)
+    channel = TelegramChannel(
+        token=token,
+        message_handler=_handle_message,
+        workspace_base=tg_settings.workspace_base,
+    )
 
     # ── SendFile tool (needs channel reference) ───────────────────────────────
     from corpclaw_lite.extensions.tools.builtin.send_file import SendFileTool
@@ -66,17 +75,75 @@ async def run_telegram_bot(token: str) -> None:
 
     tool_registry.register(SendFileTool(_send_file_cb))
 
-    # Wire send_message back so agent can reply; per-request closure captures user + channel
+    # Wire send_message back so agent can reply with progress indication
     async def _handle_and_reply(telegram_id: str, message: str) -> None:
         tid = int(telegram_id)
         user = user_manager.get_by_telegram_id(tid) or User(
             id=0, name=f"user_{tid}", department="default", telegram_id=tid
         )
-        reply = await _handle_message(telegram_id, message)
+
+        # Rate limiting
+        allowed = await rate_limiter.check(tid)
+        if not allowed:
+            await channel.send_message(
+                user,
+                "⚠️ Слишком много сообщений. Подождите минуту и попробуйте снова.",
+            )
+            return
+
+        # Create progress session
+        bot = channel._app.bot if channel._app else None  # type: ignore[union-attr]
+        status_session: StatusMessageSession | None = None
+
+        if bot is not None:
+            try:
+                status_session = StatusMessageSession(
+                    bot=bot,
+                    source_message=None,  # type: ignore[arg-type]
+                    chat_id=tid,
+                )
+                await status_session.start_standalone()
+            except Exception as exc:
+                logger.warning("Failed to start progress indicator: %s", exc)
+                status_session = None
+
+        try:
+            # Build system prompt
+            base_prompt = bootstrap.get_system_prompt()
+            dept_prompt = bootstrap.get_department_prompt(user.department)
+            user_context = f"You are talking to {user.name} from the {user.department} department."
+            parts_list = [p for p in [base_prompt, dept_prompt, user_context] if p]
+            system_prompt: str | None = "\n\n".join(parts_list) if parts_list else None
+
+            async def approval_cb(action: str, details: str) -> bool:
+                return await channel.request_approval(user, action, details)
+
+            reply = await agent_loop.run(
+                user,
+                message,
+                system_prompt=system_prompt,
+                approval_callback=approval_cb,
+                on_tool_start=(
+                    status_session.mark_tool_start if status_session is not None else None
+                ),
+            )
+        except Exception as e:
+            logger.error("AgentLoop error for user %d: %s", tid, e)
+            reply = f"Sorry, I encountered an error: {e}"
+        finally:
+            if status_session is not None:
+                await status_session.close()
+
         await channel.send_message(user, reply)
 
     # Replace handler with the reply-capable version
     channel._on_message = _handle_and_reply  # type: ignore[assignment]
+
+    # ── Rate limit cleanup background task ─────────────────────────────────────
+    async def _rate_limit_cleanup_loop() -> None:
+        while True:
+            await asyncio.sleep(300)  # 5 minutes
+            await rate_limiter.cleanup()
 
     # ── Health endpoint ────────────────────────────────────────────────────────
     try:
@@ -100,13 +167,17 @@ async def run_telegram_bot(token: str) -> None:
     logger.info("Skill hot-reloader started watching %s", skills_dir)
 
     logger.info("Starting Telegram bot...")
+    cleanup_task: asyncio.Task[None] | None = None
     try:
         await channel.start()
+        cleanup_task = asyncio.create_task(_rate_limit_cleanup_loop())
         while True:
             await asyncio.sleep(3600)
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
     finally:
+        if cleanup_task is not None:
+            cleanup_task.cancel()
         reloader.stop()
         await channel.stop()
         logger.info("Telegram bot stopped.")
