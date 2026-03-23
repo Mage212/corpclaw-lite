@@ -1,0 +1,19 @@
+# MCP Server Configurations
+# Add MCP servers here to extend the agent with external tool providers.
+# Each server runs as a subprocess and communicates via stdio or HTTP.
+#
+# Example:
+# servers:
+#   - name: filesystem
+#     transport: stdio
+#     command: npx
+#     args: ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"]
+#
+#   - name: web_search
+#     transport: stdio
+#     command: npx
+#     args: ["-y", "@anthropic/mcp-server-brave-search"]
+#     env:
+#       BRAVE_API_KEY: "${BRAVE_API_KEY}"
+
+servers: []

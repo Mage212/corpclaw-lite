@@ -13,144 +13,10 @@ import asyncio
 import logging
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-from corpclaw_lite.agent.loop import AgentLoop
-from corpclaw_lite.users.manager import UserManager
-
-if TYPE_CHECKING:
-    from corpclaw_lite.extensions.tools.registry import ToolRegistry
+from corpclaw_lite.agent.factory import build_agent_stack
 
 logger = logging.getLogger(__name__)
-
-
-def _build_agent_loop() -> tuple[AgentLoop, UserManager, ToolRegistry]:
-    """Build and return (AgentLoop, UserManager, ToolRegistry) using env/config settings."""
-    import os
-
-    from corpclaw_lite.agent.subagent import SubagentDispatcher
-    from corpclaw_lite.config.settings import AgentSettings, LLMSettings, ProviderSettings
-    from corpclaw_lite.departments.manager import DepartmentManager
-    from corpclaw_lite.departments.permissions import PermissionChecker
-    from corpclaw_lite.extensions.subagents.registry import SubagentRegistry
-    from corpclaw_lite.extensions.tools.builtin.dispatch import DispatchSubagentTool
-    from corpclaw_lite.extensions.tools.builtin.files import (
-        EditFileTool,
-        ListFilesTool,
-        ReadFileTool,
-        SearchFilesTool,
-        WriteFileTool,
-    )
-    from corpclaw_lite.extensions.tools.registry import ToolRegistry
-    from corpclaw_lite.memory.sqlite import SQLiteMemory
-    from corpclaw_lite.security.tool_guard import ToolGuard
-
-    # ── Provider ──────────────────────────────────────────────────────────────
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if api_key:
-        from corpclaw_lite.llm.anthropic import AnthropicProvider
-
-        provider = AnthropicProvider(
-            ProviderSettings(type="anthropic", model="claude-3-haiku-20240307", api_key=api_key)
-        )
-    else:
-        base_url = os.environ.get("OPENAI_BASE_URL", "http://localhost:11434/v1")
-        model = os.environ.get("OPENAI_MODEL", "qwen2.5:7b")
-        from corpclaw_lite.llm.openai import OpenAIProvider
-
-        provider = OpenAIProvider(
-            ProviderSettings(type="openai", model=model, api_key="ollama", base_url=base_url)
-        )
-        logger.info("Using local LLM at %s model=%s", base_url, model)
-
-    # ── Tools ─────────────────────────────────────────────────────────────────
-    registry = ToolRegistry()
-    builtin_tools = [
-        ReadFileTool(),
-        WriteFileTool(),
-        EditFileTool(),
-        ListFilesTool(),
-        SearchFilesTool(),
-    ]
-    for tool in builtin_tools:
-        registry.register(tool)
-
-    # ── Memory tools ───────────────────────────────────────────────────────────
-    # ── Vision / ReadImage ─────────────────────────────────────────────────────
-    from corpclaw_lite.agent.vision import VisionProcessor
-
-    # ── Exec / Excel ─────────────────────────────────────────────────────────
-    from corpclaw_lite.extensions.tools.builtin.excel import NormalizeExcelTool
-    from corpclaw_lite.extensions.tools.builtin.exec_script import ExecScriptTool
-    from corpclaw_lite.extensions.tools.builtin.image import ReadImageTool
-    from corpclaw_lite.extensions.tools.builtin.memory import MemoryRecallTool, MemoryStoreTool
-
-    # ── Web tool ───────────────────────────────────────────────────────────────
-    from corpclaw_lite.extensions.tools.builtin.web import WebFetchTool
-
-    # ── Security ──────────────────────────────────────────────────────────────
-    guard = ToolGuard()
-    guard_rules = Path("config/tool_guard_rules.yaml")
-    if guard_rules.exists():
-        guard.load_file(guard_rules)
-
-    dept_manager = DepartmentManager()
-    dept_config = Path("config/departments.yaml")
-    if dept_config.exists():
-        dept_manager.load_file(dept_config)
-    permission_checker = PermissionChecker(dept_manager)
-
-    # ── Subagents ─────────────────────────────────────────────────────────────
-    subagent_registry = SubagentRegistry()
-    subagent_dir = Path("config/subagents")
-    if subagent_dir.exists():
-        subagent_registry.load_directory(subagent_dir)
-
-    if subagent_registry.list_all():
-        dispatcher = SubagentDispatcher(
-            provider=provider,
-            main_registry=registry,
-            settings=AgentSettings(),
-            tool_guard=guard,
-            permission_checker=permission_checker,
-        )
-        registry.register(DispatchSubagentTool(dispatcher, subagent_registry))
-        logger.info(
-            "dispatch_subagent registered (%d subagents available)",
-            len(subagent_registry.list_all()),
-        )
-
-    # ── Memory ────────────────────────────────────────────────────────────────
-    memory = SQLiteMemory()
-    registry.register(MemoryStoreTool(memory))
-    registry.register(MemoryRecallTool(memory))
-
-    # ── Web ────────────────────────────────────────────────────────────────────
-    registry.register(WebFetchTool())
-
-    # ── Vision ─────────────────────────────────────────────────────────────────
-    vision = VisionProcessor(provider)
-    registry.register(ReadImageTool(vision))
-
-    # ── Exec / Excel ─────────────────────────────────────────────────────────
-    registry.register(ExecScriptTool())
-    registry.register(NormalizeExcelTool())
-
-    # ── Settings ──────────────────────────────────────────────────────────────
-    agent_settings = AgentSettings()
-    _ = LLMSettings()  # imported for completeness; not passed directly
-
-    loop = AgentLoop(
-        provider=provider,
-        registry=registry,
-        settings=agent_settings,
-        memory=memory,
-        tool_guard=guard,
-        permission_checker=permission_checker,
-        # approval_callback set later in run_telegram_bot() after channel is created
-    )
-    user_manager = UserManager()
-    return loop, user_manager, registry
 
 
 async def run_telegram_bot(token: str) -> None:
@@ -159,7 +25,7 @@ async def run_telegram_bot(token: str) -> None:
     from corpclaw_lite.config.bootstrap import BootstrapLoader
     from corpclaw_lite.users.models import User
 
-    agent_loop, user_manager, tool_registry = _build_agent_loop()
+    agent_loop, user_manager, tool_registry = build_agent_stack()
     bootstrap = BootstrapLoader(Path("config/bootstrap"))
 
     async def _handle_message(telegram_id: str, message: str) -> str:

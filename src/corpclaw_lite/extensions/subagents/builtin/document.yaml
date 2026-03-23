@@ -1,0 +1,15 @@
+id: document-agent
+name: "Document Processing Agent"
+description: "Создание, редактирование и форматирование документов, отчётов и таблиц."
+capabilities:
+  - "Writing and editing documents"
+  - "Creating reports"
+  - "Normalizing Excel files"
+  - "File format conversions"
+allowed_tools:
+  - read_file
+  - write_file
+  - edit_file
+  - list_files
+  - normalize_excel
+prompt_path: "config/bootstrap/subagents/document.md"

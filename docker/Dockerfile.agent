@@ -16,7 +16,6 @@ RUN mkdir -p /workspace /config && \
 WORKDIR /home/agent
 
 # Install Python packages commonly used by agents
-# This allows quick execution of data science / file tools
 RUN pip install --no-cache-dir \
     pandas \
     openpyxl \
@@ -25,6 +24,14 @@ RUN pip install --no-cache-dir \
     beautifulsoup4 \
     pyyaml
 
+# Install corpclaw_lite package (needed for agent_worker + IPC auth)
+COPY pyproject.toml README.md ./
+COPY src/ src/
+RUN pip install --no-cache-dir .
+
 USER agent
-# Start an infinite loop to keep container alive for IPC
+
+ENV PYTHONUNBUFFERED=1
+
+# Keep container alive for IPC via `docker exec`
 CMD ["tail", "-f", "/dev/null"]
