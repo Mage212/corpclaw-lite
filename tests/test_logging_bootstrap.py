@@ -1,15 +1,15 @@
-
 import pytest
 
 from corpclaw_lite.config.bootstrap import BootstrapLoader
 from corpclaw_lite.extensions.skills.registry import SkillRegistry
 from corpclaw_lite.extensions.skills.watcher import SkillHotReloader
-from corpclaw_lite.logging.agent_logger import AgentLogger, setup_logging
 from corpclaw_lite.logging import health
+from corpclaw_lite.logging.agent_logger import AgentLogger, setup_logging
 
 # ──────────────────────────────────────────────────────────────────────────────
 # BootstrapLoader
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 def test_bootstrap_empty_dir(tmp_path):
     loader = BootstrapLoader(tmp_path)
@@ -47,6 +47,7 @@ def test_bootstrap_hot_reload(tmp_path):
     assert "version one" in loader.get_system_prompt()
 
     import time
+
     time.sleep(0.02)  # ensure mtime changes
     p.write_text("version two", encoding="utf-8")
     # Force a new mtime by touching the file
@@ -66,6 +67,7 @@ def test_render_skills_section():
 # AgentLogger
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 def test_setup_logging_creates_files(tmp_path):
     setup_logging(log_dir=tmp_path)
     assert (tmp_path / "corpclaw.log").exists()
@@ -74,6 +76,7 @@ def test_setup_logging_creates_files(tmp_path):
 # ──────────────────────────────────────────────────────────────────────────────
 # Health
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 def test_health_increment_and_get_stats():
     health._counters.clear()
@@ -97,6 +100,7 @@ def test_health_get_stats_defaults():
 # AgentLogger
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 def test_agent_logger_writes_json(tmp_path):
     logger = AgentLogger(log_dir=tmp_path)
     logger.log_request(
@@ -110,6 +114,7 @@ def test_agent_logger_writes_json(tmp_path):
     log_file = tmp_path / "agent_activity.jsonl"
     assert log_file.exists()
     import json
+
     record = json.loads(log_file.read_text(encoding="utf-8").strip())
     assert record["user_id"] == "u1"
     assert record["tool_count"] == 2
@@ -129,6 +134,7 @@ def test_agent_logger_error_field(tmp_path):
         error="Budget exceeded",
     )
     import json
+
     record = json.loads((tmp_path / "agent_activity.jsonl").read_text().strip())
     assert record["error"] == "Budget exceeded"
 
@@ -136,6 +142,7 @@ def test_agent_logger_error_field(tmp_path):
 # ──────────────────────────────────────────────────────────────────────────────
 # SkillHotReloader
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_skill_hot_reloader_loads(tmp_path):
@@ -161,6 +168,7 @@ Do the thing.
     reloader.start()
 
     import asyncio
+
     await asyncio.sleep(0.15)  # let it poll once
     reloader.stop()
 

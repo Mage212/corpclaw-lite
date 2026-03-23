@@ -1,4 +1,5 @@
 """Tests for memory_store and memory_recall tools + SQLiteMemory fact storage."""
+
 from __future__ import annotations
 
 import pytest
@@ -9,7 +10,7 @@ from corpclaw_lite.users.models import User
 
 
 @pytest.fixture
-def memory(tmp_path: "Path") -> SQLiteMemory:  # noqa: F821
+def memory(tmp_path: Path) -> SQLiteMemory:  # noqa: F821
     return SQLiteMemory(db_path=str(tmp_path / "test.db"))
 
 
@@ -76,9 +77,7 @@ async def test_memory_store_requires_user(memory: SQLiteMemory) -> None:
 
 
 @pytest.mark.asyncio
-async def test_memory_store_and_recall_roundtrip(
-    memory: SQLiteMemory, user: User
-) -> None:
+async def test_memory_store_and_recall_roundtrip(memory: SQLiteMemory, user: User) -> None:
     store = MemoryStoreTool(memory)
     recall = MemoryRecallTool(memory)
 
@@ -91,9 +90,7 @@ async def test_memory_store_and_recall_roundtrip(
 
 
 @pytest.mark.asyncio
-async def test_memory_recall_with_query_tool(
-    memory: SQLiteMemory, user: User
-) -> None:
+async def test_memory_recall_with_query_tool(memory: SQLiteMemory, user: User) -> None:
     store = MemoryStoreTool(memory)
     recall = MemoryRecallTool(memory)
 
@@ -106,9 +103,7 @@ async def test_memory_recall_with_query_tool(
 
 
 @pytest.mark.asyncio
-async def test_memory_recall_empty_tool(
-    memory: SQLiteMemory, user: User
-) -> None:
+async def test_memory_recall_empty_tool(memory: SQLiteMemory, user: User) -> None:
     recall = MemoryRecallTool(memory)
     res = await recall.execute(user=user)
     assert "No facts stored" in res

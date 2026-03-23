@@ -100,16 +100,12 @@ async def test_mcp_manager_registers_tools(tmp_path: Any) -> None:
 
     mock_client = MagicMock(spec=MCPClient)
     mock_client.connect = AsyncMock()
-    mock_client.list_tools = AsyncMock(
-        return_value=[_make_tool_def("mcp_read", "Read via MCP")]
-    )
+    mock_client.list_tools = AsyncMock(return_value=[_make_tool_def("mcp_read", "Read via MCP")])
     mock_client.disconnect = AsyncMock()
 
     registry = ToolRegistry()
 
-    with patch(
-        "corpclaw_lite.extensions.mcp.manager.MCPClient", return_value=mock_client
-    ):
+    with patch("corpclaw_lite.extensions.mcp.manager.MCPClient", return_value=mock_client):
         manager = MCPManager(config_path=config)
         count = await manager.connect_all(registry)
 

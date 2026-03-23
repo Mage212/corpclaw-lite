@@ -34,13 +34,17 @@ async def test_tool_registry(registry: ToolRegistry) -> None:
 
 
 @pytest.mark.asyncio
-async def test_write_and_read_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, registry: ToolRegistry) -> None:
+async def test_write_and_read_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, registry: ToolRegistry
+) -> None:
     # Change CWD to tmp_path to test the _resolve_and_validate_path constraint
     monkeypatch.chdir(tmp_path)
 
     test_file = "test.txt"
     # Write
-    res_w = await registry.execute("write_file", {"path": test_file, "content": "Hello World\nLine 2"})
+    res_w = await registry.execute(
+        "write_file", {"path": test_file, "content": "Hello World\nLine 2"}
+    )
     assert "Successfully" in res_w
 
     # Read
@@ -48,7 +52,9 @@ async def test_write_and_read_file(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert res_r == "Hello World\nLine 2"
 
     # Edit
-    res_e = await registry.execute("edit_file", {"path": test_file, "old_text": "World", "new_text": "Lite"})
+    res_e = await registry.execute(
+        "edit_file", {"path": test_file, "old_text": "World", "new_text": "Lite"}
+    )
     assert "Successfully" in res_e
 
     # Check edit result
@@ -56,7 +62,9 @@ async def test_write_and_read_file(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 
 
 @pytest.mark.asyncio
-async def test_path_traversal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, registry: ToolRegistry) -> None:
+async def test_path_traversal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, registry: ToolRegistry
+) -> None:
     monkeypatch.chdir(tmp_path)
     # Trying to read something outside the workspace (like parent dir)
     res = await registry.execute("read_file", {"path": "../secret.txt"})
@@ -81,7 +89,9 @@ async def test_path_traversal_same_prefix(
 
 
 @pytest.mark.asyncio
-async def test_list_and_search(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, registry: ToolRegistry) -> None:
+async def test_list_and_search(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, registry: ToolRegistry
+) -> None:
     monkeypatch.chdir(tmp_path)
 
     await registry.execute("write_file", {"path": "dir1/f1.txt", "content": "keyword_test"})
@@ -102,6 +112,7 @@ async def test_list_and_search(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, 
 async def test_registry_execute_passes_user_kwarg(monkeypatch: pytest.MonkeyPatch) -> None:
     """ToolRegistry.execute() must forward the user kwarg into tool.execute()."""
     from typing import Any
+
     from corpclaw_lite.extensions.tools.base import RiskLevel, Tool
     from corpclaw_lite.users.models import User
 

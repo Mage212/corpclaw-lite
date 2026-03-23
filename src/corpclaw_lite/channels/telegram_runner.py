@@ -78,6 +78,10 @@ def _build_agent_loop() -> tuple[AgentLoop, UserManager, ToolRegistry]:
     # ── Memory tools ───────────────────────────────────────────────────────────
     # ── Vision / ReadImage ─────────────────────────────────────────────────────
     from corpclaw_lite.agent.vision import VisionProcessor
+
+    # ── Exec / Excel ─────────────────────────────────────────────────────────
+    from corpclaw_lite.extensions.tools.builtin.excel import NormalizeExcelTool
+    from corpclaw_lite.extensions.tools.builtin.exec_script import ExecScriptTool
     from corpclaw_lite.extensions.tools.builtin.image import ReadImageTool
     from corpclaw_lite.extensions.tools.builtin.memory import MemoryRecallTool, MemoryStoreTool
 
@@ -127,6 +131,10 @@ def _build_agent_loop() -> tuple[AgentLoop, UserManager, ToolRegistry]:
     # ── Vision ─────────────────────────────────────────────────────────────────
     vision = VisionProcessor(provider)
     registry.register(ReadImageTool(vision))
+
+    # ── Exec / Excel ─────────────────────────────────────────────────────────
+    registry.register(ExecScriptTool())
+    registry.register(NormalizeExcelTool())
 
     # ── Settings ──────────────────────────────────────────────────────────────
     agent_settings = AgentSettings()

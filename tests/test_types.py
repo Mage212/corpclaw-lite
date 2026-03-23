@@ -9,7 +9,7 @@ def test_tool_definition() -> None:
         description = "A dummy tool"
         params = [ToolParam(name="x", type="string", description="x desc")]
         risk_level = RiskLevel.LOW
-        
+
         async def execute(self, **kwargs) -> str:
             return "ok"
 

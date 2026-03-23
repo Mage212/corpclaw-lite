@@ -15,19 +15,25 @@ from corpclaw_lite.users.models import User
 class DummyProvider:
     pass
 
+
 class DummyToolA(Tool):
     name = "tool_a"
     description = ""
     params = []
     risk_level = RiskLevel.LOW
-    async def execute(self, **kwargs: Any) -> str: return "A"
+
+    async def execute(self, **kwargs: Any) -> str:
+        return "A"
+
 
 class DummyToolB(Tool):
     name = "tool_b"
     description = ""
     params = []
     risk_level = RiskLevel.LOW
-    async def execute(self, **kwargs: Any) -> str: return "B"
+
+    async def execute(self, **kwargs: Any) -> str:
+        return "B"
 
 
 @pytest.mark.asyncio
@@ -35,24 +41,23 @@ async def test_subagent_dispatcher():
     registry = ToolRegistry()
     registry.register(DummyToolA())
     registry.register(DummyToolB())
-    
-    dispatcher = SubagentDispatcher(provider=DummyProvider(), main_registry=registry, settings=AgentSettings())  # type: ignore
-    
+
+    dispatcher = SubagentDispatcher(
+        provider=DummyProvider(), main_registry=registry, settings=AgentSettings()
+    )  # type: ignore
+
     spec = SubagentSpec(
-        id="test_agent",
-        name="Test Agent",
-        description="Testing",
-        allowed_tools=["tool_a"]
+        id="test_agent", name="Test Agent", description="Testing", allowed_tools=["tool_a"]
     )
     user = User(id=1, name="User", department="dev")
-    
+
     # Instead of running the real loop which requires a real provider, we patch AgentLoop.run
     with patch("corpclaw_lite.agent.subagent.AgentLoop") as MockLoop:
         mock_loop_instance = MockLoop.return_value
         mock_loop_instance.run = AsyncMock(return_value="Subagent result")
-        
+
         res = await dispatcher.dispatch(spec, user, "Do something")
-        
+
         assert res == "Subagent result"
         # Verify the AgentLoop was created with an isolated registry containing ONLY "tool_a"
         call_args = MockLoop.call_args.kwargs
@@ -193,7 +198,9 @@ async def test_dispatch_subagent_tool_unknown_id() -> None:
     from corpclaw_lite.extensions.tools.builtin.dispatch import DispatchSubagentTool
 
     registry = SubagentRegistry()
-    registry.register(SubagentSpec(id="known", name="Known", description="desc", allowed_tools=["*"]))
+    registry.register(
+        SubagentSpec(id="known", name="Known", description="desc", allowed_tools=["*"])
+    )
 
     dispatcher = MagicMock()
     dispatcher.dispatch = AsyncMock(return_value="ok")
@@ -218,7 +225,9 @@ async def test_dispatch_subagent_tool_no_user() -> None:
     from corpclaw_lite.extensions.tools.builtin.dispatch import DispatchSubagentTool
 
     registry = SubagentRegistry()
-    registry.register(SubagentSpec(id="agent", name="Agent", description="desc", allowed_tools=["*"]))
+    registry.register(
+        SubagentSpec(id="agent", name="Agent", description="desc", allowed_tools=["*"])
+    )
 
     tool = DispatchSubagentTool(MagicMock(), registry)
 

@@ -35,7 +35,9 @@ def test_tool_guard_load_and_evaluate(tmp_path: Path):
     guard.load_file(rules_file)
 
     # 1. Block CRITICAL without approval
-    with pytest.raises(ToolGuardError, match="Blocked by ToolGuard: Security Rule 'DANGEROUS_RM' triggered"):
+    with pytest.raises(
+        ToolGuardError, match="Blocked by ToolGuard: Security Rule 'DANGEROUS_RM' triggered"
+    ):
         guard.check("exec_script", {"script": "rm -rf / etc"})
 
     # 2. Block HIGH with approval required

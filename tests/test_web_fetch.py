@@ -1,4 +1,5 @@
 """Tests for WebFetchTool with SSRF protection."""
+
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -47,7 +48,9 @@ def test_check_url_safety_no_scheme() -> None:
 def test_dns_check_private_ip() -> None:
     """Mock DNS resolving to a private IP should be blocked."""
     fake_result = [(2, 1, 6, "", ("10.0.0.1", 80))]
-    with patch("corpclaw_lite.extensions.tools.builtin.web.socket.getaddrinfo", return_value=fake_result):
+    with patch(
+        "corpclaw_lite.extensions.tools.builtin.web.socket.getaddrinfo", return_value=fake_result
+    ):
         err = _dns_check("evil.example.com")
         assert err is not None
         assert "private IP" in err
@@ -55,7 +58,9 @@ def test_dns_check_private_ip() -> None:
 
 def test_dns_check_public_ip() -> None:
     fake_result = [(2, 1, 6, "", ("93.184.216.34", 80))]
-    with patch("corpclaw_lite.extensions.tools.builtin.web.socket.getaddrinfo", return_value=fake_result):
+    with patch(
+        "corpclaw_lite.extensions.tools.builtin.web.socket.getaddrinfo", return_value=fake_result
+    ):
         err = _dns_check("example.com")
         assert err is None
 
@@ -80,7 +85,9 @@ async def test_rejects_private_ip(tool: WebFetchTool) -> None:
 async def test_rejects_blocked_hosts(tool: WebFetchTool) -> None:
     # Mock DNS to return a public IP (so it doesn't fail on DNS before host check)
     fake_dns = [(2, 1, 6, "", ("169.254.169.254", 80))]
-    with patch("corpclaw_lite.extensions.tools.builtin.web.socket.getaddrinfo", return_value=fake_dns):
+    with patch(
+        "corpclaw_lite.extensions.tools.builtin.web.socket.getaddrinfo", return_value=fake_dns
+    ):
         res = await tool.execute(url="http://169.254.169.254/latest/meta-data/")
     assert "Error" in res
     assert "blocked" in res.lower()
@@ -102,8 +109,12 @@ async def test_success(tool: WebFetchTool) -> None:
 
     fake_dns = [(2, 1, 6, "", ("93.184.216.34", 80))]
     with (
-        patch("corpclaw_lite.extensions.tools.builtin.web.socket.getaddrinfo", return_value=fake_dns),
-        patch("corpclaw_lite.extensions.tools.builtin.web.httpx.AsyncClient", return_value=mock_client),
+        patch(
+            "corpclaw_lite.extensions.tools.builtin.web.socket.getaddrinfo", return_value=fake_dns
+        ),
+        patch(
+            "corpclaw_lite.extensions.tools.builtin.web.httpx.AsyncClient", return_value=mock_client
+        ),
     ):
         res = await tool.execute(url="https://example.com")
 

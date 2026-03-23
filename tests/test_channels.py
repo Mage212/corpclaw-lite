@@ -18,6 +18,7 @@ def test_user():
         department="IT",
     )
 
+
 @pytest.mark.asyncio
 async def test_cli_channel(capsys: pytest.CaptureFixture[str], test_user: User) -> None:
     channel = CLIChannel()
@@ -118,6 +119,7 @@ async def test_approval_wrong_user_rejected(test_user: User) -> None:
     async def _fire_wrong_user_callback() -> None:
         await asyncio.sleep(0.05)
         from unittest.mock import MagicMock as MM
+
         from telegram import Update
 
         query = MM()
@@ -155,6 +157,7 @@ async def test_approval_wrong_user_rejected(test_user: User) -> None:
 async def test_handle_callback_wrong_user_shows_alert(test_user: User) -> None:
     """Wrong user callback: answer() must be called exactly once with show_alert=True."""
     from unittest.mock import MagicMock as MM
+
     from telegram import Update
 
     channel = TelegramChannel(token="test-token", message_handler=AsyncMock())

@@ -64,6 +64,7 @@ async def test_agent_loop_tool_call(test_user: User, empty_registry: ToolRegistr
         name = "test_tool"
         description = "A fake tool"
         params = []
+
         async def execute(self, **kwargs: Any) -> str:
             return "tool output"
 
@@ -71,10 +72,7 @@ async def test_agent_loop_tool_call(test_user: User, empty_registry: ToolRegistr
 
     provider = MockProvider(
         responses=[
-            LLMResponse(
-                content="",
-                tool_calls=[ToolCall(id="1", name="test_tool", arguments={})]
-            ),
+            LLMResponse(content="", tool_calls=[ToolCall(id="1", name="test_tool", arguments={})]),
             LLMResponse(content="I ran the tool and it worked."),
         ]
     )
@@ -109,8 +107,9 @@ async def test_agent_loop_budget_exceeded_returns_string(
 @pytest.mark.asyncio
 async def test_history_order(test_user: User, empty_registry: ToolRegistry) -> None:
     """History messages must appear BEFORE the current user message in context."""
-    from corpclaw_lite.memory.sqlite import SQLiteMemory
     from unittest.mock import MagicMock
+
+    from corpclaw_lite.memory.sqlite import SQLiteMemory
 
     # Mock memory returning 2 history entries
     memory = MagicMock(spec=SQLiteMemory)
@@ -155,6 +154,7 @@ async def test_approval_callback_per_call_takes_priority(
         name = "exec_tool"
         description = ""
         params = []
+
         async def execute(self, **kwargs: Any) -> str:
             return "executed"
 
@@ -178,7 +178,9 @@ async def test_approval_callback_per_call_takes_priority(
         ]
     )
     loop = AgentLoop(
-        provider, empty_registry, AgentSettings(),
+        provider,
+        empty_registry,
+        AgentSettings(),
         tool_guard=AlwaysApprovalGuard(),
         approval_callback=instance_cb,  # instance-level cb would deny
     )

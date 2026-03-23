@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+      - name: Install dependencies
+        run: uv sync
+      - name: Lint
+        run: uv run ruff check src/
+      - name: Format check
+        run: uv run ruff format --check src/
+      - name: Type check
+        run: uv run pyright src/
+      - name: Tests with coverage
+        run: uv run pytest tests/ -v --cov=src/corpclaw_lite --cov-fail-under=80

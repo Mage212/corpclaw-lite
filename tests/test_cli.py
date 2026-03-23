@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -152,9 +151,9 @@ def test_cmd_user_create(
         pass
 
     # Use real UserManager with tmp DB path
-    from corpclaw_lite.users.manager import UserManager
-    from unittest.mock import MagicMock, patch as p2
+    from unittest.mock import patch as p2
 
+    from corpclaw_lite.users.manager import UserManager
     from corpclaw_lite.users.models import User
 
     fake_user = User(id=1, name="user_12345", department="marketing", telegram_id=12345)
@@ -205,7 +204,6 @@ def test_cmd_generate_subagent(
 
 
 def test_main_no_args_prints_help(capsys: pytest.CaptureFixture[str]) -> None:
-    import sys
     from unittest.mock import patch
 
     with patch("sys.argv", ["corpclaw-lite"]):
