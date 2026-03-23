@@ -55,6 +55,7 @@ class AgentLoop:
         system_prompt: str | None = None,
         approval_callback: Callable[[str, str], Awaitable[bool]] | None = None,
         on_tool_start: Callable[[str], None] | None = None,
+        tools_enabled: bool = True,
     ) -> str:
         """Run the ReAct loop until a final answer is given or limits are reached."""
         # Per-call callback takes priority over the instance-level default
@@ -90,7 +91,7 @@ class AgentLoop:
         )
         budget = SimpleBudgetGuard(guard_config)
         progress = SimpleProgressGuard()
-        tools_schema = self._registry.to_schemas()
+        tools_schema = self._registry.to_schemas() if tools_enabled else None
         health.increment("requests")
 
         try:

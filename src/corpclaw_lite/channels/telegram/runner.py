@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 async def run_telegram_bot(token: str) -> None:
     """Start the Telegram bot and run until interrupted."""
+    from corpclaw_lite.channels.telegram.admin_notifier import AdminNotifier
     from corpclaw_lite.channels.telegram.channel import TelegramChannel
     from corpclaw_lite.channels.telegram.progress import StatusMessageSession
     from corpclaw_lite.channels.telegram.rate_limit import RateLimiter
@@ -33,56 +34,35 @@ async def run_telegram_bot(token: str) -> None:
     tg_settings = TelegramSettings()
     rate_limiter = RateLimiter(max_per_minute=tg_settings.rate_limit_per_minute)
 
-    async def _handle_message(telegram_id: str, message: str) -> str:
+    # Seed whitelist from config into persistent JSON
+    if tg_settings.whitelist:
+        user_manager.seed_whitelist(tg_settings.whitelist, tg_settings.default_department)
+
+    # Placeholder for admin notifier — set after channel.start()
+    admin_notifier: AdminNotifier | None = None
+
+    # ── Message handler (called by channel for text/upload/photo) ─────────
+    async def _handle_and_reply(telegram_id: str, message: str, mode: str = "execute") -> None:
         tid = int(telegram_id)
+
+        # ── Access control ────────────────────────────────────────────────
+        if user_manager.is_session_revoked(tid):
+            logger.debug("Ignoring message from revoked session telegram_id=%d", tid)
+            return
+
+        if not user_manager.is_allowed(tid):
+            temp_user = User(id=0, name=f"user_{tid}", department="default", telegram_id=tid)
+            await channel.send_message(temp_user, "⛔ У вас нет доступа к этому боту.")
+            return
+
+        # ── Get or register user ──────────────────────────────────────────
         user = user_manager.get_by_telegram_id(tid)
         if not user:
-            user = user_manager.create_user(telegram_id=tid, department="default")
-            logger.info("Auto-registered new user telegram_id=%d", tid)
+            dept = user_manager.get_whitelist_department(tid)
+            user = user_manager.create_user(telegram_id=tid, department=dept)
+            logger.info("Auto-registered user telegram_id=%d (dept=%s)", tid, dept)
 
-        # Build system prompt: bootstrap base + department context + user context
-        base_prompt = bootstrap.get_system_prompt()
-        dept_prompt = bootstrap.get_department_prompt(user.department)
-        user_context = f"You are talking to {user.name} from the {user.department} department."
-
-        parts = [p for p in [base_prompt, dept_prompt, user_context] if p]
-        system_prompt: str | None = "\n\n".join(parts) if parts else None
-
-        # Per-request closure — captures this user and channel; thread-safe (no shared mutation)
-        async def approval_cb(action: str, details: str) -> bool:
-            return await channel.request_approval(user, action, details)
-
-        try:
-            return await agent_loop.run(
-                user, message, system_prompt=system_prompt, approval_callback=approval_cb
-            )
-        except Exception as e:
-            logger.error("AgentLoop error for user %d: %s", tid, e)
-            return f"Sorry, I encountered an error: {e}"
-
-    channel = TelegramChannel(
-        token=token,
-        message_handler=_handle_message,
-        workspace_base=tg_settings.workspace_base,
-    )
-
-    # ── SendFile tool (needs channel reference) ───────────────────────────────
-    from corpclaw_lite.extensions.tools.builtin.send_file import SendFileTool
-
-    async def _send_file_cb(path: Path, user: User, caption: str) -> str:
-        await channel.send_file(user, path, caption)
-        return f"File '{path.name}' sent to user."
-
-    tool_registry.register(SendFileTool(_send_file_cb))
-
-    # Wire send_message back so agent can reply with progress indication
-    async def _handle_and_reply(telegram_id: str, message: str) -> None:
-        tid = int(telegram_id)
-        user = user_manager.get_by_telegram_id(tid) or User(
-            id=0, name=f"user_{tid}", department="default", telegram_id=tid
-        )
-
-        # Rate limiting
+        # ── Rate limiting ─────────────────────────────────────────────────
         allowed = await rate_limiter.check(tid)
         if not allowed:
             await channel.send_message(
@@ -91,7 +71,7 @@ async def run_telegram_bot(token: str) -> None:
             )
             return
 
-        # Create progress session
+        # ── Progress indicator ────────────────────────────────────────────
         bot = channel._app.bot if channel._app else None  # type: ignore[union-attr]
         status_session: StatusMessageSession | None = None
 
@@ -107,12 +87,12 @@ async def run_telegram_bot(token: str) -> None:
                 logger.warning("Failed to start progress indicator: %s", exc)
                 status_session = None
 
+        # ── Agent execution ───────────────────────────────────────────────
         try:
-            # Build system prompt
             base_prompt = bootstrap.get_system_prompt()
             dept_prompt = bootstrap.get_department_prompt(user.department)
-            user_context = f"You are talking to {user.name} from the {user.department} department."
-            parts_list = [p for p in [base_prompt, dept_prompt, user_context] if p]
+            user_ctx = f"You are talking to {user.name} from the {user.department} department."
+            parts_list = [p for p in [base_prompt, dept_prompt, user_ctx] if p]
             system_prompt: str | None = "\n\n".join(parts_list) if parts_list else None
 
             async def approval_cb(action: str, details: str) -> bool:
@@ -126,26 +106,55 @@ async def run_telegram_bot(token: str) -> None:
                 on_tool_start=(
                     status_session.mark_tool_start if status_session is not None else None
                 ),
+                tools_enabled=(mode == "execute"),
             )
         except Exception as e:
             logger.error("AgentLoop error for user %d: %s", tid, e)
-            reply = f"Sorry, I encountered an error: {e}"
+            reply = f"❌ Произошла ошибка: {e}"
+            # Notify admins
+            if admin_notifier is not None:
+                error_summary = (
+                    f"🔴 Agent error\n"
+                    f"User: {tid} ({user.name})\n"
+                    f"Error: {type(e).__name__}: {str(e)[:200]}"
+                )
+                asyncio.create_task(admin_notifier.notify(error_summary))
         finally:
             if status_session is not None:
                 await status_session.close()
 
         await channel.send_message(user, reply)
 
-    # Replace handler with the reply-capable version
-    channel._on_message = _handle_and_reply  # type: ignore[assignment]
+    # ── Build channel ─────────────────────────────────────────────────────
+    # Memory is available from build_agent_stack via agent_loop's public interface,
+    # but we need it for /new command. Pass it directly.
+    from corpclaw_lite.memory.sqlite import SQLiteMemory
 
-    # ── Rate limit cleanup background task ─────────────────────────────────────
+    _memory: SQLiteMemory | None = getattr(agent_loop, "_memory", None)
+    channel = TelegramChannel(
+        token=token,
+        message_handler=_handle_and_reply,
+        workspace_base=tg_settings.workspace_base,
+        tool_registry=tool_registry,
+        memory=_memory,
+    )
+
+    # ── SendFile tool ─────────────────────────────────────────────────────
+    from corpclaw_lite.extensions.tools.builtin.send_file import SendFileTool
+
+    async def _send_file_cb(path: Path, user: User, caption: str) -> str:
+        await channel.send_file(user, path, caption)
+        return f"File '{path.name}' sent to user."
+
+    tool_registry.register(SendFileTool(_send_file_cb))
+
+    # ── Rate limit cleanup ────────────────────────────────────────────────
     async def _rate_limit_cleanup_loop() -> None:
         while True:
-            await asyncio.sleep(300)  # 5 minutes
+            await asyncio.sleep(300)
             await rate_limiter.cleanup()
 
-    # ── Health endpoint ────────────────────────────────────────────────────────
+    # ── Health endpoint ───────────────────────────────────────────────────
     try:
         from corpclaw_lite.logging import health
 
@@ -154,7 +163,7 @@ async def run_telegram_bot(token: str) -> None:
     except ImportError:
         logger.info("aiohttp not installed — health endpoint disabled")
 
-    # ── Skill Hot-Reloader ────────────────────────────────────────────────────
+    # ── Skill Hot-Reloader ────────────────────────────────────────────────
     from corpclaw_lite.extensions.skills.registry import SkillRegistry
     from corpclaw_lite.extensions.skills.watcher import SkillHotReloader
 
@@ -166,10 +175,20 @@ async def run_telegram_bot(token: str) -> None:
     reloader.start()
     logger.info("Skill hot-reloader started watching %s", skills_dir)
 
+    # ── Start ─────────────────────────────────────────────────────────────
     logger.info("Starting Telegram bot...")
     cleanup_task: asyncio.Task[None] | None = None
     try:
         await channel.start()
+
+        # Wire admin notifier after channel starts (needs bot instance)
+        if tg_settings.admin_ids and channel._app:  # type: ignore[union-attr]
+            admin_notifier = AdminNotifier(
+                bot=channel._app.bot,  # type: ignore[union-attr]
+                admin_ids=tg_settings.admin_ids,
+            )
+            logger.info("Admin notifier active for %d admin(s)", len(tg_settings.admin_ids))
+
         cleanup_task = asyncio.create_task(_rate_limit_cleanup_loop())
         while True:
             await asyncio.sleep(3600)

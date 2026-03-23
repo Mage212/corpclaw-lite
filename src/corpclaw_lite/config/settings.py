@@ -56,6 +56,9 @@ class TelegramSettings(BaseModel):
 
     workspace_base: Path = Path("workspaces")
     rate_limit_per_minute: int = 10
+    whitelist: list[int] = []
+    default_department: str = "default"
+    admin_ids: list[int] = []
 
 
 class Settings(BaseSettings):

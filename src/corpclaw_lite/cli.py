@@ -60,6 +60,16 @@ def _build_parser() -> argparse.ArgumentParser:
     create_p.add_argument("-d", "--department", required=True, help="Department slug")
     create_p.add_argument("-n", "--name", default="", help="Display name")
 
+    allow_p = sub.add_parser("user-allow", help="Add telegram_id to bot whitelist")
+    allow_p.add_argument("-t", "--telegram-id", type=int, required=True, help="Telegram user ID")
+    allow_p.add_argument("-d", "--department", default="default", help="Department slug")
+
+    deny_p = sub.add_parser("user-deny", help="Remove telegram_id from bot whitelist")
+    deny_p.add_argument("-t", "--telegram-id", type=int, required=True, help="Telegram user ID")
+
+    revoke_p = sub.add_parser("user-revoke", help="Block a user session")
+    revoke_p.add_argument("-t", "--telegram-id", type=int, required=True, help="Telegram user ID")
+
     # containers
     sub.add_parser("containers", help="List active Docker containers")
     sub.add_parser("prune", help="Remove idle Docker containers")
@@ -150,6 +160,36 @@ def cmd_user_create(telegram_id: int, department: str, name: str) -> None:
     manager = UserManager()
     user = manager.create_user(telegram_id=telegram_id, department=department, name=name)
     print(f"Created user #{user.id}: {user.name} ({user.department})")
+
+
+def cmd_user_allow(telegram_id: int, department: str) -> None:
+    """Add a telegram_id to the bot whitelist."""
+    from corpclaw_lite.users.manager import UserManager
+
+    manager = UserManager()
+    manager.add_to_whitelist(telegram_id, department)
+    print(f"✅ telegram_id={telegram_id} added to whitelist (department={department})")
+
+
+def cmd_user_deny(telegram_id: int) -> None:
+    """Remove a telegram_id from the bot whitelist."""
+    from corpclaw_lite.users.manager import UserManager
+
+    manager = UserManager()
+    removed = manager.remove_from_whitelist(telegram_id)
+    if removed:
+        print(f"✅ telegram_id={telegram_id} removed from whitelist")
+    else:
+        print(f"⚠️  telegram_id={telegram_id} was not in whitelist")
+
+
+def cmd_user_revoke(telegram_id: int) -> None:
+    """Block a user's session so the bot ignores their messages."""
+    from corpclaw_lite.users.manager import UserManager
+
+    manager = UserManager()
+    manager.revoke_session(telegram_id)
+    print(f"✅ Session revoked for telegram_id={telegram_id}")
 
 
 def cmd_containers() -> None:
@@ -328,6 +368,12 @@ def main() -> None:
         cmd_user_list()
     elif args.command == "user-create":
         cmd_user_create(args.telegram_id, args.department, args.name)
+    elif args.command == "user-allow":
+        cmd_user_allow(args.telegram_id, args.department)
+    elif args.command == "user-deny":
+        cmd_user_deny(args.telegram_id)
+    elif args.command == "user-revoke":
+        cmd_user_revoke(args.telegram_id)
     elif args.command == "containers":
         cmd_containers()
     elif args.command == "prune":
