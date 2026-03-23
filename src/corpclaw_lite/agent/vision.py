@@ -5,6 +5,8 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import anyio
+
 if TYPE_CHECKING:
     from corpclaw_lite.llm.base import Provider
     from corpclaw_lite.users.models import User
@@ -29,7 +31,8 @@ class VisionProcessor:
 
     async def describe(self, path: Path, prompt: str, user: User | None = None) -> str:
         """Read an image and get a description/analysis from the vision model."""
-        if not path.exists() or not path.is_file():
+        aio_path = anyio.Path(path)
+        if not await aio_path.exists() or not await aio_path.is_file():
             return f"Error: Image file not found: {path}"
 
         media_type = _MEDIA_TYPES.get(path.suffix.lower())
@@ -38,7 +41,7 @@ class VisionProcessor:
 
         # Encode image as base64
         try:
-            raw = path.read_bytes()
+            raw = await aio_path.read_bytes()
             image_data = base64.b64encode(raw).decode("ascii")
         except Exception as e:
             return f"Error reading image file: {e}"

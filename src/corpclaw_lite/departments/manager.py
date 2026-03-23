@@ -38,7 +38,7 @@ class DepartmentManager:
     def load_file(self, path: Path | str) -> None:
         file_path = Path(path)
         if not file_path.exists():
-            logger.warning(f"Departments config not found: {file_path}")
+            logger.warning("Departments config not found: %s", file_path)
             return
 
         try:
@@ -49,9 +49,9 @@ class DepartmentManager:
             for slug, dept_data in depts.items():
                 self._departments[str(slug)] = DepartmentConfig(cast(dict[str, Any], dept_data))
 
-            logger.info(f"Loaded {len(self._departments)} departments")
+            logger.info("Loaded %d departments", len(self._departments))
         except Exception as e:
-            logger.error(f"Failed to load departments from {file_path}: {e}")
+            logger.error("Failed to load departments from %s: %s", file_path, e)
 
     def get_department(self, slug: str) -> DepartmentConfig | None:
         return self._departments.get(slug)

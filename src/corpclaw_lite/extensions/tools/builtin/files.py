@@ -141,7 +141,7 @@ class ListFilesTool(Tool):
     risk_level = RiskLevel.LOW
 
     async def execute(self, **kwargs: Any) -> str:
-        path = kwargs.get("path", ".")
+        path = kwargs.get("path") or "."
 
         try:
             resolved = resolve_and_validate_path(path)
@@ -169,7 +169,7 @@ class SearchFilesTool(Tool):
     risk_level = RiskLevel.LOW
 
     async def execute(self, **kwargs: Any) -> str:
-        path = kwargs.get("path", ".")
+        path = kwargs.get("path") or "."
         pattern = kwargs.get("pattern")
         if not isinstance(path, str) or not isinstance(pattern, str):
             return "Error: 'pattern' and 'path' must be strings."

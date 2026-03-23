@@ -26,19 +26,19 @@ class SkillLoader:
         Full markdown instructions...
         """
         if not path.exists() or not path.is_file():
-            logger.warning(f"Skill file not found: {path}")
+            logger.warning("Skill file not found: %s", path)
             return None
 
         content = path.read_text(encoding="utf-8")
 
         if not content.startswith("---"):
-            logger.warning(f"Skill file {path.name} missing YAML frontmatter.")
+            logger.warning("Skill file %s missing YAML frontmatter.", path.name)
             return None
 
         # Split at the second '---'
         parts = content.split("---", 2)
         if len(parts) < 3:
-            logger.warning(f"Skill file {path.name} has malformed frontmatter.")
+            logger.warning("Skill file %s has malformed frontmatter.", path.name)
             return None
 
         frontmatter_str = parts[1].strip()
@@ -47,7 +47,7 @@ class SkillLoader:
         try:
             metadata: dict[str, Any] = yaml.safe_load(frontmatter_str) or {}
         except yaml.YAMLError as e:
-            logger.error(f"Failed to parse frontmatter in {path.name}: {e}")
+            logger.error("Failed to parse frontmatter in %s: %s", path.name, e)
             return None
 
         skill_id = metadata.get("id")

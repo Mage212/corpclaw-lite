@@ -136,3 +136,20 @@ async def test_registry_execute_passes_user_kwarg(monkeypatch: pytest.MonkeyPatc
 
     assert result == "ok"
     assert received_user == [user], "user kwarg was not forwarded to tool.execute()"
+
+
+@pytest.mark.asyncio
+async def test_list_files_path_none_defaults_to_cwd(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ListFilesTool with path=None must default to CWD, not crash."""
+    tool = ListFilesTool()
+    # path=None should behave the same as path="."
+    result = await tool.execute(path=None)
+    assert "Error" not in result or "not a valid directory" not in result
+
+
+@pytest.mark.asyncio
+async def test_search_files_path_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """SearchFilesTool with path=None must default to CWD."""
+    tool = SearchFilesTool()
+    result = await tool.execute(path=None, pattern="nonexistent_pattern_xyz")
+    assert "No matches found" in result or "Error" not in result

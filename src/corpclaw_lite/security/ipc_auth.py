@@ -64,8 +64,8 @@ class IPCAuth:
             raise IPCAuthError("Missing authentication fields in message")
 
         now = time.time()
-        if now - timestamp > self.nonce_ttl:
-            raise IPCAuthError("Message timestamp too old (expired)")
+        if abs(now - timestamp) > self.nonce_ttl:
+            raise IPCAuthError("Message timestamp out of acceptable range (expired or future)")
 
         self._cleanup_nonces()
         if nonce in self._seen_nonces:

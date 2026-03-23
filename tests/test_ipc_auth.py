@@ -54,6 +54,31 @@ def test_ipc_auth_ttl_expiration():
         auth.verify(signed)
 
 
+def test_ipc_auth_rejects_future_timestamp() -> None:
+    """A message with a timestamp far in the future must be rejected."""
+    auth = IPCAuth(secret="test_secret", nonce_ttl_seconds=10)
+    payload = {"command": "test"}
+    signed = auth.sign(payload)
+
+    # Tamper the timestamp to be 1 hour in the future
+    signed["timestamp"] = time.time() + 3600
+
+    # Re-sign with the tampered timestamp to make the signature valid
+    # (but the timestamp check should still reject it)
+    import hashlib
+    import hmac
+    import json
+
+    payload_str = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    msg = f"{signed['nonce']}:{signed['timestamp']}:{payload_str}"
+    signed["signature"] = hmac.new(
+        "test_secret".encode(), msg.encode(), hashlib.sha256
+    ).hexdigest()
+
+    with pytest.raises(IPCAuthError, match="future|range|expired"):
+        auth.verify(signed)
+
+
 def test_ipc_auth_missing_secret_raises_ipc_auth_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """Missing CORPCLAW_IPC_SECRET must raise IPCAuthError, not ValueError."""
     monkeypatch.delenv("CORPCLAW_IPC_SECRET", raising=False)

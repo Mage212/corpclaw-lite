@@ -19,7 +19,7 @@ class SubagentRegistry:
         """Load all subagent YAML definitions from a directory."""
         dir_path = Path(config_dir)
         if not dir_path.exists() or not dir_path.is_dir():
-            logger.warning(f"Subagents config directory not found: {dir_path}")
+            logger.warning("Subagents config directory not found: %s", dir_path)
             return
 
         loaded_count = 0
@@ -39,9 +39,9 @@ class SubagentRegistry:
                 self.register(spec)
                 loaded_count += 1
             except Exception as e:
-                logger.error(f"Failed to load subagent spec {yaml_file}: {e}")
+                logger.error("Failed to load subagent spec %s: %s", yaml_file, e)
 
-        logger.info(f"Loaded {loaded_count} subagents from {dir_path}")
+        logger.info("Loaded %d subagents from %s", loaded_count, dir_path)
 
     def register(self, spec: SubagentSpec) -> None:
         self._subagents[spec.id] = spec

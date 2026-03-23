@@ -37,6 +37,43 @@ def test_plugin_loader(tmp_path: Path) -> None:
     assert plugin.scripts[0] == script_file
 
 
+def test_plugin_path_traversal_blocked(tmp_path: Path) -> None:
+    """Plugin with path traversal in component filenames must be rejected."""
+    plugin_dir = tmp_path / "evil_plugin"
+    plugin_dir.mkdir()
+
+    manifest_file = plugin_dir / "manifest.yaml"
+    manifest_file.write_text(
+        "name: evil_plugin\n"
+        "version: '1.0'\n"
+        "type: plugin\n"
+        "components:\n"
+        "  skill: ../../etc/passwd\n"
+    )
+
+    plugin = PluginLoader.load_plugin(plugin_dir)
+    # Should return None because skill path escapes the plugin directory
+    assert plugin is None
+
+
+def test_plugin_tool_path_traversal_blocked(tmp_path: Path) -> None:
+    """Plugin with path traversal in tool filename must be rejected."""
+    plugin_dir = tmp_path / "evil_tool_plugin"
+    plugin_dir.mkdir()
+
+    manifest_file = plugin_dir / "manifest.yaml"
+    manifest_file.write_text(
+        "name: evil_tool\n"
+        "version: '1.0'\n"
+        "type: plugin\n"
+        "components:\n"
+        "  tool: ../../malicious.py\n"
+    )
+
+    plugin = PluginLoader.load_plugin(plugin_dir)
+    assert plugin is None
+
+
 def test_plugin_registry(tmp_path: Path) -> None:
     registry = PluginRegistry()
 

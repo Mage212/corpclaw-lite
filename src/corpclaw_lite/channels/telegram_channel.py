@@ -2,9 +2,11 @@
 import asyncio
 import logging
 from collections.abc import Callable
+from html import escape as html_escape
 from pathlib import Path
 from typing import Any
 
+import anyio
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 from telegram.constants import ParseMode
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
@@ -77,10 +79,10 @@ class TelegramChannel(Channel):
             return
 
         try:
-            with open(path, "rb") as f:
-                await self._app.bot.send_document(
-                    chat_id=user.telegram_id, document=f, caption=caption
-                )
+            content = await anyio.Path(path).read_bytes()
+            await self._app.bot.send_document(
+                chat_id=user.telegram_id, document=content, caption=caption, filename=path.name
+            )
         except Exception as e:
             logger.error("Failed to send file to %s: %s", user.telegram_id, e)
 
@@ -102,7 +104,11 @@ class TelegramChannel(Channel):
 
         sent: Message = await self._app.bot.send_message(
             chat_id=user.telegram_id,
-            text=f"<b>⚠️ Approval Required</b>\n\n<b>Action:</b> {action}\n\n<i>{details}</i>",
+            text=(
+                f"<b>⚠️ Approval Required</b>\n\n"
+                f"<b>Action:</b> {html_escape(action)}\n\n"
+                f"<i>{html_escape(details)}</i>"
+            ),
             parse_mode=ParseMode.HTML,
             reply_markup=reply_markup,
         )

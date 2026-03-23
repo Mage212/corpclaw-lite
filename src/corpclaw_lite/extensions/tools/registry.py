@@ -28,6 +28,10 @@ class ToolRegistry:
         """List all registered tools."""
         return list(self._tools.values())
 
+    def items(self) -> dict[str, Tool]:
+        """Return a copy of the name→tool mapping."""
+        return dict(self._tools)
+
     async def execute(
         self,
         name: str,

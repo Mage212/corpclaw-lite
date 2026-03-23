@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, cast
 
 from corpclaw_lite.config.settings import ContainerSettings
 from corpclaw_lite.security.network_policy import NetworkPolicy
@@ -37,13 +37,20 @@ class ContainerPolicies:
         }
 
         if network_policy:
-            net_args = network_policy.to_docker_args()
+            net_args: dict[str, Any] = dict(network_policy.to_docker_args())
+            # Preserve our environment dict before update() overwrites it
+            saved_env: dict[str, str] = dict(args.get("environment", {}))
+            net_env = net_args.pop("environment", None)
             args.update(net_args)
-            if "environment" in net_args and "environment" in args:  # noqa: SIM102
-                # Merge environments (handling list vs dict safely depending on how it's passed)
-                if isinstance(net_args["environment"], list):
-                    for env_var in net_args["environment"]:
-                        k, v = env_var.split("=", 1)
-                        args["environment"][k] = v
+            # Merge network policy environment entries into the original dict
+            args["environment"] = saved_env
+            if isinstance(net_env, list):
+                env_list = cast(list[str], net_env)
+                for env_var in env_list:
+                    k, v = env_var.split("=", 1)
+                    args["environment"][k] = v
+            elif isinstance(net_env, dict):
+                env_dict = cast(dict[str, str], net_env)
+                args["environment"].update(env_dict)
 
         return args

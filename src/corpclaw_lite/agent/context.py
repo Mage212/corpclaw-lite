@@ -24,8 +24,13 @@ class ContextBuilder:
         """Add an assistant text message."""
         self.messages.append({"role": "assistant", "content": content})
 
-    def add_tool_calls(self, tool_calls: list[ToolCall]) -> None:
-        """Add tool calls made by the assistant."""
+    def add_tool_calls(self, tool_calls: list[ToolCall], content: str | None = None) -> None:
+        """Add tool calls made by the assistant.
+
+        When the LLM returns both text *and* tool_calls, pass the text as
+        ``content`` so that a single assistant message is emitted (required
+        by the OpenAI API format).
+        """
         calls: list[dict[str, Any]] = []
         for tc in tool_calls:
             calls.append(
@@ -41,7 +46,7 @@ class ContextBuilder:
         self.messages.append(
             {
                 "role": "assistant",
-                "content": None,
+                "content": content,
                 "tool_calls": calls,
             }
         )

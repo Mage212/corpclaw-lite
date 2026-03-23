@@ -37,7 +37,7 @@ class PluginLoader:
                 path=path,
             )
         except Exception as e:
-            logger.error(f"Failed to load plugin manifest {path}: {e}")
+            logger.error("Failed to load plugin manifest %s: %s", path, e)
             return None
 
     @classmethod
@@ -49,7 +49,7 @@ class PluginLoader:
         manifest_path = plugin_dir / "manifest.yaml"
         manifest = cls.load_manifest(manifest_path)
         if not manifest:
-            logger.warning(f"Plugin directory {plugin_dir} is missing manifest.yaml or invalid.")
+            logger.warning("Plugin directory %s is missing manifest.yaml or invalid.", plugin_dir)
             return None
 
         plugin_skill = None
@@ -59,7 +59,14 @@ class PluginLoader:
         # Load skill if defined
         skill_filename = manifest.components.get("skill")
         if skill_filename:
-            skill_path = plugin_dir / skill_filename
+            skill_path = (plugin_dir / skill_filename).resolve()
+            if not skill_path.is_relative_to(plugin_dir.resolve()):
+                logger.error(
+                    "Plugin %s: skill path '%s' escapes plugin directory (path traversal blocked).",
+                    manifest.name,
+                    skill_filename,
+                )
+                return None
             loaded_skill = SkillLoader.load_from_file(skill_path)
             if loaded_skill:
                 plugin_skill = loaded_skill
@@ -73,7 +80,14 @@ class PluginLoader:
         # Load tool if defined
         tool_filename = manifest.components.get("tool")
         if tool_filename:
-            tool_path = plugin_dir / tool_filename
+            tool_path = (plugin_dir / tool_filename).resolve()
+            if not tool_path.is_relative_to(plugin_dir.resolve()):
+                logger.error(
+                    "Plugin %s: tool path '%s' escapes plugin directory (path traversal blocked).",
+                    manifest.name,
+                    tool_filename,
+                )
+                return None
             if tool_path.exists():
                 try:
                     module_name = f"plugin_{manifest.name}_tool"
@@ -94,7 +108,7 @@ class PluginLoader:
                             ):
                                 plugin_tools.append(attr())
                 except Exception as e:
-                    logger.error(f"Failed to load tool from plugin {manifest.name}: {e}")
+                    logger.error("Failed to load tool from plugin %s: %s", manifest.name, e)
 
         # Load script if defined
         script_filename = manifest.components.get("script")

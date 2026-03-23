@@ -75,8 +75,8 @@ class OpenAIProvider(Provider):
         usage = {}
         if response.usage:
             usage = {
-                "input_tokens": response.usage.prompt_tokens,
-                "output_tokens": response.usage.completion_tokens,
+                "input_tokens": response.usage.prompt_tokens or 0,
+                "output_tokens": response.usage.completion_tokens or 0,
             }
 
         return LLMResponse(content=content, tool_calls=tool_calls, usage=usage)
@@ -116,8 +116,8 @@ class OpenAIProvider(Provider):
         usage = {}
         if response.usage:
             usage = {
-                "input_tokens": response.usage.prompt_tokens,
-                "output_tokens": response.usage.completion_tokens,
+                "input_tokens": response.usage.prompt_tokens or 0,
+                "output_tokens": response.usage.completion_tokens or 0,
             }
         return LLMResponse(content=content, usage=usage)
 

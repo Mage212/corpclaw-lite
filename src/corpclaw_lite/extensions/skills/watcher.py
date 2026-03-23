@@ -4,6 +4,8 @@ import asyncio
 import logging
 from pathlib import Path
 
+import anyio
+
 from corpclaw_lite.extensions.skills.loader import SkillLoader
 from corpclaw_lite.extensions.skills.registry import SkillRegistry
 
@@ -29,6 +31,7 @@ class SkillHotReloader:
         self._registry = registry
         self._poll_interval = poll_interval
         self._mtimes: dict[Path, float] = {}
+        self._known_files: set[Path] = set()
         self._task: asyncio.Task[None] | None = None
 
     def start(self) -> None:
@@ -56,11 +59,27 @@ class SkillHotReloader:
 
     async def _scan(self) -> None:
         """Check all .md files in the directory, reload any that changed."""
-        if not self._dir.exists():
+        aio_dir = anyio.Path(self._dir)
+        if not await aio_dir.exists():
             return
 
-        current_files = {p: p.stat().st_mtime for p in self._dir.glob("*.md")}
+        current_files: dict[Path, float] = {}
+        async for p in aio_dir.glob("*.md"):
+            sync_p = Path(p)
+            stat = await p.stat()
+            current_files[sync_p] = stat.st_mtime
 
+        current_paths = set(current_files.keys())
+
+        # Detect deleted files
+        deleted = self._known_files - current_paths
+        for path in deleted:
+            skill_id = path.stem
+            self._registry.unregister(skill_id)
+            self._mtimes.pop(path, None)
+            logger.info("HotReload: skill '%s' removed (file deleted)", skill_id)
+
+        # Detect new or modified files
         for path, mtime in current_files.items():
             prev_mtime = self._mtimes.get(path)
             if prev_mtime is None or mtime > prev_mtime:
@@ -73,3 +92,5 @@ class SkillHotReloader:
                         "updated" if prev_mtime else "loaded",
                     )
                 self._mtimes[path] = mtime
+
+        self._known_files = current_paths

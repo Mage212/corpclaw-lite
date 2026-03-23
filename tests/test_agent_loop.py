@@ -138,6 +138,87 @@ async def test_history_order(test_user: User, empty_registry: ToolRegistry) -> N
 
 
 @pytest.mark.asyncio
+async def test_single_assistant_message_with_tool_calls(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """When LLM returns content + tool_calls, context must have ONE assistant message."""
+
+    class FakeTool:
+        name = "t"
+        description = ""
+        params = []
+
+        async def execute(self, **kwargs: Any) -> str:
+            return "ok"
+
+    empty_registry._tools["t"] = FakeTool()  # type: ignore
+
+    captured: list[list[dict]] = []
+
+    class CapturingProvider(MockProvider):
+        async def chat(self, messages, tools=None, system=None):  # type: ignore[override]
+            captured.append(list(messages))
+            return await super().chat(messages, tools, system)
+
+    provider = CapturingProvider(
+        responses=[
+            LLMResponse(
+                content="Let me run the tool",
+                tool_calls=[ToolCall(id="1", name="t", arguments={})],
+            ),
+            LLMResponse(content="Done."),
+        ]
+    )
+    loop = AgentLoop(provider, empty_registry, AgentSettings())
+    await loop.run(test_user, "go")
+
+    # Check the second call's messages — should have exactly ONE assistant
+    # message containing both content and tool_calls
+    msgs = captured[1]
+    assistant_msgs = [m for m in msgs if m.get("role") == "assistant"]
+    # The assistant message with tool_calls must also carry the content
+    tc_msg = [m for m in assistant_msgs if m.get("tool_calls")]
+    assert len(tc_msg) == 1
+    assert tc_msg[0]["content"] == "Let me run the tool"
+
+
+@pytest.mark.asyncio
+async def test_loop_stops_on_progress_guard(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """Progress guard loop detection must break the outer while-True loop."""
+
+    class FakeTool:
+        name = "fail_tool"
+        description = ""
+        params = []
+
+        async def execute(self, **kwargs: Any) -> str:
+            return "Error: something went wrong"
+
+    empty_registry._tools["fail_tool"] = FakeTool()  # type: ignore
+
+    # Return tool calls repeatedly — progress guard should detect the loop
+    provider = MockProvider(
+        responses=[
+            LLMResponse(
+                content="",
+                tool_calls=[ToolCall(id=str(i), name="fail_tool", arguments={})],
+            )
+            for i in range(20)
+        ]
+    )
+    settings = AgentSettings(max_steps=20, max_tool_calls=100)
+    loop = AgentLoop(provider, empty_registry, settings)
+    result = await loop.run(test_user, "do it")
+
+    # Should have stopped due to loop detection, not budget
+    assert "loop" in result.lower() or "stuck" in result.lower()
+    # Should not have used all 20 responses
+    assert provider.call_count < 20
+
+
+@pytest.mark.asyncio
 async def test_approval_callback_per_call_takes_priority(
     test_user: User, empty_registry: ToolRegistry
 ) -> None:

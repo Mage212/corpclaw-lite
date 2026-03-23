@@ -79,6 +79,36 @@ def test_critical_after_medium_approval_blocks(tmp_path: Path) -> None:
         guard.check("exec_script", {"script": "rm -rf /tmp"})
 
 
+def test_toolguard_rm_separate_flags(tmp_path: Path) -> None:
+    """DANGEROUS_RM rule must catch rm with separate -r -f flags."""
+    rules_file = tmp_path / "rules.yaml"
+    rules_file.write_text(
+        "rules:\n"
+        "  - id: DANGEROUS_RM\n"
+        "    severity: CRITICAL\n"
+        "    tool: exec_script\n"
+        "    match_param: script\n"
+        '    match_pattern: "rm\\\\s+(-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*|(-[a-zA-Z]*f[a-zA-Z]*\\\\s+-[a-zA-Z]*r|-[a-zA-Z]*r[a-zA-Z]*\\\\s+-[a-zA-Z]*f)|--recursive|--force)"\n'
+    )
+    guard = ToolGuard()
+    guard.load_file(rules_file)
+
+    # rm -rf should be caught
+    with pytest.raises(ToolGuardError):
+        guard.check("exec_script", {"script": "rm -rf /"})
+
+    # rm -r -f should also be caught
+    with pytest.raises(ToolGuardError):
+        guard.check("exec_script", {"script": "rm -r -f /home"})
+
+    # rm --recursive should be caught
+    with pytest.raises(ToolGuardError):
+        guard.check("exec_script", {"script": "rm --recursive /tmp"})
+
+    # Safe rm should pass
+    guard.check("exec_script", {"script": "rm file.txt"})
+
+
 def test_medium_without_approval_continues_to_critical(tmp_path: Path) -> None:
     """MEDIUM rule without require_approval must not stop CRITICAL from being evaluated."""
     rules_file = tmp_path / "rules.yaml"

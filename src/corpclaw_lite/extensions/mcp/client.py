@@ -44,8 +44,9 @@ class MCPClient:
         await client.disconnect()
     """
 
-    def __init__(self, timeout: float = 30.0) -> None:
+    def __init__(self, timeout: float = 30.0, total_timeout: float = 60.0) -> None:
         self._timeout = timeout
+        self._total_timeout = total_timeout
         self._process: asyncio.subprocess.Process | None = None
         self._request_id = 0
 
@@ -122,6 +123,18 @@ class MCPClient:
 
     async def _send_request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """Send a JSON-RPC request and return the result dict."""
+        try:
+            return await asyncio.wait_for(
+                self._send_request_inner(method, params),
+                timeout=self._total_timeout,
+            )
+        except TimeoutError as e:
+            raise MCPClientError(
+                f"MCP request '{method}' exceeded total timeout of {self._total_timeout}s"
+            ) from e
+
+    async def _send_request_inner(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        """Inner implementation with per-line timeout."""
         if not self._process or not self._process.stdin or not self._process.stdout:
             raise MCPClientError("MCP client is not connected.")
 

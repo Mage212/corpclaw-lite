@@ -18,7 +18,7 @@ class PluginRegistry:
         """Load all valid plugin subdirectories from a main plugins directory."""
         dir_path = Path(plugins_dir)
         if not dir_path.exists() or not dir_path.is_dir():
-            logger.warning(f"Plugins directory not found: {dir_path}")
+            logger.warning("Plugins directory not found: %s", dir_path)
             return
 
         loaded_count = 0
@@ -29,7 +29,7 @@ class PluginRegistry:
                     self.register(plugin)
                     loaded_count += 1
 
-        logger.info(f"Loaded {loaded_count} plugins from {dir_path}")
+        logger.info("Loaded %d plugins from %s", loaded_count, dir_path)
 
     def register(self, plugin: Plugin) -> None:
         self._plugins[plugin.manifest.name] = plugin

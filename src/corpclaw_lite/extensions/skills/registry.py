@@ -18,7 +18,7 @@ class SkillRegistry:
         """Load all .md files from a directory."""
         dir_path = Path(skills_dir)
         if not dir_path.exists() or not dir_path.is_dir():
-            logger.warning(f"Skills directory not found: {dir_path}")
+            logger.warning("Skills directory not found: %s", dir_path)
             return
 
         loaded_count = 0
@@ -28,11 +28,15 @@ class SkillRegistry:
                 self.register(skill)
                 loaded_count += 1
 
-        logger.info(f"Loaded {loaded_count} skills from {dir_path}")
+        logger.info("Loaded %d skills from %s", loaded_count, dir_path)
 
     def register(self, skill: Skill) -> None:
         """Register a single skill."""
         self._skills[skill.id] = skill
+
+    def unregister(self, skill_id: str) -> None:
+        """Remove a skill by ID (no-op if not found)."""
+        self._skills.pop(skill_id, None)
 
     def get_skill(self, skill_id: str) -> Skill | None:
         """Get a skill by ID without checking permissions."""

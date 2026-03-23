@@ -58,13 +58,13 @@ class ContainerManager:
             container = self._client.containers.get(name)
             if container.status != "running":
                 container.restart()
-            logger.info(f"Container {name} is already running.")
+            logger.info("Container %s is already running.", name)
             return name
         except docker.errors.NotFound:  # type: ignore
             pass
 
         # Needs creation
-        logger.info(f"Creating new container {name} for user {user_id}")
+        logger.info("Creating new container %s for user %s", name, user_id)
 
         args = ContainerPolicies.build_docker_args(
             user_id=user_id, settings=self.settings, network_policy=self.network_policy
@@ -74,7 +74,7 @@ class ContainerManager:
             container = self._client.containers.run(**args)
             return name
         except Exception as e:
-            logger.error(f"Failed to create container: {e}")
+            logger.error("Failed to create container: %s", e)
             raise ContainerManagerError(f"Could not start container: {e}") from e
 
     def stop(self, user_id: int) -> None:
@@ -87,11 +87,11 @@ class ContainerManager:
             container = self._client.containers.get(name)
             container.stop(timeout=2)
             container.remove(v=True, force=True)
-            logger.info(f"Stopped and removed container {name}")
+            logger.info("Stopped and removed container %s", name)
         except docker.errors.NotFound:  # type: ignore
             pass
         except Exception as e:
-            logger.error(f"Failed to stop container {name}: {e}")
+            logger.error("Failed to stop container %s: %s", name, e)
 
     async def list_active(self) -> list[str]:
         """Return names of all active corpclaw agent containers."""

@@ -51,9 +51,10 @@ def test_dns_check_private_ip() -> None:
     with patch(
         "corpclaw_lite.extensions.tools.builtin.web.socket.getaddrinfo", return_value=fake_result
     ):
-        err = _dns_check("evil.example.com")
+        err, ips = _dns_check("evil.example.com")
         assert err is not None
         assert "private IP" in err
+        assert ips == []
 
 
 def test_dns_check_public_ip() -> None:
@@ -61,11 +62,19 @@ def test_dns_check_public_ip() -> None:
     with patch(
         "corpclaw_lite.extensions.tools.builtin.web.socket.getaddrinfo", return_value=fake_result
     ):
-        err = _dns_check("example.com")
+        err, ips = _dns_check("example.com")
         assert err is None
+        assert "93.184.216.34" in ips
 
 
 # ── WebFetchTool ─────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_missing_url_param(tool: WebFetchTool) -> None:
+    """Missing url parameter returns an error."""
+    res = await tool.execute()
+    assert "Error" in res
 
 
 @pytest.mark.asyncio
@@ -91,6 +100,40 @@ async def test_rejects_blocked_hosts(tool: WebFetchTool) -> None:
         res = await tool.execute(url="http://169.254.169.254/latest/meta-data/")
     assert "Error" in res
     assert "blocked" in res.lower()
+
+
+@pytest.mark.asyncio
+async def test_content_length_non_numeric(tool: WebFetchTool) -> None:
+    """Non-numeric Content-Length header must not crash."""
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.headers = {
+        "content-type": "text/html",
+        "content-length": "not-a-number",
+    }
+    mock_response.text = "<html>Ok</html>"
+    mock_response.is_redirect = False
+
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(return_value=mock_response)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+
+    fake_dns = [(2, 1, 6, "", ("93.184.216.34", 80))]
+    with (
+        patch(
+            "corpclaw_lite.extensions.tools.builtin.web.socket.getaddrinfo",
+            return_value=fake_dns,
+        ),
+        patch(
+            "corpclaw_lite.extensions.tools.builtin.web.httpx.AsyncClient",
+            return_value=mock_client,
+        ),
+    ):
+        res = await tool.execute(url="https://example.com")
+
+    assert "Status: 200" in res
+    assert "Ok" in res
 
 
 @pytest.mark.asyncio

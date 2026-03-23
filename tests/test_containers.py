@@ -115,6 +115,26 @@ def test_container_not_available_no_docker():
     assert manager.is_available() is False
 
 
+def test_environment_merge_with_network_policy():
+    """ContainerPolicies must merge environment dicts without crashing."""
+    from corpclaw_lite.container.policies import ContainerPolicies
+    from corpclaw_lite.security.network_policy import NetworkPolicy
+
+    settings = ContainerSettings()
+    policy = NetworkPolicy()
+    policy.allowlist = ["example.com", "api.internal"]
+
+    args = ContainerPolicies.build_docker_args(
+        user_id=1, settings=settings, network_policy=policy
+    )
+
+    env = args["environment"]
+    assert isinstance(env, dict)
+    assert env["CORPCLAW_USER_ID"] == "1"
+    assert "ALLOWED_DOMAINS" in env
+    assert "example.com" in env["ALLOWED_DOMAINS"]
+
+
 def test_container_stop_no_docker():
     """stop() with no docker client is a no-op."""
     manager = ContainerManager.__new__(ContainerManager)

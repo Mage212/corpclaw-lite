@@ -1,27 +1,63 @@
 rules:
-  # Blocking dangerous system removals
+  # Blocking dangerous system removals (covers rm -rf, rm -r -f, rm -fr, etc.)
   - id: DANGEROUS_RM
-    description: "Attempting to run rm -rf which is highly dangerous."
+    description: "Attempting to run destructive rm command."
     tool: "exec_script"
     severity: CRITICAL
     match_param: "script"
-    match_pattern: "rm\\s+-rf\\s+/"
+    match_pattern: "rm\\s+(-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*|(-[a-zA-Z]*f[a-zA-Z]*\\s+-[a-zA-Z]*r|-[a-zA-Z]*r[a-zA-Z]*\\s+-[a-zA-Z]*f)|--recursive|--force)"
     require_approval: false
 
-  # Preventing directory traversal attacks  
-  - id: PATH_TRAVERSAL
-    description: "Path traversal detected."
+  # Preventing directory traversal attacks — read_file
+  - id: PATH_TRAVERSAL_READ
+    description: "Path traversal detected in read_file."
     tool: "read_file"
     severity: HIGH
     match_param: "path"
     match_pattern: "\\.\\./"
     require_approval: true
 
-  # Detecting secrets passed in arguments  
-  - id: SECRET_IN_ARGS
-    description: "Potential secret API key passed in tool arguments."
+  # Preventing directory traversal attacks — write_file
+  - id: PATH_TRAVERSAL_WRITE
+    description: "Path traversal detected in write_file."
+    tool: "write_file"
+    severity: HIGH
+    match_param: "path"
+    match_pattern: "\\.\\./"
+    require_approval: true
+
+  # Preventing directory traversal attacks — edit_file
+  - id: PATH_TRAVERSAL_EDIT
+    description: "Path traversal detected in edit_file."
+    tool: "edit_file"
+    severity: HIGH
+    match_param: "path"
+    match_pattern: "\\.\\./"
+    require_approval: true
+
+  # Detecting secrets passed in script arguments
+  - id: SECRET_IN_SCRIPT
+    description: "Potential secret API key passed in script argument."
     tool: "*"
     severity: HIGH
     match_param: "script"
+    match_pattern: "(sk-[a-zA-Z0-9]{20,}|ghp_[a-zA-Z0-9]{20,})"
+    require_approval: true
+
+  # Detecting secrets passed in content arguments
+  - id: SECRET_IN_CONTENT
+    description: "Potential secret API key passed in content argument."
+    tool: "*"
+    severity: HIGH
+    match_param: "content"
+    match_pattern: "(sk-[a-zA-Z0-9]{20,}|ghp_[a-zA-Z0-9]{20,})"
+    require_approval: true
+
+  # Detecting secrets passed in value arguments
+  - id: SECRET_IN_VALUE
+    description: "Potential secret API key passed in value argument."
+    tool: "*"
+    severity: HIGH
+    match_param: "value"
     match_pattern: "(sk-[a-zA-Z0-9]{20,}|ghp_[a-zA-Z0-9]{20,})"
     require_approval: true

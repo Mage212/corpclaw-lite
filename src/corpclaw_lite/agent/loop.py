@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
@@ -93,10 +94,19 @@ class AgentLoop:
                 budget.check()
                 budget.consume_iteration()
 
-                response = await self._provider.chat(
-                    messages=context.messages,
-                    tools=tools_schema,
-                )
+                try:
+                    response = await asyncio.wait_for(
+                        self._provider.chat(
+                            messages=context.messages,
+                            tools=tools_schema,
+                        ),
+                        timeout=120,
+                    )
+                except TimeoutError:
+                    msg = "I could not get a response from the language model (timed out)."
+                    if self._memory:
+                        self._memory.add_message(str(user.id), "assistant", msg)
+                    return msg
 
                 if not response.tool_calls:
                     # Agent provided text directly — save and return
@@ -105,14 +115,13 @@ class AgentLoop:
                         self._memory.add_message(str(user.id), "assistant", final)
                     return final
 
-                # Agent requested tools
-                if response.content:
-                    context.add_assistant_message(response.content)
-
-                context.add_tool_calls(response.tool_calls)
+                # Agent requested tools — emit a single assistant message
+                # containing both content (if any) and tool_calls.
+                context.add_tool_calls(response.tool_calls, content=response.content or None)
                 budget.consume_tool_calls(len(response.tool_calls))
                 health.increment("tool_calls", len(response.tool_calls))
 
+                should_stop = False
                 for tc in response.tool_calls:
                     # 1. RBAC Tool check
                     if self._permission_checker and not self._permission_checker.can_use_tool(
@@ -158,7 +167,11 @@ class AgentLoop:
                             " error. Please change your strategy or stop using this tool."
                         )
                         context.add_assistant_message(loop_msg)
+                        should_stop = True
                         break
+
+                if should_stop:
+                    break
 
         except BudgetExceededError as e:
             health.increment("errors")
@@ -166,3 +179,9 @@ class AgentLoop:
             if self._memory:
                 self._memory.add_message(str(user.id), "assistant", msg)
             return msg
+
+        # Reached when progress guard breaks the loop
+        fallback = "I detected a loop and stopped to avoid repeating the same actions."
+        if self._memory:
+            self._memory.add_message(str(user.id), "assistant", fallback)
+        return fallback

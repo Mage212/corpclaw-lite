@@ -218,6 +218,18 @@ async def run_telegram_bot(token: str) -> None:
     except ImportError:
         logger.info("aiohttp not installed — health endpoint disabled")
 
+    # ── Skill Hot-Reloader ────────────────────────────────────────────────────
+    from corpclaw_lite.extensions.skills.registry import SkillRegistry
+    from corpclaw_lite.extensions.skills.watcher import SkillHotReloader
+
+    skill_registry = SkillRegistry()
+    skills_dir = Path("skills")
+    if skills_dir.exists():
+        skill_registry.load_directory(skills_dir)
+    reloader = SkillHotReloader(skills_dir, skill_registry)
+    reloader.start()
+    logger.info("Skill hot-reloader started watching %s", skills_dir)
+
     logger.info("Starting Telegram bot...")
     try:
         await channel.start()
@@ -226,6 +238,7 @@ async def run_telegram_bot(token: str) -> None:
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
     finally:
+        reloader.stop()
         await channel.stop()
         logger.info("Telegram bot stopped.")
 

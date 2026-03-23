@@ -59,7 +59,7 @@ class ContainerIPC:
 
             if process.returncode != 0:
                 err_msg = stderr.decode("utf-8").strip()
-                logger.error(f"ContainerIPC error executing {tool_name}: {err_msg}")
+                logger.error("ContainerIPC error executing %s: %s", tool_name, err_msg)
                 return f"Container execution error: {err_msg}"
 
             # Parse response and verify it
@@ -74,10 +74,13 @@ class ContainerIPC:
                 return str(verified_response.get("result", ""))
 
             except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse container response: '{stdout.decode('utf-8')}'")
+                logger.error(
+                    "Failed to parse container response: '%s'",
+                    stdout.decode("utf-8"),
+                )
                 return f"Error: Invalid JSON response from container: {e}"
             except Exception as e:
-                logger.error(f"Container signature verification failed: {e}")
+                logger.error("Container signature verification failed: %s", e)
                 return "Error: Security verification failed for container response."
 
         except TimeoutError:

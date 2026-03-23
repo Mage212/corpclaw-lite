@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+import anyio
+
 from corpclaw_lite.agent.loop import AgentLoop
 from corpclaw_lite.config.settings import AgentSettings
 from corpclaw_lite.extensions.subagents.base import SubagentSpec
@@ -40,7 +42,7 @@ class SubagentDispatcher:
 
         # Create an isolated tool registry with ONLY the allowed tools
         isolated_registry = ToolRegistry()
-        for tool_name, tool in self._main_registry._tools.items():  # type: ignore[attr-defined]
+        for tool_name, tool in self._main_registry.items().items():
             if "*" in spec.allowed_tools or tool_name in spec.allowed_tools:
                 isolated_registry.register(tool)
 
@@ -50,8 +52,9 @@ class SubagentDispatcher:
             from pathlib import Path
 
             prompt_file = Path(spec.prompt_path)
-            if prompt_file.exists() and prompt_file.is_file():
-                system_prompt = prompt_file.read_text(encoding="utf-8")
+            aio_prompt = anyio.Path(prompt_file)
+            if await aio_prompt.exists() and await aio_prompt.is_file():
+                system_prompt = await aio_prompt.read_text(encoding="utf-8")
                 logger.debug("Loaded prompt for subagent %s from %s", spec.id, prompt_file)
             else:
                 logger.warning(
