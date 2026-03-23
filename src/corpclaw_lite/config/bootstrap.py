@@ -74,3 +74,15 @@ class BootstrapLoader:
         for skill_id, desc in skills:
             lines.append(f"- **{skill_id}**: {desc}")
         return "\n".join(lines)
+
+    def get_department_prompt(self, department: str) -> str | None:
+        """Load department-specific instructions if available.
+
+        Looks for ``config/bootstrap/departments/<department>.md``.
+        Returns cached content, or None if no file exists.
+        """
+        path = self._dir / "departments" / f"{department}.md"
+        if path.exists():
+            content = self._load_cached(path)
+            return content.strip() if content.strip() else None
+        return None

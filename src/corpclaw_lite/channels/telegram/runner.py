@@ -35,10 +35,13 @@ async def run_telegram_bot(token: str) -> None:
             user = user_manager.create_user(telegram_id=tid, department="default")
             logger.info("Auto-registered new user telegram_id=%d", tid)
 
-        # Build system prompt: bootstrap base + user context (fallback to default if dir empty)
+        # Build system prompt: bootstrap base + department context + user context
         base_prompt = bootstrap.get_system_prompt()
+        dept_prompt = bootstrap.get_department_prompt(user.department)
         user_context = f"You are talking to {user.name} from the {user.department} department."
-        system_prompt: str | None = f"{base_prompt}\n\n{user_context}" if base_prompt else None
+
+        parts = [p for p in [base_prompt, dept_prompt, user_context] if p]
+        system_prompt: str | None = "\n\n".join(parts) if parts else None
 
         # Per-request closure — captures this user and channel; thread-safe (no shared mutation)
         async def approval_cb(action: str, details: str) -> bool:

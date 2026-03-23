@@ -133,6 +133,20 @@ def build_agent_stack() -> tuple[AgentLoop, UserManager, ToolRegistry]:
     agent_settings = AgentSettings()
     _ = LLMSettings()  # validate config is loadable
 
+    # ── Memory Consolidation ──────────────────────────────────────────────────
+    consolidator = None
+    if agent_settings.consolidation_enabled:
+        from corpclaw_lite.memory.consolidation import MemoryConsolidator
+
+        consolidator = MemoryConsolidator(
+            provider=provider,
+            threshold=agent_settings.consolidation_threshold,
+        )
+        logger.info(
+            "Memory consolidation enabled (threshold=%d)",
+            agent_settings.consolidation_threshold,
+        )
+
     loop = AgentLoop(
         provider=provider,
         registry=registry,
@@ -140,6 +154,7 @@ def build_agent_stack() -> tuple[AgentLoop, UserManager, ToolRegistry]:
         memory=memory,
         tool_guard=guard,
         permission_checker=permission_checker,
+        consolidator=consolidator,
     )
     user_manager = UserManager()
     return loop, user_manager, registry

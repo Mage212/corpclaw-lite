@@ -115,6 +115,60 @@ class SQLiteMemory:
         except Exception as e:
             logger.error("Failed to clear memory for user %s: %s", user_id, e)
 
+    def count_messages(self, user_id: str) -> int:
+        """Return the total number of messages for a user."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.execute(
+                    "SELECT COUNT(*) FROM messages WHERE user_id = ?",
+                    (str(user_id),),
+                )
+                row = cursor.fetchone()
+                return int(row[0]) if row else 0
+        except Exception as e:
+            logger.error("Failed to count messages for user %s: %s", user_id, e)
+            return 0
+
+    def get_oldest_message_ids(self, user_id: str, count: int) -> list[int]:
+        """Return IDs of the N oldest messages for a user."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.execute(
+                    """
+                    SELECT id FROM messages
+                    WHERE user_id = ?
+                    ORDER BY timestamp ASC
+                    LIMIT ?
+                    """,
+                    (str(user_id), count),
+                )
+                return [row[0] for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error("Failed to get oldest message IDs for user %s: %s", user_id, e)
+            return []
+
+    def replace_oldest(self, user_id: str, count: int, summary: str) -> None:
+        """Delete the N oldest messages and insert a consolidation summary.
+
+        Runs in a single transaction to avoid data loss.
+        """
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                ids = self.get_oldest_message_ids(user_id, count)
+                if not ids:
+                    return
+                placeholders = ",".join("?" for _ in ids)
+                conn.execute(
+                    f"DELETE FROM messages WHERE id IN ({placeholders})",  # noqa: S608
+                    ids,
+                )
+                conn.execute(
+                    "INSERT INTO messages (user_id, role, content) VALUES (?, ?, ?)",
+                    (str(user_id), "system", f"[Conversation summary]: {summary}"),
+                )
+        except Exception as e:
+            logger.error("Failed to consolidate messages for user %s: %s", user_id, e)
+
     # ── Fact storage ─────────────────────────────────────────────────────────
 
     def store_fact(self, user_id: str, key: str, value: str) -> None:

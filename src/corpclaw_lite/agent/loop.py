@@ -21,6 +21,7 @@ from corpclaw_lite.users.models import User
 
 if TYPE_CHECKING:
     from corpclaw_lite.departments.permissions import PermissionChecker
+    from corpclaw_lite.memory.consolidation import MemoryConsolidator
     from corpclaw_lite.security.tool_guard import ToolGuard
 
 
@@ -36,6 +37,7 @@ class AgentLoop:
         tool_guard: ToolGuard | None = None,
         memory: SQLiteMemory | None = None,
         approval_callback: Callable[[str, str], Awaitable[bool]] | None = None,
+        consolidator: MemoryConsolidator | None = None,
     ):
         self._provider = provider
         self._registry = registry
@@ -44,6 +46,7 @@ class AgentLoop:
         self._tool_guard = tool_guard
         self._memory = memory
         self._approval_callback = approval_callback
+        self._consolidator = consolidator
 
     async def run(
         self,
@@ -113,6 +116,8 @@ class AgentLoop:
                     final = response.content if response.content else "Agent provided no response."
                     if self._memory:
                         self._memory.add_message(str(user.id), "assistant", final)
+                        if self._consolidator:
+                            await self._consolidator.maybe_consolidate(self._memory, str(user.id))
                     return final
 
                 # Agent requested tools — emit a single assistant message
