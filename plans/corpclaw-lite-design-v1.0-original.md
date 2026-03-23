@@ -1,35 +1,8 @@
-# CorpClaw-Lite: Дизайн-документ v2.0
+# CorpClaw-Lite: Дизайн-документ v1.0
 
-**Дата оригинала:** 22 марта 2026  
-**Дата обновления:** 23 марта 2026  
-**Статус:** АКТУАЛЬНЫЙ — отражает реализованный проект  
-**Задача:** Переписать CorpClaw с нуля, сохранив успешные решения и устранив архитектурные ошибки  
-**Оригинал v1.0:** [`corpclaw-lite-design-v1.0-original.md`](./corpclaw-lite-design-v1.0-original.md)
-
----
-
-## Changelog v1.0 → v2.0
-
-Перечень всех изменений с обоснованиями:
-
-| Секция | Изменение | Обоснование |
-|--------|-----------|-------------|
-| §2 Структура | Удалён `extensions/registry.py` (UnifiedExtensionRegistry) | Раздельные registry (ToolRegistry, SkillRegistry и т.д.) проще, типобезопаснее, не требуют generic-кода |
-| §2 Структура | Удалён `extensions/watcher.py` единый watcher | Заменён на `skills/watcher.py` — только скилы нуждаются в hot-reload; bootstrap кэширует по mtime |
-| §2 Структура | Удалён `channels/registry.py` (ChannelRegistry) | Заменён на `agent/factory.py` — build_agent_stack() без overhead реестра каналов |
-| §2 Структура | Удалён `db/database.py` (async SQLite connection) | SQLite3 + `anyio.to_thread` достаточен; aiosqlite убран из зависимостей |
-| §2 Структура | Удалён `memory/vector/` (Qdrant stub) | Пустой stub создавал иллюзию реализации; будет добавлен когда появится реальная потребность |
-| §2 Структура | Удалён `agent/prompts.py` | Заменён модулярной системой `config/bootstrap.py` с файловыми модулями |
-| §2 Структура | Добавлен `agent/factory.py` | Централизация bootstrap-логики агентного стека, переиспользуется между каналами |
-| §2 Структура | Добавлен `memory/consolidation.py` | LLM-based сжатие истории при превышении порога — критично для локальных LLM |
-| §2 Структура | `main.py` → `cli.py` | Используется click вместо typer — меньше зависимостей |
-| §3 Расширения | Нет UnifiedExtensionRegistry | Раздельные registry проще и типобезопаснее |
-| §3 Расширения | watchdog → asyncio.Task polling | watchdog требовал системную зависимость; polling по mtime достаточен для skills |
-| §3 Расширения | Убрана `generate channel` CLI | Тривиально делается вручную (1 файл); generate skill/plugin/subagent оправданы |
-| §9 Память | Удалён Qdrant/VectorMemory | LIKE-поиск по SQLite покрывает MVP; семантический поиск добавится по потребности |
-| §10 Async | `aiosqlite` → `sqlite3` | Синхронный SQLite достаточен при текущей нагрузке; убирает зависимость |
-| §13 Тесты | `mypy` → `pyright` | В 10-20x быстрее, лучше поддержка Python 3.12+, единая цепочка с Pylance в IDE |
-| §16 Чеклист | `mypy` → `pyright` | Аналогично |
+**Дата:** 22 марта 2026  
+**Статус:** APPROVED — основание для разработки  
+**Задача:** Переписать CorpClaw с нуля, сохранив успешные решения и устранив архитектурные ошибки
 
 ---
 
@@ -56,7 +29,7 @@
     → Сборка контекста (история + факты + скилы + инструменты)
     → LLM вызов
     → Есть tool_calls? → Выполнить инструменты → добавить результаты в контекст → повторить
-    → Нет tool_calls? → Финальный ответ → сохранить в память → (опц.) consolidation
+    → Нет tool_calls? → Финальный ответ → сохранить в память
 ```
 
 **Почему:** LLM-based TaskPlanner/TaskVerifier из CorpClaw v1 добавлял 3x задержку и тратил 2 дополнительных вызова к локальной модели. Ни OpenClaw, ни CoPaw, ни NemoClaw не использует LLM-based planning.
@@ -126,47 +99,46 @@
 
 ## 2. Структура проекта
 
-> **Изменения v2.0:** Удалены `extensions/registry.py`, `extensions/watcher.py`, `channels/registry.py`, `db/database.py`, `memory/vector/`, `agent/prompts.py`. Добавлены `agent/factory.py`, `memory/consolidation.py`, `config/bootstrap.py`. `main.py` → `cli.py`.
-
 ```
 corpclaw-lite/
 ├── src/corpclaw_lite/
 │   │
 │   ├── agent/
-│   │   ├── loop.py              # AgentLoop — ReAct цикл (~190 строк)
-│   │   ├── context.py           # ContextBuilder (история + tools + user)
+│   │   ├── loop.py              # AgentLoop — ReAct цикл (~400 строк)
+│   │   ├── context.py           # Сборка контекста (история + факты + скилы)
 │   │   ├── guards.py            # SimpleBudgetGuard + SimpleProgressGuard
 │   │   ├── vision.py            # VisionProcessor — отдельный LLM-вызов для изображений
 │   │   ├── subagent.py          # SubagentDispatcher — вызов субагентов
-│   │   └── factory.py           # build_agent_stack() — сборка агентного стека [NEW v2.0]
+│   │   └── prompts.py           # Системные промпты (шаблоны)
 │   │
 │   ├── llm/
-│   │   ├── base.py              # Protocol Provider, LLMResponse, ToolCall (~100 строк)
+│   │   ├── base.py              # Protocol Provider, LLMResponse, StreamChunk (~100 строк)
 │   │   ├── anthropic.py         # AnthropicProvider (~300 строк)
 │   │   ├── openai.py            # OpenAIProvider + Ollama/vLLM support (~350 строк)
-│   │   ├── xml_tool_calling.py  # XML fallback для локальных LLM (~200 строк) ← ПЕРЕНЕСЁН из v1
-│   │   └── routing.py           # ProviderRouter — модель по задаче (~30 строк)
+│   │   ├── xml_tool_calling.py  # XML fallback для локальных LLM (~200 строк) ← ПЕРЕНЕСТИ из v1
+│   │   └── routing.py           # ProviderRouter — модель по задаче (~150 строк)
 │   │
 │   ├── extensions/
+│   │   ├── base.py              # Базовые протоколы расширений (Manifest, Loader, Registry)
+│   │   ├── registry.py          # UnifiedExtensionRegistry — единый реестр
+│   │   ├── watcher.py           # HotReload watcher для всех типов расширений
+│   │   │
 │   │   ├── tools/
 │   │   │   ├── base.py          # Tool protocol (name, description, params, execute, risk_level)
 │   │   │   ├── registry.py      # ToolRegistry
 │   │   │   ├── guard.py         # ToolGuard — YAML rules, severity, approval
 │   │   │   └── builtin/         # Встроенные инструменты
 │   │   │       ├── files.py     # read_file, write_file, edit_file, list_files, search_files
-│   │   │       ├── web.py       # web_fetch (SSRF-protected)
+│   │   │       ├── web.py       # web_fetch, web_search
 │   │   │       ├── memory.py    # memory_store, memory_recall
 │   │   │       ├── image.py     # read_image (vision via separate LLM call)
 │   │   │       ├── send_file.py # Отправка файла пользователю через канал
-│   │   │       ├── exec_script.py # Выполнение скриптов (HIGH risk)
-│   │   │       ├── excel.py     # normalize_excel
-│   │   │       └── dispatch.py  # dispatch_subagent tool
+│   │   │       └── profile.py   # user_profile
 │   │   │
 │   │   ├── skills/
 │   │   │   ├── base.py          # Skill dataclass (id, description, allowed_for, instructions, path)
 │   │   │   ├── loader.py        # Markdown loader
-│   │   │   ├── registry.py      # SkillRegistry
-│   │   │   └── watcher.py       # SkillHotReloader (asyncio.Task polling) [ВМЕСТО extensions/watcher.py]
+│   │   │   └── registry.py      # SkillRegistry
 │   │   │
 │   │   ├── plugins/
 │   │   │   ├── base.py          # Plugin = Skill + Tool + Script манифест
@@ -189,11 +161,14 @@ corpclaw-lite/
 │   │
 │   ├── channels/
 │   │   ├── base.py              # Channel Protocol + ChannelManifest
+│   │   ├── registry.py          # ChannelRegistry
 │   │   ├── cli.py               # CLIChannel — базовый канал (stdin/stdout)
-│   │   └── telegram/            # Telegram как подключаемый канал [РЕФАКТОРИНГ v2.0]
-│   │       ├── __init__.py      # Re-export TelegramChannel, run_telegram_bot
-│   │       ├── channel.py       # TelegramChannel (send_message, send_file, request_approval)
-│   │       └── runner.py        # run_telegram_bot() — Telegram Application lifecycle
+│   │   └── telegram/
+│   │       ├── manifest.yaml    # Manifest: "telegram" channel
+│   │       ├── channel.py       # TelegramChannel
+│   │       ├── router.py        # MessageRouter (whitelist, user lookup)
+│   │       ├── formatter.py     # MarkdownV2 / HTML форматирование
+│   │       └── approval_ui.py   # Inline-кнопки (Approve/Deny)
 │   │
 │   ├── security/
 │   │   ├── tool_guard.py        # YAML-rule engine (CoPaw pattern)
@@ -202,7 +177,7 @@ corpclaw-lite/
 │   │   └── ipc_auth.py          # HMAC + nonce (replay protection), mandatory
 │   │
 │   ├── container/
-│   │   ├── manager.py           # Docker lifecycle, resource limits
+│   │   ├── manager.py           # Docker lifecycle, resource limits (~500 строк)
 │   │   ├── ipc.py               # stdio IPC с контейнером
 │   │   └── policies.py          # Seccomp + NetworkPolicy → Docker args
 │   │
@@ -211,29 +186,35 @@ corpclaw-lite/
 │   │   └── permissions.py       # check(user, resource_type, resource_id) → bool
 │   │
 │   ├── memory/
-│   │   ├── sqlite.py            # SQLite backend (история + факты + consolidation helpers)
-│   │   └── consolidation.py     # MemoryConsolidator — LLM-based компрессия истории [NEW v2.0]
+│   │   ├── sqlite.py            # SQLite backend
+│   │   ├── manager.py           # MemoryManager (история + факты)
+│   │   ├── consolidation.py     # LLM-based consolidation (simple, optional)
+│   │   └── vector/              # Опциональный vector store (Qdrant)
+│   │       ├── base.py          # VectorStore Protocol
+│   │       └── qdrant.py        # QdrantBackend (if enabled)
 │   │
 │   ├── users/
 │   │   ├── models.py            # User dataclass
 │   │   └── manager.py           # UserManager (SQLite)
 │   │
+│   ├── db/
+│   │   └── database.py          # Async SQLite connection
+│   │
 │   ├── config/
-│   │   ├── settings.py          # Pydantic Settings (providers, agent, container)
-│   │   ├── loader.py            # YAML + env var expansion
-│   │   └── bootstrap.py         # BootstrapLoader — модульные промпты с hot-reload по mtime
+│   │   ├── settings.py          # Pydantic Settings (~200 строк)
+│   │   └── loader.py            # YAML + env var expansion
 │   │
 │   ├── logging/
-│   │   ├── __init__.py          # setup_logging(), health counters
+│   │   ├── agent_logger.py      # Structured agent activity log
 │   │   ├── scrubber.py          # Log filter (credential scrubbing)
 │   │   └── rotation.py          # RotatingFileHandler setup
 │   │
-│   └── cli.py                   # Click CLI (chat, telegram, user-*, skill list и т.д.)
+│   └── main.py                  # Typer CLI (~300 строк)
 │
 ├── config/
 │   ├── settings.yaml            # Основные настройки
 │   ├── departments.yaml         # RBAC конфигурация
-│   ├── mcp_servers.yaml         # MCP серверы (шаблон)
+│   ├── mcp_servers.yaml         # MCP серверы
 │   ├── tool_guard_rules.yaml    # ToolGuard правила (CoPaw pattern)
 │   ├── network_policy.yaml      # Network allowlist (NemoClaw pattern)
 │   └── bootstrap/               # Модульные инструкции агента
@@ -244,10 +225,13 @@ corpclaw-lite/
 │       │   ├── marketing.md
 │       │   ├── development.md
 │       │   └── admin.md
-│       └── subagents/           # Промпты субагентов
-│           ├── research.md
-│           ├── document.md
-│           └── execution.md
+│       ├── subagents/           # Промпты субагентов
+│       │   ├── filesystem.md
+│       │   ├── research.md
+│       │   ├── document.md
+│       │   └── execution.md
+│       └── users/               # Пользовательские настройки (hotreload)
+│           └── {user_id}.md
 │
 ├── skills/                      # Стандартные скилы (markdown)
 │   ├── translator.md
@@ -258,16 +242,16 @@ corpclaw-lite/
 │
 ├── plugins/                     # Плагины (каждый — отдельная папка)
 │   └── example_plugin/
-│       ├── manifest.yaml
-│       ├── skill.md
-│       ├── tool.py
-│       └── script.sh
+│       ├── manifest.yaml        # Название, скил, описание инструментов
+│       ├── skill.md             # Инструкции как использовать этот плагин
+│       ├── tool.py              # Дополнительный Python инструмент (опционально)
+│       └── script.sh            # Заготовленный скрипт (опционально)
 │
 ├── docker/
 │   ├── Dockerfile.agent         # Образ для пользовательских контейнеров
 │   └── seccomp_default.json     # Seccomp профиль
 │
-├── .github/workflows/ci.yml    # CI: ruff + pyright + pytest
+├── migrations/                  # Alembic миграции БД
 ├── tests/
 ├── pyproject.toml
 ├── AGENTS.md
@@ -276,31 +260,49 @@ corpclaw-lite/
 
 ---
 
-## 3. Система расширений
+## 3. Единая система расширений
 
-> **Изменения v2.0:** Отказ от UnifiedExtensionRegistry в пользу раздельных типизированных registry. HotReload только для skills (где реально нужен). watchdog заменён на asyncio.Task polling по mtime.
+### 3.1 Принцип: Unified Extension Model
 
-### 3.1 Принцип: раздельные типизированные реестры
+Все расширения (tools, skills, plugins, subagents, mcp, channels) строятся по **единой модели через манифест**:
 
-Все расширения (tools, skills, plugins, subagents) строятся по **единой модели через манифест**, но регистрируются в **раздельных типизированных реестрах**:
+```yaml
+# Манифест расширения (пример для плагина)
+name: excel_normalizer
+version: "1.0.0"
+type: plugin                 # tool | skill | plugin | subagent | channel
 
-- `ToolRegistry` — инструменты
-- `SkillRegistry` — markdown-скилы
-- `PluginRegistry` — плагины (skill + tool + script)
-- `SubagentRegistry` — субагенты
+# Метаданные
+description: "Нормализует Excel файлы в стандартный формат"
+author: "CorpClaw Team"
 
-**Обоснование отказа от UnifiedExtensionRegistry:** Единый generic-реестр требует сложных type-guards при извлечении, теряет типобезопасность и добавляет abstraction layer без практической пользы. Раздельные реестры — 50-100 строк каждый, полностью типизированы, не требуют downcasting.
+# Доступность
+allowed_departments: [marketing, development, admin]
 
-### 3.2 HotReload
+# Компоненты плагина
+skill: skill.md              # Инструкции для агента
+tool: tool.py                # Дополнительный инструмент (опц.)
+script: normalize.py         # Готовый скрипт (опц.)
 
-`SkillHotReloader` — asyncio.Task, периодически проверяющий mtime файлов в `skills/`:
-- Новые `.md` файлы → автоматическая загрузка
-- Изменённые → перезагрузка
-- Удалённые → unregister
+# Зависимости
+requires:
+  packages: [openpyxl]
+  tools: [read_file, write_file]
+```
 
-`BootstrapLoader` — кэширует содержимое файлов по mtime, автоматически обновляется при следующем вызове.
+**Единый Registry:** `UnifiedExtensionRegistry` — централизованный каталог, который знает о всех расширениях. Загружен один раз при старте, обновляется через HotReload.
 
-**Обоснование отказа от watchdog:** Системная зависимость (inotify/FSEvents) ради наблюдения за 5-10 файлами. Polling с интервалом 5 сек — достаточен и не требует дополнительных пакетов.
+### 3.2 HotReload для всех расширений
+
+Единый `ExtensionWatcher` через `watchdog` отслеживает изменения в:
+- `skills/` — перезагружает Skill dataclass
+- `plugins/` — перезагружает манифест и инструмент
+- `config/bootstrap/` — инвалидирует кэш системных промптов
+- `channels/` — уведомляет ChannelRegistry (не перезапускает сервер)
+
+**MCP серверы** перезапускаются gracefully при изменении `mcp_servers.yaml`.
+
+**Субагенты** обновляются при изменении их YAML/MD-конфигов.
 
 ### 3.3 Модульные инструкции агента (Bootstrap)
 
@@ -309,21 +311,23 @@ corpclaw-lite/
 ```
 Системный промпт = SOUL.md + COMPANY.md + BEHAVIOR.md
                  + departments/{slug}.md     (по департаменту)
+                 + users/{user_id}.md        (персональные настройки, опц.)
                  + [активные скилы]
                  + [каталог субагентов]
 ```
 
-Каждый модуль кэшируется по mtime. При изменении файла — инвалидируется кэш конкретного модуля, не весь промпт.
+Каждый модуль кэшируется с TTL. При изменении файла — инвалидируется кэш конкретного модуля, не весь промпт.
 
 ### 3.4 Шаблоны для создания расширений
+
+Команды CLI для генерации стартовых шаблонов:
 
 ```bash
 uv run corpclaw-lite generate skill my_skill
 uv run corpclaw-lite generate plugin my_plugin --with-tool --with-script
 uv run corpclaw-lite generate subagent my_agent
+uv run corpclaw-lite generate channel my_channel
 ```
-
-> **Изменение v2.0:** Убрана `generate channel` — создание канала тривиально (1 файл + 1 import в factory), генератор не оправдан.
 
 ---
 
@@ -496,9 +500,7 @@ class ReadFileTool(Tool):
 
 ## 7. Каналы связи
 
-> **Изменения v2.0:** Удалён `ChannelRegistry`. Каналы подключаются через `agent/factory.py` (build_agent_stack). Telegram перемещён в подпакет `channels/telegram/`.
-
-Каналы — это расширения, использующие общий Channel Protocol. CLI — базовый канал. Telegram — первый плагин-канал.
+Каналы — это расширения, управляемые через единый реестр. CLI — базовый канал. Telegram — первый плагин-канал.
 
 ### 7.1 Channel Protocol
 
@@ -512,21 +514,7 @@ class Channel(Protocol):
     async def request_approval(self, chat_id: str, action: str, details: str) -> bool: ...
 ```
 
-### 7.2 Agent Factory — сборка стека
-
-Вместо ChannelRegistry используется `agent/factory.py`:
-
-```python
-def build_agent_stack() -> tuple[AgentLoop, UserManager, ToolRegistry]:
-    """Build the complete agent stack: provider, tools, memory, guards, loop."""
-    ...
-```
-
-Каждый канал (CLI, Telegram, будущий Slack) вызывает `build_agent_stack()` и получает готовый `AgentLoop`.
-
-**Обоснование:** ChannelRegistry добавляет indirection без пользы. Factory — 150 строк с конкретной логикой, не generic-абстракция.
-
-### 7.3 Форматирование и Inline-кнопки
+### 7.2 Форматирование и Inline-кнопки
 
 Telegram-канал поддерживает:
 - **MarkdownV2 / HTML** — красивый вывод текста (код, жирный, курсив, блоки)
@@ -568,56 +556,32 @@ container:
 
 ## 9. Память
 
-> **Изменения v2.0:** Удалён VectorMemory/Qdrant stub. Добавлен `MemoryConsolidator` с интеграцией в AgentLoop.
+### 9.1 Базовая память (всегда)
 
-### 9.1 Базовая память (SQLite)
+- **SQLite** — история диалогов (rolling buffer, `history_limit: 50`)
+- **SQLite** — долгосрочные факты (key-value, с TTL)
+- **LLM Consolidation** — периодическое суммирование фактов. Не при каждом запросе — только когда накоплено достаточно сообщений (порог в конфиге).
 
-- **История** — rolling buffer с конфигурируемым лимитом (`max_history: 20`)
-- **Факты** — долгосрочные key-value (upsert, LIKE-поиск)
-- **Consolidation helpers** — `count_messages()`, `replace_oldest()` для интеграции с MemoryConsolidator
+### 9.2 Векторный поиск (опционально)
 
-### 9.2 LLM-based Consolidation
+Qdrant — опциональное расширение, включается в `settings.yaml`:
 
-`MemoryConsolidator` — автоматическое сжатие длинных диалогов:
-
-```python
-class MemoryConsolidator:
-    def __init__(self, provider: Provider, threshold: int = 30):
-        ...
-
-    async def maybe_consolidate(self, memory: SQLiteMemory, user_id: str) -> bool:
-        """If message count > threshold, compress oldest 50% into summary."""
-        ...
+```yaml
+memory:
+  hybrid_search:
+    enabled: false    # Qdrant отключён по умолчанию
+    qdrant_url: "${QDRANT_URL:-http://localhost:6333}"
 ```
 
-**Механика:**
-1. После каждого ответа агента → `maybe_consolidate()`
-2. Проверяет `count_messages()` для user_id
-3. Если > threshold (конфиг, default 30) → берёт старую половину
-4. Один LLM-вызов: «сожми в 3-5 фактов» → summary
-5. `replace_oldest()` — транзакция: удалить N старых + вставить summary как `role: system`
-
-**Критично для локальных LLM:** Qwen-7B (8K-32K окно). Без consolidation 20 длинных сообщений ≈ 4K-8K токенов → быстро исчерпывают окно.
-
-### 9.3 Векторный поиск (будущее)
-
-Семантический поиск (Qdrant/ChromaDB) будет добавлен при появлении реальной потребности:
-- > 1000 фактов на пользователя
-- Потребность в RAG по корпоративным документам
-- Необходимость семантического поиска по истории
-
-**Обоснование удаления stub:** Пустой код создавал иллюзию реализации и загрязнял кодовую базу. Подключение через конфиг — когда будет нужно.
+Если включён — `memory_recall` использует semantic search. Если нет — простой keyword поиск по SQLite.
 
 ---
 
 ## 10. Асинхронность и масштабирование
 
-> **Изменение v2.0:** `aiosqlite` заменён на `sqlite3`. Синхронные операции SQLite (~1ms) не являются bottleneck; при необходимости — `anyio.to_thread`.
-
 ### 10.1 Полностью асинхронный стек
 
-- Обработчики каналов, LLM вызовы, инструменты, IPC с контейнерами, MCP — всё `async def`
-- SQLite — синхронный (`sqlite3`), но не блокирует event loop благодаря GIL-friendly операциям (~1ms)
+- Обработчики каналов, LLM вызовы, инструменты, IPC с контейнерами, SQLite (aiosqlite), MCP — всё `async def`
 - **Per-user asyncio.Lock** — один пользователь не запускает параллельные запросы, разные пользователи работают параллельно
 
 ### 10.2 Задел под горизонтальное масштабирование
@@ -638,7 +602,7 @@ class MemoryConsolidator:
 - **`agent_activity.jsonl`** — структурированный лог каждого запроса (user_id, duration, tools_used, tokens). RotatingFileHandler, 10MB, 5 файлов.
 - **`corpclaw.log`** — Python DEBUG логи ключевых модулей. RotatingFileHandler, 5MB, 3 файла.
 - **CredentialScrubber** — log filter, маскирует API-ключи по regex (`sk-...`, `ghp_...`, и т.д.)
-- **Health counters** — in-memory счётчики (requests, tool_calls, errors). Prometheus — опциональное расширение.
+- **`/health` HTTP эндпоинт** — базовые счётчики (requests, tool_calls, errors). Prometheus — опциональное расширение.
 
 ---
 
@@ -690,73 +654,69 @@ plugins/my_plugin/
 
 ## 13. Тестирование
 
-> **Изменение v2.0:** `mypy` заменён на `pyright` (strict mode). В 10-20x быстрее, нативная поддержка Python 3.12+, единая цепочка с Pylance в IDE.
-
 ```
 tests/
 ├── test_agent_loop.py      # ReAct цикл с mock LLM
 ├── test_tool_guard.py      # YAML-правила безопасности
 ├── test_permissions.py     # RBAC
-├── test_skills.py          # Загрузка/поиск/hot-reload скилов
+├── test_skills.py          # Загрузка/поиск скилов
 ├── test_plugins.py         # Загрузка плагинов
-├── test_consolidation.py   # Memory consolidation (threshold, replace, format)
+├── test_memory.py          # SQLite + consolidation
 ├── test_subagent.py        # Dispatch субагентов
-├── test_channels.py        # Telegram channel protocol
-├── test_vision.py          # ReadImage + VisionProcessor
-├── test_web_fetch.py       # SSRF protection
-└── ...
+├── test_containers.py      # Docker lifecycle (mark: requires_docker)
+└── test_channels.py        # Telegram router (whitelist, auth)
 ```
 
-- Coverage: ≥75% (текущий: 157 тестов, 0 failures)
-- **Pyright**: strict mode, 0 errors
+- Coverage: ≥75%
+- MyPy: strict mode
 - Ruff: E, F, I, UP, B, C4, SIM, G + 100 символов
 
 ---
 
 ## 14. Фазовый план реализации
 
-### Фаза 1: Ядро ✅
-1. ✅ Инициализация `corpclaw-lite/` через `uv init`
-2. ✅ LLM-провайдеры (Anthropic, OpenAI) + XML-fallback (перенос из v1)
-3. ✅ Базовые типы: Tool, Skill, User, PermissionChecker
-4. ✅ **Simple ReAct AgentLoop** (без субагентов, без памяти)
-5. ✅ CLI-канал для ручного тестирования
-6. ✅ Встроенные инструменты: read_file, write_file, list_files, search_files
-7. ✅ Тесты для AgentLoop + инструментов
+### Фаза 1: Ядро (неделя 1)
+1. Инициализация `corpclaw-lite/` через `uv init`
+2. LLM-провайдеры (Anthropic, OpenAI) + XML-fallback (перенос из v1)
+3. Базовые типы: Tool, Skill, User, PermissionChecker
+4. **Simple ReAct AgentLoop** (без субагентов, без памяти)
+5. CLI-канал для ручного тестирования
+6. Встроенные инструменты: read_file, write_file, list_files, search_files
+7. Тесты для AgentLoop + инструментов
 
-### Фаза 2: Расширения и RBAC ✅
-1. ✅ Система скилов (loader, registry, watcher)
-2. ✅ PermissionChecker + DepartmentManager (YAML)
-3. ✅ Система плагинов (manifest loader)
-4. ✅ SubagentDispatcher + SubagentRegistry
-5. ✅ Встроенные субагенты (filesystem, research, document, execution)
-6. ✅ ProviderRouter (роутинг моделей по задаче)
-7. ✅ VisionProcessor (read_image через отдельный LLM-вызов)
+### Фаза 2: Расширения и RBAC (неделя 1–2)
+1. Система скилов (loader, registry, watcher)
+2. PermissionChecker + DepartmentManager (YAML)
+3. Система плагинов (manifest loader)
+4. SubagentDispatcher + SubagentRegistry
+5. Встроенные субагенты (filesystem, research, document, execution)
+6. ProviderRouter (роутинг моделей по задаче)
+7. VisionProcessor (read_image через отдельный LLM-вызов)
 
-### Фаза 3: Безопасность и контейнеры ✅
-1. ✅ ToolGuard (YAML rules, severity levels)
-2. ✅ NetworkPolicy
-3. ✅ Mandatory IPC Auth (HMAC + nonce)
-4. ✅ ContainerManager (lifecycle, resource limits, NetworkPolicy)
-5. ✅ Config Immutability (read-only mount)
-6. ✅ CredentialScrubber
+### Фаза 3: Безопасность и контейнеры (неделя 2)
+1. ToolGuard (YAML rules, severity levels)
+2. NetworkPolicy
+3. Mandatory IPC Auth (HMAC + nonce)
+4. ContainerManager (lifecycle, resource limits, NetworkPolicy)
+5. Config Immutability (read-only mount)
+6. CredentialScrubber
 
-### Фаза 4: Telegram-канал и память ✅
-1. ✅ Channel Protocol (без ChannelRegistry — через factory)
-2. ✅ TelegramChannel (channel.py, runner.py, approval inline-кнопки)
-3. ✅ SQLite память (история, факты)
-4. ✅ LLM Consolidation (MemoryConsolidator, по порогу)
-5. ⏭️ ~~Qdrant~~ — отложен до реальной потребности
-6. ✅ Структурированное логирование
-7. ✅ Health counters (in-memory)
+### Фаза 4: Telegram-канал и память (неделя 2–3)
+1. Channel Protocol + ChannelRegistry
+2. TelegramChannel (router, formatter, approval_ui)
+3. SQLite память (история, факты)
+4. LLM Consolidation (опциональная, по порогу)
+5. Qdrant (опциональный)
+6. Структурированное логирование
+7. Health HTTP-эндпоинт
 
-### Фаза 5: Полировка ✅
-1. ✅ MCP интеграция (manager, client, adapter)
-2. ✅ HotReload (SkillHotReloader + BootstrapLoader mtime cache)
-3. ✅ Bootstrap модульные инструкции + department-aware промпты
-4. ✅ CLI команды (chat, telegram, user-create, skill list, generate)
-5. ✅ AGENTS.md
-6. ✅ CI pipeline (.github/workflows/ci.yml)
+### Фаза 5: Полировка (неделя 3)
+1. MCP интеграция (manager, client, adapter)
+2. HotReload unified watcher
+3. Bootstrap модульные инструкции + hot-reload кэш
+4. CLI команды (user-create, containers, prune, skill list, plugin list, generate)
+5. README.md + AGENTS.md
+6. CI pipeline
 
 ---
 
@@ -764,7 +724,7 @@ tests/
 
 | Ошибка v1 | Решение в Lite |
 |-----------|----------------|
-| 4 параллельных механизма расширения | 1 механизм с типами (plugin, skill, subagent) — раздельные registry |
+| 4 параллельных механизма расширения | 1 механизм с типами (plugin, skill, subagent, channel) |
 | extensibility/ — 1,863 строк для 0 потребителей | Нет фреймворка. Расширяемость через манифесты |
 | Skill dataclass: 30 полей | Skill dataclass: 6 полей |
 | Tool базовый класс: 18 properties | Tool базовый класс: 5 properties |
@@ -772,12 +732,9 @@ tests/
 | HMAC IPC как опциональный | HMAC IPC как обязательный с nonce |
 | Governance: gzip, SIEM, SOC-2 | Structured JSON logging + CredentialScrubber |
 | Approvals: shadow_mode, cooldown | ToolGuard inline Approve/Deny кнопки |
-| Memory: Qdrant + LLM consolidation при каждом запросе | SQLite rolling buffer + пороговая consolidation |
-| AgentLoop: 1762 строки God Object | AgentLoop: ~190 строк, делегирует субагентам |
+| Memory: Qdrant + LLM consolidation при каждом запросе | SQLite rolling buffer + редкая consolidation + опциональный Qdrant |
+| AgentLoop: 1762 строки God Object | AgentLoop: ~400 строк, делегирует субагентам |
 | Документация: 22K строк (дрейф) | README.md + inline docstrings |
-| UnifiedExtensionRegistry | Раздельные типизированные registry |
-| ChannelRegistry | agent/factory.py — build_agent_stack() |
-| aiosqlite + watchdog | sqlite3 + asyncio polling — меньше зависимостей |
 
 ---
 
@@ -786,9 +743,9 @@ tests/
 - [ ] `uv run corpclaw-lite telegram` — запускается, отвечает на сообщения
 - [ ] Маркетолог говорит «нормализуй Excel» → получает файл обратно
 - [ ] `uv run pytest tests/ -v` — ≥75% coverage, 0 failures
-- [ ] `uv run pyright src/` — 0 errors (strict mode)
+- [ ] `uv run mypy src/ --strict` — 0 errors
 - [ ] `uv run ruff check src/ --fix && ruff format src/` — 0 errors
 - [ ] Docker контейнер поднимается, выполняет инструменты изолированно
 - [ ] ToolGuard блокирует `rm -rf` через exec_script
 - [ ] Добавление нового `skills/*.md` → скил доступен без перезапуска (HotReload)
-- [ ] Memory consolidation сжимает историю при > 30 сообщениях
+- [ ] `/health` возвращает статус и базовые метрики
