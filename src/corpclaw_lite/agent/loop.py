@@ -13,13 +13,14 @@ from corpclaw_lite.agent.guards import (
 )
 from corpclaw_lite.config.settings import AgentSettings
 from corpclaw_lite.extensions.tools.registry import ToolRegistry
-from corpclaw_lite.llm.base import Provider
+from corpclaw_lite.llm.base import Provider, ToolCall
 from corpclaw_lite.logging import health
 from corpclaw_lite.memory.sqlite import SQLiteMemory
 from corpclaw_lite.security.tool_guard import ApprovalRequest, ToolGuardError
 from corpclaw_lite.users.models import User
 
 if TYPE_CHECKING:
+    from corpclaw_lite.agent.compressor import ContextCompressor
     from corpclaw_lite.departments.permissions import PermissionChecker
     from corpclaw_lite.memory.consolidation import MemoryConsolidator
     from corpclaw_lite.security.tool_guard import ToolGuard
@@ -38,6 +39,7 @@ class AgentLoop:
         memory: SQLiteMemory | None = None,
         approval_callback: Callable[[str, str], Awaitable[bool]] | None = None,
         consolidator: MemoryConsolidator | None = None,
+        compressor: ContextCompressor | None = None,
     ):
         self._provider = provider
         self._registry = registry
@@ -47,6 +49,7 @@ class AgentLoop:
         self._memory = memory
         self._approval_callback = approval_callback
         self._consolidator = consolidator
+        self._compressor = compressor
 
     async def run(
         self,
@@ -99,6 +102,12 @@ class AgentLoop:
                 budget.check()
                 budget.consume_iteration()
 
+                if context.message_count > 10:
+                    context.prune_old_tool_results(protect_tail=6)
+
+                if self._compressor and self._compressor.should_compress(context.messages):
+                    context.messages = await self._compressor.compress(context.messages)
+
                 try:
                     response = await asyncio.wait_for(
                         self._provider.chat(
@@ -128,61 +137,35 @@ class AgentLoop:
                 budget.consume_tool_calls(len(response.tool_calls))
                 health.increment("tool_calls", len(response.tool_calls))
 
-                should_stop = False
-                for tc in response.tool_calls:
-                    # 1. RBAC Tool check
-                    if self._permission_checker and not self._permission_checker.can_use_tool(
-                        user, tc.name
-                    ):
-                        result = (
-                            f"Error: Permission denied. Your department ({user.department})"
-                            f" cannot use tool '{tc.name}'."
+                if self._can_parallelize(response.tool_calls):
+                    results = await self._execute_parallel(
+                        response.tool_calls, user, _approval_cb, on_tool_start
+                    )
+                    for tc, result in zip(response.tool_calls, results, strict=True):
+                        context.add_tool_result(tc.id, tc.name, result)
+                        if progress.detect_loop(tc.name, result):
+                            context.add_assistant_message(
+                                "System Guard: You seem to be stuck in a loop repeating the same"
+                                " error. Please change your strategy or stop using this tool."
+                            )
+                            break
+                else:
+                    should_stop = False
+                    for tc in response.tool_calls:
+                        result = await self._execute_single_tool(
+                            tc, user, _approval_cb, on_tool_start
                         )
-                    else:
-                        try:
-                            # 2. Security Guard check
-                            if self._tool_guard:
-                                self._tool_guard.check(tc.name, tc.arguments)
+                        context.add_tool_result(tc.id, tc.name, result)
+                        if progress.detect_loop(tc.name, result):
+                            context.add_assistant_message(
+                                "System Guard: You seem to be stuck in a loop repeating the same"
+                                " error. Please change your strategy or stop using this tool."
+                            )
+                            should_stop = True
+                            break
 
-                            # 3. Progress callback
-                            if on_tool_start:
-                                on_tool_start(tc.name)
-
-                            # 4. Execution
-                            result = await self._registry.execute(tc.name, tc.arguments, user=user)
-                        except ApprovalRequest as e:
-                            if _approval_cb:
-                                approved = await _approval_cb(e.action, e.details)
-                                if approved:
-                                    result = await self._registry.execute(
-                                        tc.name, tc.arguments, user=user
-                                    )
-                                else:
-                                    result = f"Action '{e.action}' was denied by user."
-                            else:
-                                result = (
-                                    f"Action Paused: approval required for '{e.action}' "
-                                    f"but no approval channel is configured."
-                                )
-                        except ToolGuardError as e:
-                            result = str(e)
-                        except Exception as e:
-                            result = f"Error executing tool {tc.name}: {e}"
-
-                    context.add_tool_result(tc.id, tc.name, result)
-
-                    # Check looping
-                    if progress.detect_loop(tc.name, result):
-                        loop_msg = (
-                            "System Guard: You seem to be stuck in a loop repeating the same"
-                            " error. Please change your strategy or stop using this tool."
-                        )
-                        context.add_assistant_message(loop_msg)
-                        should_stop = True
+                    if should_stop:
                         break
-
-                if should_stop:
-                    break
 
         except BudgetExceededError as e:
             health.increment("errors")
@@ -191,8 +174,72 @@ class AgentLoop:
                 self._memory.add_message(str(user.id), "assistant", msg)
             return msg
 
-        # Reached when progress guard breaks the loop
         fallback = "I detected a loop and stopped to avoid repeating the same actions."
         if self._memory:
             self._memory.add_message(str(user.id), "assistant", fallback)
         return fallback
+
+    def _can_parallelize(self, tool_calls: list[ToolCall]) -> bool:
+        """Check if all tools in batch can be safely executed in parallel."""
+        if len(tool_calls) <= 1:
+            return False
+        if self._tool_guard:
+            return False
+
+        for tc in tool_calls:
+            tool = self._registry.get(tc.name)
+            if tool is None or not getattr(tool, "parallel_safe", True):
+                return False
+        return True
+
+    async def _execute_parallel(
+        self,
+        tool_calls: list[ToolCall],
+        user: User,
+        approval_callback: Callable[[str, str], Awaitable[bool]] | None,
+        on_tool_start: Callable[[str], None] | None,
+    ) -> list[str]:
+        """Execute multiple tools in parallel and return results."""
+
+        async def execute_one(tc: ToolCall) -> str:
+            return await self._execute_single_tool(tc, user, approval_callback, on_tool_start)
+
+        results = await asyncio.gather(*[execute_one(tc) for tc in tool_calls])
+        return list(results)
+
+    async def _execute_single_tool(
+        self,
+        tc: ToolCall,
+        user: User,
+        approval_callback: Callable[[str, str], Awaitable[bool]] | None,
+        on_tool_start: Callable[[str], None] | None,
+    ) -> str:
+        """Execute a single tool with all checks."""
+        if self._permission_checker and not self._permission_checker.can_use_tool(user, tc.name):
+            return (
+                f"Error: Permission denied. Your department ({user.department})"
+                f" cannot use tool '{tc.name}'."
+            )
+
+        try:
+            if self._tool_guard:
+                await self._tool_guard.check(tc.name, tc.arguments)
+
+            if on_tool_start:
+                on_tool_start(tc.name)
+
+            return await self._registry.execute(tc.name, tc.arguments, user=user)
+        except ApprovalRequest as e:
+            if approval_callback:
+                approved = await approval_callback(e.action, e.details)
+                if approved:
+                    return await self._registry.execute(tc.name, tc.arguments, user=user)
+                return f"Action '{e.action}' was denied by user."
+            return (
+                f"Action Paused: approval required for '{e.action}' "
+                f"but no approval channel is configured."
+            )
+        except ToolGuardError as e:
+            return str(e)
+        except Exception as e:
+            return f"Error executing tool {tc.name}: {e}"

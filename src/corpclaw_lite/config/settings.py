@@ -31,6 +31,25 @@ class LLMSettings(BaseModel):
     routing: list[RoutingRule] = []
 
 
+class ContainerSettings(BaseModel):
+    """Settings for Docker container sandboxes."""
+
+    max_memory: str = "512m"
+    cpus: float = 0.5
+    idle_timeout_seconds: int = 600
+    max_per_user: int = 1
+
+
+class CompressionSettings(BaseModel):
+    """Settings for context compression (Hermes pattern)."""
+
+    enabled: bool = True
+    max_context_tokens: int = 8000
+    threshold_ratio: float = 0.5
+    protect_tail_tokens: int = 3000
+    summary_ratio: float = 0.20
+
+
 class AgentSettings(BaseModel):
     """Settings for the AgentLoop."""
 
@@ -40,15 +59,8 @@ class AgentSettings(BaseModel):
     max_history: int = 20
     consolidation_threshold: int = 30
     consolidation_enabled: bool = True
-
-
-class ContainerSettings(BaseModel):
-    """Settings for Docker container sandboxes."""
-
-    max_memory: str = "512m"
-    cpus: float = 0.5
-    idle_timeout_seconds: int = 600
-    max_per_user: int = 1
+    approval_mode: str = "manual"
+    compression: CompressionSettings = CompressionSettings()
 
 
 class TelegramSettings(BaseModel):

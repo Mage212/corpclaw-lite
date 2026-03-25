@@ -3,6 +3,7 @@ from typing import Any
 
 import pytest
 
+from corpclaw_lite.agent.context import ContextBuilder
 from corpclaw_lite.agent.loop import AgentLoop
 from corpclaw_lite.config.settings import AgentSettings
 from corpclaw_lite.extensions.tools.registry import ToolRegistry
@@ -183,9 +184,7 @@ async def test_single_assistant_message_with_tool_calls(
 
 
 @pytest.mark.asyncio
-async def test_loop_stops_on_progress_guard(
-    test_user: User, empty_registry: ToolRegistry
-) -> None:
+async def test_loop_stops_on_progress_guard(test_user: User, empty_registry: ToolRegistry) -> None:
     """Progress guard loop detection must break the outer while-True loop."""
 
     class FakeTool:
@@ -275,9 +274,7 @@ async def test_approval_callback_per_call_takes_priority(
 
 
 @pytest.mark.asyncio
-async def test_on_tool_start_callback_called(
-    test_user: User, empty_registry: ToolRegistry
-) -> None:
+async def test_on_tool_start_callback_called(test_user: User, empty_registry: ToolRegistry) -> None:
     """on_tool_start callback must fire for each tool call."""
 
     class FakeTool:
@@ -311,3 +308,107 @@ async def test_on_tool_start_callback_called(
 
     assert result == "Done."
     assert started_tools == ["read_file", "read_file"]
+
+
+class TestContextBuilderPruning:
+    """Tests for ContextBuilder pruning methods."""
+
+    def test_message_count(self, test_user: User) -> None:
+        ctx = ContextBuilder("system")
+        assert ctx.message_count == 1
+
+        ctx.add_user_message("hello")
+        assert ctx.message_count == 2
+
+    def test_estimate_tokens_rough(self, test_user: User) -> None:
+        ctx = ContextBuilder("system prompt")
+        ctx.add_user_message("a" * 100)
+
+        estimate = ctx.estimate_tokens()
+        assert estimate > 0
+        assert estimate < 100
+
+    def test_prune_old_tool_results_noop_when_few_messages(self) -> None:
+        ctx = ContextBuilder("system")
+        ctx.add_user_message("hi")
+        assert ctx.prune_old_tool_results() == 0
+
+    def test_prune_old_tool_results_protects_tail(self) -> None:
+        ctx = ContextBuilder("system")
+        ctx.add_user_message("hi")
+        long_result = "x" * 500
+        for i in range(10):
+            ctx.messages.append(
+                {"role": "tool", "tool_call_id": str(i), "name": "t", "content": long_result}
+            )
+
+        pruned = ctx.prune_old_tool_results(protect_tail=3)
+
+        assert pruned == 7
+        for i in range(7):
+            assert (
+                ctx.messages[2 + i]["content"] == "[Old tool output cleared to save context space]"
+            )
+        for i in range(7, 10):
+            assert ctx.messages[2 + i]["content"] == long_result
+
+    def test_prune_old_tool_results_skips_short_content(self) -> None:
+        ctx = ContextBuilder("system")
+        ctx.add_user_message("hi")
+        short_result = "short"
+        ctx.messages.append(
+            {"role": "tool", "tool_call_id": "1", "name": "t", "content": short_result}
+        )
+        ctx.messages.append(
+            {"role": "tool", "tool_call_id": "2", "name": "t", "content": "x" * 300}
+        )
+
+        pruned = ctx.prune_old_tool_results(protect_tail=0)
+
+        assert pruned == 1
+        assert ctx.messages[2]["content"] == short_result
+        assert ctx.messages[3]["content"] == "[Old tool output cleared to save context space]"
+
+
+@pytest.mark.asyncio
+async def test_pruning_in_loop_reduces_context(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """Loop should prune old tool results when context grows large."""
+
+    class FakeTool:
+        name = "big_tool"
+        description = ""
+        params = []
+
+        async def execute(self, **kwargs: Any) -> str:
+            return "x" * 500
+
+    empty_registry._tools["big_tool"] = FakeTool()
+
+    captured_contexts: list[list[dict]] = []
+
+    class CapturingProvider(MockProvider):
+        async def chat(self, messages, tools=None, system=None):
+            captured_contexts.append(list(messages))
+            return await super().chat(messages, tools, system)
+
+    tool_calls = [ToolCall(id=str(i), name="big_tool", arguments={}) for i in range(8)]
+    provider = CapturingProvider(
+        responses=[
+            LLMResponse(content="", tool_calls=tool_calls),
+            LLMResponse(content="Done."),
+        ]
+    )
+    loop = AgentLoop(provider, empty_registry, AgentSettings())
+    await loop.run(test_user, "run tools")
+
+    first_call = captured_contexts[0]
+    second_call = captured_contexts[1]
+
+    assert len(first_call) < 15
+    tool_results_in_second = [m for m in second_call if m.get("role") == "tool"]
+    pruned_results = [
+        m for m in tool_results_in_second if "[Old tool output cleared" in m.get("content", "")
+    ]
+    assert len(pruned_results) > 0

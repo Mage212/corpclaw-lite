@@ -62,6 +62,57 @@ class ContextBuilder:
             }
         )
 
+    @property
+    def message_count(self) -> int:
+        """Return the number of messages in context."""
+        return len(self.messages)
+
+    def estimate_tokens(self) -> int:
+        """Rough token estimate using len/4 heuristic."""
+        total = 0
+        for msg in self.messages:
+            content = msg.get("content")
+            if isinstance(content, str):
+                total += len(content) // 4
+            elif content is None:
+                total += 0
+            else:
+                total += len(str(content)) // 4
+        return total
+
+    def prune_old_tool_results(self, protect_tail: int = 6, min_length: int = 200) -> int:
+        """Replace old tool results (>min_length chars) with placeholder.
+
+        Cheap pre-pass compression without LLM call.
+        Protects the last `protect_tail` tool results.
+
+        Returns count of pruned messages.
+        """
+        if len(self.messages) <= protect_tail + 2:
+            return 0
+
+        placeholder = "[Old tool output cleared to save context space]"
+
+        tool_result_indices = [
+            i for i, msg in enumerate(self.messages) if msg.get("role") == "tool"
+        ]
+
+        if len(tool_result_indices) <= protect_tail:
+            return 0
+
+        pruned = 0
+        protected_set = set(tool_result_indices[-protect_tail:]) if protect_tail > 0 else set()
+
+        for idx in tool_result_indices:
+            if idx in protected_set:
+                continue
+            content = self.messages[idx].get("content", "")
+            if isinstance(content, str) and len(content) > min_length:
+                self.messages[idx]["content"] = placeholder
+                pruned += 1
+
+        return pruned
+
     @classmethod
     def build_initial(
         cls,

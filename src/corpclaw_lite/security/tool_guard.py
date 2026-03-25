@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import yaml
+
+if TYPE_CHECKING:
+    from corpclaw_lite.llm.base import Provider
 
 logger = logging.getLogger(__name__)
 
@@ -73,8 +77,14 @@ _SEVERITY_RANK: dict[str, int] = {
 class ToolGuard:
     """Security guard that intercepts tool calls and applies YAML policies (CoPaw pattern)."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        provider: Provider | None = None,
+        approval_mode: str = "manual",
+    ) -> None:
         self._rules: list[GuardRule] = []
+        self._provider = provider
+        self._approval_mode = approval_mode
 
     def load_file(self, path: Path | str) -> None:
         file_path = Path(path)
@@ -94,25 +104,24 @@ class ToolGuard:
         except Exception as e:
             logger.error("Failed to load ToolGuard rules from %s: %s", file_path, e)
 
-    def check(self, tool_name: str, arguments: dict[str, Any]) -> None:
+    async def check(self, tool_name: str, arguments: dict[str, Any]) -> None:
         """
         Evaluate ALL rules against the tool call, then apply the strictest matching action.
 
         Priority order:
         1. CRITICAL/HIGH without require_approval → unconditional ToolGuardError
         2. Any require_approval rule (highest severity of those) → ApprovalRequest
+           (with smart approval if enabled and provider available)
         3. MEDIUM/INFO without require_approval → log only, execution continues
         """
         matches = [r for r in self._rules if r.evaluate(tool_name, arguments)]
         if not matches:
             return
 
-        # Log every match
         for rule in matches:
             msg = f"Security Rule '{rule.id}' triggered ({rule.severity}): {rule.description}"
             logger.warning("ToolGuard: %s for tool %s", msg, tool_name)
 
-        # 1. Hard blocks — CRITICAL or HIGH without require_approval
         hard_blocks = [
             r
             for r in matches
@@ -123,11 +132,56 @@ class ToolGuard:
             msg = f"Security Rule '{worst.id}' triggered ({worst.severity}): {worst.description}"
             raise ToolGuardError(f"Blocked by ToolGuard: {msg}")
 
-        # 2. Approval requests — pick the highest-severity one
         approval_rules = [r for r in matches if r.require_approval]
         if approval_rules:
             worst = max(approval_rules, key=lambda r: _SEVERITY_RANK.get(r.severity, 0))
             msg = f"Security Rule '{worst.id}' triggered ({worst.severity}): {worst.description}"
+
+            if self._approval_mode == "smart" and self._provider:
+                verdict = await self._smart_evaluate(tool_name, arguments, worst)
+                if verdict == "approve":
+                    logger.info("Smart approval: auto-approved %s", tool_name)
+                    return
+                if verdict == "deny":
+                    raise ToolGuardError(f"Blocked by smart approval: {msg}")
+
             raise ApprovalRequest(action=worst.id, details=msg)
 
-        # 3. MEDIUM/INFO without require_approval — already logged above, allow execution
+    async def _smart_evaluate(
+        self, tool_name: str, arguments: dict[str, Any], rule: GuardRule
+    ) -> str:
+        """LLM-based risk assessment for smart approvals.
+
+        Returns 'approve', 'deny', or 'escalate'.
+        """
+
+        arg_str = str(arguments)[:500]
+        prompt = f"""You are a security evaluator for an AI assistant tool call.
+Evaluate the REAL risk of this tool call. Many pattern matches are false positives.
+
+Tool: {tool_name}
+Arguments: {arg_str}
+Triggered rule: {rule.id} - {rule.description}
+
+Respond with ONLY ONE WORD:
+- APPROVE if this is clearly safe (low real risk)
+- DENY if this is clearly dangerous (high real risk)
+- ESCALATE if you are uncertain (needs human review)
+
+Response:"""
+
+        try:
+            assert self._provider is not None
+            response = await asyncio.wait_for(
+                self._provider.chat(messages=[{"role": "user", "content": prompt}], tools=None),
+                timeout=10.0,
+            )
+            content = (response.content or "").strip().upper()
+            if content.startswith("APPROVE"):
+                return "approve"
+            if content.startswith("DENY"):
+                return "deny"
+            return "escalate"
+        except Exception as e:
+            logger.warning("Smart approval LLM call failed: %s, escalating", e)
+            return "escalate"

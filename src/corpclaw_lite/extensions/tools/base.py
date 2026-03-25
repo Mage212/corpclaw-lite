@@ -33,6 +33,7 @@ class Tool(ABC):
     description: str
     params: list[ToolParam]
     risk_level: RiskLevel = RiskLevel.LOW
+    parallel_safe: bool = True
 
     @abstractmethod
     async def execute(self, **kwargs: Any) -> str:

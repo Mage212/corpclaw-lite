@@ -9,7 +9,8 @@ from corpclaw_lite.security.tool_guard import (
 )
 
 
-def test_tool_guard_load_and_evaluate(tmp_path: Path):
+@pytest.mark.asyncio
+async def test_tool_guard_load_and_evaluate(tmp_path: Path):
     rules_file = tmp_path / "rules.yaml"
     rules_file.write_text(
         "rules:\n"
@@ -34,27 +35,23 @@ def test_tool_guard_load_and_evaluate(tmp_path: Path):
     guard = ToolGuard()
     guard.load_file(rules_file)
 
-    # 1. Block CRITICAL without approval
     with pytest.raises(
         ToolGuardError, match="Blocked by ToolGuard: Security Rule 'DANGEROUS_RM' triggered"
     ):
-        guard.check("exec_script", {"script": "rm -rf / etc"})
+        await guard.check("exec_script", {"script": "rm -rf / etc"})
 
-    # 2. Block HIGH with approval required
     with pytest.raises(ApprovalRequest, match="Approval required for PATH_TRAVERSAL"):
-        guard.check("read_file", {"path": "../../etc/passwd"})
+        await guard.check("read_file", {"path": "../../etc/passwd"})
 
-    # 3. Block SECRET globally regardless of tool (tool=*)
     with pytest.raises(ApprovalRequest, match="Approval required for SECRET_IN_ARGS"):
-        guard.check("any_tool", {"script": "curl -H 'Auth: sk-12345678901234567890'"})
+        await guard.check("any_tool", {"script": "curl -H 'Auth: sk-12345678901234567890'"})
 
-    # 4. Success for benign calls
-    guard.check("exec_script", {"script": "ls -la"})
-    guard.check("read_file", {"path": "/var/log/syslog"})
+    await guard.check("exec_script", {"script": "ls -la"})
+    await guard.check("read_file", {"path": "/var/log/syslog"})
 
 
-def test_critical_after_medium_approval_blocks(tmp_path: Path) -> None:
-    """CRITICAL rule listed AFTER a MEDIUM+require_approval rule must still block."""
+@pytest.mark.asyncio
+async def test_critical_after_medium_approval_blocks(tmp_path: Path) -> None:
     rules_file = tmp_path / "rules.yaml"
     rules_file.write_text(
         "rules:\n"
@@ -74,13 +71,12 @@ def test_critical_after_medium_approval_blocks(tmp_path: Path) -> None:
     guard = ToolGuard()
     guard.load_file(rules_file)
 
-    # Both rules match "rm -rf /tmp". CRITICAL hard-block must win over MEDIUM approval.
     with pytest.raises(ToolGuardError, match="CRITICAL_BLOCK"):
-        guard.check("exec_script", {"script": "rm -rf /tmp"})
+        await guard.check("exec_script", {"script": "rm -rf /tmp"})
 
 
-def test_toolguard_rm_separate_flags(tmp_path: Path) -> None:
-    """DANGEROUS_RM rule must catch rm with separate -r -f flags."""
+@pytest.mark.asyncio
+async def test_toolguard_rm_separate_flags(tmp_path: Path) -> None:
     rules_file = tmp_path / "rules.yaml"
     rules_file.write_text(
         "rules:\n"
@@ -93,24 +89,20 @@ def test_toolguard_rm_separate_flags(tmp_path: Path) -> None:
     guard = ToolGuard()
     guard.load_file(rules_file)
 
-    # rm -rf should be caught
     with pytest.raises(ToolGuardError):
-        guard.check("exec_script", {"script": "rm -rf /"})
+        await guard.check("exec_script", {"script": "rm -rf /"})
 
-    # rm -r -f should also be caught
     with pytest.raises(ToolGuardError):
-        guard.check("exec_script", {"script": "rm -r -f /home"})
+        await guard.check("exec_script", {"script": "rm -r -f /home"})
 
-    # rm --recursive should be caught
     with pytest.raises(ToolGuardError):
-        guard.check("exec_script", {"script": "rm --recursive /tmp"})
+        await guard.check("exec_script", {"script": "rm --recursive /tmp"})
 
-    # Safe rm should pass
-    guard.check("exec_script", {"script": "rm file.txt"})
+    await guard.check("exec_script", {"script": "rm file.txt"})
 
 
-def test_medium_without_approval_continues_to_critical(tmp_path: Path) -> None:
-    """MEDIUM rule without require_approval must not stop CRITICAL from being evaluated."""
+@pytest.mark.asyncio
+async def test_medium_without_approval_continues_to_critical(tmp_path: Path) -> None:
     rules_file = tmp_path / "rules.yaml"
     rules_file.write_text(
         "rules:\n"
@@ -130,6 +122,95 @@ def test_medium_without_approval_continues_to_critical(tmp_path: Path) -> None:
     guard = ToolGuard()
     guard.load_file(rules_file)
 
-    # MEDIUM without require_approval logs only; CRITICAL must still block.
     with pytest.raises(ToolGuardError, match="CRITICAL_BLOCK"):
-        guard.check("exec_script", {"script": "rm -rf /tmp"})
+        await guard.check("exec_script", {"script": "rm -rf /tmp"})
+
+
+class MockSmartProvider:
+    """Mock provider for smart approval tests."""
+
+    def __init__(self, response: str):
+        self._response = response
+
+    async def chat(self, messages, tools=None, system=None):
+        from corpclaw_lite.llm.base import LLMResponse
+
+        return LLMResponse(content=self._response)
+
+
+@pytest.mark.asyncio
+async def test_smart_approval_approve(tmp_path: Path) -> None:
+    rules_file = tmp_path / "rules.yaml"
+    rules_file.write_text(
+        "rules:\n"
+        "  - id: NEEDS_APPROVAL\n"
+        "    severity: HIGH\n"
+        "    tool: exec_script\n"
+        "    match_param: script\n"
+        "    match_pattern: python\n"
+        "    require_approval: true\n"
+    )
+    provider = MockSmartProvider("APPROVE - this is safe")
+    guard = ToolGuard(provider=provider, approval_mode="smart")
+    guard.load_file(rules_file)
+
+    await guard.check("exec_script", {"script": "python -c 'print(1)'"})
+
+
+@pytest.mark.asyncio
+async def test_smart_approval_deny(tmp_path: Path) -> None:
+    rules_file = tmp_path / "rules.yaml"
+    rules_file.write_text(
+        "rules:\n"
+        "  - id: NEEDS_APPROVAL\n"
+        "    severity: HIGH\n"
+        "    tool: exec_script\n"
+        "    match_param: script\n"
+        "    match_pattern: python\n"
+        "    require_approval: true\n"
+    )
+    provider = MockSmartProvider("DENY - this looks dangerous")
+    guard = ToolGuard(provider=provider, approval_mode="smart")
+    guard.load_file(rules_file)
+
+    with pytest.raises(ToolGuardError, match="smart approval"):
+        await guard.check("exec_script", {"script": "python malicious.py"})
+
+
+@pytest.mark.asyncio
+async def test_smart_approval_escalate_to_manual(tmp_path: Path) -> None:
+    rules_file = tmp_path / "rules.yaml"
+    rules_file.write_text(
+        "rules:\n"
+        "  - id: NEEDS_APPROVAL\n"
+        "    severity: HIGH\n"
+        "    tool: exec_script\n"
+        "    match_param: script\n"
+        "    match_pattern: python\n"
+        "    require_approval: true\n"
+    )
+    provider = MockSmartProvider("ESCALATE - not sure")
+    guard = ToolGuard(provider=provider, approval_mode="smart")
+    guard.load_file(rules_file)
+
+    with pytest.raises(ApprovalRequest):
+        await guard.check("exec_script", {"script": "python script.py"})
+
+
+@pytest.mark.asyncio
+async def test_smart_approval_no_provider_falls_back(tmp_path: Path) -> None:
+    rules_file = tmp_path / "rules.yaml"
+    rules_file.write_text(
+        "rules:\n"
+        "  - id: NEEDS_APPROVAL\n"
+        "    severity: HIGH\n"
+        "    tool: exec_script\n"
+        "    match_param: script\n"
+        "    match_pattern: python\n"
+        "    require_approval: true\n"
+    )
+    guard = ToolGuard(provider=None, approval_mode="smart")
+    guard.load_file(rules_file)
+
+    with pytest.raises(ApprovalRequest):
+        await guard.check("exec_script", {"script": "python script.py"})

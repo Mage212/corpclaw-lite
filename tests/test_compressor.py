@@ -1,0 +1,284 @@
+from typing import Any
+from unittest.mock import AsyncMock
+
+import pytest
+
+from corpclaw_lite.agent.compressor import ContextCompressor, PLACEHOLDER
+from corpclaw_lite.config.settings import CompressionSettings
+from corpclaw_lite.llm.base import LLMResponse
+
+
+class MockProvider:
+    def __init__(self, response: str = "Mock summary"):
+        self._response = response
+        self.calls: list[list[dict]] = []
+
+    async def chat(self, messages: list[dict[str, Any]], tools=None, system=None):
+        self.calls.append(messages)
+        return LLMResponse(content=self._response)
+
+
+@pytest.fixture
+def settings() -> CompressionSettings:
+    return CompressionSettings(
+        enabled=True,
+        max_context_tokens=1000,
+        threshold_ratio=0.5,
+        protect_tail_tokens=200,
+        summary_ratio=0.20,
+    )
+
+
+@pytest.fixture
+def provider() -> MockProvider:
+    return MockProvider()
+
+
+class TestShouldCompress:
+    def test_disabled_returns_false(self, provider: MockProvider) -> None:
+        settings = CompressionSettings(enabled=False)
+        compressor = ContextCompressor(provider, settings)
+        messages = [{"role": "user", "content": "x" * 10000}]
+        assert not compressor.should_compress(messages)
+
+    def test_below_threshold_returns_false(
+        self, provider: MockProvider, settings: CompressionSettings
+    ) -> None:
+        compressor = ContextCompressor(provider, settings)
+        messages = [{"role": "user", "content": "short"}]
+        assert not compressor.should_compress(messages)
+
+    def test_above_threshold_returns_true(
+        self, provider: MockProvider, settings: CompressionSettings
+    ) -> None:
+        compressor = ContextCompressor(provider, settings)
+        messages = [{"role": "user", "content": "x" * 3000}]
+        assert compressor.should_compress(messages)
+
+
+class TestPruneOldToolResults:
+    def test_no_tool_results(self, provider: MockProvider, settings: CompressionSettings) -> None:
+        compressor = ContextCompressor(provider, settings)
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "hi"},
+        ]
+        result = compressor._prune_old_tool_results(messages)
+        assert result == messages
+
+    def test_prunes_old_long_results(
+        self, provider: MockProvider, settings: CompressionSettings
+    ) -> None:
+        compressor = ContextCompressor(provider, settings)
+        long_result = "x" * 500
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "tool", "tool_call_id": "1", "name": "t", "content": long_result},
+            {"role": "tool", "tool_call_id": "2", "name": "t", "content": long_result},
+            {"role": "tool", "tool_call_id": "3", "name": "t", "content": long_result},
+            {"role": "tool", "tool_call_id": "4", "name": "t", "content": long_result},
+            {"role": "tool", "tool_call_id": "5", "name": "t", "content": long_result},
+            {"role": "tool", "tool_call_id": "6", "name": "t", "content": long_result},
+            {"role": "tool", "tool_call_id": "7", "name": "t", "content": long_result},
+            {"role": "user", "content": "done"},
+        ]
+        result = compressor._prune_old_tool_results(messages, protect_tail_count=3)
+
+        assert result[1]["content"] == PLACEHOLDER
+        assert result[2]["content"] == PLACEHOLDER
+        assert result[3]["content"] == PLACEHOLDER
+        assert result[4]["content"] == PLACEHOLDER
+        assert result[5]["content"] == long_result
+        assert result[6]["content"] == long_result
+        assert result[7]["content"] == long_result
+
+    def test_keeps_short_results(
+        self, provider: MockProvider, settings: CompressionSettings
+    ) -> None:
+        compressor = ContextCompressor(provider, settings)
+        short_result = "short"
+        messages = [
+            {"role": "tool", "tool_call_id": "1", "name": "t", "content": short_result},
+        ]
+        result = compressor._prune_old_tool_results(messages, protect_tail_count=0)
+        assert result[0]["content"] == short_result
+
+
+class TestSanitizeToolPairs:
+    def test_no_orphans(self, provider: MockProvider, settings: CompressionSettings) -> None:
+        compressor = ContextCompressor(provider, settings)
+        messages = [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {"id": "1", "type": "function", "function": {"name": "t", "arguments": "{}"}}
+                ],
+            },
+            {"role": "tool", "tool_call_id": "1", "name": "t", "content": "result"},
+        ]
+        result = compressor._sanitize_tool_pairs(messages)
+        assert len(result) == 2
+
+    def test_removes_orphaned_tool_result(
+        self, provider: MockProvider, settings: CompressionSettings
+    ) -> None:
+        compressor = ContextCompressor(provider, settings)
+        messages = [
+            {"role": "tool", "tool_call_id": "orphan", "name": "t", "content": "result"},
+        ]
+        result = compressor._sanitize_tool_pairs(messages)
+        assert len(result) == 0
+
+    def test_adds_stub_for_orphaned_tool_call(
+        self, provider: MockProvider, settings: CompressionSettings
+    ) -> None:
+        compressor = ContextCompressor(provider, settings)
+        messages = [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "orphan",
+                        "type": "function",
+                        "function": {"name": "test_tool", "arguments": "{}"},
+                    }
+                ],
+            },
+        ]
+        result = compressor._sanitize_tool_pairs(messages)
+        assert len(result) == 2
+        assert result[1]["role"] == "tool"
+        assert result[1]["tool_call_id"] == "orphan"
+        assert "lost" in result[1]["content"].lower()
+
+
+class TestCompress:
+    @pytest.mark.asyncio
+    async def test_skips_small_messages(
+        self, provider: MockProvider, settings: CompressionSettings
+    ) -> None:
+        compressor = ContextCompressor(provider, settings)
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "hi"},
+        ]
+        result = await compressor.compress(messages)
+        assert result == messages
+
+    @pytest.mark.asyncio
+    async def test_compress_generates_summary(
+        self, provider: MockProvider, settings: CompressionSettings
+    ) -> None:
+        settings = CompressionSettings(
+            enabled=True,
+            max_context_tokens=300,
+            threshold_ratio=0.5,
+            protect_tail_tokens=50,
+            summary_ratio=0.20,
+        )
+        compressor = ContextCompressor(provider, settings)
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "x" * 200},
+            {"role": "assistant", "content": "y" * 200},
+            {"role": "user", "content": "z" * 200},
+            {"role": "assistant", "content": "w" * 200},
+            {"role": "user", "content": "a" * 200},
+            {"role": "assistant", "content": "b" * 200},
+            {"role": "user", "content": "final"},
+        ]
+        result = await compressor.compress(messages)
+
+        assert len(result) < len(messages)
+        summary_msgs = [m for m in result if "Summary" in m.get("content", "")]
+        assert len(summary_msgs) == 1
+
+    @pytest.mark.asyncio
+    async def test_compress_preserves_head_and_tail(
+        self, provider: MockProvider, settings: CompressionSettings
+    ) -> None:
+        compressor = ContextCompressor(provider, settings)
+        messages = [
+            {"role": "system", "content": "system prompt"},
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "x" * 400},
+            {"role": "user", "content": "y" * 400},
+            {"role": "assistant", "content": "z" * 400},
+            {"role": "user", "content": "last user message"},
+        ]
+        result = await compressor.compress(messages)
+
+        assert result[0]["role"] == "system"
+        assert result[0]["content"] == "system prompt"
+
+
+class TestGenerateSummary:
+    @pytest.mark.asyncio
+    async def test_generates_structured_summary(
+        self, provider: MockProvider, settings: CompressionSettings
+    ) -> None:
+        compressor = ContextCompressor(provider, settings)
+        turns = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi there!"},
+        ]
+        summary = await compressor._generate_summary(turns)
+        assert summary == "Mock summary"
+        assert len(provider.calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_uses_previous_summary(
+        self, provider: MockProvider, settings: CompressionSettings
+    ) -> None:
+        compressor = ContextCompressor(provider, settings)
+        compressor._previous_summary = "Old summary"
+
+        turns = [{"role": "user", "content": "New message"}]
+        await compressor._generate_summary(turns)
+
+        prompt = provider.calls[0][0]["content"]
+        assert "Previous summary" in prompt
+        assert "Old summary" in prompt
+
+    @pytest.mark.asyncio
+    async def test_returns_none_on_provider_error(self, settings: CompressionSettings) -> None:
+        failing_provider = AsyncMock()
+        failing_provider.chat.side_effect = Exception("LLM error")
+
+        compressor = ContextCompressor(failing_provider, settings)
+        turns = [{"role": "user", "content": "test"}]
+
+        result = await compressor._generate_summary(turns)
+        assert result is None
+
+
+class TestEstimateTokens:
+    def test_empty_messages(self, provider: MockProvider, settings: CompressionSettings) -> None:
+        compressor = ContextCompressor(provider, settings)
+        assert compressor._estimate_tokens([]) == 0
+
+    def test_counts_content(self, provider: MockProvider, settings: CompressionSettings) -> None:
+        compressor = ContextCompressor(provider, settings)
+        messages = [{"role": "user", "content": "x" * 400}]
+        estimate = compressor._estimate_tokens(messages)
+        assert estimate == 100
+
+    def test_counts_tool_calls(self, provider: MockProvider, settings: CompressionSettings) -> None:
+        compressor = ContextCompressor(provider, settings)
+        messages = [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "1",
+                        "type": "function",
+                        "function": {"name": "t", "arguments": "{" + "x" * 400 + "}"},
+                    }
+                ],
+            }
+        ]
+        estimate = compressor._estimate_tokens(messages)
+        assert estimate > 0
