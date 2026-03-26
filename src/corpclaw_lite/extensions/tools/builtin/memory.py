@@ -41,7 +41,7 @@ class MemoryStoreTool(Tool):
         if user is None:
             return "Error: User context is required for memory_store."
 
-        self._memory.store_fact(str(user.id), key, value)
+        await self._memory.store_fact(str(user.id), key, value)
         return f"Stored: {key} = {value}"
 
 
@@ -76,7 +76,7 @@ class MemoryRecallTool(Tool):
         if isinstance(query, str) and not query.strip():
             query = None
 
-        facts = self._memory.recall_facts(str(user.id), query)
+        facts = await self._memory.recall_facts(str(user.id), query)
         if not facts:
             return "No facts stored." if not query else f"No facts matching '{query}'."
 

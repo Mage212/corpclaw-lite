@@ -16,6 +16,9 @@ class IPCAuthError(Exception):
     pass
 
 
+MAX_NONCES = 100_000
+
+
 class IPCAuth:
     """Provides HMAC-SHA256 authentication with nonce to prevent replay attacks."""
 
@@ -68,6 +71,8 @@ class IPCAuth:
             raise IPCAuthError("Message timestamp out of acceptable range (expired or future)")
 
         self._cleanup_nonces()
+        if len(self._seen_nonces) >= MAX_NONCES:
+            raise IPCAuthError("Nonce store capacity exceeded — possible abuse")
         if nonce in self._seen_nonces:
             raise IPCAuthError("Replay attack detected (nonce already seen)")
 

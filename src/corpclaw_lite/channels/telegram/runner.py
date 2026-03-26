@@ -27,12 +27,20 @@ async def run_telegram_bot(token: str) -> None:
     from corpclaw_lite.channels.telegram.rate_limit import RateLimiter
     from corpclaw_lite.config.bootstrap import BootstrapLoader
     from corpclaw_lite.config.settings import TelegramSettings
+    from corpclaw_lite.extensions.skills.registry import SkillRegistry
+    from corpclaw_lite.extensions.skills.watcher import SkillHotReloader
     from corpclaw_lite.users.models import User
 
     agent_loop, user_manager, tool_registry = build_agent_stack()
     bootstrap = BootstrapLoader(Path("config/bootstrap"))
     tg_settings = TelegramSettings()
     rate_limiter = RateLimiter(max_per_minute=tg_settings.rate_limit_per_minute)
+
+    # ── Skills ─────────────────────────────────────────────────────────────
+    skill_registry = SkillRegistry()
+    skills_dir = Path("skills")
+    if skills_dir.exists():
+        skill_registry.load_directory(skills_dir)
 
     # Seed whitelist from config into persistent JSON
     if tg_settings.whitelist:
@@ -72,7 +80,7 @@ async def run_telegram_bot(token: str) -> None:
             return
 
         # ── Progress indicator ────────────────────────────────────────────
-        bot = channel._app.bot if channel._app else None  # type: ignore[union-attr]
+        bot = channel.bot
         status_session: StatusMessageSession | None = None
 
         if bot is not None:
@@ -94,6 +102,14 @@ async def run_telegram_bot(token: str) -> None:
             user_ctx = f"You are talking to {user.name} from the {user.department} department."
             parts_list = [p for p in [base_prompt, dept_prompt, user_ctx] if p]
             system_prompt: str | None = "\n\n".join(parts_list) if parts_list else None
+
+            # Inject allowed skill instructions into system prompt
+            allowed_skills = skill_registry.get_allowed_skills(user)
+            if allowed_skills:
+                skill_block = "\n\n## Available Skills\n"
+                for s in allowed_skills:
+                    skill_block += f"\n### {s.id}: {s.description}\n{s.instructions}\n"
+                system_prompt = (system_prompt or "") + skill_block
 
             async def approval_cb(action: str, details: str) -> bool:
                 return await channel.request_approval(user, action, details)
@@ -126,17 +142,12 @@ async def run_telegram_bot(token: str) -> None:
         await channel.send_message(user, reply)
 
     # ── Build channel ─────────────────────────────────────────────────────
-    # Memory is available from build_agent_stack via agent_loop's public interface,
-    # but we need it for /new command. Pass it directly.
-    from corpclaw_lite.memory.sqlite import SQLiteMemory
-
-    _memory: SQLiteMemory | None = getattr(agent_loop, "_memory", None)
     channel = TelegramChannel(
         token=token,
         message_handler=_handle_and_reply,
         workspace_base=tg_settings.workspace_base,
         tool_registry=tool_registry,
-        memory=_memory,
+        memory=agent_loop.memory,
     )
 
     # ── SendFile tool ─────────────────────────────────────────────────────
@@ -164,13 +175,6 @@ async def run_telegram_bot(token: str) -> None:
         logger.info("aiohttp not installed — health endpoint disabled")
 
     # ── Skill Hot-Reloader ────────────────────────────────────────────────
-    from corpclaw_lite.extensions.skills.registry import SkillRegistry
-    from corpclaw_lite.extensions.skills.watcher import SkillHotReloader
-
-    skill_registry = SkillRegistry()
-    skills_dir = Path("skills")
-    if skills_dir.exists():
-        skill_registry.load_directory(skills_dir)
     reloader = SkillHotReloader(skills_dir, skill_registry)
     reloader.start()
     logger.info("Skill hot-reloader started watching %s", skills_dir)
@@ -182,9 +186,9 @@ async def run_telegram_bot(token: str) -> None:
         await channel.start()
 
         # Wire admin notifier after channel starts (needs bot instance)
-        if tg_settings.admin_ids and channel._app:  # type: ignore[union-attr]
+        if tg_settings.admin_ids and channel.app:
             admin_notifier = AdminNotifier(
-                bot=channel._app.bot,  # type: ignore[union-attr]
+                bot=channel.app.bot,
                 admin_ids=tg_settings.admin_ids,
             )
             logger.info("Admin notifier active for %d admin(s)", len(tg_settings.admin_ids))

@@ -58,7 +58,8 @@ class ContextCompressor:
         if len(messages) < 5:
             return messages
 
-        messages = self._prune_old_tool_results(messages, protect_tail_count=6)
+        # Note: prune_old_tool_results is already called by the loop before compress(),
+        # so we skip it here to avoid double-pruning.
 
         tokens = self._estimate_tokens(messages)
         tail_budget = self._settings.protect_tail_tokens
@@ -97,35 +98,6 @@ class ContextCompressor:
             len(messages),
             len(result),
         )
-        return result
-
-    def _prune_old_tool_results(
-        self, messages: list[dict[str, Any]], protect_tail_count: int = 6, min_length: int = 200
-    ) -> list[dict[str, Any]]:
-        """Replace old tool results with placeholder (cheap, no LLM)."""
-        tool_indices = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
-        if len(tool_indices) <= protect_tail_count:
-            return messages
-
-        protected: set[int] = (
-            set(tool_indices[-protect_tail_count:]) if protect_tail_count > 0 else set()
-        )
-        result: list[dict[str, Any]] = []
-        pruned = 0
-
-        for i, msg in enumerate(messages):
-            if msg.get("role") == "tool" and i not in protected:
-                content = msg.get("content", "")
-                if isinstance(content, str) and len(content) > min_length:
-                    result.append({**msg, "content": PLACEHOLDER})
-                    pruned += 1
-                else:
-                    result.append(msg)
-            else:
-                result.append(msg)
-
-        if pruned:
-            logger.debug("ContextCompressor: pruned %d old tool results", pruned)
         return result
 
     def _sanitize_tool_pairs(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

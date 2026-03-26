@@ -80,6 +80,16 @@ class TelegramChannel(Channel):
         self._processed_order: deque[int] = deque()
         self._dedup_lock = asyncio.Lock()
 
+    @property
+    def bot(self) -> Any:
+        """Return the bot instance, or None if not started."""
+        return self._app.bot if self._app else None
+
+    @property
+    def app(self) -> Any:
+        """Return the Application instance, or None if not started."""
+        return self._app
+
     def get_user_workspace(self, user: User) -> Path:
         """Return per-user workspace directory, creating it if needed."""
         ws = self._workspace_base / f"user_{user.telegram_id}"
@@ -281,7 +291,7 @@ class TelegramChannel(Channel):
             return
         tid = update.effective_user.id
         if self._memory:
-            self._memory.clear(str(tid))
+            await self._memory.clear(str(tid))
         await update.effective_chat.send_message("🔄 Сессия сброшена. Можете начать заново.")
         logger.info("User %d reset session", tid)
 

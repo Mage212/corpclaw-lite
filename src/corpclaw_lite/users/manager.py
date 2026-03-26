@@ -22,6 +22,8 @@ class UserManager:
         self._init_db()
         self._whitelist_path = self._db.parent / "whitelist.json"
         self._revoked_path = self._db.parent / "revoked_sessions.json"
+        self._whitelist_cache: list[dict[str, int | str]] | None = None
+        self._revoked_cache: set[int] | None = None
 
     def _init_db(self) -> None:
         with sqlite3.connect(self._db) as conn:
@@ -102,23 +104,27 @@ class UserManager:
     # ── Whitelist ─────────────────────────────────────────────────────────────
 
     def _load_whitelist(self) -> list[dict[str, int | str]]:
-        """Load whitelist entries from JSON file."""
+        """Load whitelist entries from JSON file (cached)."""
+        if self._whitelist_cache is not None:
+            return self._whitelist_cache
         if not self._whitelist_path.exists():
             return []
         try:
             data = json.loads(self._whitelist_path.read_text("utf-8"))
             if isinstance(data, list):
+                self._whitelist_cache = data  # type: ignore[assignment]
                 return data  # type: ignore[return-value]
         except Exception as e:
             logger.warning("Failed to load whitelist: %s", e)
         return []
 
     def _save_whitelist(self, entries: list[dict[str, int | str]]) -> None:
-        """Save whitelist entries to JSON file (atomic write)."""
+        """Save whitelist entries to JSON file (atomic write) and update cache."""
         self._whitelist_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self._whitelist_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(entries, indent=2), encoding="utf-8")
         tmp.replace(self._whitelist_path)
+        self._whitelist_cache = entries
 
     def seed_whitelist(self, telegram_ids: list[int], default_department: str) -> None:
         """Merge config-based whitelist IDs into the persistent file.
@@ -179,12 +185,16 @@ class UserManager:
     # ── Revoked Sessions ──────────────────────────────────────────────────────
 
     def _load_revoked(self) -> set[int]:
+        if self._revoked_cache is not None:
+            return self._revoked_cache
         if not self._revoked_path.exists():
             return set()
         try:
             data = json.loads(self._revoked_path.read_text("utf-8"))
             if isinstance(data, list):
-                return {int(item) for item in data if isinstance(item, (int, float, str))}  # type: ignore[misc]
+                result = {int(item) for item in data if isinstance(item, (int, float, str))}  # type: ignore[misc]
+                self._revoked_cache = result
+                return result
         except Exception as e:
             logger.warning("Failed to load revoked sessions: %s", e)
         return set()
@@ -194,6 +204,7 @@ class UserManager:
         tmp = self._revoked_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(sorted(revoked)), encoding="utf-8")
         tmp.replace(self._revoked_path)
+        self._revoked_cache = revoked
 
     def revoke_session(self, telegram_id: int) -> None:
         """Block a user from interacting with the bot."""

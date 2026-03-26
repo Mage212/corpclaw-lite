@@ -36,9 +36,9 @@ async def test_agent_loop_with_memory(tmp_path, mock_provider, mock_registry, te
     db_file = tmp_path / "sqlite.db"
     mem = SQLiteMemory(str(db_file))
 
-    # Add fake history
-    mem.add_message(str(test_user.id), "user", "What is my name?")
-    mem.add_message(str(test_user.id), "assistant", "Your name is Test Loop User.")
+    # Add fake history (methods are now async)
+    await mem.add_message(str(test_user.id), "user", "What is my name?")
+    await mem.add_message(str(test_user.id), "assistant", "Your name is Test Loop User.")
 
     settings = AgentSettings(max_steps=5, max_tool_calls=5, max_wall_time_ms=5000)
 
@@ -55,7 +55,8 @@ async def test_agent_loop_with_memory(tmp_path, mock_provider, mock_registry, te
     call_args = mock_provider.chat.call_args[1]
     messages = call_args["messages"]
 
-    # We expect: System -> Context Msg (User) -> Context Msg (Assistant) -> Current User Msg
+    # We expect: Context Msg (User) -> Context Msg (Assistant) -> Current User Msg
+    # System prompt is now passed via system= kwarg, not in messages
     assert len(messages) >= 3
 
     # In CorpClaw Lite, messages are raw dictionaries
@@ -72,7 +73,7 @@ async def test_agent_loop_with_memory(tmp_path, mock_provider, mock_registry, te
     assert found_assistant, "Should have loaded assistant message from memory"
 
     # Check that new messages were appended to memory
-    hist = mem.get_history(str(test_user.id))
+    hist = await mem.get_history(str(test_user.id))
     assert len(hist) == 4
 
     # newest message is last in SQLite get_history order

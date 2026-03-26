@@ -37,12 +37,12 @@ class MemoryConsolidator:
 
         Returns True if consolidation was performed.
         """
-        count = memory.count_messages(user_id)
+        count = await memory.count_messages(user_id)
         if count < self._threshold:
             return False
 
         split = count // 2
-        history = memory.get_history(user_id, limit=count)
+        history = await memory.get_history(user_id, limit=count)
         old_messages = history[:split]
 
         if not old_messages:
@@ -50,7 +50,7 @@ class MemoryConsolidator:
 
         try:
             summary = await self._summarize(old_messages)
-            memory.replace_oldest(user_id, count=split, summary=summary)
+            await memory.replace_oldest(user_id, count=split, summary=summary)
             logger.info(
                 "Consolidated %d messages into summary for user %s",
                 split,

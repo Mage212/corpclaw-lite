@@ -51,6 +51,11 @@ class AgentLoop:
         self._consolidator = consolidator
         self._compressor = compressor
 
+    @property
+    def memory(self) -> SQLiteMemory | None:
+        """Access the memory backend (if configured)."""
+        return self._memory
+
     async def run(
         self,
         user: User,
@@ -69,7 +74,7 @@ class AgentLoop:
         # Load history BEFORE building context so it precedes the current message
         history: list[dict[str, Any]] = []
         if self._memory:
-            history = self._memory.get_history(str(user.id), limit=self._settings.max_history)
+            history = await self._memory.get_history(str(user.id), limit=self._settings.max_history)
 
         context = ContextBuilder.build_initial(
             user,
@@ -80,7 +85,7 @@ class AgentLoop:
 
         # Save new user message
         if self._memory:
-            self._memory.add_message(str(user.id), "user", message)
+            await self._memory.add_message(str(user.id), "user", message)
 
         # Get budget from department if permission checker is available
         guard_config = (
@@ -113,20 +118,21 @@ class AgentLoop:
                         self._provider.chat(
                             messages=context.messages,
                             tools=tools_schema,
+                            system=context.system_prompt or None,
                         ),
                         timeout=120,
                     )
                 except TimeoutError:
                     msg = "I could not get a response from the language model (timed out)."
                     if self._memory:
-                        self._memory.add_message(str(user.id), "assistant", msg)
+                        await self._memory.add_message(str(user.id), "assistant", msg)
                     return msg
 
                 if not response.tool_calls:
                     # Agent provided text directly — save and return
                     final = response.content if response.content else "Agent provided no response."
                     if self._memory:
-                        self._memory.add_message(str(user.id), "assistant", final)
+                        await self._memory.add_message(str(user.id), "assistant", final)
                         if self._consolidator:
                             await self._consolidator.maybe_consolidate(self._memory, str(user.id))
                     return final
@@ -175,12 +181,12 @@ class AgentLoop:
             health.increment("errors")
             msg = f"I reached my resource limit and had to stop: {e}"
             if self._memory:
-                self._memory.add_message(str(user.id), "assistant", msg)
+                await self._memory.add_message(str(user.id), "assistant", msg)
             return msg
 
         fallback = "I detected a loop and stopped to avoid repeating the same actions."
         if self._memory:
-            self._memory.add_message(str(user.id), "assistant", fallback)
+            await self._memory.add_message(str(user.id), "assistant", fallback)
         return fallback
 
     def _can_parallelize(self, tool_calls: list[ToolCall]) -> bool:
@@ -229,7 +235,10 @@ class AgentLoop:
 
         try:
             if self._tool_guard:
-                await self._tool_guard.check(tc.name, tc.arguments)
+                tool = self._registry.get(tc.name)
+                risk_level = getattr(tool, "risk_level", None)
+                risk = risk_level.value if risk_level else None
+                await self._tool_guard.check(tc.name, tc.arguments, risk_level=risk)
 
             if on_tool_start:
                 on_tool_start(tc.name)

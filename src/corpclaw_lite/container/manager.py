@@ -110,7 +110,9 @@ class ContainerManager:
         if not self._client:
             return 0
 
-        logger.info("Pruning idle containers feature requested")
-        # In a real system, you track the last IPC access time for `user_id`.
-        # Here we return 0 as a placeholder.
+        # TODO: Implement idle tracking by recording last IPC access time per user_id.
+        logger.warning(
+            "prune_idle() called but idle tracking is not implemented yet. "
+            "No containers were pruned."
+        )
         return 0

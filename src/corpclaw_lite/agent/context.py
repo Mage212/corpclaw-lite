@@ -13,8 +13,6 @@ class ContextBuilder:
     def __init__(self, system_prompt: str = ""):
         self.system_prompt = system_prompt
         self.messages: list[dict[str, Any]] = []
-        if self.system_prompt:
-            self.messages.append({"role": "system", "content": self.system_prompt})
 
     def add_user_message(self, content: str) -> None:
         """Add a user message to context."""
@@ -135,9 +133,15 @@ class ContextBuilder:
         )
         builder = cls(system_prompt=system)
         for item in history or []:
-            if item["role"] == "user":
-                builder.add_user_message(str(item["content"]))
-            else:
-                builder.add_assistant_message(str(item["content"]))
+            role = item["role"]
+            content_str = str(item["content"])
+            if role == "user":
+                builder.add_user_message(content_str)
+            elif role == "assistant":
+                builder.add_assistant_message(content_str)
+            elif role == "system":
+                # Consolidation summaries stored as "system" role
+                builder.add_user_message(f"[Previous conversation summary]: {content_str}")
+            # Skip "tool" role — orphaned without matching tool_calls
         builder.add_user_message(message)
         return builder

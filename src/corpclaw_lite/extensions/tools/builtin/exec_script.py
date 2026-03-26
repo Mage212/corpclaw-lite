@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,17 @@ from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
 DEFAULT_TIMEOUT = 30
 MAX_TIMEOUT = 120
 MAX_OUTPUT_BYTES = 50_000
+
+# Defense-in-depth: block destructive patterns regardless of ToolGuard rules
+BLOCKED_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"rm\s+(-[a-zA-Z]*[rf][a-zA-Z]*\s+)*/\s*$"),
+    re.compile(r"rm\s+(-[a-zA-Z]*[rf][a-zA-Z]*\s+)+/\b"),
+    re.compile(r"mkfs\."),
+    re.compile(r"dd\s+.*of=/dev/"),
+    re.compile(r":\(\)\{.*\|.*&\s*\};:"),  # fork bomb
+    re.compile(r">\s*/dev/sd[a-z]"),
+    re.compile(r"chmod\s+777\s+/\s*$"),
+]
 
 
 class ExecScriptTool(Tool):
@@ -40,6 +52,10 @@ class ExecScriptTool(Tool):
         timeout_val = max(1, min(timeout_val, MAX_TIMEOUT))
 
         workspace = Path.cwd().resolve()
+
+        for pat in BLOCKED_PATTERNS:
+            if pat.search(script):
+                return "Error: command blocked by built-in safety filter."
 
         try:
             proc = await asyncio.create_subprocess_shell(

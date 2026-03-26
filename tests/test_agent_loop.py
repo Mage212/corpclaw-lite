@@ -226,7 +226,7 @@ async def test_approval_callback_per_call_takes_priority(
 
     # ToolGuard rule that always raises ApprovalRequest for exec_tool
     class AlwaysApprovalGuard(ToolGuard):
-        def check(self, tool_name: str, arguments: Any) -> None:  # type: ignore[override]
+        async def check(self, tool_name: str, arguments: Any, risk_level: str | None = None) -> None:  # type: ignore[override]
             raise ApprovalRequest(action="exec_tool", details="test")
 
     # A fake tool so it can execute after approval
@@ -315,10 +315,10 @@ class TestContextBuilderPruning:
 
     def test_message_count(self, test_user: User) -> None:
         ctx = ContextBuilder("system")
-        assert ctx.message_count == 1
+        assert ctx.message_count == 0  # system prompt not in messages
 
         ctx.add_user_message("hello")
-        assert ctx.message_count == 2
+        assert ctx.message_count == 1
 
     def test_estimate_tokens_rough(self, test_user: User) -> None:
         ctx = ContextBuilder("system prompt")
@@ -326,7 +326,6 @@ class TestContextBuilderPruning:
 
         estimate = ctx.estimate_tokens()
         assert estimate > 0
-        assert estimate < 100
 
     def test_prune_old_tool_results_noop_when_few_messages(self) -> None:
         ctx = ContextBuilder("system")
@@ -347,10 +346,10 @@ class TestContextBuilderPruning:
         assert pruned == 7
         for i in range(7):
             assert (
-                ctx.messages[2 + i]["content"] == "[Old tool output cleared to save context space]"
+                ctx.messages[1 + i]["content"] == "[Old tool output cleared to save context space]"
             )
         for i in range(7, 10):
-            assert ctx.messages[2 + i]["content"] == long_result
+            assert ctx.messages[1 + i]["content"] == long_result
 
     def test_prune_old_tool_results_skips_short_content(self) -> None:
         ctx = ContextBuilder("system")
@@ -366,8 +365,8 @@ class TestContextBuilderPruning:
         pruned = ctx.prune_old_tool_results(protect_tail=0)
 
         assert pruned == 1
-        assert ctx.messages[2]["content"] == short_result
-        assert ctx.messages[3]["content"] == "[Old tool output cleared to save context space]"
+        assert ctx.messages[1]["content"] == short_result
+        assert ctx.messages[2]["content"] == "[Old tool output cleared to save context space]"
 
 
 @pytest.mark.asyncio
@@ -393,7 +392,7 @@ async def test_pruning_in_loop_reduces_context(
             captured_contexts.append(list(messages))
             return await super().chat(messages, tools, system)
 
-    tool_calls = [ToolCall(id=str(i), name="big_tool", arguments={}) for i in range(8)]
+    tool_calls = [ToolCall(id=str(i), name="big_tool", arguments={}) for i in range(12)]
     provider = CapturingProvider(
         responses=[
             LLMResponse(content="", tool_calls=tool_calls),

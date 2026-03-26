@@ -14,5 +14,5 @@ def test_network_policy(tmp_path: Path):
     assert "external.api.com" in policy.allowlist
 
     args = policy.to_docker_args()
-    assert args["network_mode"] == "bridge"
+    assert args["network_mode"] == "none"
     assert "ALLOWED_DOMAINS=external.api.com,my-internal-service:8080" in args["environment"]

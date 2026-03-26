@@ -10,7 +10,7 @@ from corpclaw_lite.users.models import User
 
 
 @pytest.fixture
-def memory(tmp_path: Path) -> SQLiteMemory:  # noqa: F821
+def memory(tmp_path) -> SQLiteMemory:
     return SQLiteMemory(db_path=str(tmp_path / "test.db"))
 
 
@@ -22,47 +22,52 @@ def user() -> User:
 # ── SQLiteMemory fact methods ────────────────────────────────────────────────
 
 
-def test_store_and_recall_fact(memory: SQLiteMemory) -> None:
-    memory.store_fact("u1", "name", "Alice")
-    memory.store_fact("u1", "role", "Engineer")
+@pytest.mark.asyncio
+async def test_store_and_recall_fact(memory: SQLiteMemory) -> None:
+    await memory.store_fact("u1", "name", "Alice")
+    await memory.store_fact("u1", "role", "Engineer")
 
-    facts = memory.recall_facts("u1")
+    facts = await memory.recall_facts("u1")
     keys = {f["key"] for f in facts}
     assert "name" in keys
     assert "role" in keys
     assert any(f["value"] == "Alice" for f in facts)
 
 
-def test_store_fact_upsert(memory: SQLiteMemory) -> None:
-    memory.store_fact("u1", "city", "Moscow")
-    memory.store_fact("u1", "city", "London")
+@pytest.mark.asyncio
+async def test_store_fact_upsert(memory: SQLiteMemory) -> None:
+    await memory.store_fact("u1", "city", "Moscow")
+    await memory.store_fact("u1", "city", "London")
 
-    facts = memory.recall_facts("u1")
+    facts = await memory.recall_facts("u1")
     city_facts = [f for f in facts if f["key"] == "city"]
     assert len(city_facts) == 1
     assert city_facts[0]["value"] == "London"
 
 
-def test_recall_facts_with_query(memory: SQLiteMemory) -> None:
-    memory.store_fact("u1", "language", "Python")
-    memory.store_fact("u1", "framework", "Django")
-    memory.store_fact("u1", "hobby", "chess")
+@pytest.mark.asyncio
+async def test_recall_facts_with_query(memory: SQLiteMemory) -> None:
+    await memory.store_fact("u1", "language", "Python")
+    await memory.store_fact("u1", "framework", "Django")
+    await memory.store_fact("u1", "hobby", "chess")
 
-    results = memory.recall_facts("u1", query="Py")
+    results = await memory.recall_facts("u1", query="Py")
     assert len(results) == 1
     assert results[0]["key"] == "language"
 
 
-def test_recall_facts_empty(memory: SQLiteMemory) -> None:
-    facts = memory.recall_facts("nonexistent")
+@pytest.mark.asyncio
+async def test_recall_facts_empty(memory: SQLiteMemory) -> None:
+    facts = await memory.recall_facts("nonexistent")
     assert facts == []
 
 
-def test_clear_facts(memory: SQLiteMemory) -> None:
-    memory.store_fact("u1", "a", "1")
-    memory.store_fact("u1", "b", "2")
-    memory.clear_facts("u1")
-    assert memory.recall_facts("u1") == []
+@pytest.mark.asyncio
+async def test_clear_facts(memory: SQLiteMemory) -> None:
+    await memory.store_fact("u1", "a", "1")
+    await memory.store_fact("u1", "b", "2")
+    await memory.clear_facts("u1")
+    assert await memory.recall_facts("u1") == []
 
 
 # ── MemoryStoreTool ──────────────────────────────────────────────────────────

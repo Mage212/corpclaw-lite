@@ -1,9 +1,13 @@
+# pyright: reportUnknownMemberType=false, reportUnknownVariableType=false, reportAttributeAccessIssue=false, reportUnknownArgumentType=false
 from __future__ import annotations
 
 import os
 import re
+from functools import partial
 from pathlib import Path
 from typing import Any
+
+import anyio
 
 from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
 
@@ -57,7 +61,8 @@ class ReadFileTool(Tool):
             if resolved.suffix.lower() in IMAGE_EXTENSIONS:
                 return "Error: Use read_image tool for image files."
 
-            return resolved.read_text(encoding="utf-8")
+            content = await anyio.to_thread.run_sync(partial(resolved.read_text, encoding="utf-8"))
+            return content
         except Exception as e:
             return f"Error reading file '{path}': {e}"
 
@@ -81,8 +86,10 @@ class WriteFileTool(Tool):
 
         try:
             resolved = resolve_and_validate_path(path)
-            resolved.parent.mkdir(parents=True, exist_ok=True)
-            resolved.write_text(content, encoding="utf-8")
+            await anyio.to_thread.run_sync(
+                partial(resolved.parent.mkdir, parents=True, exist_ok=True)
+            )
+            await anyio.to_thread.run_sync(partial(resolved.write_text, content, encoding="utf-8"))
             return f"Successfully wrote {len(content)} chars to '{resolved}'"
         except Exception as e:
             return f"Error writing file '{path}': {e}"
@@ -117,13 +124,13 @@ class EditFileTool(Tool):
             if not resolved.exists():
                 return f"Error: File '{resolved}' does not exist."
 
-            content = resolved.read_text(encoding="utf-8")
+            content = await anyio.to_thread.run_sync(partial(resolved.read_text, encoding="utf-8"))
             if old_text not in content:
                 return "Error: 'old_text' exactly not found in file."
 
             count = content.count(old_text)
             content = content.replace(old_text, new_text)
-            resolved.write_text(content, encoding="utf-8")
+            await anyio.to_thread.run_sync(partial(resolved.write_text, content, encoding="utf-8"))
 
             return f"Successfully edited file '{resolved}' (replaced {count} occurrence(s))."
         except Exception as e:
@@ -148,10 +155,14 @@ class ListFilesTool(Tool):
             if not resolved.exists() or not resolved.is_dir():
                 return f"Error: '{resolved}' is not a valid directory."
 
-            items: list[str] = []
-            for item in resolved.iterdir():
-                type_name = "DIR" if item.is_dir() else "FILE"
-                items.append(f"[{type_name}] {item.name}")
+            def _list_dir() -> list[str]:
+                items: list[str] = []
+                for item in resolved.iterdir():
+                    type_name = "DIR" if item.is_dir() else "FILE"
+                    items.append(f"[{type_name}] {item.name}")
+                return items
+
+            items = await anyio.to_thread.run_sync(_list_dir)
             return "\n".join(items) if items else "Directory is empty."
         except Exception as e:
             return f"Error listing directory '{path}': {e}"
@@ -179,36 +190,43 @@ class SearchFilesTool(Tool):
             if not resolved.exists() or not resolved.is_dir():
                 return f"Error: '{resolved}' is not a valid directory."
 
-            regex = re.compile(pattern)
-            results: list[str] = []
+            def _search() -> list[str]:
+                if len(pattern) > 200:
+                    return ["Error: pattern too long (max 200 chars)."]
+                try:
+                    regex = re.compile(pattern)
+                except re.error as e:
+                    return [f"Error: invalid regex pattern: {e}"]
 
-            for root, _, files in os.walk(resolved):
-                for file_name in files:
-                    file_path = Path(root) / file_name
-                    # Skip hidden or large typical non-text files quickly
-                    if (
-                        file_path.name.startswith(".")
-                        or file_path.suffix.lower() in IMAGE_EXTENSIONS
-                    ):
-                        continue
+                results: list[str] = []
+                for root, _, files in os.walk(resolved):
+                    for file_name in files:
+                        file_path = Path(root) / file_name
+                        if (
+                            file_path.name.startswith(".")
+                            or file_path.suffix.lower() in IMAGE_EXTENSIONS
+                        ):
+                            continue
 
-                    try:
-                        content = file_path.read_text(encoding="utf-8", errors="ignore")
-                        matches: list[str] = []
-                        for i, line in enumerate(content.splitlines(), start=1):
-                            if regex.search(line):
-                                matches.append(f"{i}: {line.strip()[:100]}")
+                        try:
+                            content = file_path.read_text(encoding="utf-8", errors="ignore")
+                            matches: list[str] = []
+                            for i, line in enumerate(content.splitlines(), start=1):
+                                if regex.search(line):
+                                    matches.append(f"{i}: {line.strip()[:100]}")
 
-                        if matches:
-                            rel_path = file_path.relative_to(resolved)
-                            results.append(f"--- {rel_path} ---")
-                            results.extend(matches)
-                            if len(results) > 100:
-                                results.append("... search truncated.")
-                                return "\n".join(results)
-                    except Exception:
-                        pass  # Ignore read errors
+                            if matches:
+                                rel_path = file_path.relative_to(resolved)
+                                results.append(f"--- {rel_path} ---")
+                                results.extend(matches)
+                                if len(results) > 100:
+                                    results.append("... search truncated.")
+                                    return results
+                        except Exception:
+                            pass
+                return results
 
+            results = await anyio.to_thread.run_sync(_search)
             return "\n".join(results) if results else "No matches found."
         except Exception as e:
             return f"Error searching files in '{path}': {e}"

@@ -158,14 +158,15 @@ class WebFetchTool(Tool):
         current_url = url
         current_ips = resolved_ips
         for _ in range(MAX_REDIRECTS):
-            # Pin DNS resolution to pre-resolved IPs when available
-            if current_ips:
-                parsed_u = urlparse(current_url)
+            # Pin DNS resolution to pre-resolved IPs when available.
+            # Skip IP-pinning for HTTPS — TLS cert validation already prevents
+            # DNS-rebinding (cert won't match a rogue IP).
+            parsed_u = urlparse(current_url)
+            if current_ips and parsed_u.scheme != "https":
                 hostname = parsed_u.hostname or ""
-                # Replace hostname with resolved IP in URL
                 url_to_fetch = current_url.replace(f"://{hostname}", f"://{current_ips[0]}", 1)
                 headers = {"Host": hostname}
-                verify = parsed_u.scheme == "https"
+                verify = False
             else:
                 url_to_fetch = current_url
                 headers = {}

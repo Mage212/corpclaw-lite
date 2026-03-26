@@ -26,37 +26,40 @@ def mock_provider():
     return provider
 
 
-def test_count_messages(memory):
+@pytest.mark.asyncio
+async def test_count_messages(memory):
     """Test message counting."""
-    assert memory.count_messages("u1") == 0
-    memory.add_message("u1", "user", "Hello")
-    assert memory.count_messages("u1") == 1
-    memory.add_message("u1", "assistant", "Hi!")
-    assert memory.count_messages("u1") == 2
+    assert await memory.count_messages("u1") == 0
+    await memory.add_message("u1", "user", "Hello")
+    assert await memory.count_messages("u1") == 1
+    await memory.add_message("u1", "assistant", "Hi!")
+    assert await memory.count_messages("u1") == 2
     # Different user doesn't affect count
-    memory.add_message("u2", "user", "Hey")
-    assert memory.count_messages("u1") == 2
+    await memory.add_message("u2", "user", "Hey")
+    assert await memory.count_messages("u1") == 2
 
 
-def test_get_oldest_message_ids(memory):
+@pytest.mark.asyncio
+async def test_get_oldest_message_ids(memory):
     """Test getting oldest message IDs."""
     for i in range(5):
-        memory.add_message("u1", "user", f"Message {i}")
-    ids = memory.get_oldest_message_ids("u1", 3)
+        await memory.add_message("u1", "user", f"Message {i}")
+    ids = await memory.get_oldest_message_ids("u1", 3)
     assert len(ids) == 3
 
 
-def test_replace_oldest(memory):
+@pytest.mark.asyncio
+async def test_replace_oldest(memory):
     """Test replacing oldest messages with summary."""
     for i in range(6):
-        memory.add_message("u1", "user", f"Message {i}")
+        await memory.add_message("u1", "user", f"Message {i}")
 
-    assert memory.count_messages("u1") == 6
-    memory.replace_oldest("u1", count=3, summary="Summary of first 3 messages")
+    assert await memory.count_messages("u1") == 6
+    await memory.replace_oldest("u1", count=3, summary="Summary of first 3 messages")
 
     # 6 - 3 deleted + 1 summary = 4
-    assert memory.count_messages("u1") == 4
-    history = memory.get_history("u1", limit=10)
+    assert await memory.count_messages("u1") == 4
+    history = await memory.get_history("u1", limit=10)
     # Summary should appear somewhere in the history
     all_content = " ".join(str(m["content"]) for m in history)
     assert "[Conversation summary]" in all_content
@@ -65,7 +68,7 @@ def test_replace_oldest(memory):
 @pytest.mark.asyncio
 async def test_consolidator_below_threshold(memory, mock_provider):
     """No consolidation when below threshold."""
-    memory.add_message("u1", "user", "Hello")
+    await memory.add_message("u1", "user", "Hello")
     consolidator = MemoryConsolidator(mock_provider, threshold=10)
     result = await consolidator.maybe_consolidate(memory, "u1")
     assert result is False
@@ -76,23 +79,23 @@ async def test_consolidator_below_threshold(memory, mock_provider):
 async def test_consolidator_above_threshold(memory, mock_provider):
     """Consolidation triggers when above threshold."""
     for i in range(12):
-        memory.add_message("u1", "user", f"Message {i}")
-        memory.add_message("u1", "assistant", f"Reply {i}")
+        await memory.add_message("u1", "user", f"Message {i}")
+        await memory.add_message("u1", "assistant", f"Reply {i}")
 
     consolidator = MemoryConsolidator(mock_provider, threshold=20)
     result = await consolidator.maybe_consolidate(memory, "u1")
     assert result is True
     mock_provider.chat.assert_called_once()
     # Messages should be reduced
-    assert memory.count_messages("u1") < 24
+    assert await memory.count_messages("u1") < 24
 
 
 @pytest.mark.asyncio
 async def test_consolidator_formats_messages(memory, mock_provider):
     """Verify the summarization prompt includes message content."""
     for i in range(8):
-        memory.add_message("u1", "user", f"Question {i}")
-        memory.add_message("u1", "assistant", f"Answer {i}")
+        await memory.add_message("u1", "user", f"Question {i}")
+        await memory.add_message("u1", "assistant", f"Answer {i}")
 
     consolidator = MemoryConsolidator(mock_provider, threshold=10)
     await consolidator.maybe_consolidate(memory, "u1")

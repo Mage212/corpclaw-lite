@@ -1,16 +1,24 @@
+# pyright: reportUnknownMemberType=false, reportUnknownVariableType=false, reportAttributeAccessIssue=false
 from __future__ import annotations
 
 import json
 import logging
 import sqlite3
+from functools import partial
 from pathlib import Path
 from typing import Any
+
+import anyio
 
 logger = logging.getLogger(__name__)
 
 
 class SQLiteMemory:
-    """Persistent storage for agent conversation history and facts using SQLite."""
+    """Persistent storage for agent conversation history and facts using SQLite.
+
+    All public methods are async and delegate blocking SQLite I/O to a thread pool
+    via ``anyio.to_thread.run_sync`` to avoid blocking the event loop.
+    """
 
     def __init__(self, db_path: str = "memory.db"):
         self.db_path = Path("data") / db_path
@@ -60,10 +68,9 @@ class SQLiteMemory:
         except Exception as e:
             logger.error("Failed to initialize SQLite Memory: %s", e)
 
-    def add_message(self, user_id: str, role: str, content: str | dict[str, Any]) -> None:
-        """Add a message to the memory store."""
-        content_str = json.dumps(content) if isinstance(content, dict) else str(content)
+    # ── Messages ─────────────────────────────────────────────────────────────
 
+    def _sync_add_message(self, user_id: str, role: str, content_str: str) -> None:
         try:
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute(
@@ -73,8 +80,12 @@ class SQLiteMemory:
         except Exception as e:
             logger.error("Failed to insert message into memory for user %s: %s", user_id, e)
 
-    def get_history(self, user_id: str, limit: int = 20) -> list[dict[str, Any]]:
-        """Retrieve recent conversation history for a user."""
+    async def add_message(self, user_id: str, role: str, content: str | dict[str, Any]) -> None:
+        """Add a message to the memory store."""
+        content_str = json.dumps(content) if isinstance(content, dict) else str(content)
+        await anyio.to_thread.run_sync(partial(self._sync_add_message, user_id, role, content_str))
+
+    def _sync_get_history(self, user_id: str, limit: int) -> list[dict[str, Any]]:
         try:
             with sqlite3.connect(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
@@ -89,34 +100,36 @@ class SQLiteMemory:
                 )
                 rows = cursor.fetchall()
 
-                # Fetched DESC (newest first) → reverse to chronological order.
                 history: list[dict[str, Any]] = []
                 for r in reversed(rows):
                     role = r["role"]
                     content_str = r["content"]
-
                     try:
                         content: Any = json.loads(content_str)
                     except json.JSONDecodeError:
                         content = content_str
-
                     history.append({"role": role, "content": content})
-
                 return history
         except Exception as e:
             logger.error("Failed to fetch history for user %s: %s", user_id, e)
             return []
 
-    def clear(self, user_id: str) -> None:
-        """Clear the history for a user."""
+    async def get_history(self, user_id: str, limit: int = 20) -> list[dict[str, Any]]:
+        """Retrieve recent conversation history for a user."""
+        return await anyio.to_thread.run_sync(partial(self._sync_get_history, user_id, limit))
+
+    def _sync_clear(self, user_id: str) -> None:
         try:
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute("DELETE FROM messages WHERE user_id = ?", (str(user_id),))
         except Exception as e:
             logger.error("Failed to clear memory for user %s: %s", user_id, e)
 
-    def count_messages(self, user_id: str) -> int:
-        """Return the total number of messages for a user."""
+    async def clear(self, user_id: str) -> None:
+        """Clear the history for a user."""
+        await anyio.to_thread.run_sync(partial(self._sync_clear, user_id))
+
+    def _sync_count_messages(self, user_id: str) -> int:
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.execute(
@@ -129,8 +142,11 @@ class SQLiteMemory:
             logger.error("Failed to count messages for user %s: %s", user_id, e)
             return 0
 
-    def get_oldest_message_ids(self, user_id: str, count: int) -> list[int]:
-        """Return IDs of the N oldest messages for a user."""
+    async def count_messages(self, user_id: str) -> int:
+        """Return the total number of messages for a user."""
+        return await anyio.to_thread.run_sync(partial(self._sync_count_messages, user_id))
+
+    def _sync_get_oldest_message_ids(self, user_id: str, count: int) -> list[int]:
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.execute(
@@ -147,14 +163,16 @@ class SQLiteMemory:
             logger.error("Failed to get oldest message IDs for user %s: %s", user_id, e)
             return []
 
-    def replace_oldest(self, user_id: str, count: int, summary: str) -> None:
-        """Delete the N oldest messages and insert a consolidation summary.
+    async def get_oldest_message_ids(self, user_id: str, count: int) -> list[int]:
+        """Return IDs of the N oldest messages for a user."""
+        return await anyio.to_thread.run_sync(
+            partial(self._sync_get_oldest_message_ids, user_id, count)
+        )
 
-        Runs in a single transaction to avoid data loss.
-        """
+    def _sync_replace_oldest(self, user_id: str, count: int, summary: str) -> None:
         try:
             with sqlite3.connect(self.db_path) as conn:
-                ids = self.get_oldest_message_ids(user_id, count)
+                ids = self._sync_get_oldest_message_ids(user_id, count)
                 if not ids:
                     return
                 placeholders = ",".join("?" for _ in ids)
@@ -169,10 +187,16 @@ class SQLiteMemory:
         except Exception as e:
             logger.error("Failed to consolidate messages for user %s: %s", user_id, e)
 
+    async def replace_oldest(self, user_id: str, count: int, summary: str) -> None:
+        """Delete the N oldest messages and insert a consolidation summary.
+
+        Runs in a single transaction to avoid data loss.
+        """
+        await anyio.to_thread.run_sync(partial(self._sync_replace_oldest, user_id, count, summary))
+
     # ── Fact storage ─────────────────────────────────────────────────────────
 
-    def store_fact(self, user_id: str, key: str, value: str) -> None:
-        """Upsert a key-value fact for a user."""
+    def _sync_store_fact(self, user_id: str, key: str, value: str) -> None:
         try:
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute(
@@ -188,10 +212,13 @@ class SQLiteMemory:
         except Exception as e:
             logger.error("Failed to store fact for user %s: %s", user_id, e)
 
-    def recall_facts(
-        self, user_id: str, query: str | None = None, limit: int = 10
+    async def store_fact(self, user_id: str, key: str, value: str) -> None:
+        """Upsert a key-value fact for a user."""
+        await anyio.to_thread.run_sync(partial(self._sync_store_fact, user_id, key, value))
+
+    def _sync_recall_facts(
+        self, user_id: str, query: str | None, limit: int
     ) -> list[dict[str, str]]:
-        """Recall facts for a user, optionally filtered by LIKE search on key and value."""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
@@ -219,10 +246,21 @@ class SQLiteMemory:
             logger.error("Failed to recall facts for user %s: %s", user_id, e)
             return []
 
-    def clear_facts(self, user_id: str) -> None:
-        """Delete all facts for a user."""
+    async def recall_facts(
+        self, user_id: str, query: str | None = None, limit: int = 10
+    ) -> list[dict[str, str]]:
+        """Recall facts for a user, optionally filtered by LIKE search on key and value."""
+        return await anyio.to_thread.run_sync(
+            partial(self._sync_recall_facts, user_id, query, limit)
+        )
+
+    def _sync_clear_facts(self, user_id: str) -> None:
         try:
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute("DELETE FROM memory_facts WHERE user_id = ?", (str(user_id),))
         except Exception as e:
             logger.error("Failed to clear facts for user %s: %s", user_id, e)
+
+    async def clear_facts(self, user_id: str) -> None:
+        """Delete all facts for a user."""
+        await anyio.to_thread.run_sync(partial(self._sync_clear_facts, user_id))

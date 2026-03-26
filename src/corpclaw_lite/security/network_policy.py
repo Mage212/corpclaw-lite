@@ -40,10 +40,13 @@ class NetworkPolicy:
         # but true lockdown is achieved via container orchestration networks.
         # This returns a simplified representation for ContainerManager.
 
-        # NemoClaw pattern: "none" network + specific proxies, or restricted bridge
+        # NemoClaw pattern: deny-by-default via network_mode="none".
+        # True allowlist-based networking requires Docker custom network + iptables.
+        logger.warning(
+            "NetworkPolicy: using network_mode='none' (deny-by-default). "
+            "Allowlist-based networking requires Docker custom network + iptables setup."
+        )
         return {
-            "network_mode": "bridge",
-            # We would add iptables rules here via startup script or specific DNS mappings
-            # For phase 2 mock, we pass it as an environment variable to the container wrapper.
+            "network_mode": "none",
             "environment": [f"ALLOWED_DOMAINS={','.join(self.allowlist)}"],
         }

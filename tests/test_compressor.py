@@ -56,54 +56,6 @@ class TestShouldCompress:
         assert compressor.should_compress(messages)
 
 
-class TestPruneOldToolResults:
-    def test_no_tool_results(self, provider: MockProvider, settings: CompressionSettings) -> None:
-        compressor = ContextCompressor(provider, settings)
-        messages = [
-            {"role": "system", "content": "sys"},
-            {"role": "user", "content": "hi"},
-        ]
-        result = compressor._prune_old_tool_results(messages)
-        assert result == messages
-
-    def test_prunes_old_long_results(
-        self, provider: MockProvider, settings: CompressionSettings
-    ) -> None:
-        compressor = ContextCompressor(provider, settings)
-        long_result = "x" * 500
-        messages = [
-            {"role": "system", "content": "sys"},
-            {"role": "tool", "tool_call_id": "1", "name": "t", "content": long_result},
-            {"role": "tool", "tool_call_id": "2", "name": "t", "content": long_result},
-            {"role": "tool", "tool_call_id": "3", "name": "t", "content": long_result},
-            {"role": "tool", "tool_call_id": "4", "name": "t", "content": long_result},
-            {"role": "tool", "tool_call_id": "5", "name": "t", "content": long_result},
-            {"role": "tool", "tool_call_id": "6", "name": "t", "content": long_result},
-            {"role": "tool", "tool_call_id": "7", "name": "t", "content": long_result},
-            {"role": "user", "content": "done"},
-        ]
-        result = compressor._prune_old_tool_results(messages, protect_tail_count=3)
-
-        assert result[1]["content"] == PLACEHOLDER
-        assert result[2]["content"] == PLACEHOLDER
-        assert result[3]["content"] == PLACEHOLDER
-        assert result[4]["content"] == PLACEHOLDER
-        assert result[5]["content"] == long_result
-        assert result[6]["content"] == long_result
-        assert result[7]["content"] == long_result
-
-    def test_keeps_short_results(
-        self, provider: MockProvider, settings: CompressionSettings
-    ) -> None:
-        compressor = ContextCompressor(provider, settings)
-        short_result = "short"
-        messages = [
-            {"role": "tool", "tool_call_id": "1", "name": "t", "content": short_result},
-        ]
-        result = compressor._prune_old_tool_results(messages, protect_tail_count=0)
-        assert result[0]["content"] == short_result
-
-
 class TestSanitizeToolPairs:
     def test_no_orphans(self, provider: MockProvider, settings: CompressionSettings) -> None:
         compressor = ContextCompressor(provider, settings)

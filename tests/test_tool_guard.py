@@ -140,11 +140,12 @@ class MockSmartProvider:
 
 @pytest.mark.asyncio
 async def test_smart_approval_approve(tmp_path: Path) -> None:
+    """Smart approval auto-approves MEDIUM severity rules when LLM says APPROVE."""
     rules_file = tmp_path / "rules.yaml"
     rules_file.write_text(
         "rules:\n"
         "  - id: NEEDS_APPROVAL\n"
-        "    severity: HIGH\n"
+        "    severity: MEDIUM\n"
         "    tool: exec_script\n"
         "    match_param: script\n"
         "    match_pattern: python\n"
@@ -159,11 +160,12 @@ async def test_smart_approval_approve(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_smart_approval_deny(tmp_path: Path) -> None:
+    """Smart approval blocks MEDIUM severity rules when LLM says DENY."""
     rules_file = tmp_path / "rules.yaml"
     rules_file.write_text(
         "rules:\n"
         "  - id: NEEDS_APPROVAL\n"
-        "    severity: HIGH\n"
+        "    severity: MEDIUM\n"
         "    tool: exec_script\n"
         "    match_param: script\n"
         "    match_pattern: python\n"
@@ -179,11 +181,12 @@ async def test_smart_approval_deny(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_smart_approval_escalate_to_manual(tmp_path: Path) -> None:
+    """Smart approval escalates to manual ApprovalRequest when LLM says ESCALATE."""
     rules_file = tmp_path / "rules.yaml"
     rules_file.write_text(
         "rules:\n"
         "  - id: NEEDS_APPROVAL\n"
-        "    severity: HIGH\n"
+        "    severity: MEDIUM\n"
         "    tool: exec_script\n"
         "    match_param: script\n"
         "    match_pattern: python\n"
@@ -203,13 +206,35 @@ async def test_smart_approval_no_provider_falls_back(tmp_path: Path) -> None:
     rules_file.write_text(
         "rules:\n"
         "  - id: NEEDS_APPROVAL\n"
-        "    severity: HIGH\n"
+        "    severity: MEDIUM\n"
         "    tool: exec_script\n"
         "    match_param: script\n"
         "    match_pattern: python\n"
         "    require_approval: true\n"
     )
     guard = ToolGuard(provider=None, approval_mode="smart")
+    guard.load_file(rules_file)
+
+    with pytest.raises(ApprovalRequest):
+        await guard.check("exec_script", {"script": "python script.py"})
+
+
+@pytest.mark.asyncio
+async def test_severity_cap_skips_smart_approval_for_high(tmp_path: Path) -> None:
+    """HIGH/CRITICAL severity rules must always require human approval, never smart approval."""
+    rules_file = tmp_path / "rules.yaml"
+    rules_file.write_text(
+        "rules:\n"
+        "  - id: HIGH_APPROVAL\n"
+        "    severity: HIGH\n"
+        "    tool: exec_script\n"
+        "    match_param: script\n"
+        "    match_pattern: python\n"
+        "    require_approval: true\n"
+    )
+    # Provider would approve, but severity cap should prevent smart approval
+    provider = MockSmartProvider("APPROVE - this is safe")
+    guard = ToolGuard(provider=provider, approval_mode="smart")
     guard.load_file(rules_file)
 
     with pytest.raises(ApprovalRequest):
