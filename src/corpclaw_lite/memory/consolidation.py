@@ -77,8 +77,8 @@ class MemoryConsolidator:
         lines: list[str] = []
         for msg in messages:
             role = msg.get("role", "unknown")
-            content = msg.get("content", "")
+            content: Any = msg.get("content", "")
             if isinstance(content, dict):
-                content = str(content)
+                content = str(dict(content))  # type: ignore[call-overload]
             lines.append(f"{role}: {content}")
         return "\n".join(lines)

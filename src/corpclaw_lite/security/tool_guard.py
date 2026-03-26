@@ -171,7 +171,8 @@ Respond with ONLY ONE WORD:
 Response:"""
 
         try:
-            assert self._provider is not None
+            if self._provider is None:
+                return "escalate"
             response = await asyncio.wait_for(
                 self._provider.chat(messages=[{"role": "user", "content": prompt}], tools=None),
                 timeout=10.0,

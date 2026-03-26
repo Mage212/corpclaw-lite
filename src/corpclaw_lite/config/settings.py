@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings
@@ -59,7 +60,7 @@ class AgentSettings(BaseModel):
     max_history: int = 20
     consolidation_threshold: int = 30
     consolidation_enabled: bool = True
-    approval_mode: str = "manual"
+    approval_mode: Literal["manual", "smart", "off"] = "manual"
     compression: CompressionSettings = CompressionSettings()
 
 

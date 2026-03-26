@@ -141,6 +141,7 @@ class AgentLoop:
                     results = await self._execute_parallel(
                         response.tool_calls, user, _approval_cb, on_tool_start
                     )
+                    should_stop = False
                     for tc, result in zip(response.tool_calls, results, strict=True):
                         context.add_tool_result(tc.id, tc.name, result)
                         if progress.detect_loop(tc.name, result):
@@ -148,7 +149,10 @@ class AgentLoop:
                                 "System Guard: You seem to be stuck in a loop repeating the same"
                                 " error. Please change your strategy or stop using this tool."
                             )
+                            should_stop = True
                             break
+                    if should_stop:
+                        break
                 else:
                     should_stop = False
                     for tc in response.tool_calls:
@@ -180,10 +184,12 @@ class AgentLoop:
         return fallback
 
     def _can_parallelize(self, tool_calls: list[ToolCall]) -> bool:
-        """Check if all tools in batch can be safely executed in parallel."""
+        """Check if all tools in batch can be safely executed in parallel.
+
+        ToolGuard checks are performed inside _execute_single_tool for each tool,
+        so parallel execution is safe even with ToolGuard present.
+        """
         if len(tool_calls) <= 1:
-            return False
-        if self._tool_guard:
             return False
 
         for tc in tool_calls:

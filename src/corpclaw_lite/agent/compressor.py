@@ -110,7 +110,7 @@ class ContextCompressor:
         protected: set[int] = (
             set(tool_indices[-protect_tail_count:]) if protect_tail_count > 0 else set()
         )
-        result = []
+        result: list[dict[str, Any]] = []
         pruned = 0
 
         for i, msg in enumerate(messages):
@@ -155,7 +155,7 @@ class ContextCompressor:
         if not orphaned_results and not orphaned_calls:
             return messages
 
-        result = []
+        result: list[dict[str, Any]] = []
         for msg in messages:
             if msg.get("role") == "tool" and msg.get("tool_call_id") in orphaned_results:
                 continue
@@ -219,7 +219,7 @@ Summary:"""
 
     def _format_turns_for_summary(self, turns: list[dict[str, Any]], max_chars: int = 8000) -> str:
         """Format turns for summary prompt, truncating if needed."""
-        lines = []
+        lines: list[str] = []
         total = 0
 
         for msg in turns:

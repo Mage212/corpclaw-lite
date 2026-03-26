@@ -101,7 +101,9 @@ class ContextBuilder:
             return 0
 
         pruned = 0
-        protected_set = set(tool_result_indices[-protect_tail:]) if protect_tail > 0 else set()
+        protected_set: set[int] = (
+            set(tool_result_indices[-protect_tail:]) if protect_tail > 0 else set()
+        )
 
         for idx in tool_result_indices:
             if idx in protected_set:

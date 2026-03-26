@@ -10,7 +10,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from corpclaw_lite.channels.telegram.callback_data import (
     CB_DELETE_BACK,
@@ -399,15 +399,16 @@ class DeleteBrowserHandler:
             )
             return
 
-        state = context.user_data.get(DELETE_STATE_KEY)
-        if not isinstance(state, dict):
+        state_raw = context.user_data.get(DELETE_STATE_KEY)
+        if not isinstance(state_raw, dict):
             await safe_edit_message(
                 update, "Состояние файлового менеджера устарело. Вызовите /delete снова."
             )
             return
 
+        state: dict[str, Any] = cast("dict[str, Any]", state_raw)
         workspace = self._workspace
-        current_path = Path(state.get("current_path", str(workspace)))
+        current_path = Path(str(state.get("current_path", str(workspace))))
         current_page = int(state.get("page", 0))
 
         if data == CB_DELETE_CANCEL:
@@ -489,10 +490,11 @@ class DeleteBrowserHandler:
             index = int(data[len(prefix) :])
         except ValueError:
             return None
-        entries = state.get("entries")
-        if not isinstance(entries, list) or index < 0 or index >= len(entries):
+        entries_raw = state.get("entries")
+        entries_typed = cast("list[Any]", entries_raw)
+        if not isinstance(entries_raw, list) or index < 0 or index >= len(entries_typed):
             return None
-        entry = entries[index]
+        entry = entries_typed[index]
         if not isinstance(entry, DeleteEntry):
             return None
         return entry
@@ -600,14 +602,15 @@ class DeleteBrowserHandler:
                 update, "Состояние файлового менеджера устарело. Вызовите /delete снова."
             )
             return
-        state = context.user_data.get(DELETE_STATE_KEY)
-        if not isinstance(state, dict):
+        state_raw = context.user_data.get(DELETE_STATE_KEY)
+        if not isinstance(state_raw, dict):
             await safe_edit_message(
                 update, "Состояние файлового менеджера устарело. Вызовите /delete снова."
             )
             return
 
-        selected_target = state.get("selected_target")
+        state: dict[str, Any] = cast("dict[str, Any]", state_raw)
+        selected_target: str | None = state.get("selected_target")
         if not isinstance(selected_target, str) or not selected_target:
             self._clear_state(context.user_data)
             await safe_edit_message(update, "Файл для удаления не выбран. Вызовите /delete снова.")
@@ -628,7 +631,7 @@ class DeleteBrowserHandler:
             await safe_edit_message(update, "Файл уже удален или недоступен.")
             return
 
-        selected_kind = state.get("selected_kind")
+        selected_kind: str | None = state.get("selected_kind")
         if target_path.is_dir():
             if selected_kind != "directory":
                 self._clear_state(context.user_data)
@@ -644,7 +647,7 @@ class DeleteBrowserHandler:
             next_page = 0
         else:
             await _path_delete_async(target_path)
-            next_path = Path(state.get("current_path", str(workspace)))
+            next_path = Path(str(state.get("current_path", str(workspace))))
             next_page = int(state.get("page", 0))
 
         await self._render_browser(

@@ -184,7 +184,7 @@ class UserManager:
         try:
             data = json.loads(self._revoked_path.read_text("utf-8"))
             if isinstance(data, list):
-                return {int(item) for item in data if isinstance(item, (int, float, str))}
+                return {int(item) for item in data if isinstance(item, (int, float, str))}  # type: ignore[misc]
         except Exception as e:
             logger.warning("Failed to load revoked sessions: %s", e)
         return set()

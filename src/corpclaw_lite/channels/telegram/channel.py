@@ -145,7 +145,7 @@ class TelegramChannel(Channel):
     async def _is_duplicate(self, update: Update) -> bool:
         """Return True if this update_id was already processed."""
         uid = update.update_id
-        if uid is None:
+        if uid == 0:
             return False
         async with self._dedup_lock:
             if uid in self._processed_ids:
@@ -265,7 +265,7 @@ class TelegramChannel(Channel):
         if not update.effective_chat:
             return
         if self._tool_registry:
-            tools = self._tool_registry.list_tools()
+            tools = self._tool_registry.list_all()
             if tools:
                 lines = [f"• {t.name} — {t.description.split('.')[0]}" for t in tools]
                 text = "🔧 Доступные инструменты:\n\n" + "\n".join(lines)
