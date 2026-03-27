@@ -13,10 +13,7 @@ from __future__ import annotations
 
 import re
 
-import mistletoe
-from mistletoe.block_token import BlockCode, remove_token
-from telegramify_markdown import _update_block, escape_latex
-from telegramify_markdown.render import TelegramMarkdownRenderer
+from telegramify_markdown import markdownify
 
 # Limits
 TELEGRAM_MAX_MESSAGE_LENGTH = 4096
@@ -102,21 +99,8 @@ def convert_markdown_tables(text: str) -> str:
 
 
 def _markdownify(text: str) -> str:
-    """Custom markdownify with our rendering rules.
-
-    Wraps TelegramMarkdownRenderer directly so we can tweak token rules
-    inside the context manager.
-
-    Custom rules:
-      - Disable indented code blocks (only fenced ``` blocks are code).
-    """
-    with TelegramMarkdownRenderer(normalize_whitespace=False) as renderer:
-        # Avoid treating indented lines as code blocks
-        remove_token(BlockCode)
-        content = escape_latex(text)
-        document = mistletoe.Document(content)
-        _update_block(document)
-        return str(renderer.render(document))
+    """Convert standard Markdown to Telegram MarkdownV2 format."""
+    return markdownify(text, normalize_whitespace=False)
 
 
 def convert_markdown(text: str) -> str:
