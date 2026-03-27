@@ -1,7 +1,7 @@
 # CorpClaw Lite — Архитектура проекта
 
 > Версия документа: 2026-03-27  
-> Версия проекта: Phase 1 (MVP) + Hermes Integration
+> Версия проекта: Phase 5 (Polishing) — 67 модулей, ~8K LOC, 301 тест
 
 ---
 
@@ -190,11 +190,16 @@ ToolGuard проверки выполняются **внутри** `_execute_sin
 **Решение:** Парсинг tool calls из XML-разметки:
 
 ```xml
-<invoke>
+<tool_call>
 <name>tool_name</name>
 <arguments>{"key": "value"}</arguments>
-</invoke>
+</tool_call>
 ```
+
+**Двухуровневый парсинг (openai.py):**
+1. **Native:** Парсинг `message.tool_calls` из OpenAI/Anthropic SDK
+2. **XML Fallback:** Если native пуст, но ответ содержит текст — `parse_xml_tool_call(content)`
+3. **Repair Loop:** При ошибке JSON внутри `<arguments>` — автоматический retry с промптом для LLM
 
 **Парсер:**
 - Regex-based extraction
@@ -640,16 +645,17 @@ marketing:
 
 | Компонент | LOC | Файлов |
 |-----------|-----|--------|
-| Agent Core | ~1130 | 7 |
-| LLM Providers | ~480 | 5 |
-| Extensions | ~1960 | 20+ |
-| Security | ~430 | 4 |
-| Channels | ~2080 | 12 |
-| Container | ~370 | 4 |
-| Memory | ~350 | 2 |
-| Config/RBAC | ~590 | 7 |
-| Logging | ~140 | 3 |
-| **Итого** | **~7800** | **~68** |
+| Agent Core | 1136 | 7 |
+| LLM Providers | 482 | 4 |
+| Extensions | 1964 | 23 |
+| Security | 446 | 4 |
+| Channels | 2078 | 12 |
+| Container | 426 | 4 |
+| Memory | 350 | 2 |
+| Config + RBAC | 548 | 6 |
+| Logging | 136 | 3 |
+| **Исходники** | **~7975** | **67** |
+| **Тесты** | **~4895** | **43** |
 
 ---
 
