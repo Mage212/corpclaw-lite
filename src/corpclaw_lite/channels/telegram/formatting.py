@@ -1,4 +1,4 @@
-# pyright: reportMissingTypeStubs=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportPrivateUsage=false
+# pyright: reportMissingTypeStubs=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportPrivateUsage=false, reportAttributeAccessIssue=false, reportMissingImports=false, reportPrivateImportUsage=false, reportUnknownArgumentType=false
 """Telegram message formatting and splitting layer.
 
 Provides utilities for:

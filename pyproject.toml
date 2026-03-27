@@ -27,7 +27,7 @@ corpclaw-lite = "corpclaw_lite.cli:main"
 [tool.pyright]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
-venvPath = ".."
+venvPath = "."
 venv = ".venv"
 
 [tool.pytest.ini_options]
