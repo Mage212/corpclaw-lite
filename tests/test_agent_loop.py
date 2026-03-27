@@ -322,12 +322,6 @@ class TestContextBuilderPruning:
         ctx.add_user_message("hello")
         assert ctx.message_count == 1
 
-    def test_estimate_tokens_rough(self, test_user: User) -> None:
-        ctx = ContextBuilder("system prompt")
-        ctx.add_user_message("a" * 100)
-
-        estimate = ctx.estimate_tokens()
-        assert estimate > 0
 
     def test_prune_old_tool_results_noop_when_few_messages(self) -> None:
         ctx = ContextBuilder("system")

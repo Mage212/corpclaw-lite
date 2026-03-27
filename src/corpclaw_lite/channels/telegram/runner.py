@@ -64,10 +64,10 @@ async def run_telegram_bot(token: str) -> None:
             return
 
         # ── Get or register user ──────────────────────────────────────────
-        user = user_manager.get_by_telegram_id(tid)
+        user = await user_manager.async_get_by_telegram_id(tid)
         if not user:
             dept = user_manager.get_whitelist_department(tid)
-            user = user_manager.create_user(telegram_id=tid, department=dept)
+            user = await user_manager.async_create_user(telegram_id=tid, department=dept)
             logger.info("Auto-registered user telegram_id=%d (dept=%s)", tid, dept)
 
         # ── Rate limiting ─────────────────────────────────────────────────

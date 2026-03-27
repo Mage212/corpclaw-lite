@@ -65,19 +65,6 @@ class ContextBuilder:
         """Return the number of messages in context."""
         return len(self.messages)
 
-    def estimate_tokens(self) -> int:
-        """Rough token estimate using len/4 heuristic."""
-        total = 0
-        for msg in self.messages:
-            content = msg.get("content")
-            if isinstance(content, str):
-                total += len(content) // 4
-            elif content is None:
-                total += 0
-            else:
-                total += len(str(content)) // 4
-        return total
-
     def prune_old_tool_results(self, protect_tail: int = 6, min_length: int = 200) -> int:
         """Replace old tool results (>min_length chars) with placeholder.
 

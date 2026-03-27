@@ -1,9 +1,13 @@
+# pyright: reportUnknownMemberType=false, reportUnknownVariableType=false, reportAttributeAccessIssue=false
 from __future__ import annotations
 
 import json
 import logging
 import sqlite3
+from functools import partial
 from pathlib import Path
+
+import anyio
 
 from corpclaw_lite.users.models import User
 
@@ -222,3 +226,15 @@ class UserManager:
     def is_session_revoked(self, telegram_id: int) -> bool:
         """Check if a user's session is revoked."""
         return telegram_id in self._load_revoked()
+
+    # ── Async wrappers (for use from event loop) ─────────────────────────────
+
+    async def async_get_by_telegram_id(self, telegram_id: int) -> User | None:
+        """Async wrapper around get_by_telegram_id (runs SQLite in thread)."""
+        return await anyio.to_thread.run_sync(partial(self.get_by_telegram_id, telegram_id))
+
+    async def async_create_user(self, telegram_id: int, department: str, name: str = "") -> User:
+        """Async wrapper around create_user (runs SQLite in thread)."""
+        return await anyio.to_thread.run_sync(
+            partial(self.create_user, telegram_id=telegram_id, department=department, name=name)
+        )

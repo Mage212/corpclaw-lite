@@ -31,7 +31,7 @@ def build_agent_stack() -> tuple[AgentLoop, UserManager, ToolRegistry]:
     """
     from corpclaw_lite.agent.subagent import SubagentDispatcher
     from corpclaw_lite.agent.vision import VisionProcessor
-    from corpclaw_lite.config.settings import AgentSettings, LLMSettings, ProviderSettings
+    from corpclaw_lite.config.settings import AgentSettings, ProviderSettings
     from corpclaw_lite.departments.manager import DepartmentManager
     from corpclaw_lite.departments.permissions import PermissionChecker
     from corpclaw_lite.extensions.subagents.registry import SubagentRegistry
@@ -57,8 +57,9 @@ def build_agent_stack() -> tuple[AgentLoop, UserManager, ToolRegistry]:
     if api_key:
         from corpclaw_lite.llm.anthropic import AnthropicProvider
 
+        anthropic_model = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
         provider = AnthropicProvider(
-            ProviderSettings(type="anthropic", model="claude-3-haiku-20240307", api_key=api_key)
+            ProviderSettings(type="anthropic", model=anthropic_model, api_key=api_key)
         )
     else:
         base_url = os.environ.get("OPENAI_BASE_URL", "http://localhost:11434/v1")
@@ -93,6 +94,9 @@ def build_agent_stack() -> tuple[AgentLoop, UserManager, ToolRegistry]:
         dept_manager.load_file(dept_config)
     permission_checker = PermissionChecker(dept_manager)
 
+    # ── Agent Settings ─────────────────────────────────────────────────────────
+    agent_settings = AgentSettings()
+
     # ── Subagents ─────────────────────────────────────────────────────────────
     subagent_registry = SubagentRegistry()
     subagent_dir = Path("config/subagents")
@@ -103,7 +107,7 @@ def build_agent_stack() -> tuple[AgentLoop, UserManager, ToolRegistry]:
         dispatcher = SubagentDispatcher(
             provider=provider,
             main_registry=registry,
-            settings=AgentSettings(),
+            settings=agent_settings,
             tool_guard=guard,
             permission_checker=permission_checker,
         )
@@ -129,10 +133,6 @@ def build_agent_stack() -> tuple[AgentLoop, UserManager, ToolRegistry]:
     registry.register(ExecScriptTool())
     registry.register(NormalizeExcelTool())
 
-    # ── Agent Loop ────────────────────────────────────────────────────────────
-    agent_settings = AgentSettings()
-    _ = LLMSettings()  # validate config is loadable
-
     # ── Memory Consolidation ──────────────────────────────────────────────────
     consolidator = None
     if agent_settings.consolidation_enabled:
@@ -147,6 +147,18 @@ def build_agent_stack() -> tuple[AgentLoop, UserManager, ToolRegistry]:
             agent_settings.consolidation_threshold,
         )
 
+    # ── Context Compression ────────────────────────────────────────────────────
+    compressor = None
+    if agent_settings.compression.enabled:
+        from corpclaw_lite.agent.compressor import ContextCompressor
+
+        compressor = ContextCompressor(provider, agent_settings.compression)
+        logger.info(
+            "Context compression enabled (threshold_ratio=%.2f)",
+            agent_settings.compression.threshold_ratio,
+        )
+
+    # ── Agent Loop ────────────────────────────────────────────────────────────
     loop = AgentLoop(
         provider=provider,
         registry=registry,
@@ -155,6 +167,7 @@ def build_agent_stack() -> tuple[AgentLoop, UserManager, ToolRegistry]:
         tool_guard=guard,
         permission_checker=permission_checker,
         consolidator=consolidator,
+        compressor=compressor,
     )
     user_manager = UserManager()
     return loop, user_manager, registry
