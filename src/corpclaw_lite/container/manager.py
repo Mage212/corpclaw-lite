@@ -110,9 +110,61 @@ class ContainerManager:
         if not self._client:
             return 0
 
-        # TODO: Implement idle tracking by recording last IPC access time per user_id.
-        logger.warning(
-            "prune_idle() called but idle tracking is not implemented yet. "
-            "No containers were pruned."
-        )
-        return 0
+        removed = 0
+        try:
+            containers = self._client.containers.list(all=True, filters={"name": "corpclaw_agent_"})
+        except Exception as exc:
+            logger.error("Failed to list containers for pruning: %s", exc)
+            return 0
+
+        import datetime as dt
+
+        now = dt.datetime.now(tz=dt.UTC)
+        idle_seconds = getattr(self.settings, "idle_timeout_seconds", 600)
+
+        for container in containers:
+            try:
+                status: str = container.status  # type: ignore[assignment]
+                # Always remove exited/dead containers
+                if status in ("exited", "dead"):
+                    container.remove(v=True, force=True)
+                    logger.info("Pruned exited container %s", container.name)
+                    removed += 1
+                    continue
+
+                # For running containers, check if they've been idle
+                if status == "running":
+                    attrs: dict[str, Any] = container.attrs or {}  # type: ignore[assignment]
+                    state = attrs.get("State", {})
+                    started_at_str: str = state.get("StartedAt", "")
+                    if started_at_str:
+                        # Parse Docker ISO timestamp
+                        started_at_str = started_at_str.replace("Z", "+00:00")
+                        # Truncate nanosecond precision to microseconds
+                        if "." in started_at_str:
+                            base, frac_tz = started_at_str.split(".", 1)
+                            # Separate fractional seconds from timezone
+                            frac = ""
+                            tz_part = ""
+                            for i, ch in enumerate(frac_tz):
+                                if ch in ("+", "-"):
+                                    frac = frac_tz[:i]
+                                    tz_part = frac_tz[i:]
+                                    break
+                            else:
+                                frac = frac_tz
+                            started_at_str = f"{base}.{frac[:6]}{tz_part}"
+
+                        started_at = dt.datetime.fromisoformat(started_at_str)
+                        age = (now - started_at).total_seconds()
+                        if age > idle_seconds:
+                            container.stop(timeout=2)
+                            container.remove(v=True, force=True)
+                            logger.info(
+                                "Pruned idle container %s (age=%ds)", container.name, int(age)
+                            )
+                            removed += 1
+            except Exception as exc:
+                logger.debug("Error pruning container %s: %s", container.name, exc)
+
+        return removed

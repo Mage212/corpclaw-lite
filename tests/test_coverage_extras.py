@@ -1,0 +1,162 @@
+"""Additional coverage tests for targeted uncovered modules."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from corpclaw_lite.channels.cli import CLIChannel
+from corpclaw_lite.departments.manager import DepartmentConfig, DepartmentManager
+from corpclaw_lite.users.models import User
+
+# ── DepartmentManager ─────────────────────────────────────────────────────────
+
+
+def test_department_manager_load_file(tmp_path: Path) -> None:
+    """load_file() parses departments.yaml and creates DepartmentConfig."""
+    config_file = tmp_path / "departments.yaml"
+    config_file.write_text(
+        "departments:\n"
+        "  engineering:\n"
+        "    description: Engineering\n"
+        "    allowed_tools: ['*']\n"
+        "    budget:\n"
+        "      max_iterations: 20\n"
+        "  marketing:\n"
+        "    description: Marketing\n"
+        "    allowed_tools: [read_file]\n",
+        encoding="utf-8",
+    )
+    mgr = DepartmentManager()
+    mgr.load_file(config_file)
+
+    eng = mgr.get_department("engineering")
+    assert eng is not None
+    assert eng.allowed_tools == ["*"]
+    assert eng.budget.max_iterations == 20
+
+    mkt = mgr.get_department("marketing")
+    assert mkt is not None
+    assert mkt.allowed_tools == ["read_file"]
+
+
+def test_department_manager_load_missing_file(tmp_path: Path) -> None:
+    """load_file() handles missing file gracefully."""
+    mgr = DepartmentManager()
+    mgr.load_file(tmp_path / "nonexistent.yaml")
+    assert mgr.get_department("anything") is None
+
+
+def test_department_config_defaults() -> None:
+    """DepartmentConfig with empty data uses sensible defaults."""
+    cfg = DepartmentConfig({})
+    assert cfg.name == "Unknown"
+    assert cfg.allowed_tools == ["*"]
+    assert cfg.budget.max_iterations == 15
+
+
+# ── CLIChannel ─────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_cli_channel_start_stop() -> None:
+    """CLIChannel start/stop lifecycle."""
+    ch = CLIChannel()
+    await ch.start()
+    await ch.stop()
+
+
+@pytest.mark.asyncio
+async def test_cli_channel_send_message() -> None:
+    """send_message prints to console."""
+    ch = CLIChannel()
+    user = User(id=0, name="test", department="default")
+    await ch.send_message(user, "Hello!")
+    # No assertion needed — confirms no exceptions
+
+
+@pytest.mark.asyncio
+async def test_cli_channel_send_file(tmp_path: Path) -> None:
+    """send_file prints the file path."""
+    ch = CLIChannel()
+    user = User(id=0, name="test", department="default")
+    f = tmp_path / "test.txt"
+    f.write_text("content", encoding="utf-8")
+    await ch.send_file(user, f, caption="test file")
+
+
+# ── Container Policies ────────────────────────────────────────────────────────
+
+
+def test_container_policies_build_docker_args() -> None:
+    from corpclaw_lite.config.settings import ContainerSettings
+    from corpclaw_lite.container.policies import ContainerPolicies
+
+    settings = ContainerSettings()
+    args = ContainerPolicies.build_docker_args(user_id=123, settings=settings)
+    assert args["name"] == "corpclaw_agent_123"
+    assert args["detach"] is True
+    assert "mem_limit" in args
+    assert args["environment"]["CORPCLAW_USER_ID"] == "123"
+
+
+def test_container_policies_with_network_policy() -> None:
+    from corpclaw_lite.config.settings import ContainerSettings
+    from corpclaw_lite.container.policies import ContainerPolicies
+    from corpclaw_lite.security.network_policy import NetworkPolicy
+
+    settings = ContainerSettings()
+    policy = NetworkPolicy()
+    args = ContainerPolicies.build_docker_args(
+        user_id=456, settings=settings, network_policy=policy
+    )
+    assert args["name"] == "corpclaw_agent_456"
+
+
+# ── XML Tool Calling ──────────────────────────────────────────────────────────
+
+
+def test_xml_tool_calling_no_tool_call() -> None:
+    from corpclaw_lite.llm.xml_tool_calling import parse_xml_tool_call
+
+    result = parse_xml_tool_call("")
+    assert result.status == "no_tool_call"
+
+
+def test_xml_tool_calling_valid() -> None:
+    from corpclaw_lite.llm.xml_tool_calling import parse_xml_tool_call
+
+    xml = (
+        "<tool_call>\n"
+        "<name>read_file</name>\n"
+        '<arguments>{"path": "/tmp/test.txt"}</arguments>\n'
+        "</tool_call>"
+    )
+    result = parse_xml_tool_call(xml)
+    assert result.status == "valid"
+    assert result.tool_call is not None
+    assert result.tool_call.name == "read_file"
+    assert result.tool_call.arguments == {"path": "/tmp/test.txt"}
+
+
+def test_xml_tool_calling_malformed() -> None:
+    from corpclaw_lite.llm.xml_tool_calling import parse_xml_tool_call
+
+    result = parse_xml_tool_call("<tool_call>broken")
+    assert result.status == "malformed_xml"
+
+
+def test_xml_build_fallback_system() -> None:
+    from corpclaw_lite.llm.xml_tool_calling import build_xml_fallback_system
+
+    result = build_xml_fallback_system(["read_file", "write_file"])
+    assert "read_file" in result
+    assert "write_file" in result
+
+
+def test_xml_build_repair_prompt() -> None:
+    from corpclaw_lite.llm.xml_tool_calling import build_xml_repair_prompt
+
+    result = build_xml_repair_prompt("bad xml")
+    assert "bad xml" in result

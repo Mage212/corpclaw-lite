@@ -322,7 +322,6 @@ class TestContextBuilderPruning:
         ctx.add_user_message("hello")
         assert ctx.message_count == 1
 
-
     def test_prune_old_tool_results_noop_when_few_messages(self) -> None:
         ctx = ContextBuilder("system")
         ctx.add_user_message("hi")

@@ -103,10 +103,17 @@ def cmd_chat() -> None:
     setup_logging()
 
     async def _run() -> None:
+        from pathlib import Path
+
+        from corpclaw_lite.agent.factory import build_agent_stack
         from corpclaw_lite.channels.cli import CLIChannel
+        from corpclaw_lite.config.bootstrap import BootstrapLoader
         from corpclaw_lite.users.models import User
 
-        # Minimal bootstrap: create a local CLI user
+        agent_loop, _, _ = build_agent_stack()
+        bootstrap = BootstrapLoader(Path("config/bootstrap"))
+        system_prompt = bootstrap.get_system_prompt() or None
+
         user = User(id=0, name="cli-user", department="default", telegram_id=None)
         channel = CLIChannel()
         await channel.start()
@@ -115,7 +122,17 @@ def cmd_chat() -> None:
             while True:
                 msg = await asyncio.get_event_loop().run_in_executor(None, lambda: input("You: "))
                 if msg.strip():
-                    await channel.send_message(user, f"[echo] {msg}")
+
+                    async def approval_cb(action: str, details: str) -> bool:
+                        return await channel.request_approval(user, action, details)
+
+                    reply = await agent_loop.run(
+                        user,
+                        msg,
+                        system_prompt=system_prompt,
+                        approval_callback=approval_cb,
+                    )
+                    await channel.send_message(user, reply)
         except (KeyboardInterrupt, EOFError):
             pass
         finally:
