@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from corpclaw_lite.agent.compressor import ContextCompressor, PLACEHOLDER
+from corpclaw_lite.agent.compressor import ContextCompressor
 from corpclaw_lite.config.settings import CompressionSettings
 from corpclaw_lite.llm.base import LLMResponse
 

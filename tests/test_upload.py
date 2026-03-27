@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from corpclaw_lite.channels.telegram.upload import (
     build_agent_directive,
     is_image,

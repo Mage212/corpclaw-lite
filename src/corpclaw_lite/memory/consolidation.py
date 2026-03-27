@@ -77,8 +77,8 @@ class MemoryConsolidator:
         lines: list[str] = []
         for msg in messages:
             role = msg.get("role", "unknown")
-            content: Any = msg.get("content", "")
-            if isinstance(content, dict):
-                content = str(dict(content))  # type: ignore[call-overload]
+            content_raw: Any = msg.get("content", "")
+            # str(Any) is pyright-safe; handles str, dict, None, and all other types
+            content: str = str(content_raw) if content_raw is not None else ""
             lines.append(f"{role}: {content}")
         return "\n".join(lines)

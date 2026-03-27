@@ -226,7 +226,9 @@ async def test_approval_callback_per_call_takes_priority(
 
     # ToolGuard rule that always raises ApprovalRequest for exec_tool
     class AlwaysApprovalGuard(ToolGuard):
-        async def check(self, tool_name: str, arguments: Any, risk_level: str | None = None) -> None:  # type: ignore[override]
+        async def check(  # type: ignore[override]
+            self, tool_name: str, arguments: Any, risk_level: str | None = None
+        ) -> None:
             raise ApprovalRequest(action="exec_tool", details="test")
 
     # A fake tool so it can execute after approval
@@ -411,3 +413,62 @@ async def test_pruning_in_loop_reduces_context(
         m for m in tool_results_in_second if "[Old tool output cleared" in m.get("content", "")
     ]
     assert len(pruned_results) > 0
+
+
+@pytest.mark.asyncio
+async def test_parallel_loop_all_results_added(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """Parallel loop detection must NOT orphan tool results.
+
+    When the progress guard detects a loop on the N-th tool in a parallel batch,
+    all results (including N+1, N+2, …) must still be added to context so that
+    every tool_call in the assistant message has a matching tool result.
+    """
+    call_count = 0
+
+    class LoopingTool:
+        name = "loop_tool"
+        description = ""
+        params: list[Any] = []
+        parallel_safe = True
+
+        async def execute(self, **kwargs: Any) -> str:
+            nonlocal call_count
+            call_count += 1
+            return "Error: same error every time"
+
+    empty_registry._tools["loop_tool"] = LoopingTool()  # type: ignore
+
+    # 3 parallel tool calls — loop will be detected on the 1st one
+    tool_calls = [ToolCall(id=str(i), name="loop_tool", arguments={}) for i in range(3)]
+
+    captured_contexts: list[list[dict[str, Any]]] = []
+
+    class CapturingProvider(MockProvider):
+        async def chat(  # type: ignore[override]
+            self,
+            messages: list[dict[str, Any]],
+            tools: Any = None,
+            system: Any = None,
+        ) -> LLMResponse:
+            captured_contexts.append(list(messages))
+            return await super().chat(messages, tools, system)
+
+    provider = CapturingProvider(
+        responses=[
+            LLMResponse(content="", tool_calls=tool_calls),
+            LLMResponse(content="Stopped."),
+        ]
+    )
+    settings = AgentSettings(max_steps=10, max_tool_calls=50)
+    loop = AgentLoop(provider, empty_registry, settings)
+    result = await loop.run(test_user, "run parallel")
+
+    # Loop was detected → fallback message
+    assert "loop" in result.lower() or "stuck" in result.lower() or "stopped" in result.lower()
+    # All 3 tools were actually executed
+    assert call_count == 3
+
+    # The context sent to the first LLM call had the user message
+    assert any(m.get("role") == "user" for m in captured_contexts[0])

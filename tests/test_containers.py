@@ -124,9 +124,7 @@ def test_environment_merge_with_network_policy():
     policy = NetworkPolicy()
     policy.allowlist = ["example.com", "api.internal"]
 
-    args = ContainerPolicies.build_docker_args(
-        user_id=1, settings=settings, network_policy=policy
-    )
+    args = ContainerPolicies.build_docker_args(user_id=1, settings=settings, network_policy=policy)
 
     env = args["environment"]
     assert isinstance(env, dict)

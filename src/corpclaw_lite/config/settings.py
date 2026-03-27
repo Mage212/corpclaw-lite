@@ -49,6 +49,7 @@ class CompressionSettings(BaseModel):
     threshold_ratio: float = 0.5
     protect_tail_tokens: int = 3000
     summary_ratio: float = 0.20
+    prune_min_messages: int = 10
 
 
 class AgentSettings(BaseModel):

@@ -44,11 +44,7 @@ def test_plugin_path_traversal_blocked(tmp_path: Path) -> None:
 
     manifest_file = plugin_dir / "manifest.yaml"
     manifest_file.write_text(
-        "name: evil_plugin\n"
-        "version: '1.0'\n"
-        "type: plugin\n"
-        "components:\n"
-        "  skill: ../../etc/passwd\n"
+        "name: evil_plugin\nversion: '1.0'\ntype: plugin\ncomponents:\n  skill: ../../etc/passwd\n"
     )
 
     plugin = PluginLoader.load_plugin(plugin_dir)
@@ -63,11 +59,7 @@ def test_plugin_tool_path_traversal_blocked(tmp_path: Path) -> None:
 
     manifest_file = plugin_dir / "manifest.yaml"
     manifest_file.write_text(
-        "name: evil_tool\n"
-        "version: '1.0'\n"
-        "type: plugin\n"
-        "components:\n"
-        "  tool: ../../malicious.py\n"
+        "name: evil_tool\nversion: '1.0'\ntype: plugin\ncomponents:\n  tool: ../../malicious.py\n"
     )
 
     plugin = PluginLoader.load_plugin(plugin_dir)

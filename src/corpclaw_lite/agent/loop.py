@@ -50,6 +50,7 @@ class AgentLoop:
         self._approval_callback = approval_callback
         self._consolidator = consolidator
         self._compressor = compressor
+        self._approval_lock = asyncio.Lock()
 
     @property
     def memory(self) -> SQLiteMemory | None:
@@ -107,7 +108,10 @@ class AgentLoop:
                 budget.check()
                 budget.consume_iteration()
 
-                if context.message_count > 10:
+                compression_cfg = self._settings.compression
+                if compression_cfg.enabled and context.message_count > (
+                    compression_cfg.prune_min_messages
+                ):
                     context.prune_old_tool_results(protect_tail=6)
 
                 if self._compressor and self._compressor.should_compress(context.messages):
@@ -147,17 +151,17 @@ class AgentLoop:
                     results = await self._execute_parallel(
                         response.tool_calls, user, _approval_cb, on_tool_start
                     )
-                    should_stop = False
+                    # Add ALL results first to keep context valid (no orphaned tool_calls)
+                    loop_detected = False
                     for tc, result in zip(response.tool_calls, results, strict=True):
                         context.add_tool_result(tc.id, tc.name, result)
-                        if progress.detect_loop(tc.name, result):
+                        if not loop_detected and progress.detect_loop(tc.name, result):
                             context.add_assistant_message(
                                 "System Guard: You seem to be stuck in a loop repeating the same"
                                 " error. Please change your strategy or stop using this tool."
                             )
-                            should_stop = True
-                            break
-                    if should_stop:
+                            loop_detected = True
+                    if loop_detected:
                         break
                 else:
                     should_stop = False
@@ -246,7 +250,9 @@ class AgentLoop:
             return await self._registry.execute(tc.name, tc.arguments, user=user)
         except ApprovalRequest as e:
             if approval_callback:
-                approved = await approval_callback(e.action, e.details)
+                # Lock prevents concurrent approval prompts when tools run in parallel
+                async with self._approval_lock:
+                    approved = await approval_callback(e.action, e.details)
                 if approved:
                     return await self._registry.execute(tc.name, tc.arguments, user=user)
                 return f"Action '{e.action}' was denied by user."

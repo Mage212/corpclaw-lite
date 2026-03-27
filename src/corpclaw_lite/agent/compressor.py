@@ -69,6 +69,7 @@ class ContextCompressor:
             return self._sanitize_tool_pairs(messages)
 
         tail_start = self._find_tail_boundary(messages, tail_budget)
+        # head_count + 2: require at least 2 messages in middle for compression to be worthwhile
         if tail_start <= head_count + 2:
             logger.warning(
                 "ContextCompressor: tail protection covers most of context, skipping compression"

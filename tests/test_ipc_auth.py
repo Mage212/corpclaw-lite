@@ -71,9 +71,7 @@ def test_ipc_auth_rejects_future_timestamp() -> None:
 
     payload_str = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     msg = f"{signed['nonce']}:{signed['timestamp']}:{payload_str}"
-    signed["signature"] = hmac.new(
-        "test_secret".encode(), msg.encode(), hashlib.sha256
-    ).hexdigest()
+    signed["signature"] = hmac.new(b"test_secret", msg.encode(), hashlib.sha256).hexdigest()
 
     with pytest.raises(IPCAuthError, match="future|range|expired"):
         auth.verify(signed)
