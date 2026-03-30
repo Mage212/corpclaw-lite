@@ -16,29 +16,49 @@ class ContainerPolicies:
         user_id: int,
         settings: ContainerSettings,
         network_policy: NetworkPolicy | None = None,
-        workspace_dir: str = "/tmp",
+        workspace_dir: str = "workspaces",
         seccomp_profile_path: str = "docker/seccomp_default.json",
     ) -> dict[str, Any]:
-        """Generate kwargs for docker.containers.run()"""
+        """Generate kwargs for docker.containers.run()
 
+        Args:
+            user_id: Telegram user ID — used to name the container.
+            settings: ContainerSettings with image, limits, etc.
+            network_policy: Optional network allowlist to apply.
+            workspace_dir: Absolute host path to bind-mount at /workspace.
+                           Should be the user-specific directory from ContainerManager.
+            seccomp_profile_path: Host path to seccomp profile JSON.
+        """
         args: dict[str, Any] = {
-            "image": "corpclaw-agent-base:latest",
+            "image": settings.image,
             "name": f"corpclaw_agent_{user_id}",
             "detach": True,
-            "stdin_open": True,  # Keep stdin open for IPC
+            "stdin_open": True,  # Keep stdin open for docker exec IPC
             "tty": False,
             "mem_limit": settings.max_memory,
             "nano_cpus": int(settings.cpus * 1e9),
             "pids_limit": 100,  # Prevent fork bombs
             "security_opt": [f"seccomp={seccomp_profile_path}"],
-            "cap_drop": ["ALL"],  # Drop all capabilities
+            "cap_drop": ["ALL"],  # Drop all Linux capabilities
+            "read_only": True,  # Read-only root FS; /workspace and /tmp are rw
+            "tmpfs": {"/tmp": "size=64m"},
             "volumes": {
+                # User workspace: the ONLY writable persistent path for the user
                 workspace_dir: {"bind": "/workspace", "mode": "rw"},
-                # Future: Mount tools or read-only configs here
             },
             "working_dir": "/workspace",
-            "environment": {"CORPCLAW_USER_ID": str(user_id)},
+            "environment": {
+                "CORPCLAW_USER_ID": str(user_id),
+                "PYTHONUNBUFFERED": "1",
+            },
         }
+
+        # Pass IPC secret into container so agent_worker can verify requests
+        import os
+
+        ipc_secret = os.environ.get("CORPCLAW_IPC_SECRET")
+        if ipc_secret:
+            args["environment"]["CORPCLAW_IPC_SECRET"] = ipc_secret
 
         if network_policy:
             net_args: dict[str, Any] = dict(network_policy.to_docker_args())

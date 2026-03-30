@@ -37,6 +37,10 @@ async def run_telegram_bot(token: str) -> None:
     from corpclaw_lite.users.models import User
 
     agent_loop, user_manager, tool_registry = build_agent_stack()
+    # ContainerManager is attached by factory if container.enabled=true
+    from corpclaw_lite.container.manager import ContainerManager, ContainerManagerError
+
+    container_manager: ContainerManager | None = getattr(user_manager, "_container_manager", None)
     bootstrap = BootstrapLoader(PROJECT_ROOT / "config" / "bootstrap")
     tg_settings = TelegramSettings()
     rate_limiter = RateLimiter(max_per_minute=tg_settings.rate_limit_per_minute)
@@ -100,6 +104,21 @@ async def run_telegram_bot(token: str) -> None:
             except Exception as exc:
                 logger.warning("Failed to start progress indicator: %s", exc)
                 status_session = None
+
+        # ── Container isolation guard ───────────────────────────────────────
+        # If container isolation is enabled, ensure the sandbox is running.
+        # Hard block: agent will NOT run without a healthy container.
+        if container_manager is not None:
+            try:
+                container_manager.ensure_running(tid)
+            except ContainerManagerError as e:
+                logger.error("Container failed for user %d: %s", tid, e)
+                await channel.send_message(
+                    user,
+                    "⚠️ Изолированная рабочая среда временно недоступна.\n"
+                    "Пожалуйста, повторите попытку позже или обратитесь к администратору.",
+                )
+                return
 
         # ── Agent execution ───────────────────────────────────────────────
         try:

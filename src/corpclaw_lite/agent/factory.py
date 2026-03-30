@@ -4,16 +4,17 @@ Configuration layering:
     config/settings.yaml  – all provider definitions, routing rules, agent parameters
     .env                  – secrets only (API keys, bot tokens)
 
-Environment variables in settings.yaml are interpolated as ${VAR:-default}.
+Container isolation (container.enabled=true, default):
+    - ContainerManager starts a Docker container per user on first message
+    - File/script tools (read_file, write_file, edit_file, list_files, search_files,
+      exec_script) are registered as IPCToolProxy — they execute INSIDE the container
+    - Host-side tools (web_fetch, memory_*, read_image, send_file, normalize_excel,
+      dispatch_subagent) run on the host as usual
+    - If Docker is unavailable with container.enabled=true → RuntimeError at startup
 
-Provider selection (from settings.yaml llm.named):
-    - Define any number of named providers: default, vision, cloud, ...
-    - Routing rules in llm.routing steer task_kind/subagent_id to a specific provider
-    - The router itself implements the Provider protocol — drop-in for all components
-
-Fallback (no settings.yaml or empty llm.named):
-    - Reads ANTHROPIC_API_KEY → AnthropicProvider
-    - Otherwise reads OPENAI_BASE_URL + OPENAI_MODEL + OPENAI_API_KEY → OpenAIProvider
+Dev mode (container.enabled=false):
+    - All tools run directly on the host (no isolation)
+    - Useful for local development without Docker
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from corpclaw_lite.agent.loop import AgentLoop
 from corpclaw_lite.users.manager import UserManager
@@ -90,26 +91,12 @@ def _build_router() -> Provider:
     return _build_provider_from_env()
 
 
-def build_agent_stack() -> tuple[AgentLoop, UserManager, ToolRegistry]:
-    """Build and return (AgentLoop, UserManager, ToolRegistry) from config + env.
-
-    The returned AgentLoop uses an LLMRouter that automatically routes:
-    - task_kind "vision" → vision provider (or default if not configured)
-    - subagent_id rules  → subagent-specific providers
-    - everything else    → default provider
-
-    To add a new provider: add it to config/settings.yaml llm.named and optionally
-    a routing rule in llm.routing. No code changes required.
-    """
-    from corpclaw_lite.agent.subagent import SubagentDispatcher
-    from corpclaw_lite.agent.vision import VisionProcessor
-    from corpclaw_lite.config.loader import load_settings
-    from corpclaw_lite.config.settings import AgentSettings
-    from corpclaw_lite.departments.manager import DepartmentManager
-    from corpclaw_lite.departments.permissions import PermissionChecker
-    from corpclaw_lite.extensions.subagents.registry import SubagentRegistry
-    from corpclaw_lite.extensions.tools.builtin.dispatch import DispatchSubagentTool
-    from corpclaw_lite.extensions.tools.builtin.excel import NormalizeExcelTool
+def _register_sandboxed_tools(
+    registry: ToolRegistry,
+    ipc: Any,
+) -> None:
+    """Register file/script tools as IPCToolProxy (execute inside container)."""
+    from corpclaw_lite.container.proxy import IPCToolProxy
     from corpclaw_lite.extensions.tools.builtin.exec_script import ExecScriptTool
     from corpclaw_lite.extensions.tools.builtin.files import (
         EditFileTool,
@@ -118,6 +105,71 @@ def build_agent_stack() -> tuple[AgentLoop, UserManager, ToolRegistry]:
         SearchFilesTool,
         WriteFileTool,
     )
+
+    sandboxed = [
+        ReadFileTool(),
+        WriteFileTool(),
+        EditFileTool(),
+        ListFilesTool(),
+        SearchFilesTool(),
+        ExecScriptTool(),
+    ]
+    for tool in sandboxed:
+        registry.register(IPCToolProxy.from_tool(tool, ipc))
+        logger.debug("Registered sandboxed IPCToolProxy: %s", tool.name)
+
+
+def _register_local_tools(registry: ToolRegistry) -> None:
+    """Register file/script tools to run directly on the host (dev/test mode)."""
+    from corpclaw_lite.extensions.tools.builtin.exec_script import ExecScriptTool
+    from corpclaw_lite.extensions.tools.builtin.files import (
+        EditFileTool,
+        ListFilesTool,
+        ReadFileTool,
+        SearchFilesTool,
+        WriteFileTool,
+    )
+
+    for tool in [
+        ReadFileTool(),
+        WriteFileTool(),
+        EditFileTool(),
+        ListFilesTool(),
+        SearchFilesTool(),
+        ExecScriptTool(),
+    ]:
+        registry.register(tool)
+        logger.debug("Registered local tool (no container): %s", tool.name)
+
+
+def build_agent_stack() -> tuple[AgentLoop, UserManager, ToolRegistry]:
+    """Build and return (AgentLoop, UserManager, ToolRegistry) from config + env.
+
+    Container isolation:
+        - container.enabled=true (default): file/script tools run inside Docker
+        - container.enabled=false: everything runs on host (dev mode)
+
+    LLM routing:
+        - Reads config/settings.yaml → builds LLMRouter with named providers
+        - Falls back to env vars if no named providers configured
+
+    Returns:
+        (AgentLoop, UserManager, ToolRegistry) ready to serve requests.
+
+    Raises:
+        RuntimeError: If container.enabled=true but Docker is not available.
+    """
+    from corpclaw_lite.agent.subagent import SubagentDispatcher
+    from corpclaw_lite.agent.vision import VisionProcessor
+    from corpclaw_lite.config.loader import load_settings
+    from corpclaw_lite.config.settings import AgentSettings
+    from corpclaw_lite.container.ipc import ContainerIPC
+    from corpclaw_lite.container.manager import ContainerManager
+    from corpclaw_lite.departments.manager import DepartmentManager
+    from corpclaw_lite.departments.permissions import PermissionChecker
+    from corpclaw_lite.extensions.subagents.registry import SubagentRegistry
+    from corpclaw_lite.extensions.tools.builtin.dispatch import DispatchSubagentTool
+    from corpclaw_lite.extensions.tools.builtin.excel import NormalizeExcelTool
     from corpclaw_lite.extensions.tools.builtin.image import ReadImageTool
     from corpclaw_lite.extensions.tools.builtin.memory import MemoryRecallTool, MemoryStoreTool
     from corpclaw_lite.extensions.tools.builtin.web import WebFetchTool
@@ -125,21 +177,56 @@ def build_agent_stack() -> tuple[AgentLoop, UserManager, ToolRegistry]:
     from corpclaw_lite.memory.sqlite import SQLiteMemory
     from corpclaw_lite.security.tool_guard import ToolGuard
 
+    # ── Load settings ─────────────────────────────────────────────────────────
+    full_settings = load_settings(PROJECT_ROOT / "config" / "settings.yaml")
+    container_cfg = full_settings.container
+    agent_settings = full_settings.agent if full_settings.agent else AgentSettings()
+
     # ── Provider / Router ─────────────────────────────────────────────────────
     provider = _build_router()
 
-    # ── Tools ─────────────────────────────────────────────────────────────────
+    # ── Tool Registry ─────────────────────────────────────────────────────────
     registry = ToolRegistry()
-    for tool in [
-        ReadFileTool(),
-        WriteFileTool(),
-        EditFileTool(),
-        ListFilesTool(),
-        SearchFilesTool(),
-    ]:
-        registry.register(tool)
 
-    # ── Security ───────────────────────────────────────────────────────────────────
+    # ── Container Isolation ────────────────────────────────────────────────────
+    container_manager: ContainerManager | None = None
+    if container_cfg.enabled:
+        if not ContainerManager.is_docker_available():
+            raise RuntimeError(
+                "Container isolation is enabled (container.enabled=true) "
+                "but Docker daemon is not available. "
+                "Start Docker or set container.enabled=false in settings.yaml to use dev mode."
+            )
+        workspace_base = PROJECT_ROOT / container_cfg.workspace_base
+        container_manager = ContainerManager(
+            settings=container_cfg,
+            workspace_base=workspace_base,
+        )
+        # Build shared IPC client (stateless — one instance handles all users)
+        try:
+            from corpclaw_lite.security.ipc_auth import IPCAuth
+
+            container_ipc = ContainerIPC(auth=IPCAuth(), timeout_seconds=30.0)
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to initialise ContainerIPC: {e}. Is CORPCLAW_IPC_SECRET set in .env?"
+            ) from e
+
+        _register_sandboxed_tools(registry, container_ipc)
+        logger.info(
+            "Container isolation ENABLED — file/script tools routed to Docker "
+            "(image=%s, workspace_base=%s)",
+            container_cfg.image,
+            workspace_base,
+        )
+    else:
+        _register_local_tools(registry)
+        logger.warning(
+            "Container isolation DISABLED (container.enabled=false) — "
+            "file/script tools run on host. Dev mode only!"
+        )
+
+    # ── Security ───────────────────────────────────────────────────────────────
     guard = ToolGuard()
     guard_rules = PROJECT_ROOT / "config" / "tool_guard_rules.yaml"
     if guard_rules.exists():
@@ -151,11 +238,7 @@ def build_agent_stack() -> tuple[AgentLoop, UserManager, ToolRegistry]:
         dept_manager.load_file(dept_config)
     permission_checker = PermissionChecker(dept_manager)
 
-    # ── Agent Settings (from settings.yaml, with env-overrides) ───────────────
-    full_settings = load_settings(PROJECT_ROOT / "config" / "settings.yaml")
-    agent_settings = full_settings.agent if full_settings.agent else AgentSettings()
-
-    # ── Subagents ──────────────────────────────────────────────────────────────────
+    # ── Subagents ──────────────────────────────────────────────────────────────
     subagent_registry = SubagentRegistry()
     subagent_dir = PROJECT_ROOT / "config" / "subagents"
     if subagent_dir.exists():
@@ -180,15 +263,12 @@ def build_agent_stack() -> tuple[AgentLoop, UserManager, ToolRegistry]:
     registry.register(MemoryStoreTool(memory))
     registry.register(MemoryRecallTool(memory))
 
-    # ── Web ────────────────────────────────────────────────────────────────────
+    # ── Host-side tools (always on host, regardless of container mode) ────────
     registry.register(WebFetchTool())
 
-    # ── Vision ─────────────────────────────────────────────────────────────────
     vision = VisionProcessor(provider)
     registry.register(ReadImageTool(vision))
 
-    # ── Exec / Excel ─────────────────────────────────────────────────────────
-    registry.register(ExecScriptTool())
     registry.register(NormalizeExcelTool())
 
     # ── Memory Consolidation ──────────────────────────────────────────────────
@@ -201,8 +281,7 @@ def build_agent_stack() -> tuple[AgentLoop, UserManager, ToolRegistry]:
             threshold=agent_settings.consolidation_threshold,
         )
         logger.info(
-            "Memory consolidation enabled (threshold=%d)",
-            agent_settings.consolidation_threshold,
+            "Memory consolidation enabled (threshold=%d)", agent_settings.consolidation_threshold
         )
 
     # ── Context Compression ────────────────────────────────────────────────────
@@ -228,4 +307,9 @@ def build_agent_stack() -> tuple[AgentLoop, UserManager, ToolRegistry]:
         compressor=compressor,
     )
     user_manager = UserManager()
+
+    # Return container_manager bundled into UserManager for use in runner
+    # We store it as an attribute so runner.py can access it without changing the signature
+    user_manager._container_manager = container_manager  # type: ignore[attr-defined]
+
     return loop, user_manager, registry

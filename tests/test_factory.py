@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import os
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from corpclaw_lite.agent.loop import AgentLoop
+from corpclaw_lite.container.proxy import IPCToolProxy
 from corpclaw_lite.extensions.tools.registry import ToolRegistry
 from corpclaw_lite.users.manager import UserManager
 
@@ -19,6 +20,29 @@ def _clean_env() -> None:  # type: ignore[misc]
     with patch.dict(os.environ, {}, clear=False):
         for k in env_keys:
             os.environ.pop(k, None)
+        yield  # type: ignore[misc]
+
+
+@pytest.fixture(autouse=True)
+def _disable_containers() -> None:  # type: ignore[misc]
+    """Disable container isolation for all factory tests.
+
+    Factory tests run without Docker. Container integration is tested separately
+    in test_container_proxy.py and test_container_manager.py.
+    The settings.yaml override ensures container.enabled=false during import.
+    """
+    from corpclaw_lite.config import loader as config_loader
+    from corpclaw_lite.config.settings import ContainerSettings, Settings
+
+    # Build a settings object with containers disabled
+    _original_load = config_loader.load_settings
+
+    def _mock_load(path: object = None) -> Settings:  # type: ignore[misc]
+        settings = _original_load(path)  # type: ignore[arg-type]
+        settings.container = ContainerSettings(enabled=False)
+        return settings
+
+    with patch.object(config_loader, "load_settings", side_effect=_mock_load):
         yield  # type: ignore[misc]
 
 
@@ -39,7 +63,7 @@ def test_build_agent_stack_local_provider() -> None:
     assert isinstance(user_manager, UserManager)
     assert isinstance(registry, ToolRegistry)
 
-    # Check builtin tools are registered
+    # Check builtin tools are registered (local mode — not IPCToolProxy)
     tool_names = [t.name for t in registry.list_all()]
     assert "read_file" in tool_names
     assert "write_file" in tool_names
@@ -49,6 +73,10 @@ def test_build_agent_stack_local_provider() -> None:
     assert "memory_store" in tool_names
     assert "memory_recall" in tool_names
     assert "normalize_excel" in tool_names
+
+    # In dev mode (containers disabled), tools run on host (not IPCToolProxy)
+    read_file_tool = registry.get("read_file")
+    assert not isinstance(read_file_tool, IPCToolProxy)
 
 
 def test_build_agent_stack_anthropic_provider() -> None:
@@ -111,3 +139,71 @@ def test_memory_wired() -> None:
         loop, _, _ = build_agent_stack()
 
     assert loop.memory is not None
+
+
+def test_container_enabled_requires_docker() -> None:
+    """When container.enabled=true and Docker is not available, must raise RuntimeError."""
+    from corpclaw_lite.config import loader as config_loader
+    from corpclaw_lite.config.settings import ContainerSettings, Settings
+
+    _original_load = config_loader.load_settings
+
+    def _mock_load_enabled(path: object = None) -> Settings:  # type: ignore[misc]
+        settings = _original_load(path)  # type: ignore[arg-type]
+        settings.container = ContainerSettings(enabled=True)
+        return settings
+
+    from corpclaw_lite.agent.factory import build_agent_stack
+    from corpclaw_lite.container.manager import ContainerManager
+
+    with (
+        patch.object(config_loader, "load_settings", side_effect=_mock_load_enabled),
+        patch.object(ContainerManager, "is_docker_available", return_value=False),
+        patch.dict(os.environ, {"OPENAI_BASE_URL": "http://test:11434/v1"}, clear=False),
+        pytest.raises(RuntimeError, match="Docker daemon is not available"),
+    ):
+        build_agent_stack()
+
+
+def test_container_enabled_registers_ipc_proxies() -> None:
+    """When container.enabled=true and Docker is available, file tools are IPCToolProxy."""
+    from corpclaw_lite.config import loader as config_loader
+    from corpclaw_lite.config.settings import ContainerSettings, Settings
+
+    _original_load = config_loader.load_settings
+
+    def _mock_load_enabled(path: object = None) -> Settings:  # type: ignore[misc]
+        settings = _original_load(path)  # type: ignore[arg-type]
+        settings.container = ContainerSettings(enabled=True)
+        return settings
+
+    from corpclaw_lite.agent.factory import build_agent_stack
+    from corpclaw_lite.container.manager import ContainerManager
+
+    mock_docker = MagicMock()
+    mock_docker.from_env.return_value.ping.return_value = True
+
+    with (
+        patch.object(config_loader, "load_settings", side_effect=_mock_load_enabled),
+        patch.object(ContainerManager, "is_docker_available", return_value=True),
+        patch.dict(
+            os.environ,
+            {
+                "OPENAI_BASE_URL": "http://test:11434/v1",
+                "CORPCLAW_IPC_SECRET": "test-secret-for-unit-test",
+            },
+            clear=False,
+        ),
+        patch("corpclaw_lite.container.manager.docker", mock_docker),
+    ):
+        _, _, registry = build_agent_stack()
+
+    # File tools should now be IPCToolProxy instances
+    read_file_tool = registry.get("read_file")
+    assert isinstance(read_file_tool, IPCToolProxy)
+    exec_tool = registry.get("exec_script")
+    assert isinstance(exec_tool, IPCToolProxy)
+
+    # Host-side tools should NOT be proxied
+    web_fetch = registry.get("web_fetch")
+    assert not isinstance(web_fetch, IPCToolProxy)

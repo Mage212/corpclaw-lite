@@ -46,6 +46,12 @@ class LLMSettings(BaseModel):
 class ContainerSettings(BaseModel):
     """Settings for Docker container sandboxes."""
 
+    # Set to false to disable container isolation (dev/test mode — runs on host)
+    enabled: bool = True
+    # Docker image used as the per-user sandbox
+    image: str = "corpclaw-agent-base:latest"
+    # Base directory for per-user workspaces (bind-mounted into /workspace)
+    workspace_base: str = "workspaces"
     max_memory: str = "512m"
     cpus: float = 0.5
     idle_timeout_seconds: int = 600

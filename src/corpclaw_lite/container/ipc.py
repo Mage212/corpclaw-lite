@@ -1,3 +1,26 @@
+"""ContainerIPC — per-call docker exec IPC for container tool dispatch.
+
+Design:
+    - Each tool call is a stateless `docker exec` into the user's running container
+    - The request JSON is HMAC-signed before being piped to agent_worker.py's stdin
+    - The response is verified before returning to the caller
+
+This stateless pattern is more resilient than a persistent stdio connection:
+    - Container crash → next call gets ContainerManagerError → user sees clean error
+    - No "zombie" processes or broken pipe races
+    - Each call has its own timeout — no head-of-line blocking
+
+Sequence:
+    IPCToolProxy.execute()
+        → ContainerIPC.send_tool_call(user_id, tool, args)
+            → docker exec -i corpclaw_agent_{user_id} python -m ...agent_worker
+                → agent_worker reads signed stdin, executes tool, prints signed JSON
+            → verify response signature
+        → return result string
+"""
+
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
@@ -16,35 +39,57 @@ logger = logging.getLogger(__name__)
 class ContainerIPCError(Exception):
     """Raised for errors in container IPC communication."""
 
-    pass
-
 
 class ContainerIPC:
-    """Manages stdio-based IPC with a running Docker container."""
+    """Manages stateless docker-exec-based IPC with running Docker containers.
 
-    def __init__(self, container_name: str, auth: IPCAuth, timeout_seconds: float = 30.0):
-        self.container_name = container_name
+    One instance is shared across all users. The user_id is passed per-call
+    to resolve the container name (corpclaw_agent_{user_id}).
+    """
+
+    def __init__(self, auth: IPCAuth, timeout_seconds: float = 30.0) -> None:
         self.auth = auth
         self.timeout = timeout_seconds
 
-    async def send_tool_call(self, tool_name: str, args: dict[str, Any]) -> str:
-        """
-        Send a tool execution request to the container and return the result.
-        Uses docker exec to run a one-shot process that reads stdin,
-        authenticates, executes the tool, and prints to stdout.
-        """
-        payload = {"type": "tool_call", "tool": tool_name, "args": args}
+    @classmethod
+    def from_env(cls, timeout_seconds: float = 30.0) -> ContainerIPC:
+        """Convenience constructor — IPCAuth reads CORPCLAW_IPC_SECRET from env."""
+        return cls(auth=IPCAuth(), timeout_seconds=timeout_seconds)
 
+    @staticmethod
+    def container_name(user_id: int) -> str:
+        """Return the canonical container name for a user."""
+        return f"corpclaw_agent_{user_id}"
+
+    async def send_tool_call(
+        self,
+        user_id: int,
+        tool_name: str,
+        args: dict[str, Any],
+    ) -> str:
+        """Execute a tool inside the user's container and return the result.
+
+        Sends a signed JSON payload to agent_worker.py via docker exec stdin,
+        then verifies the signed response from stdout.
+
+        Args:
+            user_id: Telegram user ID — resolves to corpclaw_agent_{user_id}.
+            tool_name: Name of the tool to execute (must be registered in agent_worker).
+            args: Tool arguments dict.
+
+        Returns:
+            Tool result string, or an error string if execution failed.
+        """
+        name = self.container_name(user_id)
+        payload = {"type": "tool_call", "tool": tool_name, "args": args}
         signed_message = self.auth.sign(payload)
         input_data = json.dumps(signed_message).encode("utf-8")
 
-        # We use docker CLI via asyncio.create_subprocess_exec for simplicity in this phase.
-        # Alternatively, docker SDK exec_run could be used, but it's blocking.
         cmd = [
             "docker",
             "exec",
             "-i",
-            self.container_name,
+            name,
             "python",
             "-m",
             "corpclaw_lite.container.agent_worker",
@@ -64,10 +109,15 @@ class ContainerIPC:
 
             if process.returncode != 0:
                 err_msg = stderr.decode("utf-8").strip()
-                logger.error("ContainerIPC error executing %s: %s", tool_name, err_msg)
+                logger.error(
+                    "ContainerIPC exec error (user=%d, tool=%s): %s",
+                    user_id,
+                    tool_name,
+                    err_msg,
+                )
                 return f"Container execution error: {err_msg}"
 
-            # Parse response and verify it
+            # Parse and verify signature on response
             try:
                 response_str = stdout.decode("utf-8").strip()
                 response_msg = json.loads(response_str)
@@ -80,15 +130,16 @@ class ContainerIPC:
 
             except json.JSONDecodeError as e:
                 logger.error(
-                    "Failed to parse container response: '%s'",
+                    "Failed to parse container response for user=%d: '%s'",
+                    user_id,
                     stdout.decode("utf-8"),
                 )
                 return f"Error: Invalid JSON response from container: {e}"
             except Exception as e:
-                logger.error("Container signature verification failed: %s", e)
+                logger.error("Container signature verification failed (user=%d): %s", user_id, e)
                 return "Error: Security verification failed for container response."
 
         except TimeoutError:
-            return f"Error: Container tool execution timed out after {self.timeout}s"
+            return f"Error: Container tool '{tool_name}' timed out after {self.timeout}s"
         except Exception as e:
             return f"Error in Container IPC: {e}"

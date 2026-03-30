@@ -66,6 +66,16 @@ agent:
     threshold_ratio: 0.5
     protect_tail_tokens: 3000
 
+# Container isolation — per-user Docker sandboxes
+# Set enabled: false for local development without Docker
+container:
+  enabled: true
+  image: "corpclaw-agent-base:latest"
+  workspace_base: "${WORKSPACE_BASE:-workspaces}"
+  max_memory: "512m"
+  cpus: 0.5
+  idle_timeout_seconds: 600
+
 telegram:
   rate_limit_per_minute: 10
   default_department: "default"
