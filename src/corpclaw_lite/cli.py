@@ -64,8 +64,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # chat
     chat_p = sub.add_parser("chat", help="Start an interactive CLI chat session")
-    chat_p.add_argument("--user-id", type=int, default=1, help="Mock user ID (default: 1)")
-    chat_p.add_argument("--department", type=str, default="engineering", help="Mock user department (default: engineering)")
+    chat_p.add_argument(
+        "--telegram-id",
+        type=int,
+        required=True,
+        help="Telegram ID пользователя (должен быть в БД, user-create)",
+    )
 
     # telegram
     sub.add_parser("telegram", help="Start the Telegram bot (polling)")
@@ -112,8 +116,8 @@ def _build_parser() -> argparse.ArgumentParser:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def cmd_chat(user_id: int = 1, department: str = "engineering") -> None:
-    """Launch an interactive CLI chat loop."""
+def cmd_chat(telegram_id: int) -> None:
+    """Launch an interactive CLI chat loop for a registered user."""
     from corpclaw_lite.agent.factory import PROJECT_ROOT
     from corpclaw_lite.config.loader import load_settings
     from corpclaw_lite.logging.agent_logger import setup_logging
@@ -132,13 +136,23 @@ def cmd_chat(user_id: int = 1, department: str = "engineering") -> None:
         from corpclaw_lite.agent.factory import build_agent_stack
         from corpclaw_lite.channels.cli import CLIChannel
         from corpclaw_lite.config.bootstrap import BootstrapLoader
-        from corpclaw_lite.users.models import User
+        from corpclaw_lite.users.manager import UserManager
 
         agent_loop, user_manager, _ = build_agent_stack()
         bootstrap = BootstrapLoader(Path("config/bootstrap"))
         system_prompt = bootstrap.get_system_prompt() or None
 
-        user = User(id=user_id, name="cli-user", department=department, telegram_id=user_id)
+        # Load user from DB — same flow as Telegram bot
+        standalone_manager = UserManager()
+        user = standalone_manager.get_by_telegram_id(telegram_id)
+        if user is None:
+            print(
+                f"\n[ERROR] Пользователь с telegram_id={telegram_id} не найден в БД.\n"
+                f"Сначала создайте его:\n"
+                f"  uv run corpclaw-lite user-create -t {telegram_id} -d <department> -n <name>\n"
+            )
+            return
+        print(f"[INFO] Вошёл как: {user.name} (department={user.department})")
         container_manager = getattr(user_manager, "_container_manager", None)
         if container_manager:
             container_manager.ensure_running(user.telegram_id)
@@ -410,7 +424,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.command == "chat":
-        cmd_chat(args.user_id, args.department)
+        cmd_chat(args.telegram_id)
     elif args.command == "telegram":
         cmd_telegram()
     elif args.command == "user-list":

@@ -238,7 +238,7 @@ def test_require_env_fail(
 @pytest.mark.parametrize(
     "argv,mock_target",
     [
-        (["corpclaw-lite", "chat"], "cmd_chat"),
+        (["corpclaw-lite", "chat", "--telegram-id", "278278319"], "cmd_chat"),
         (["corpclaw-lite", "telegram"], "cmd_telegram"),
         (["corpclaw-lite", "user-list"], "cmd_user_list"),
         (["corpclaw-lite", "user-create", "-t", "123", "-d", "it"], "cmd_user_create"),
