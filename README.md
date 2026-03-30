@@ -13,9 +13,11 @@ uv sync
 # Интерактивный CLI чат
 uv run corpclaw-lite chat
 
-# Запуск Telegram-бота
-export TELEGRAM_BOT_TOKEN="your-token"
-export CORPCLAW_IPC_SECRET="your-secret"
+# Настройка окружения
+cp .env.example .env
+# Отредактируйте .env, добавив TELEGRAM_BOT_TOKEN и CORPCLAW_IPC_SECRET
+
+# Запуск Telegram-бота (uv run автоматически подхватит .env)
 uv run corpclaw-lite telegram
 ```
 

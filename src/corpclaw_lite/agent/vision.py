@@ -52,12 +52,20 @@ class VisionProcessor:
 
         logger.info("VisionProcessor describing %s (%s, %d bytes)", path.name, media_type, len(raw))
 
-        # Try vision-aware provider first
+        # Resolve the actual provider: if we have a router, use the vision task route
         from corpclaw_lite.llm.base import LLMResponse, VisionProvider
+        from corpclaw_lite.llm.router import LLMRouter
 
-        if isinstance(self._provider, VisionProvider):
+        effective_provider: Provider
+        if isinstance(self._provider, LLMRouter):
+            effective_provider = self._provider.for_task("vision")
+        else:
+            effective_provider = self._provider
+
+        # Try vision-aware provider first
+        if isinstance(effective_provider, VisionProvider):
             try:
-                result: LLMResponse = await self._provider.chat_with_image(
+                result: LLMResponse = await effective_provider.chat_with_image(
                     image_data=image_data,
                     image_media_type=media_type,
                     prompt=prompt,
@@ -74,7 +82,7 @@ class VisionProcessor:
             {"role": "user", "content": f"[Attached Image: {path.name}]\n\n{prompt}"}
         ]
         try:
-            response = await self._provider.chat(messages=messages)
+            response = await effective_provider.chat(messages=messages)
             return response.content if response.content else "Vision model returned no description."
         except Exception as e:
             return f"Error communicating with vision model: {e}"

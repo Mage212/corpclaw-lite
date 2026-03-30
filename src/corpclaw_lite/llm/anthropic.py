@@ -21,7 +21,12 @@ class AnthropicProvider(Provider):
         self._model = settings.model
         if not settings.api_key:
             raise ValueError("Anthropic requires an API key in settings")
-        self._client = anthropic.AsyncAnthropic(api_key=settings.api_key)
+
+        kwargs: dict[str, Any] = {"api_key": settings.api_key}
+        if settings.base_url:
+            kwargs["base_url"] = settings.base_url
+
+        self._client = anthropic.AsyncAnthropic(**kwargs)
 
     def _convert_tool(self, tool: dict[str, Any]) -> dict[str, Any]:
         """Convert standard JSON Schema tool to Anthropic tool schema."""

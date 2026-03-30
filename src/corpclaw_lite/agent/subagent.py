@@ -44,6 +44,15 @@ class SubagentDispatcher:
         """Run the subagent on a specific task."""
         logger.info("Dispatching subagent %s for user %s", spec.id, user.id)
 
+        # Resolve provider: if we have a router, use subagent-specific routing
+        from corpclaw_lite.llm.router import LLMRouter
+
+        effective_provider: Provider
+        if isinstance(self._provider, LLMRouter):
+            effective_provider = self._provider.for_subagent(spec.id)
+        else:
+            effective_provider = self._provider
+
         # Create an isolated tool registry with ONLY the allowed tools
         isolated_registry = ToolRegistry()
         for tool_name, tool in self._main_registry.items().items():
@@ -69,7 +78,7 @@ class SubagentDispatcher:
 
         # Setup isolated loop — pass security guards through from parent
         loop = AgentLoop(
-            provider=self._provider,
+            provider=effective_provider,
             registry=isolated_registry,
             settings=self._settings,
             tool_guard=self._tool_guard,

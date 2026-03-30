@@ -1,25 +1,71 @@
+# CorpClaw Lite — Main Configuration
+#
+# Secrets and API keys are injected via ${VAR:-default} from .env / environment.
+# To add a new LLM provider: add it to llm.named and optionally a routing rule.
+# To change routing: edit llm.routing — no code changes needed.
+#
+# Provider types:
+#   openai    — OpenAI-compatible: Ollama, vLLM, LM Studio, OpenRouter, etc.
+#   anthropic — native Anthropic SDK (supports base_url for proxies/gateways)
+
 llm:
-  default: "local"
+  # Name of the default named provider (used when no routing rule matches)
+  default: "default"
+
+  # Named providers — add as many as you need
   named:
-    local:
+    # Primary provider: resolves to whatever is set in .env
+    default:
       type: "openai"
-      model: "qwen2.5-7b-instruct"
-      base_url: "${LLM_BASE_URL:-http://localhost:11434/v1}"
+      model: "${OPENAI_MODEL:-qwen2.5:7b}"
+      base_url: "${OPENAI_BASE_URL:-http://localhost:11434/v1}"
+      api_key: "${OPENAI_API_KEY:-ollama}"
+
+    # Vision provider: same base by default, override to use a dedicated vision model
+    # e.g. change model to "qwen2.5-vl:7b" or point base_url to a different endpoint
     vision:
       type: "openai"
-      model: "${VISION_MODEL:-qwen2.5-vl-7b}"
-      base_url: "${VISION_LLM_BASE_URL:-http://localhost:11434/v1}"
+      model: "${OPENAI_MODEL:-qwen2.5:7b}"
+      base_url: "${OPENAI_BASE_URL:-http://localhost:11434/v1}"
+      api_key: "${OPENAI_API_KEY:-ollama}"
+
+    # Cloud provider: Anthropic Claude for heavier tasks (summarisation, code review)
+    # Only active if ANTHROPIC_API_KEY is set in .env
     cloud:
       type: "anthropic"
-      model: "claude-3-5-sonnet-20241022"
+      model: "${ANTHROPIC_MODEL:-claude-3-5-sonnet-20241022}"
       api_key: "${ANTHROPIC_API_KEY:-}"
+      base_url: "${ANTHROPIC_BASE_URL:-}"
+
+  # Routing rules — checked top-to-bottom, first match wins
+  # task_kind and subagent_id are optional; both may be set for specificity
   routing:
+    # Vision tasks routed to the dedicated vision provider
     - task_kind: "vision"
       provider: "vision"
-    - subagent_id: "execution-agent"
-      provider: "cloud"
+
+    # Memory consolidation uses the default provider (light summarisation)
+    - task_kind: "consolidate"
+      provider: "default"
+
+    # Example: route a specific subagent to the cloud provider
+    # - subagent_id: "heavy-analysis-agent"
+    #   provider: "cloud"
 
 agent:
   max_steps: 15
   max_tool_calls: 30
   max_wall_time_ms: 120000
+  max_history: 20
+  approval_mode: "manual"
+  consolidation_enabled: true
+  consolidation_threshold: 30
+  compression:
+    enabled: true
+    max_context_tokens: 8000
+    threshold_ratio: 0.5
+    protect_tail_tokens: 3000
+
+telegram:
+  rate_limit_per_minute: 10
+  default_department: "default"
