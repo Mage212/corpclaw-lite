@@ -47,6 +47,7 @@ class TestTelegramChannel:
         await channel.send_message(user, "Hello World")
 
         from corpclaw_lite.channels.telegram.formatting import convert_markdown
+
         expected_text = convert_markdown("Hello World")
 
         mock_bot.send_message.assert_awaited_once_with(

@@ -211,6 +211,8 @@ async def run_telegram_bot(token: str) -> None:
     finally:
         if cleanup_task is not None:
             cleanup_task.cancel()
+        for task in _background_tasks:
+            task.cancel()
         reloader.stop()
         await channel.stop()
         logger.info("Telegram bot stopped.")
