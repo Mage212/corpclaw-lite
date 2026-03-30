@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from corpclaw_lite.agent.factory import PROJECT_ROOT, build_agent_stack
+from corpclaw_lite.runtime.shutdown import install_signal_handlers
 
 __all__ = [
     "run_telegram_bot",
@@ -234,6 +235,8 @@ async def run_telegram_bot(token: str) -> None:
     # ── Start ─────────────────────────────────────────────────────────────
     logger.info("Starting Telegram bot...")
     cleanup_task: asyncio.Task[None] | None = None
+    shutdown_event = asyncio.Event()
+    install_signal_handlers(shutdown_event)
     try:
         await channel.start()
 
@@ -246,9 +249,9 @@ async def run_telegram_bot(token: str) -> None:
             logger.info("Admin notifier active for %d admin(s)", len(tg_settings.admin_ids))
 
         cleanup_task = asyncio.create_task(_rate_limit_cleanup_loop())
-        while True:
-            await asyncio.sleep(3600)
-    except (KeyboardInterrupt, asyncio.CancelledError):
+        # Wait until a signal fires
+        await shutdown_event.wait()
+    except asyncio.CancelledError:
         pass
     finally:
         if cleanup_task is not None:
@@ -257,7 +260,16 @@ async def run_telegram_bot(token: str) -> None:
             task.cancel()
         reloader.stop()
         await channel.stop()
-        logger.info("Telegram bot stopped.")
+        # Stop all per-user Docker containers so no ghost containers remain
+        if container_manager is not None:
+            active = await container_manager.list_active()
+            for cname in active:
+                try:
+                    uid = int(cname.split("_")[-1])
+                    container_manager.stop(uid)
+                except Exception as e:
+                    logger.warning("Could not stop container %s: %s", cname, e)
+        logger.info("Telegram bot stopped cleanly.")
 
 
 if __name__ == "__main__":

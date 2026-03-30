@@ -23,8 +23,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import os
 import sys
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "cmd_chat",
@@ -130,13 +133,18 @@ def cmd_chat(telegram_id: int) -> None:
         console_level=_log.console_level,
     )
 
+    shutdown: asyncio.Event = asyncio.Event()
+
     async def _run() -> None:
         from pathlib import Path
 
         from corpclaw_lite.agent.factory import build_agent_stack
         from corpclaw_lite.channels.cli import CLIChannel
         from corpclaw_lite.config.bootstrap import BootstrapLoader
+        from corpclaw_lite.runtime.shutdown import install_signal_handlers
         from corpclaw_lite.users.manager import UserManager
+
+        install_signal_handlers(shutdown)
 
         agent_loop, user_manager, _ = build_agent_stack()
         bootstrap = BootstrapLoader(Path("config/bootstrap"))
@@ -160,9 +168,28 @@ def cmd_chat(telegram_id: int) -> None:
         channel = CLIChannel()
         await channel.start()
         print("CorpClaw Lite – CLI chat (Ctrl+C to quit)")
+        loop = asyncio.get_running_loop()
         try:
-            while True:
-                msg = await asyncio.get_event_loop().run_in_executor(None, lambda: input("You: "))
+            while not shutdown.is_set():
+                # Race input() against the shutdown event so Ctrl+C exits immediately
+                input_future: asyncio.Future[str] = loop.run_in_executor(
+                    None, lambda: input("You: ")
+                )
+                shutdown_wait = asyncio.ensure_future(shutdown.wait())
+                _, _ = await asyncio.wait(
+                    [input_future, shutdown_wait],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if shutdown.is_set():
+                    input_future.cancel()
+                    break
+                # input finished first — cancel the shutdown watcher
+                shutdown_wait.cancel()
+                try:
+                    msg = input_future.result()
+                except Exception:
+                    break  # EOFError / piped input exhausted
+
                 if msg.strip():
 
                     async def approval_cb(action: str, details: str) -> bool:
@@ -175,10 +202,11 @@ def cmd_chat(telegram_id: int) -> None:
                         approval_callback=approval_cb,
                     )
                     await channel.send_message(user, reply)
-        except (KeyboardInterrupt, EOFError):
-            pass
         finally:
             await channel.stop()
+            if container_manager is not None:
+                container_manager.stop(user.telegram_id)
+            logger.info("CLI chat shut down cleanly for user %d.", telegram_id)
 
     asyncio.run(_run())
 
