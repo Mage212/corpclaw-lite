@@ -34,12 +34,9 @@ WORKDIR /app
 COPY pyproject.toml ./
 COPY src/ ./src/
 
-# Install the package (agent_worker only needs the container/ and extensions/tools/ modules)
-# We install without optional deps to keep the image small
-RUN pip install --no-cache-dir -e ".[container]" 2>/dev/null || \
-    pip install --no-cache-dir -e . && \
-    # Remove cache to shrink image
-    find /usr/local/lib/python3.12 -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+# the Docker image extremely lightweight.
+RUN pip install --no-cache-dir pydantic anyio && \
+    find /usr/local/lib/python* -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
 
 # Create non-root agent user
 RUN useradd --no-create-home --shell /bin/false --uid 1001 agent
@@ -49,6 +46,7 @@ RUN useradd --no-create-home --shell /bin/false --uid 1001 agent
 RUN mkdir -p /workspace && chown agent:agent /workspace
 
 USER agent
+ENV PYTHONPATH=/app/src
 
 # Default command — runs as the IPC worker for docker exec
 # In practice, docker exec overrides this with:

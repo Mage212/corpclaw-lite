@@ -89,15 +89,14 @@ cp .env.example .env
 |-----------|---------|
 | `TELEGRAM_BOT_TOKEN` | Токен бота от @BotFather |
 | `CORPCLAW_IPC_SECRET` | Произвольная строка ≥32 символов (HMAC-ключ для IPC между host и контейнером) |
-| `OPENAI_BASE_URL` | URL Ollama/LM Studio (напр. `http://localhost:11434/v1`) |
-| `OPENAI_MODEL` | Модель (напр. `qwen2.5:7b`) |
+| `OPENAI_BASE_URL` | URL базового провайдера (напр. `http://localhost:11434/v1` для Ollama) |
 
 Опционально:
 
 | Переменная | Описание |
 |-----------|---------|
 | `ANTHROPIC_API_KEY` | Если нужен Claude |
-| `ANTHROPIC_MODEL` | По умолчанию `claude-3-5-sonnet-20241022` |
+| `OPENAI_API_KEY` | Если базовый провайдер требует авторизации (напр. OpenRouter) |
 
 ### 2. Docker-контейнер (sandbox)
 
@@ -153,11 +152,11 @@ llm:
   named:
     default:
       type: "openai"
-      model: "${OPENAI_MODEL:-qwen2.5:7b}"
+      model: "qwen2.5:7b"
       base_url: "${OPENAI_BASE_URL:-http://localhost:11434/v1}"
     cloud:
       type: "anthropic"
-      model: "${ANTHROPIC_MODEL:-claude-3-5-sonnet-20241022}"
+      model: "claude-3-5-sonnet-20241022"
       api_key: "${ANTHROPIC_API_KEY:-}"
   routing:
     - task_kind: "vision"

@@ -17,15 +17,14 @@ llm:
     # Primary provider: resolves to whatever is set in .env
     default:
       type: "openai"
-      model: "${OPENAI_MODEL:-qwen2.5:7b}"
+      model: "nvidia/nemotron-3-nano-30b-a3b:free"
       base_url: "${OPENAI_BASE_URL:-http://localhost:11434/v1}"
       api_key: "${OPENAI_API_KEY:-ollama}"
 
     # Vision provider: same base by default, override to use a dedicated vision model
-    # e.g. change model to "qwen2.5-vl:7b" or point base_url to a different endpoint
     vision:
       type: "openai"
-      model: "${OPENAI_MODEL:-qwen2.5:7b}"
+      model: "qwen2.5-vl:7b"
       base_url: "${OPENAI_BASE_URL:-http://localhost:11434/v1}"
       api_key: "${OPENAI_API_KEY:-ollama}"
 
@@ -33,7 +32,7 @@ llm:
     # Only active if ANTHROPIC_API_KEY is set in .env
     cloud:
       type: "anthropic"
-      model: "${ANTHROPIC_MODEL:-claude-3-5-sonnet-20241022}"
+      model: "claude-3-5-sonnet-20241022"
       api_key: "${ANTHROPIC_API_KEY:-}"
       base_url: "${ANTHROPIC_BASE_URL:-}"
 

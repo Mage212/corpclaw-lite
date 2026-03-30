@@ -63,7 +63,9 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
 
     # chat
-    sub.add_parser("chat", help="Start an interactive CLI chat session")
+    chat_p = sub.add_parser("chat", help="Start an interactive CLI chat session")
+    chat_p.add_argument("--user-id", type=int, default=1, help="Mock user ID (default: 1)")
+    chat_p.add_argument("--department", type=str, default="engineering", help="Mock user department (default: engineering)")
 
     # telegram
     sub.add_parser("telegram", help="Start the Telegram bot (polling)")
@@ -110,7 +112,7 @@ def _build_parser() -> argparse.ArgumentParser:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def cmd_chat() -> None:
+def cmd_chat(user_id: int = 1, department: str = "engineering") -> None:
     """Launch an interactive CLI chat loop."""
     from corpclaw_lite.agent.factory import PROJECT_ROOT
     from corpclaw_lite.config.loader import load_settings
@@ -132,11 +134,15 @@ def cmd_chat() -> None:
         from corpclaw_lite.config.bootstrap import BootstrapLoader
         from corpclaw_lite.users.models import User
 
-        agent_loop, _, _ = build_agent_stack()
+        agent_loop, user_manager, _ = build_agent_stack()
         bootstrap = BootstrapLoader(Path("config/bootstrap"))
         system_prompt = bootstrap.get_system_prompt() or None
 
-        user = User(id=0, name="cli-user", department="default", telegram_id=None)
+        user = User(id=user_id, name="cli-user", department=department, telegram_id=user_id)
+        container_manager = getattr(user_manager, "_container_manager", None)
+        if container_manager:
+            container_manager.ensure_running(user.telegram_id)
+
         channel = CLIChannel()
         await channel.start()
         print("CorpClaw Lite – CLI chat (Ctrl+C to quit)")
@@ -404,7 +410,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.command == "chat":
-        cmd_chat()
+        cmd_chat(args.user_id, args.department)
     elif args.command == "telegram":
         cmd_telegram()
     elif args.command == "user-list":

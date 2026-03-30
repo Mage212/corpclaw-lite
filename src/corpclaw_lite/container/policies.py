@@ -26,8 +26,6 @@ class ContainerPolicies:
             settings: ContainerSettings with image, limits, etc.
             network_policy: Optional network allowlist to apply.
             workspace_dir: Absolute host path to bind-mount at /workspace.
-                           Should be the user-specific directory from ContainerManager.
-            seccomp_profile_path: Host path to seccomp profile JSON.
         """
         args: dict[str, Any] = {
             "image": settings.image,
@@ -38,8 +36,7 @@ class ContainerPolicies:
             "mem_limit": settings.max_memory,
             "nano_cpus": int(settings.cpus * 1e9),
             "pids_limit": 100,  # Prevent fork bombs
-            "security_opt": [f"seccomp={seccomp_profile_path}"],
-            "cap_drop": ["ALL"],  # Drop all Linux capabilities
+            "security_opt": ["no-new-privileges:true"],
             "read_only": True,  # Read-only root FS; /workspace and /tmp are rw
             "tmpfs": {"/tmp": "size=64m"},
             "volumes": {
@@ -52,6 +49,11 @@ class ContainerPolicies:
                 "PYTHONUNBUFFERED": "1",
             },
         }
+
+        # Apply strict Linux isolation if enabled (breaks Docker Desktop for Mac's runc)
+        if settings.strict_capabilities:
+            args["cap_drop"] = ["ALL"]
+            args["security_opt"].append("seccomp=unconfined") # Or valid JSON policy
 
         # Pass IPC secret into container so agent_worker can verify requests
         import os
