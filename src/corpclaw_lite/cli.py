@@ -448,6 +448,10 @@ def cmd_generate(ext_type: str, name: str) -> None:
 
 
 def main() -> None:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+
     parser = _build_parser()
     args = parser.parse_args()
 
