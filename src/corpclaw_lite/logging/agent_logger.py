@@ -46,6 +46,7 @@ def setup_logging(
     text_handler.addFilter(CredentialScrubber())
 
     root = logging.getLogger()
+    root.handlers.clear()  # Prevent duplicate logs if setup_logging is called twice
     root.setLevel(logging.DEBUG)  # root must be lowest — handlers filter upward
     root.addHandler(text_handler)
 
@@ -55,6 +56,10 @@ def setup_logging(
     console.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
     console.addFilter(CredentialScrubber())
     root.addHandler(console)
+
+    # Reduce spam from underlying HTTP libraries
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 class AgentLogger:

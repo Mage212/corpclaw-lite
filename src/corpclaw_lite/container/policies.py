@@ -53,7 +53,7 @@ class ContainerPolicies:
         # Apply strict Linux isolation if enabled (breaks Docker Desktop for Mac's runc)
         if settings.strict_capabilities:
             args["cap_drop"] = ["ALL"]
-            args["security_opt"].append("seccomp=unconfined") # Or valid JSON policy
+            args["security_opt"].append("seccomp=unconfined")  # Or valid JSON policy
 
         # Pass IPC secret into container so agent_worker can verify requests
         import os

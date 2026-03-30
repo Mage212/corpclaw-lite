@@ -218,6 +218,11 @@ async def run_telegram_bot(token: str) -> None:
 
     # ── Health endpoint ───────────────────────────────────────────────────
     try:
+        import importlib.util
+
+        if importlib.util.find_spec("aiohttp") is None:
+            raise ImportError("aiohttp missing")
+
         from corpclaw_lite.logging import health
 
         _health_task = asyncio.create_task(health.run_health_server())
