@@ -33,6 +33,9 @@ class TestSetupLogging:
                 has_scrubber = any(isinstance(f, CredentialScrubber) for f in handler.filters)
                 assert has_scrubber, f"Handler {handler} missing CredentialScrubber filter"
         finally:
+            for handler in root.handlers:
+                if handler not in old_handlers:
+                    handler.close()
             root.handlers.clear()
             root.handlers.extend(old_handlers)
 
@@ -48,6 +51,9 @@ class TestSetupLogging:
             setup_logging(log_dir=log_dir)
             assert (log_dir / "corpclaw.log").exists()
         finally:
+            for handler in root.handlers:
+                if handler not in old_handlers:
+                    handler.close()
             root.handlers.clear()
             root.handlers.extend(old_handlers)
 
