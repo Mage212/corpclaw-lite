@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from collections.abc import Generator
+from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
 
@@ -12,6 +14,25 @@ import anyio
 from corpclaw_lite.users.models import User
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _db_connect(db_path: Path) -> Generator[sqlite3.Connection, None, None]:
+    """Context manager that opens a SQLite connection and explicitly closes it.
+
+    Unlike plain ``with sqlite3.connect()`` (which only manages transactions),
+    this helper calls ``.close()`` on exit — preventing ResourceWarning in
+    Python 3.12+ when connections are garbage-collected.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 class UserManager:
@@ -30,7 +51,7 @@ class UserManager:
         self._revoked_cache: set[int] | None = None
 
     def _init_db(self) -> None:
-        with sqlite3.connect(self._db) as conn:
+        with _db_connect(self._db) as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute(
                 """
@@ -51,7 +72,7 @@ class UserManager:
         name: str = "",
     ) -> User:
         """Insert a new user (if not exists) and return the DB record."""
-        with sqlite3.connect(self._db) as conn:
+        with _db_connect(self._db) as conn:
             conn.execute(
                 "INSERT OR IGNORE INTO users (telegram_id, name, department) VALUES (?,?,?)",
                 (telegram_id, name or f"user_{telegram_id}", department),
@@ -69,7 +90,7 @@ class UserManager:
 
     def get_by_telegram_id(self, telegram_id: int) -> User | None:
         """Look up a user by their Telegram ID."""
-        with sqlite3.connect(self._db) as conn:
+        with _db_connect(self._db) as conn:
             conn.row_factory = sqlite3.Row
             row = conn.execute(
                 "SELECT * FROM users WHERE telegram_id = ?", (telegram_id,)
@@ -85,7 +106,7 @@ class UserManager:
 
     def list_users(self) -> list[User]:
         """Return all registered users."""
-        with sqlite3.connect(self._db) as conn:
+        with _db_connect(self._db) as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute("SELECT * FROM users ORDER BY id").fetchall()
         return [
@@ -99,7 +120,7 @@ class UserManager:
         ]
 
     def _get_id_by_telegram(self, telegram_id: int) -> int:
-        with sqlite3.connect(self._db) as conn:
+        with _db_connect(self._db) as conn:
             row = conn.execute(
                 "SELECT id FROM users WHERE telegram_id = ?", (telegram_id,)
             ).fetchone()

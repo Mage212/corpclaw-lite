@@ -55,7 +55,7 @@ async def test_write_and_read_file(
     res_e = await registry.execute(
         "edit_file", {"path": test_file, "old_text": "World", "new_text": "Lite"}
     )
-    assert "Successfully" in res_e
+    assert "occurrence(s) replaced" in res_e
 
     # Check edit result
     assert await registry.execute("read_file", {"path": test_file}) == "Hello Lite\nLine 2"

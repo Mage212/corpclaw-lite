@@ -38,15 +38,27 @@ class NetworkPolicy:
 
         For CorpClaw Lite, connecting to a restricted predefined network is the pattern.
         """
-        # A simple approach is passing environment variables or using specific add-host entries
-        # but true lockdown is achieved via container orchestration networks.
-        # This returns a simplified representation for ContainerManager.
-
-        # NemoClaw pattern: deny-by-default via network_mode="none".
-        # True allowlist-based networking requires Docker custom network + iptables.
+        # KNOWN LIMITATION: network_mode='none' blocks ALL outbound traffic including
+        # the allowlist. The ALLOWED_DOMAINS env var is set but not consumed by any
+        # component — it is informational only.
+        #
+        # To implement true allowlist-based networking:
+        #   1. Create a custom Docker network:
+        #         docker network create --driver bridge corpclaw_agent
+        #   2. Remove network_mode='none' and connect container to corpclaw_agent
+        #   3. In the container entrypoint, apply iptables rules:
+        #         iptables -P OUTPUT DROP
+        #         for domain in $ALLOWED_DOMAINS; do
+        #             iptables -A OUTPUT -d $(dig +short $domain) -j ACCEPT
+        #         done
+        #   4. Requires --cap-add NET_ADMIN on the container
+        #
+        # See docs/network_policy.md for the full setup guide.
         logger.warning(
-            "NetworkPolicy: using network_mode='none' (deny-by-default). "
-            "Allowlist-based networking requires Docker custom network + iptables setup."
+            "NetworkPolicy: network_mode='none' blocks ALL traffic (deny-by-default). "
+            "The ALLOWED_DOMAINS env var is set but not enforced — "
+            "allowlist-based networking requires Docker custom network + iptables. "
+            "See inline comments in network_policy.py for setup instructions."
         )
         return {
             "network_mode": "none",

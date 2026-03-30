@@ -13,15 +13,33 @@ DEFAULT_TIMEOUT = 30
 MAX_TIMEOUT = 120
 MAX_OUTPUT_BYTES = 50_000
 
-# Defense-in-depth: block destructive patterns regardless of ToolGuard rules
+# Defense-in-depth: block destructive patterns regardless of ToolGuard rules.
+# These patterns catch obvious destructive/RCE vectors that must NEVER execute
+# in a sandboxed agent context. ToolGuard YAML rules are the primary control --
+# these are the last-resort hardcoded backstop.
 BLOCKED_PATTERNS: list[re.Pattern[str]] = [
-    re.compile(r"rm\s+(-[a-zA-Z]*[rf][a-zA-Z]*\s+)*/\s*$"),
-    re.compile(r"rm\s+(-[a-zA-Z]*[rf][a-zA-Z]*\s+)+/\b"),
-    re.compile(r"mkfs\."),
-    re.compile(r"dd\s+.*of=/dev/"),
-    re.compile(r":\(\)\{.*\|.*&\s*\};:"),  # fork bomb
-    re.compile(r">\s*/dev/sd[a-z]"),
-    re.compile(r"chmod\s+777\s+/\s*$"),
+    # Destructive file operations
+    re.compile(r"rm\s+(-[a-zA-Z]*[rf][a-zA-Z]*\s+)*/\s*$"),  # rm -rf /
+    re.compile(r"rm\s+(-[a-zA-Z]*[rf][a-zA-Z]*\s+)+/\b"),  # rm -rf /path
+    re.compile(r"find\s+/.*-delete"),  # find / -delete
+    re.compile(r"find\s+/.*-exec\s+rm"),  # find / -exec rm
+    re.compile(r"mkfs\."),  # filesystem format
+    re.compile(r"dd\s+.*of=/dev/"),  # dd to device
+    re.compile(r">\s*/dev/sd[a-z]"),  # overwrite disk
+    re.compile(r"chmod\s+777\s+/\s*$"),  # chmod 777 /
+    # Fork bomb
+    re.compile(r":\(\)\{.*\|.*&\s*\};:"),
+    # RCE via download-and-execute
+    re.compile(r"curl\s+.*\|\s*(ba)?sh", re.IGNORECASE),  # curl | bash
+    re.compile(r"wget\s+.*\|\s*(ba)?sh", re.IGNORECASE),  # wget | bash
+    re.compile(r"curl\s+.*-o\s*-\s*\|\s*(ba)?sh", re.IGNORECASE),  # curl -o- | bash
+    # Obfuscated payload delivery
+    re.compile(r"base64\s+(--decode|-d).*\|"),  # base64 decode | pipe
+    re.compile(r"\|\s*base64\s+(--decode|-d)"),  # ... | base64 -d | ...
+    # Privilege escalation
+    re.compile(r"\bsudo\s+"),  # sudo anything
+    # Eval with explicit string literal (eval of variable is allowed for scripting)
+    re.compile(r"""\beval\s+['"`]"""),  # eval '...' or eval "..."
 ]
 
 

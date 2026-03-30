@@ -416,7 +416,7 @@ class TelegramChannel(Channel):
         workspace = self.get_user_workspace(temp_user)
         target_path = (workspace / safe_name).resolve()
 
-        if not str(target_path).startswith(str(workspace.resolve())):
+        if not target_path.is_relative_to(workspace.resolve()):
             await update.message.reply_text("⚠️ Недопустимый путь файла.")
             return
 

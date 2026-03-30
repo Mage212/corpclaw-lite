@@ -1,8 +1,11 @@
 # pyright: reportUnknownMemberType=false, reportUnknownVariableType=false, reportAttributeAccessIssue=false, reportUnknownArgumentType=false
+"""File system tools: read, write, edit, list, search."""
+
 from __future__ import annotations
 
 import os
 import re
+from datetime import datetime
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -102,8 +105,14 @@ class EditFileTool(Tool):
     description = "Edit a file by replacing old_text with new_text exactly."
     params = [
         ToolParam(name="path", type="string", description="Path to the file"),
-        ToolParam(name="old_text", type="string", description="Text to finding strictly"),
+        ToolParam(name="old_text", type="string", description="Text to find strictly"),
         ToolParam(name="new_text", type="string", description="Text to replace with"),
+        ToolParam(
+            name="max_replacements",
+            type="integer",
+            description="Max occurrences to replace (default: 1). Use 0 for unlimited.",
+            required=False,
+        ),
     ]
     risk_level = RiskLevel.MEDIUM
 
@@ -119,6 +128,9 @@ class EditFileTool(Tool):
         ):
             return "Error: missing required params 'path', 'old_text', 'new_text'"
 
+        max_repl_raw = kwargs.get("max_replacements", 1)
+        max_repl = int(max_repl_raw) if isinstance(max_repl_raw, (int, float)) else 1
+
         try:
             resolved = resolve_and_validate_path(path)
             if not resolved.exists():
@@ -128,17 +140,32 @@ class EditFileTool(Tool):
             if old_text not in content:
                 return "Error: 'old_text' exactly not found in file."
 
-            count = content.count(old_text)
-            content = content.replace(old_text, new_text)
-            await anyio.to_thread.run_sync(partial(resolved.write_text, content, encoding="utf-8"))
+            total = content.count(old_text)
+            if max_repl == 0:
+                # Unlimited: replace all
+                content = content.replace(old_text, new_text)
+                applied = total
+            else:
+                content = content.replace(old_text, new_text, max_repl)
+                applied = min(total, max_repl)
 
-            return f"Successfully edited file '{resolved}' (replaced {count} occurrence(s))."
+            await anyio.to_thread.run_sync(partial(resolved.write_text, content, encoding="utf-8"))
+            return f"Edited '{resolved}' ({applied} of {total} occurrence(s) replaced)."
         except Exception as e:
             return f"Error editing file '{path}': {e}"
 
 
+def _format_size(size_bytes: int) -> str:
+    """Human-readable file size."""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    if size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    return f"{size_bytes / 1024 / 1024:.1f} MB"
+
+
 class ListFilesTool(Tool):
-    """Tool to list files in a directory."""
+    """Tool to list files in a directory with size and modification date."""
 
     name = "list_files"
     description = "List all files and subdirectories in a specific directory."
@@ -157,9 +184,21 @@ class ListFilesTool(Tool):
 
             def _list_dir() -> list[str]:
                 items: list[str] = []
-                for item in resolved.iterdir():
-                    type_name = "DIR" if item.is_dir() else "FILE"
-                    items.append(f"[{type_name}] {item.name}")
+                for item in sorted(resolved.iterdir(), key=lambda p: (p.is_file(), p.name)):
+                    try:
+                        stat = item.stat()
+                        mdate = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d")
+                        if item.is_dir():
+                            try:
+                                child_count = sum(1 for _ in item.iterdir())
+                                items.append(f"[DIR]  {item.name:<30} ({child_count})  {mdate}")
+                            except PermissionError:
+                                items.append(f"[DIR]  {item.name:<30}              {mdate}")
+                        else:
+                            size_str = _format_size(stat.st_size)
+                            items.append(f"[FILE] {item.name:<30} {size_str:>8}  {mdate}")
+                    except OSError:
+                        items.append(f"[{'DIR' if item.is_dir() else 'FILE'}] {item.name}")
                 return items
 
             items = await anyio.to_thread.run_sync(_list_dir)
