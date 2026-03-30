@@ -209,7 +209,7 @@ def build_agent_stack() -> tuple[AgentLoop, UserManager, ToolRegistry]:
         try:
             from corpclaw_lite.security.ipc_auth import IPCAuth
 
-            container_ipc = ContainerIPC(auth=IPCAuth(), timeout_seconds=30.0)
+            container_ipc = ContainerIPC(auth=IPCAuth(), timeout_seconds=120.0)
         except Exception as e:
             raise RuntimeError(
                 f"Failed to initialise ContainerIPC: {e}. Is CORPCLAW_IPC_SECRET set in .env?"

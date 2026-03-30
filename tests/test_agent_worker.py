@@ -8,7 +8,15 @@ from corpclaw_lite.container.agent_worker import _build_container_registry
 def test_build_container_registry_has_expected_tools() -> None:
     """Verify the container registry contains the right subset of tools."""
     registry = _build_container_registry()
-    expected = {"read_file", "write_file", "edit_file", "list_files", "search_files", "exec_script"}
+    expected = {
+        "read_file",
+        "write_file",
+        "edit_file",
+        "list_files",
+        "search_files",
+        "exec_script",
+        "normalize_excel",
+    }
     actual = {t.name for t in registry.list_all()}
     assert actual == expected
 

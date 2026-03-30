@@ -133,9 +133,18 @@ class NormalizeExcelTool(Tool):
                     else:
                         seen.add(key)
 
-        # Delete rows (already in reverse order)
-        for row_idx in rows_to_delete:
-            ws.delete_rows(row_idx)
+        # Delete rows (already in reverse order) in bulk/chunks to drastically improve performance
+        if rows_to_delete:
+            current_start = rows_to_delete[0]
+            current_count = 1
+            for r in rows_to_delete[1:]:
+                if r == current_start - current_count:
+                    current_count += 1
+                else:
+                    ws.delete_rows(current_start - current_count + 1, current_count)
+                    current_start = r
+                    current_count = 1
+            ws.delete_rows(current_start - current_count + 1, current_count)
 
         try:
             wb.save(str(output_path))
