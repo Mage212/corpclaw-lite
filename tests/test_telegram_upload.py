@@ -1,12 +1,10 @@
 """Tests for Telegram upload path sanitization and helpers."""
 
-import pytest
-
 from corpclaw_lite.channels.telegram.upload import (
-    is_safe_extension,
-    is_image,
-    sanitize_filename,
     build_agent_directive,
+    is_image,
+    is_safe_extension,
+    sanitize_filename,
 )
 
 
@@ -28,12 +26,12 @@ def test_sanitize_filename():
     assert sanitize_filename("..") is None
     assert sanitize_filename(".") is None
     assert sanitize_filename("\x00trick.txt") is None
-    
+
     # Path traversal
     assert sanitize_filename("../../../etc/passwd") is None
     assert sanitize_filename("C:\\Windows\\System32\\cmd.exe") == "_Windows_System32_cmd.exe"
     assert sanitize_filename("C:\\folder\\file.txt") == "_folder_file.txt"
-    
+
     # Advanced logic matches
     assert sanitize_filename("a/b/c.txt") == "a_b_c.txt"
     assert sanitize_filename(" image.jpg.exe ") is None
@@ -42,13 +40,13 @@ def test_sanitize_filename():
 def test_build_agent_directive():
     d1 = build_agent_directive("image.jpg", caption=None)
     assert "read_image" in d1
-    
+
     d2 = build_agent_directive("image.jpg", caption="What is this?")
     assert "What is this?" in d2
     assert "read_image" in d2
-    
+
     d3 = build_agent_directive("doc.pdf", caption=None)
     assert "Пользователь загрузил файл" in d3
-    
+
     d4 = build_agent_directive("doc.pdf", caption="Summarize")
     assert "Summarize" in d4

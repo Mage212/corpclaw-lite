@@ -12,8 +12,8 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-
 # ── agent_logger / CredentialScrubber integration ────────────────────────────────
+
 
 class TestSetupLogging:
     """Tests that setup_logging() correctly configures the credential scrubber."""
@@ -63,9 +63,13 @@ class TestCredentialScrubber:
 
     def _make_record(self, msg: str) -> logging.LogRecord:
         return logging.LogRecord(
-            name="test", level=logging.INFO,
-            pathname="", lineno=0,
-            msg=msg, args=(), exc_info=None,
+            name="test",
+            level=logging.INFO,
+            pathname="",
+            lineno=0,
+            msg=msg,
+            args=(),
+            exc_info=None,
         )
 
     def test_scrubs_openai_key_pattern(self) -> None:
@@ -107,8 +111,10 @@ class TestCredentialScrubber:
         scrubber = CredentialScrubber()
         key = "sk-" + "x" * 30
         record = logging.LogRecord(
-            name="test", level=logging.INFO,
-            pathname="", lineno=0,
+            name="test",
+            level=logging.INFO,
+            pathname="",
+            lineno=0,
             msg="Using %s",
             args=(key,),
             exc_info=None,
@@ -122,16 +128,20 @@ class TestCredentialScrubber:
 
         scrubber = CredentialScrubber()
         record = logging.LogRecord(
-            name="test", level=logging.INFO,
-            pathname="", lineno=0,
+            name="test",
+            level=logging.INFO,
+            pathname="",
+            lineno=0,
             msg=42,  # non-string msg  # type: ignore[arg-type]
-            args=(), exc_info=None,
+            args=(),
+            exc_info=None,
         )
         result = scrubber.filter(record)
         assert result is True  # should not crash
 
 
 # ── NetworkPolicy ─────────────────────────────────────────────────────────────────
+
 
 class TestNetworkPolicy:
     """Tests for NetworkPolicy Docker arguments generation."""
@@ -178,12 +188,14 @@ class TestNetworkPolicy:
 
 # ── Health counters ───────────────────────────────────────────────────────────────
 
+
 class TestHealthCounters:
     """Tests for in-memory health counters."""
 
     def setup_method(self) -> None:
         """Reset counters before each test."""
         from corpclaw_lite.logging import health
+
         health._counters.clear()  # type: ignore[attr-defined]
 
     def test_increment_and_get_stats(self) -> None:

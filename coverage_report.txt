@@ -1,0 +1,192 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.13.12, pytest-9.0.2, pluggy-1.6.0
+rootdir: /Users/vadimmitroshkin/coding_projects/corpclaw/corpclaw-lite
+configfile: pyproject.toml
+plugins: anyio-4.12.1, asyncio-1.3.0, cov-7.0.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 364 items
+
+tests/test_agent_loop.py ..............                                  [  3%]
+tests/test_agent_memory.py .                                             [  4%]
+tests/test_agent_worker.py ..                                            [  4%]
+tests/test_bootstrap.py ........                                         [  6%]
+tests/test_builtin_tools.py ........                                     [  9%]
+tests/test_channels.py .....                                             [ 10%]
+tests/test_cli.py ........................                               [ 17%]
+tests/test_cli_commands.py ......                                        [ 18%]
+tests/test_compressor.py ...............                                 [ 22%]
+tests/test_consolidation.py ......                                       [ 24%]
+tests/test_containers.py .........                                       [ 26%]
+tests/test_coverage_extras.py .............                              [ 30%]
+tests/test_excel.py .........                                            [ 32%]
+tests/test_exec_script.py .....                                          [ 34%]
+tests/test_factory.py ......                                             [ 35%]
+tests/test_file_manager.py ..........                                    [ 38%]
+tests/test_health.py ..                                                  [ 39%]
+tests/test_ipc_auth.py ......                                            [ 40%]
+tests/test_llm_advanced.py ....s                                         [ 42%]
+tests/test_llm_providers.py .........                                    [ 44%]
+tests/test_logging_and_security.py ...............                       [ 48%]
+tests/test_logging_bootstrap.py ............                             [ 52%]
+tests/test_mcp.py ......                                                 [ 53%]
+tests/test_memory.py ....                                                [ 54%]
+tests/test_memory_tools.py ..........                                    [ 57%]
+tests/test_network_policy.py .                                           [ 57%]
+tests/test_permissions.py ..........                                     [ 60%]
+tests/test_plugin_loader.py .......                                      [ 62%]
+tests/test_plugins.py ....                                               [ 63%]
+tests/test_progress.py ..........                                        [ 66%]
+tests/test_rate_limit.py .....                                           [ 67%]
+tests/test_scrubber.py .                                                 [ 68%]
+tests/test_send_file.py ....                                             [ 69%]
+tests/test_skill_loader.py ......                                        [ 70%]
+tests/test_skills.py ..                                                  [ 71%]
+tests/test_subagent_registry.py ....                                     [ 72%]
+tests/test_subagents.py .......                                          [ 74%]
+tests/test_telegram_channel.py F....                                     [ 75%]
+tests/test_telegram_file_manager.py ......                               [ 77%]
+tests/test_telegram_formatting.py .........                              [ 79%]
+tests/test_telegram_progress.py ...                                      [ 80%]
+tests/test_telegram_rate_limit.py ...                                    [ 81%]
+tests/test_telegram_upload.py ....                                       [ 82%]
+tests/test_tool_guard.py ..........                                      [ 85%]
+tests/test_types.py .                                                    [ 85%]
+tests/test_upload.py ....................                                [ 91%]
+tests/test_user_manager.py ....                                          [ 92%]
+tests/test_vision.py .....                                               [ 93%]
+tests/test_web_fetch.py ...........                                      [ 96%]
+tests/test_whitelist.py ............                                     [100%]
+
+=================================== FAILURES ===================================
+_________________ TestTelegramChannel.test_send_message_basic __________________
+
+self = <test_telegram_channel.TestTelegramChannel object at 0x10e2387d0>
+channel = <corpclaw_lite.channels.telegram.channel.TelegramChannel object at 0x10e7defd0>
+mock_bot = <AsyncMock name='mock.bot' id='4537394448'>
+
+    @pytest.mark.asyncio
+    async def test_send_message_basic(self, channel: TelegramChannel, mock_bot: AsyncMock) -> None:
+        user = User(id="123", telegram_id=123, department="it", name="Test User")
+    
+        await channel.send_message(user, "Hello World")
+    
+>       mock_bot.send_message.assert_awaited_once_with(
+            chat_id=123,
+            text="Hello World",
+            parse_mode="MarkdownV2",
+            disable_web_page_preview=True,
+        )
+
+tests/test_telegram_channel.py:49: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+../../../.pyenv/versions/3.13.12/lib/python3.13/unittest/mock.py:2393: in assert_awaited_once_with
+    return self.assert_awaited_with(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <AsyncMock name='mock.bot.send_message' id='4539122080'>, args = ()
+kwargs = {'chat_id': 123, 'disable_web_page_preview': True, 'parse_mode': 'MarkdownV2', 'text': 'Hello World'}
+expected = call(chat_id=123, text='Hello World', parse_mode='MarkdownV2', disable_web_page_preview=True)
+_error_message = <function AsyncMockMixin.assert_awaited_with.<locals>._error_message at 0x10e8c2520>
+actual = call(chat_id=123, text='Hello World\n', parse_mode='MarkdownV2', disable_web_page_preview=True)
+cause = None
+
+    def assert_awaited_with(self, /, *args, **kwargs):
+        """
+        Assert that the last await was with the specified arguments.
+        """
+        if self.await_args is None:
+            expected = self._format_mock_call_signature(args, kwargs)
+            raise AssertionError(f'Expected await: {expected}\nNot awaited')
+    
+        def _error_message():
+            msg = self._format_mock_failure_message(args, kwargs, action='await')
+            return msg
+    
+        expected = self._call_matcher(_Call((args, kwargs), two=True))
+        actual = self._call_matcher(self.await_args)
+        if actual != expected:
+            cause = expected if isinstance(expected, Exception) else None
+>           raise AssertionError(_error_message()) from cause
+E           AssertionError: expected await not found.
+E           Expected: send_message(chat_id=123, text='Hello World', parse_mode='MarkdownV2', disable_web_page_preview=True)
+E             Actual: send_message(chat_id=123, text='Hello World\n', parse_mode='MarkdownV2', disable_web_page_preview=True)
+
+../../../.pyenv/versions/3.13.12/lib/python3.13/unittest/mock.py:2382: AssertionError
+------------------------------ Captured log setup ------------------------------
+DEBUG    asyncio:selector_events.py:64 Using selector: KqueueSelector
+================================ tests coverage ================================
+______________ coverage: platform darwin, python 3.13.12-final-0 _______________
+
+Name                                                        Stmts   Miss  Cover
+-------------------------------------------------------------------------------
+src/corpclaw_lite/__init__.py                                   0      0   100%
+src/corpclaw_lite/agent/compressor.py                         133     15    89%
+src/corpclaw_lite/agent/context.py                             55      3    95%
+src/corpclaw_lite/agent/factory.py                             78      4    95%
+src/corpclaw_lite/agent/guards.py                              71      6    92%
+src/corpclaw_lite/agent/loop.py                               134     17    87%
+src/corpclaw_lite/agent/subagent.py                            39      3    92%
+src/corpclaw_lite/agent/vision.py                              40      5    88%
+src/corpclaw_lite/channels/base.py                             11      0   100%
+src/corpclaw_lite/channels/cli.py                              33      7    79%
+src/corpclaw_lite/channels/telegram/__init__.py                 5      0   100%
+src/corpclaw_lite/channels/telegram/callback_data.py           14      0   100%
+src/corpclaw_lite/channels/telegram/channel.py                271    177    35%
+src/corpclaw_lite/channels/telegram/file_manager.py           366    214    42%
+src/corpclaw_lite/channels/telegram/formatting.py             104      6    94%
+src/corpclaw_lite/channels/telegram/progress.py                89      8    91%
+src/corpclaw_lite/channels/telegram/rate_limit.py              34      0   100%
+src/corpclaw_lite/channels/telegram/runner.py                 129    119     8%
+src/corpclaw_lite/channels/telegram/upload.py                  45      2    96%
+src/corpclaw_lite/cli.py                                      198     46    77%
+src/corpclaw_lite/config/bootstrap.py                          39      0   100%
+src/corpclaw_lite/config/settings.py                           51      0   100%
+src/corpclaw_lite/container/agent_worker.py                    48     30    38%
+src/corpclaw_lite/container/manager.py                        115     55    52%
+src/corpclaw_lite/container/policies.py                        22      3    86%
+src/corpclaw_lite/departments/manager.py                       37      2    95%
+src/corpclaw_lite/departments/permissions.py                   45      4    91%
+src/corpclaw_lite/extensions/mcp/__init__.py                    0      0   100%
+src/corpclaw_lite/extensions/mcp/adapter.py                    29      0   100%
+src/corpclaw_lite/extensions/mcp/client.py                     90     65    28%
+src/corpclaw_lite/extensions/mcp/manager.py                    47      6    87%
+src/corpclaw_lite/extensions/plugins/base.py                   24      0   100%
+src/corpclaw_lite/extensions/plugins/loader.py                 70     18    74%
+src/corpclaw_lite/extensions/plugins/registry.py               35      3    91%
+src/corpclaw_lite/extensions/skills/base.py                    10      0   100%
+src/corpclaw_lite/extensions/skills/loader.py                  31      0   100%
+src/corpclaw_lite/extensions/skills/registry.py                35      3    91%
+src/corpclaw_lite/extensions/skills/watcher.py                 57      7    88%
+src/corpclaw_lite/extensions/subagents/base.py                  9      0   100%
+src/corpclaw_lite/extensions/subagents/registry.py             31      0   100%
+src/corpclaw_lite/extensions/tools/base.py                     24      0   100%
+src/corpclaw_lite/extensions/tools/builtin/dispatch.py         23      1    96%
+src/corpclaw_lite/extensions/tools/builtin/excel.py            93     10    89%
+src/corpclaw_lite/extensions/tools/builtin/exec_script.py      47      5    89%
+src/corpclaw_lite/extensions/tools/builtin/files.py           174     33    81%
+src/corpclaw_lite/extensions/tools/builtin/image.py            26     13    50%
+src/corpclaw_lite/extensions/tools/builtin/memory.py           37      2    95%
+src/corpclaw_lite/extensions/tools/builtin/send_file.py        36      5    86%
+src/corpclaw_lite/extensions/tools/builtin/web.py             123     33    73%
+src/corpclaw_lite/extensions/tools/registry.py                 39      4    90%
+src/corpclaw_lite/llm/anthropic.py                             52      6    88%
+src/corpclaw_lite/llm/base.py                                  20      0   100%
+src/corpclaw_lite/llm/openai.py                                64      7    89%
+src/corpclaw_lite/llm/xml_tool_calling.py                      41      5    88%
+src/corpclaw_lite/logging/__init__.py                           2      0   100%
+src/corpclaw_lite/logging/agent_logger.py                      37      0   100%
+src/corpclaw_lite/logging/health.py                            23     12    48%
+src/corpclaw_lite/memory/consolidation.py                      42      4    90%
+src/corpclaw_lite/memory/sqlite.py                            141     28    80%
+src/corpclaw_lite/security/credential_scrubber.py              30      4    87%
+src/corpclaw_lite/security/ipc_auth.py                         55      3    95%
+src/corpclaw_lite/security/network_policy.py                   24      2    92%
+src/corpclaw_lite/security/tool_guard.py                      112     10    91%
+src/corpclaw_lite/users/manager.py                            152     15    90%
+src/corpclaw_lite/users/models.py                               9      0   100%
+-------------------------------------------------------------------------------
+TOTAL                                                        4100   1030    75%
+=========================== short test summary info ============================
+FAILED tests/test_telegram_channel.py::TestTelegramChannel::test_send_message_basic
+================== 1 failed, 362 passed, 1 skipped in 21.75s ===================

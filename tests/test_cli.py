@@ -211,16 +211,22 @@ def test_main_no_args_prints_help(capsys: pytest.CaptureFixture[str]) -> None:
     out, _ = capsys.readouterr()
     assert "COMMAND" in out or "usage" in out.lower()
 
+
 # ── New dispatch and require_env tests ────────────────────────────────────────
+
 
 def test_require_env_success(monkeypatch: pytest.MonkeyPatch) -> None:
     from corpclaw_lite.cli import _require_env
+
     monkeypatch.setenv("TEST_ENV_VAR", "value")
     assert _require_env("TEST_ENV_VAR") == "value"
 
 
-def test_require_env_fail(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+def test_require_env_fail(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     from corpclaw_lite.cli import _require_env
+
     monkeypatch.delenv("MISSING_ENV", raising=False)
     with pytest.raises(SystemExit) as exc:
         _require_env("MISSING_ENV")
@@ -229,26 +235,29 @@ def test_require_env_fail(monkeypatch: pytest.MonkeyPatch, capsys: pytest.Captur
     assert "MISSING_ENV" in captured.err
 
 
-@pytest.mark.parametrize("argv,mock_target", [
-    (["corpclaw-lite", "chat"], "cmd_chat"),
-    (["corpclaw-lite", "telegram"], "cmd_telegram"),
-    (["corpclaw-lite", "user-list"], "cmd_user_list"),
-    (["corpclaw-lite", "user-create", "-t", "123", "-d", "it"], "cmd_user_create"),
-    (["corpclaw-lite", "user-allow", "-t", "123"], "cmd_user_allow"),
-    (["corpclaw-lite", "user-deny", "-t", "123"], "cmd_user_deny"),
-    (["corpclaw-lite", "user-revoke", "-t", "123"], "cmd_user_revoke"),
-    (["corpclaw-lite", "containers"], "cmd_containers"),
-    (["corpclaw-lite", "prune"], "cmd_prune"),
-    (["corpclaw-lite", "skill", "list"], "cmd_skill_list"),
-    (["corpclaw-lite", "plugin", "list"], "cmd_plugin_list"),
-    (["corpclaw-lite", "generate", "skill", "testskill"], "cmd_generate"),
-])
+@pytest.mark.parametrize(
+    "argv,mock_target",
+    [
+        (["corpclaw-lite", "chat"], "cmd_chat"),
+        (["corpclaw-lite", "telegram"], "cmd_telegram"),
+        (["corpclaw-lite", "user-list"], "cmd_user_list"),
+        (["corpclaw-lite", "user-create", "-t", "123", "-d", "it"], "cmd_user_create"),
+        (["corpclaw-lite", "user-allow", "-t", "123"], "cmd_user_allow"),
+        (["corpclaw-lite", "user-deny", "-t", "123"], "cmd_user_deny"),
+        (["corpclaw-lite", "user-revoke", "-t", "123"], "cmd_user_revoke"),
+        (["corpclaw-lite", "containers"], "cmd_containers"),
+        (["corpclaw-lite", "prune"], "cmd_prune"),
+        (["corpclaw-lite", "skill", "list"], "cmd_skill_list"),
+        (["corpclaw-lite", "plugin", "list"], "cmd_plugin_list"),
+        (["corpclaw-lite", "generate", "skill", "testskill"], "cmd_generate"),
+    ],
+)
 def test_cli_dispatch(argv: list[str], mock_target: str) -> None:
-    from unittest.mock import patch
     import sys
-    from corpclaw_lite.cli import main
-    with patch.object(sys, "argv", argv):
-        with patch(f"corpclaw_lite.cli.{mock_target}") as mock_cmd:
-            main()
-            mock_cmd.assert_called_once()
+    from unittest.mock import patch
 
+    from corpclaw_lite.cli import main
+
+    with patch.object(sys, "argv", argv), patch(f"corpclaw_lite.cli.{mock_target}") as mock_cmd:
+        main()
+        mock_cmd.assert_called_once()

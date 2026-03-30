@@ -35,8 +35,11 @@ Here is my answer.
 
 # ── Helpers ───────────────────────────────────────────────────────────────────────
 
+
 def _anthropic_settings() -> ProviderSettings:
-    return ProviderSettings(type="anthropic", model="claude-3-haiku-20240307", api_key="sk-ant-test123")
+    return ProviderSettings(
+        type="anthropic", model="claude-3-haiku-20240307", api_key="sk-ant-test123"
+    )
 
 
 def _openai_settings(base_url: str = "http://localhost:11434/v1") -> ProviderSettings:
@@ -45,8 +48,8 @@ def _openai_settings(base_url: str = "http://localhost:11434/v1") -> ProviderSet
 
 # ── AnthropicProvider ─────────────────────────────────────────────────────────────
 
-class TestAnthropicProvider:
 
+class TestAnthropicProvider:
     def _text_response(self, text: str) -> MagicMock:
         block = MagicMock()
         block.type = "text"
@@ -82,9 +85,7 @@ class TestAnthropicProvider:
             mock_mod.AsyncAnthropic.return_value = mock_client
             provider = AnthropicProvider(_anthropic_settings())
 
-        result = await provider.chat(
-            messages=[{"role": "user", "content": "Привет"}]
-        )
+        result = await provider.chat(messages=[{"role": "user", "content": "Привет"}])
 
         assert isinstance(result, LLMResponse)
         assert result.content == "Привет!"
@@ -168,8 +169,8 @@ class TestAnthropicProvider:
 
 # ── OpenAIProvider ────────────────────────────────────────────────────────────────
 
-class TestOpenAIProvider:
 
+class TestOpenAIProvider:
     def _text_resp(self, text: str) -> MagicMock:
         choice = MagicMock()
         choice.message.content = text
