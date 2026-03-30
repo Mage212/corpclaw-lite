@@ -42,7 +42,17 @@ class RateLimiter:
         Should be called periodically from a background task.
         """
         async with self._lock:
-            inactive = [uid for uid, ts_list in self._timestamps.items() if not ts_list]
+            now = datetime.now()
+            minute_ago = now - timedelta(minutes=1)
+
+            inactive: list[int] = []
+            for uid, ts_list in self._timestamps.items():
+                active_ts = [ts for ts in ts_list if ts > minute_ago]
+                if not active_ts:
+                    inactive.append(uid)
+                else:
+                    self._timestamps[uid] = active_ts
+
             for uid in inactive:
                 del self._timestamps[uid]
             if inactive:

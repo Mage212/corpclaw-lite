@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import logging
 
 from corpclaw_lite.agent.guards import SimpleBudgetGuardConfig

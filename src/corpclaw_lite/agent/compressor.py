@@ -228,21 +228,27 @@ Summary:"""
         return 0
 
     def _estimate_tokens(self, messages: list[dict[str, Any]]) -> int:
-        """Rough token estimate using len/4 heuristic."""
+        """Rough token estimate using utf-8 byte count / 4 heuristic.
+
+        Rationale:
+        - ASCII (English): 1 char = 1 byte → len_bytes/4 ≈ tokens (accurate)
+        - Cyrillic (Russian): 1 char = 2 bytes, 1–3 tokens in BPE → len_bytes/4 is a safer estimate
+          than len/4 which would severely underestimate and cause unexpected context limit hits.
+        """
         total = 0
         for msg in messages:
             content = msg.get("content")
             if isinstance(content, str):
-                total += len(content) // 4
+                total += len(content.encode("utf-8")) // 4
             elif content is not None:
-                total += len(str(content)) // 4
+                total += len(str(content).encode("utf-8")) // 4
 
             if msg.get("tool_calls"):
                 for tc in msg["tool_calls"]:
                     args = tc.get("function", {}).get("arguments", "")
                     if isinstance(args, str):
-                        total += len(args) // 4
+                        total += len(args.encode("utf-8")) // 4
                     elif args:
-                        total += len(str(args)) // 4
+                        total += len(str(args).encode("utf-8")) // 4
 
         return total

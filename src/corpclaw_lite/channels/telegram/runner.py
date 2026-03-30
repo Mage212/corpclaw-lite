@@ -13,8 +13,9 @@ import asyncio
 import logging
 import sys
 from pathlib import Path
+from typing import Any
 
-from corpclaw_lite.agent.factory import build_agent_stack
+from corpclaw_lite.agent.factory import PROJECT_ROOT, build_agent_stack
 
 logger = logging.getLogger(__name__)
 
@@ -32,13 +33,13 @@ async def run_telegram_bot(token: str) -> None:
     from corpclaw_lite.users.models import User
 
     agent_loop, user_manager, tool_registry = build_agent_stack()
-    bootstrap = BootstrapLoader(Path("config/bootstrap"))
+    bootstrap = BootstrapLoader(PROJECT_ROOT / "config" / "bootstrap")
     tg_settings = TelegramSettings()
     rate_limiter = RateLimiter(max_per_minute=tg_settings.rate_limit_per_minute)
 
     # ── Skills ─────────────────────────────────────────────────────────────
     skill_registry = SkillRegistry()
-    skills_dir = Path("skills")
+    skills_dir = PROJECT_ROOT / "skills"
     if skills_dir.exists():
         skill_registry.load_directory(skills_dir)
 
@@ -48,6 +49,7 @@ async def run_telegram_bot(token: str) -> None:
 
     # Placeholder for admin notifier — set after channel.start()
     admin_notifier: AdminNotifier | None = None
+    _background_tasks: set[asyncio.Task[Any]] = set()
 
     # ── Message handler (called by channel for text/upload/photo) ─────────
     async def _handle_and_reply(telegram_id: str, message: str, mode: str = "execute") -> None:
@@ -134,7 +136,9 @@ async def run_telegram_bot(token: str) -> None:
                     f"User: {tid} ({user.name})\n"
                     f"Error: {type(e).__name__}: {str(e)[:200]}"
                 )
-                asyncio.create_task(admin_notifier.notify(error_summary))
+                _task = asyncio.create_task(admin_notifier.notify(error_summary))
+                _background_tasks.add(_task)
+                _task.add_done_callback(_background_tasks.discard)
         finally:
             if status_session is not None:
                 await status_session.close()
@@ -169,7 +173,9 @@ async def run_telegram_bot(token: str) -> None:
     try:
         from corpclaw_lite.logging import health
 
-        asyncio.create_task(health.run_health_server())
+        _health_task = asyncio.create_task(health.run_health_server())
+        _background_tasks.add(_health_task)
+        _health_task.add_done_callback(_background_tasks.discard)
         logger.info("Health endpoint started on :8080/health")
     except ImportError:
         logger.info("aiohttp not installed — health endpoint disabled")

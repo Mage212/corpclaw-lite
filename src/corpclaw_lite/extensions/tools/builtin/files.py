@@ -199,7 +199,23 @@ class SearchFilesTool(Tool):
                     return [f"Error: invalid regex pattern: {e}"]
 
                 results: list[str] = []
-                for root, _, files in os.walk(resolved):
+                _skip_dirs = {
+                    ".git",
+                    "__pycache__",
+                    "node_modules",
+                    ".venv",
+                    "venv",
+                    ".mypy_cache",
+                    ".ruff_cache",
+                    ".pytest_cache",
+                    ".tox",
+                    "dist",
+                    "build",
+                    ".eggs",
+                }
+                for root, dirs, files in os.walk(resolved):
+                    # Prune system/hidden directories in-place (prevents os.walk from descending)
+                    dirs[:] = [d for d in dirs if d not in _skip_dirs and not d.startswith(".")]
                     for file_name in files:
                         file_path = Path(root) / file_name
                         if (

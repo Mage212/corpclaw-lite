@@ -14,6 +14,8 @@ def setup_logging(log_dir: Path | str = "logs") -> None:
     - corpclaw.log: DEBUG text logs with rotation (5MB x 3 files)
     - agent_activity.jsonl: structured JSON events for analytics (10MB x 5)
     """
+    from corpclaw_lite.security.credential_scrubber import CredentialScrubber
+
     log_path = Path(log_dir)
     log_path.mkdir(parents=True, exist_ok=True)
 
@@ -26,6 +28,7 @@ def setup_logging(log_dir: Path | str = "logs") -> None:
     )
     text_handler.setLevel(logging.DEBUG)
     text_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    text_handler.addFilter(CredentialScrubber())
 
     root = logging.getLogger()
     root.setLevel(logging.DEBUG)
@@ -35,6 +38,7 @@ def setup_logging(log_dir: Path | str = "logs") -> None:
     console = logging.StreamHandler()
     console.setLevel(logging.INFO)
     console.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+    console.addFilter(CredentialScrubber())
     root.addHandler(console)
 
 

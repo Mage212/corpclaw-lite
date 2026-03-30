@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 from functools import partial
 from pathlib import Path
@@ -11,6 +12,11 @@ from typing import Any
 import anyio
 
 logger = logging.getLogger(__name__)
+
+# Data directory: absolute path, supports CORPCLAW_DATA_DIR env var override.
+_DATA_DIR = Path(
+    os.environ.get("CORPCLAW_DATA_DIR", "") or Path(__file__).parent.parent.parent.parent / "data"
+)
 
 
 class SQLiteMemory:
@@ -21,7 +27,7 @@ class SQLiteMemory:
     """
 
     def __init__(self, db_path: str = "memory.db"):
-        self.db_path = Path("data") / db_path
+        self.db_path = _DATA_DIR / db_path
         self._init_db()
 
     def _init_db(self) -> None:
@@ -170,9 +176,20 @@ class SQLiteMemory:
         )
 
     def _sync_replace_oldest(self, user_id: str, count: int, summary: str) -> None:
+        """Replace the N oldest messages with a summary in a single atomic transaction."""
         try:
             with sqlite3.connect(self.db_path) as conn:
-                ids = self._sync_get_oldest_message_ids(user_id, count)
+                # SELECT + DELETE + INSERT in one connection = atomic
+                cursor = conn.execute(
+                    """
+                    SELECT id FROM messages
+                    WHERE user_id = ?
+                    ORDER BY timestamp ASC
+                    LIMIT ?
+                    """,
+                    (str(user_id), count),
+                )
+                ids = [row[0] for row in cursor.fetchall()]
                 if not ids:
                     return
                 placeholders = ",".join("?" for _ in ids)

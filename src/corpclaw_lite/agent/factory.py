@@ -18,6 +18,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Project root: corpclaw-lite/ — 4 levels up from this file.
+# Supports CORPCLAW_ROOT env var override for Docker/systemd deployments.
+PROJECT_ROOT = Path(
+    os.environ.get("CORPCLAW_ROOT", "") or Path(__file__).parent.parent.parent.parent
+)
+
 
 def build_agent_stack() -> tuple[AgentLoop, UserManager, ToolRegistry]:
     """Build and return (AgentLoop, UserManager, ToolRegistry) using env/config settings.
@@ -82,14 +88,14 @@ def build_agent_stack() -> tuple[AgentLoop, UserManager, ToolRegistry]:
     ]:
         registry.register(tool)
 
-    # ── Security ──────────────────────────────────────────────────────────────
+    # ── Security ───────────────────────────────────────────────────────────────────
     guard = ToolGuard()
-    guard_rules = Path("config/tool_guard_rules.yaml")
+    guard_rules = PROJECT_ROOT / "config" / "tool_guard_rules.yaml"
     if guard_rules.exists():
         guard.load_file(guard_rules)
 
     dept_manager = DepartmentManager()
-    dept_config = Path("config/departments.yaml")
+    dept_config = PROJECT_ROOT / "config" / "departments.yaml"
     if dept_config.exists():
         dept_manager.load_file(dept_config)
     permission_checker = PermissionChecker(dept_manager)
@@ -97,9 +103,9 @@ def build_agent_stack() -> tuple[AgentLoop, UserManager, ToolRegistry]:
     # ── Agent Settings ─────────────────────────────────────────────────────────
     agent_settings = AgentSettings()
 
-    # ── Subagents ─────────────────────────────────────────────────────────────
+    # ── Subagents ──────────────────────────────────────────────────────────────────
     subagent_registry = SubagentRegistry()
-    subagent_dir = Path("config/subagents")
+    subagent_dir = PROJECT_ROOT / "config" / "subagents"
     if subagent_dir.exists():
         subagent_registry.load_directory(subagent_dir)
 

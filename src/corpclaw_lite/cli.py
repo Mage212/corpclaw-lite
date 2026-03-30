@@ -96,8 +96,6 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def cmd_chat() -> None:
     """Launch an interactive CLI chat loop."""
-    import asyncio
-
     from corpclaw_lite.logging.agent_logger import setup_logging
 
     setup_logging()
@@ -211,8 +209,6 @@ def cmd_user_revoke(telegram_id: int) -> None:
 
 def cmd_containers() -> None:
     """List active Docker sandbox containers."""
-    import asyncio
-
     from corpclaw_lite.container.manager import ContainerManager
 
     mgr = ContainerManager()
@@ -226,8 +222,6 @@ def cmd_containers() -> None:
 
 def cmd_prune() -> None:
     """Stop and remove idle containers."""
-    import asyncio
-
     from corpclaw_lite.container.manager import ContainerManager
 
     mgr = ContainerManager()
