@@ -97,6 +97,7 @@ def _register_sandboxed_tools(
 ) -> None:
     """Register file/script tools as IPCToolProxy (execute inside container)."""
     from corpclaw_lite.container.proxy import IPCToolProxy
+    from corpclaw_lite.extensions.tools.builtin.excel import NormalizeExcelTool
     from corpclaw_lite.extensions.tools.builtin.exec_script import ExecScriptTool
     from corpclaw_lite.extensions.tools.builtin.files import (
         EditFileTool,
@@ -113,6 +114,7 @@ def _register_sandboxed_tools(
         ListFilesTool(),
         SearchFilesTool(),
         ExecScriptTool(),
+        NormalizeExcelTool(),
     ]
     for tool in sandboxed:
         registry.register(IPCToolProxy.from_tool(tool, ipc))
@@ -121,6 +123,7 @@ def _register_sandboxed_tools(
 
 def _register_local_tools(registry: ToolRegistry) -> None:
     """Register file/script tools to run directly on the host (dev/test mode)."""
+    from corpclaw_lite.extensions.tools.builtin.excel import NormalizeExcelTool
     from corpclaw_lite.extensions.tools.builtin.exec_script import ExecScriptTool
     from corpclaw_lite.extensions.tools.builtin.files import (
         EditFileTool,
@@ -137,6 +140,7 @@ def _register_local_tools(registry: ToolRegistry) -> None:
         ListFilesTool(),
         SearchFilesTool(),
         ExecScriptTool(),
+        NormalizeExcelTool(),
     ]:
         registry.register(tool)
         logger.debug("Registered local tool (no container): %s", tool.name)
@@ -169,7 +173,6 @@ def build_agent_stack() -> tuple[AgentLoop, UserManager, ToolRegistry]:
     from corpclaw_lite.departments.permissions import PermissionChecker
     from corpclaw_lite.extensions.subagents.registry import SubagentRegistry
     from corpclaw_lite.extensions.tools.builtin.dispatch import DispatchSubagentTool
-    from corpclaw_lite.extensions.tools.builtin.excel import NormalizeExcelTool
     from corpclaw_lite.extensions.tools.builtin.image import ReadImageTool
     from corpclaw_lite.extensions.tools.builtin.memory import MemoryRecallTool, MemoryStoreTool
     from corpclaw_lite.extensions.tools.builtin.web import WebFetchTool
@@ -268,8 +271,6 @@ def build_agent_stack() -> tuple[AgentLoop, UserManager, ToolRegistry]:
 
     vision = VisionProcessor(provider)
     registry.register(ReadImageTool(vision))
-
-    registry.register(NormalizeExcelTool())
 
     # ── Memory Consolidation ──────────────────────────────────────────────────
     consolidator = None

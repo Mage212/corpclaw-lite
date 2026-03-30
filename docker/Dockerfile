@@ -35,7 +35,7 @@ COPY pyproject.toml ./
 COPY src/ ./src/
 
 # the Docker image extremely lightweight.
-RUN pip install --no-cache-dir pydantic anyio && \
+RUN pip install --no-cache-dir pydantic anyio openpyxl && \
     find /usr/local/lib/python* -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
 
 # Create non-root agent user

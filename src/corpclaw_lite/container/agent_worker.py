@@ -11,6 +11,7 @@ import json
 import logging
 import sys
 
+from corpclaw_lite.extensions.tools.builtin.excel import NormalizeExcelTool
 from corpclaw_lite.extensions.tools.builtin.exec_script import ExecScriptTool
 from corpclaw_lite.extensions.tools.builtin.files import (
     EditFileTool,
@@ -45,6 +46,7 @@ def _build_container_registry() -> ToolRegistry:
         ListFilesTool(),
         SearchFilesTool(),
         ExecScriptTool(),
+        NormalizeExcelTool(),
     ]:
         registry.register(tool)
     return registry
