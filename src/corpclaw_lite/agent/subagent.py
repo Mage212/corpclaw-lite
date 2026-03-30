@@ -87,7 +87,7 @@ class SubagentDispatcher:
 
         try:
             # Pass system_prompt as dedicated system message, task as user message
-            result = await loop.run(user, task_context, system_prompt=system_prompt)
+            result, _ = await loop.run(user, task_context, system_prompt=system_prompt)
             return result
         except Exception as e:
             logger.error("Subagent %s failed: %s", spec.id, e)

@@ -4,7 +4,7 @@ from typing import Any
 import pytest
 
 from corpclaw_lite.agent.context import ContextBuilder
-from corpclaw_lite.agent.loop import AgentLoop
+from corpclaw_lite.agent.loop import AgentLoop, RunStats
 from corpclaw_lite.config.settings import AgentSettings
 from corpclaw_lite.extensions.tools.registry import ToolRegistry
 from corpclaw_lite.llm.base import LLMResponse, Provider, StreamChunk, ToolCall
@@ -53,9 +53,13 @@ async def test_agent_loop_basic(test_user: User, empty_registry: ToolRegistry) -
         ]
     )
     loop = AgentLoop(provider, empty_registry, AgentSettings())
-    res = await loop.run(test_user, "Hi")
+    res, stats = await loop.run(test_user, "Hi")
     assert res == "Hello! How can I help?"
     assert provider.call_count == 1
+    assert isinstance(stats, RunStats)
+    assert stats.status == "ok"
+    assert stats.iterations == 1
+    assert stats.duration_ms > 0
 
 
 @pytest.mark.asyncio
@@ -78,9 +82,11 @@ async def test_agent_loop_tool_call(test_user: User, empty_registry: ToolRegistr
         ]
     )
     loop = AgentLoop(provider, empty_registry, AgentSettings())
-    res = await loop.run(test_user, "Run test tool")
+    res, stats = await loop.run(test_user, "Run test tool")
     assert res == "I ran the tool and it worked."
     assert provider.call_count == 2
+    assert stats.tools_used == ["test_tool"]
+    assert stats.status == "ok"
 
 
 @pytest.mark.asyncio
@@ -99,10 +105,11 @@ async def test_agent_loop_budget_exceeded_returns_string(
     )
     loop = AgentLoop(provider, empty_registry, settings)
 
-    result = await loop.run(test_user, "Loop forever")
+    result, stats = await loop.run(test_user, "Loop forever")
     assert isinstance(result, str)
     assert "resource limit" in result.lower() or "budget" in result.lower()
     assert provider.call_count == 2
+    assert stats.status == "budget"
 
 
 @pytest.mark.asyncio
@@ -209,12 +216,13 @@ async def test_loop_stops_on_progress_guard(test_user: User, empty_registry: Too
     )
     settings = AgentSettings(max_steps=20, max_tool_calls=100)
     loop = AgentLoop(provider, empty_registry, settings)
-    result = await loop.run(test_user, "do it")
+    result, stats = await loop.run(test_user, "do it")
 
     # Should have stopped due to loop detection, not budget
     assert "loop" in result.lower() or "stuck" in result.lower()
     # Should not have used all 20 responses
     assert provider.call_count < 20
+    assert stats.status == "loop"
 
 
 @pytest.mark.asyncio
@@ -267,12 +275,13 @@ async def test_approval_callback_per_call_takes_priority(
         approval_callback=instance_cb,  # instance-level cb would deny
     )
 
-    result = await loop.run(test_user, "run it", approval_callback=per_call_cb)
+    result, stats = await loop.run(test_user, "run it", approval_callback=per_call_cb)
 
     # Per-call callback must have been used (approved → executed)
     assert per_call_called, "per-call callback was not called"
     assert not instance_called, "instance-level callback must not be called when per-call is given"
     assert result == "done"
+    assert stats.status == "ok"
 
 
 @pytest.mark.asyncio
@@ -304,12 +313,13 @@ async def test_on_tool_start_callback_called(test_user: User, empty_registry: To
     loop = AgentLoop(provider, empty_registry, AgentSettings())
 
     started_tools: list[str] = []
-    result = await loop.run(
+    result, stats = await loop.run(
         test_user, "read two files", on_tool_start=lambda name: started_tools.append(name)
     )
 
     assert result == "Done."
     assert started_tools == ["read_file", "read_file"]
+    assert stats.tools_used == ["read_file", "read_file"]
 
 
 class TestContextBuilderPruning:
@@ -456,12 +466,13 @@ async def test_parallel_loop_all_results_added(
     )
     settings = AgentSettings(max_steps=10, max_tool_calls=50)
     loop = AgentLoop(provider, empty_registry, settings)
-    result = await loop.run(test_user, "run parallel")
+    result, stats = await loop.run(test_user, "run parallel")
 
     # Loop was detected → fallback message
     assert "loop" in result.lower() or "stuck" in result.lower() or "stopped" in result.lower()
     # All 3 tools were actually executed
     assert call_count == 3
+    assert stats.status == "loop"
 
     # The context sent to the first LLM call had the user message
     assert any(m.get("role") == "user" for m in captured_contexts[0])

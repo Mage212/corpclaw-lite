@@ -44,7 +44,7 @@ async def test_agent_loop_with_memory(tmp_path, mock_provider, mock_registry, te
 
     loop = AgentLoop(provider=mock_provider, registry=mock_registry, settings=settings, memory=mem)
 
-    result = await loop.run(test_user, "Can you remind me again?")
+    result, _ = await loop.run(test_user, "Can you remind me again?")
 
     assert result == "I remember now."
 

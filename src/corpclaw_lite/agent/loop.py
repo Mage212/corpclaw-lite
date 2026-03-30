@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
+import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from corpclaw_lite.agent.context import ContextBuilder
@@ -21,6 +25,7 @@ from corpclaw_lite.users.models import User
 
 __all__ = [
     "AgentLoop",
+    "RunStats",
 ]
 
 if TYPE_CHECKING:
@@ -28,6 +33,28 @@ if TYPE_CHECKING:
     from corpclaw_lite.departments.permissions import PermissionChecker
     from corpclaw_lite.memory.consolidation import MemoryConsolidator
     from corpclaw_lite.security.tool_guard import ToolGuard
+
+logger = logging.getLogger(__name__)
+
+# Max chars to include from tool args / results in DEBUG logs
+# Large files / responses are truncated to avoid flooding the log file
+_LOG_TRUNCATE = 400
+
+
+@dataclass
+class RunStats:
+    """Metrics for a single AgentLoop.run() call.
+
+    Returned alongside the final answer so callers (runner, CLI) can log
+    or display execution details without reading internal state.
+    """
+
+    iterations: int = 0
+    tools_used: list[str] = field(default_factory=list[str])
+    duration_ms: float = 0.0
+    # "ok" | "budget" | "loop" | "timeout" | "error"
+    status: str = "ok"
+    error: str | None = None
 
 
 class AgentLoop:
@@ -69,8 +96,21 @@ class AgentLoop:
         approval_callback: Callable[[str, str], Awaitable[bool]] | None = None,
         on_tool_start: Callable[[str], None] | None = None,
         tools_enabled: bool = True,
-    ) -> str:
-        """Run the ReAct loop until a final answer is given or limits are reached."""
+    ) -> tuple[str, RunStats]:
+        """Run the ReAct loop until a final answer is given or limits are reached.
+
+        Returns:
+            (reply, stats) — the agent's final answer and execution metrics.
+        """
+        stats = RunStats()
+        t0 = time.monotonic()
+
+        logger.debug(
+            "[user=%s] run() start | msg=%r",
+            user.id,
+            message[:120],
+        )
+
         # Per-call callback takes priority over the instance-level default
         _approval_cb = (
             approval_callback if approval_callback is not None else self._approval_callback
@@ -111,6 +151,7 @@ class AgentLoop:
             while True:
                 budget.check()
                 budget.consume_iteration()
+                stats.iterations += 1
 
                 compression_cfg = self._settings.compression
                 if compression_cfg.enabled and context.message_count > (
@@ -134,7 +175,20 @@ class AgentLoop:
                     msg = "I could not get a response from the language model (timed out)."
                     if self._memory:
                         await self._memory.add_message(str(user.id), "assistant", msg)
-                    return msg
+                    stats.status = "timeout"
+                    stats.duration_ms = (time.monotonic() - t0) * 1000
+                    logger.warning(
+                        "[user=%s] LLM timeout on iteration %d", user.id, stats.iterations
+                    )
+                    return msg, stats
+
+                logger.debug(
+                    "[user=%s] llm_response iter=%d | content=%r | tool_calls=%d",
+                    user.id,
+                    stats.iterations,
+                    (response.content or "")[:200],
+                    len(response.tool_calls or []),
+                )
 
                 if not response.tool_calls:
                     # Agent provided text directly — save and return
@@ -143,7 +197,15 @@ class AgentLoop:
                         await self._memory.add_message(str(user.id), "assistant", final)
                         if self._consolidator:
                             await self._consolidator.maybe_consolidate(self._memory, str(user.id))
-                    return final
+                    stats.duration_ms = (time.monotonic() - t0) * 1000
+                    logger.debug(
+                        "[user=%s] final_answer | len=%d | iterations=%d | duration_ms=%.0f",
+                        user.id,
+                        len(final),
+                        stats.iterations,
+                        stats.duration_ms,
+                    )
+                    return final, stats
 
                 # Agent requested tools — emit a single assistant message
                 # containing both content (if any) and tool_calls.
@@ -159,6 +221,7 @@ class AgentLoop:
                     loop_detected = False
                     for tc, result in zip(response.tool_calls, results, strict=True):
                         context.add_tool_result(tc.id, tc.name, result)
+                        stats.tools_used.append(tc.name)
                         if not loop_detected and progress.detect_loop(tc.name, result):
                             context.add_assistant_message(
                                 "System Guard: You seem to be stuck in a loop repeating the same"
@@ -174,6 +237,7 @@ class AgentLoop:
                             tc, user, _approval_cb, on_tool_start
                         )
                         context.add_tool_result(tc.id, tc.name, result)
+                        stats.tools_used.append(tc.name)
                         if progress.detect_loop(tc.name, result):
                             context.add_assistant_message(
                                 "System Guard: You seem to be stuck in a loop repeating the same"
@@ -190,12 +254,19 @@ class AgentLoop:
             msg = f"I reached my resource limit and had to stop: {e}"
             if self._memory:
                 await self._memory.add_message(str(user.id), "assistant", msg)
-            return msg
+            stats.status = "budget"
+            stats.error = str(e)
+            stats.duration_ms = (time.monotonic() - t0) * 1000
+            logger.warning("[user=%s] budget exceeded: %s", user.id, e)
+            return msg, stats
 
         fallback = "I detected a loop and stopped to avoid repeating the same actions."
         if self._memory:
             await self._memory.add_message(str(user.id), "assistant", fallback)
-        return fallback
+        stats.status = "loop"
+        stats.duration_ms = (time.monotonic() - t0) * 1000
+        logger.warning("[user=%s] loop detected after %d iterations", user.id, stats.iterations)
+        return fallback, stats
 
     def _can_parallelize(self, tool_calls: list[ToolCall]) -> bool:
         """Check if all tools in batch can be safely executed in parallel.
@@ -241,6 +312,13 @@ class AgentLoop:
                 f" cannot use tool '{tc.name}'."
             )
 
+        logger.debug(
+            "[user=%s] tool_call | tool=%s | args=%s",
+            user.id,
+            tc.name,
+            json.dumps(tc.arguments, ensure_ascii=False)[:_LOG_TRUNCATE],
+        )
+
         try:
             if self._tool_guard:
                 tool = self._registry.get(tc.name)
@@ -251,20 +329,31 @@ class AgentLoop:
             if on_tool_start:
                 on_tool_start(tc.name)
 
-            return await self._registry.execute(tc.name, tc.arguments, user=user)
+            result = await self._registry.execute(tc.name, tc.arguments, user=user)
+
         except ApprovalRequest as e:
             if approval_callback:
                 # Lock prevents concurrent approval prompts when tools run in parallel
                 async with self._approval_lock:
                     approved = await approval_callback(e.action, e.details)
                 if approved:
-                    return await self._registry.execute(tc.name, tc.arguments, user=user)
-                return f"Action '{e.action}' was denied by user."
-            return (
-                f"Action Paused: approval required for '{e.action}' "
-                f"but no approval channel is configured."
-            )
+                    result = await self._registry.execute(tc.name, tc.arguments, user=user)
+                else:
+                    result = f"Action '{e.action}' was denied by user."
+            else:
+                result = (
+                    f"Action Paused: approval required for '{e.action}' "
+                    f"but no approval channel is configured."
+                )
         except ToolGuardError as e:
-            return str(e)
+            result = str(e)
         except Exception as e:
-            return f"Error executing tool {tc.name}: {e}"
+            result = f"Error executing tool {tc.name}: {e}"
+
+        logger.debug(
+            "[user=%s] tool_result | tool=%s | result=%r",
+            user.id,
+            tc.name,
+            result[:_LOG_TRUNCATE],
+        )
+        return result

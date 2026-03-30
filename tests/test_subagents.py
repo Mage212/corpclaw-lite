@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from corpclaw_lite.agent.loop import RunStats
 from corpclaw_lite.agent.subagent import SubagentDispatcher
 from corpclaw_lite.config.settings import AgentSettings
 from corpclaw_lite.extensions.subagents.base import SubagentSpec
@@ -54,7 +55,7 @@ async def test_subagent_dispatcher():
     # Instead of running the real loop which requires a real provider, we patch AgentLoop.run
     with patch("corpclaw_lite.agent.subagent.AgentLoop") as MockLoop:
         mock_loop_instance = MockLoop.return_value
-        mock_loop_instance.run = AsyncMock(return_value="Subagent result")
+        mock_loop_instance.run = AsyncMock(return_value=("Subagent result", RunStats()))
 
         res = await dispatcher.dispatch(spec, user, "Do something")
 
@@ -92,9 +93,11 @@ async def test_subagent_prompt_loading(tmp_path: Path) -> None:
 
     captured_system: list[str] = []
 
-    async def _capture_run(u: object, msg: str, system_prompt: str | None = None) -> str:
+    async def _capture_run(
+        u: object, msg: str, system_prompt: str | None = None
+    ) -> tuple[str, RunStats]:
         captured_system.append(system_prompt or "")
-        return "done"
+        return "done", RunStats()
 
     with patch("corpclaw_lite.agent.subagent.AgentLoop") as MockLoop:
         mock_loop_instance = MockLoop.return_value
@@ -131,9 +134,11 @@ async def test_subagent_prompt_fallback_when_missing() -> None:
 
     captured_system: list[str] = []
 
-    async def _capture_run(u: object, msg: str, system_prompt: str | None = None) -> str:
+    async def _capture_run(
+        u: object, msg: str, system_prompt: str | None = None
+    ) -> tuple[str, RunStats]:
         captured_system.append(system_prompt or "")
-        return "done"
+        return "done", RunStats()
 
     with patch("corpclaw_lite.agent.subagent.AgentLoop") as MockLoop:
         mock_loop_instance = MockLoop.return_value
@@ -167,9 +172,11 @@ async def test_subagent_system_prompt_passed_as_kwarg() -> None:
 
     captured_args: list[tuple[str, str | None]] = []
 
-    async def _capture(u: object, msg: str, system_prompt: str | None = None) -> str:
+    async def _capture(
+        u: object, msg: str, system_prompt: str | None = None
+    ) -> tuple[str, RunStats]:
         captured_args.append((msg, system_prompt))
-        return "done"
+        return "done", RunStats()
 
     with patch("corpclaw_lite.agent.subagent.AgentLoop") as MockLoop:
         mock_loop_instance = MockLoop.return_value

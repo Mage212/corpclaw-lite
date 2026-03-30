@@ -13,35 +13,45 @@ __all__ = [
 ]
 
 
-def setup_logging(log_dir: Path | str = "logs") -> None:
-    """
-    Configure root logging with two handlers:
-    - corpclaw.log: DEBUG text logs with rotation (5MB x 3 files)
-    - agent_activity.jsonl: structured JSON events for analytics (10MB x 5)
+def setup_logging(
+    log_dir: Path | str = "logs",
+    level: str = "DEBUG",
+    console_level: str = "INFO",
+) -> None:
+    """Configure root logging with two handlers:
+
+    - corpclaw.log: text logs with rotation (5MB x 3 files), level=level
+    - Console (stderr): level=console_level (INFO by default — less noise)
+
+    Both handlers strip credentials via CredentialScrubber.
+    Call this once at application startup before any loggers are used.
     """
     from corpclaw_lite.security.credential_scrubber import CredentialScrubber
 
     log_path = Path(log_dir)
     log_path.mkdir(parents=True, exist_ok=True)
 
-    # Text log – human-readable DEBUG output
+    file_level: int = getattr(logging, level.upper(), logging.DEBUG)
+    con_level: int = getattr(logging, console_level.upper(), logging.INFO)
+
+    # Text log — human-readable, full detail for debugging
     text_handler = RotatingFileHandler(
         log_path / "corpclaw.log",
-        maxBytes=5 * 1024 * 1024,  # 5 MB
+        maxBytes=5 * 1024 * 1024,  # 5 MB per file
         backupCount=3,
         encoding="utf-8",
     )
-    text_handler.setLevel(logging.DEBUG)
+    text_handler.setLevel(file_level)
     text_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
     text_handler.addFilter(CredentialScrubber())
 
     root = logging.getLogger()
-    root.setLevel(logging.DEBUG)
+    root.setLevel(logging.DEBUG)  # root must be lowest — handlers filter upward
     root.addHandler(text_handler)
 
-    # Console handler (INFO only)
+    # Console handler — cleaner output for operators watching stdout
     console = logging.StreamHandler()
-    console.setLevel(logging.INFO)
+    console.setLevel(con_level)
     console.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
     console.addFilter(CredentialScrubber())
     root.addHandler(console)

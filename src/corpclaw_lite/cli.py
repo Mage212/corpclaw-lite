@@ -112,9 +112,17 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def cmd_chat() -> None:
     """Launch an interactive CLI chat loop."""
+    from corpclaw_lite.agent.factory import PROJECT_ROOT
+    from corpclaw_lite.config.loader import load_settings
     from corpclaw_lite.logging.agent_logger import setup_logging
 
-    setup_logging()
+    _settings = load_settings(PROJECT_ROOT / "config" / "settings.yaml")
+    _log = _settings.logging
+    setup_logging(
+        log_dir=PROJECT_ROOT / _log.log_dir,
+        level=_log.level,
+        console_level=_log.console_level,
+    )
 
     async def _run() -> None:
         from pathlib import Path
@@ -140,7 +148,7 @@ def cmd_chat() -> None:
                     async def approval_cb(action: str, details: str) -> bool:
                         return await channel.request_approval(user, action, details)
 
-                    reply = await agent_loop.run(
+                    reply, _ = await agent_loop.run(
                         user,
                         msg,
                         system_prompt=system_prompt,
@@ -160,9 +168,17 @@ def cmd_telegram() -> None:
     token = _require_env("TELEGRAM_BOT_TOKEN")
     _require_env("CORPCLAW_IPC_SECRET")  # fail fast
 
+    from corpclaw_lite.agent.factory import PROJECT_ROOT
+    from corpclaw_lite.config.loader import load_settings
     from corpclaw_lite.logging.agent_logger import setup_logging
 
-    setup_logging()
+    _settings = load_settings(PROJECT_ROOT / "config" / "settings.yaml")
+    _log = _settings.logging
+    setup_logging(
+        log_dir=PROJECT_ROOT / _log.log_dir,
+        level=_log.level,
+        console_level=_log.console_level,
+    )
 
     from corpclaw_lite.channels.telegram.runner import run_telegram_bot
 

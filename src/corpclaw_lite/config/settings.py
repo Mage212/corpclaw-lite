@@ -11,6 +11,7 @@ __all__ = [
     "CompressionSettings",
     "ContainerSettings",
     "LLMSettings",
+    "LoggingSettings",
     "ProviderSettings",
     "RoutingRule",
     "Settings",
@@ -92,6 +93,17 @@ class TelegramSettings(BaseModel):
     admin_ids: list[int] = []
 
 
+class LoggingSettings(BaseModel):
+    """Settings for the logging pipeline."""
+
+    # Level written to corpclaw.log (rotating file — DEBUG by default for diagnostics)
+    level: str = "DEBUG"
+    # Level written to the console (less verbose to avoid noise)
+    console_level: str = "INFO"
+    # Directory for log files, relative to project root (supports ${VAR:-default})
+    log_dir: str = "logs"
+
+
 class Settings(BaseSettings):
     """Main application settings."""
 
@@ -99,5 +111,6 @@ class Settings(BaseSettings):
     agent: AgentSettings = AgentSettings()
     container: ContainerSettings = ContainerSettings()
     telegram: TelegramSettings = TelegramSettings()
+    logging: LoggingSettings = LoggingSettings()
 
     model_config = {"env_nested_delimiter": "__"}

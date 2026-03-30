@@ -79,3 +79,11 @@ container:
 telegram:
   rate_limit_per_minute: 10
   default_department: "default"
+
+# Logging — file rotation + structured activity log
+# Set level to "INFO" to reduce verbosity in production
+# Set log_dir to an absolute path or relative to project root
+logging:
+  level: "DEBUG"           # corpclaw.log — detailed trace for debugging
+  console_level: "INFO"    # stdout/stderr — clean output for operators
+  log_dir: "${LOG_DIR:-logs}"

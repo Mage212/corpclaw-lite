@@ -31,10 +31,21 @@ async def run_telegram_bot(token: str) -> None:
     from corpclaw_lite.channels.telegram.progress import StatusMessageSession
     from corpclaw_lite.channels.telegram.rate_limit import RateLimiter
     from corpclaw_lite.config.bootstrap import BootstrapLoader
+    from corpclaw_lite.config.loader import load_settings
     from corpclaw_lite.config.settings import TelegramSettings
     from corpclaw_lite.extensions.skills.registry import SkillRegistry
     from corpclaw_lite.extensions.skills.watcher import SkillHotReloader
+    from corpclaw_lite.logging.agent_logger import AgentLogger, setup_logging
     from corpclaw_lite.users.models import User
+
+    full_settings = load_settings(PROJECT_ROOT / "config" / "settings.yaml")
+    log_cfg = full_settings.logging
+    setup_logging(
+        log_dir=PROJECT_ROOT / log_cfg.log_dir,
+        level=log_cfg.level,
+        console_level=log_cfg.console_level,
+    )
+    agent_activity_logger = AgentLogger(log_dir=PROJECT_ROOT / log_cfg.log_dir)
 
     agent_loop, user_manager, tool_registry = build_agent_stack()
     # ContainerManager is attached by factory if container.enabled=true
@@ -139,7 +150,7 @@ async def run_telegram_bot(token: str) -> None:
             async def approval_cb(action: str, details: str) -> bool:
                 return await channel.request_approval(user, action, details)
 
-            reply = await agent_loop.run(
+            reply, run_stats = await agent_loop.run(
                 user,
                 message,
                 system_prompt=system_prompt,
@@ -152,6 +163,7 @@ async def run_telegram_bot(token: str) -> None:
         except Exception as e:
             logger.error("AgentLoop error for user %d: %s", tid, e)
             reply = f"❌ Произошла ошибка: {e}"
+            run_stats = None
             # Notify admins
             if admin_notifier is not None:
                 error_summary = (
@@ -165,6 +177,17 @@ async def run_telegram_bot(token: str) -> None:
         finally:
             if status_session is not None:
                 await status_session.close()
+
+        # ── Structured activity log ────────────────────────────────────────
+        agent_activity_logger.log_request(
+            user_id=str(tid),
+            department=user.department,
+            message_preview=message[:100],
+            duration_ms=run_stats.duration_ms if run_stats is not None else 0.0,
+            tools_used=run_stats.tools_used if run_stats is not None else [],
+            status=run_stats.status if run_stats is not None else "error",
+            error=run_stats.error if run_stats is not None else None,
+        )
 
         await channel.send_message(user, reply)
 
