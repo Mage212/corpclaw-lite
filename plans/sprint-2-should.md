@@ -2,12 +2,13 @@
 
 ## Summary
 
-Спринт закрывает все задачи категории **SHOULD** из комплексного код-ревью (2026-03-30).  
+Спринт закрывает задачи категории **SHOULD** из комплексного код-ревью (2026-03-30).  
 Sprint 1 (MUST) завершён: coverage 75%, pyright 0 errors, все блокеры деплоя устранены.  
 Sprint 2 фокусируется на надёжности в боевых условиях и улучшении качества кода.
 
+**Статус:** ✅ ЗАВЕРШЁН (2026-03-30)  
 **Эстимейт:** 1 день (≈ 5–6 часов)  
-**DoD:** `uv run ruff check src/ --fix && uv run ruff format src/ && uv run pyright src/ && uv run pytest tests/ -v` — 0 errors, ≥75% coverage.
+**Итог:** 363 passed, 1 skipped, 75% coverage, 0 ruff errors, 0 pyright errors
 
 ---
 
@@ -352,16 +353,16 @@ def add_message(
 
 ## Status
 
-- [ ] Задача 1 — H2: BLOCKED_PATTERNS расширение
-- [ ] Задача 2 — M1: `[build-system]` в pyproject.toml
-- [ ] Задача 3 — C3: NetworkPolicy — документировать ограничения
-- [ ] Задача 4 — M7: ListFilesTool с размером и датой
-- [ ] Задача 5 — M9: EditFileTool `max_replacements`
-- [ ] Задача 6 — M2: Убрать AGENTS.md/CLAUDE.md дублирование
-- [ ] Задача 7 — M5: ResourceWarning в тестах
-- [ ] Задача 8 — H5→LOW: `is_relative_to` в channel.py
-- [ ] (Опц.) M-extra: tool_calls в SQLite памяти
-- [ ] Full check: `uv run ruff check src/ --fix && uv run ruff format src/ && uv run pyright src/ && uv run pytest tests/ -v`
+- [x] Задача 1 — H2: BLOCKED_PATTERNS расширение (+8 новых паттернов: curl|bash, base64 -d|, find / -delete, sudo, eval "...")
+- [x] Задача 2 — M1: `[build-system]` в pyproject.toml (hatchling)
+- [x] Задача 3 — C3: NetworkPolicy — задокументированы ограничения (Вариант A: inline комментарий с инструкцией)
+- [x] Задача 4 — M7: ListFilesTool с размером и датой (`[FILE] README.md  3.2 KB  2026-03-30`)
+- [x] Задача 5 — M9: EditFileTool `max_replacements` (default=1, 0=unlimited)
+- [~] Задача 6 — M2: Убрать AGENTS.md/CLAUDE.md дублирование — **пропущено по решению пользователя, оба файла сохранены**
+- [x] Задача 7 — M5: ResourceWarning в тестах — `_db_connect()` helper + `tests/conftest.py`
+- [x] Задача 8 — H5→LOW: `is_relative_to` в channel.py
+- [~] (Опц.) M-extra: tool_calls в SQLite памяти — **отложено в Sprint 3 / backlog**
+- [x] Full check: 363 passed, 1 skipped, 75% coverage, 0 ruff errors, 0 pyright errors
 
 ---
 
@@ -381,12 +382,16 @@ def add_message(
 
 ## Notes
 
-**Что НЕ входит в Sprint 2 (Backlog / Sprint 3):**
+**Что НЕ входит в Sprint 2 — перенесено в Sprint 3 / backlog:**
 
-- **C3 Вариант B** — реализация Docker custom network + iptables (требует devops-ресурсов и testing)
-- **L1** — загрузка `settings.yaml` через pydantic-settings (enhancement, env vars работают)
-- **L2** — добавить `__all__` во все модули (pure style, нет практической пользы)
-- **M4** — docker import guard через optional dependency group (minor, текущий `# type: ignore` работает)
-- **История tool_calls (M-extra)** — отложить до E2E-тестирования
+| Задача | Статус | Причина переноса |
+|--------|--------|------------------|
+| **C3 Вариант B** — Docker custom network + iptables | Sprint 3 / ops | Требует Docker custom network, `--cap-add NET_ADMIN`, devops-тестирования в контейнерах. Вариант A (документирование) закрыт в Sprint 2. |
+| **M-extra** — `tool_calls` в SQLite памяти | Sprint 3 / after E2E | Реализовывать только если E2E-тестирование с реальным LLM (Qwen/Ollama) покажет, что отсутствие tool_call истории между сессиями существенно ухудшает работу агента. Требует миграции существующих БД. |
+| **L1** — загрузка `settings.yaml` | Backlog | env vars покрывают MVP, YAML-конфиг — удобство, не блокер |
+| **L2** — `__all__` во всех модулях | Backlog | Pure style, нет практической пользы |
+| **M4** — docker import guard | Backlog | Текущий `# type: ignore` работает, minor |
+| **M2** — дублирование AGENTS.md/CLAUDE.md | Пропущено | По решению пользователя |
 
 **Зависимости между задачами:** отсутствуют — все задачи независимы, можно выполнять в любом порядке.
+
