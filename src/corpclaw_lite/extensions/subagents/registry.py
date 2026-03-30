@@ -6,6 +6,10 @@ import yaml
 
 from corpclaw_lite.extensions.subagents.base import SubagentSpec
 
+__all__ = [
+    "SubagentRegistry",
+]
+
 logger = logging.getLogger(__name__)
 
 

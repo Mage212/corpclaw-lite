@@ -10,6 +10,15 @@ import httpx
 
 from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
 
+__all__ = [
+    "BLOCKED_HOSTS",
+    "DEFAULT_TIMEOUT",
+    "MAX_REDIRECTS",
+    "MAX_RESPONSE_SIZE",
+    "MAX_TEXT_CHARS",
+    "WebFetchTool",
+]
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 30

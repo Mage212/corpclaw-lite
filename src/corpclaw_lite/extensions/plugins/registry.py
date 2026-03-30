@@ -5,6 +5,10 @@ from corpclaw_lite.extensions.plugins.base import Plugin
 from corpclaw_lite.extensions.plugins.loader import PluginLoader
 from corpclaw_lite.users.models import User
 
+__all__ = [
+    "PluginRegistry",
+]
+
 logger = logging.getLogger(__name__)
 
 

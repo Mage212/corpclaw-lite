@@ -13,6 +13,10 @@ from typing import Any
 
 import anyio
 
+__all__ = [
+    "SQLiteMemory",
+]
+
 logger = logging.getLogger(__name__)
 
 # Data directory: absolute path, supports CORPCLAW_DATA_DIR env var override.

@@ -6,6 +6,11 @@ from typing import Literal
 from corpclaw_lite.extensions.skills.base import Skill
 from corpclaw_lite.extensions.tools.base import Tool
 
+__all__ = [
+    "Plugin",
+    "PluginManifest",
+]
+
 logger = logging.getLogger(__name__)
 
 

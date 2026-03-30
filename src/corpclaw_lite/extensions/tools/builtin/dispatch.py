@@ -4,6 +4,10 @@ from typing import TYPE_CHECKING, Any
 
 from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
 
+__all__ = [
+    "DispatchSubagentTool",
+]
+
 if TYPE_CHECKING:
     from corpclaw_lite.agent.subagent import SubagentDispatcher
     from corpclaw_lite.extensions.subagents.registry import SubagentRegistry

@@ -13,6 +13,10 @@ import anyio
 
 from corpclaw_lite.users.models import User
 
+__all__ = [
+    "UserManager",
+]
+
 logger = logging.getLogger(__name__)
 
 

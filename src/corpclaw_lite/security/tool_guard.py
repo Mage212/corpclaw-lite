@@ -9,6 +9,14 @@ from typing import TYPE_CHECKING, Any, cast
 
 import yaml
 
+__all__ = [
+    "ApprovalRequest",
+    "GuardRule",
+    "RuleSeverity",
+    "ToolGuard",
+    "ToolGuardError",
+]
+
 if TYPE_CHECKING:
     from corpclaw_lite.llm.base import Provider
 

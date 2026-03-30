@@ -8,6 +8,11 @@ import yaml
 
 from corpclaw_lite.agent.guards import SimpleBudgetGuardConfig
 
+__all__ = [
+    "DepartmentConfig",
+    "DepartmentManager",
+]
+
 logger = logging.getLogger(__name__)
 
 

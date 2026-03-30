@@ -29,6 +29,19 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 from telegram.helpers import escape_markdown
 
+__all__ = [
+    "DELETE_PAGE_SIZE",
+    "DELETE_STATE_KEY",
+    "DeleteBrowserHandler",
+    "DeleteEntry",
+    "PROTECTED_DELETE_FILES",
+    "PROTECTED_DELETE_ROOTS",
+    "build_delete_browser",
+    "build_delete_confirmation",
+    "is_protected_delete_target",
+    "safe_edit_message",
+]
+
 logger = logging.getLogger(__name__)
 
 DELETE_STATE_KEY = "delete_file_manager"

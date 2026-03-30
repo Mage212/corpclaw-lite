@@ -6,6 +6,12 @@ from typing import Any
 
 from pydantic import BaseModel
 
+__all__ = [
+    "RiskLevel",
+    "Tool",
+    "ToolParam",
+]
+
 
 class RiskLevel(StrEnum):
     """Risk levels for tools to determine pre-approval needs."""

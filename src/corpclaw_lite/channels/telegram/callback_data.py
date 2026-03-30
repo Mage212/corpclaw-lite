@@ -1,3 +1,20 @@
+__all__ = [
+    "CB_APPROVE",
+    "CB_DELETE_BACK",
+    "CB_DELETE_CANCEL",
+    "CB_DELETE_CONFIRM",
+    "CB_DELETE_DIR",
+    "CB_DELETE_EXEC",
+    "CB_DELETE_FILE",
+    "CB_DELETE_NOOP",
+    "CB_DELETE_OPEN",
+    "CB_DELETE_PAGE",
+    "CB_DELETE_REFRESH",
+    "CB_DELETE_ROOT",
+    "CB_DELETE_UP",
+    "CB_DENY",
+]
+
 """Callback data prefixes for Telegram inline workflows."""
 
 # Delete file manager flow

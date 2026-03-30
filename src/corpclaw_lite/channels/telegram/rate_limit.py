@@ -7,6 +7,10 @@ import logging
 from collections import defaultdict
 from datetime import datetime, timedelta
 
+__all__ = [
+    "RateLimiter",
+]
+
 logger = logging.getLogger(__name__)
 
 

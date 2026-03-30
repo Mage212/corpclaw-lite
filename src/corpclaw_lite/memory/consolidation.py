@@ -13,6 +13,11 @@ from typing import Any
 from corpclaw_lite.llm.base import Provider
 from corpclaw_lite.memory.sqlite import SQLiteMemory
 
+__all__ = [
+    "CONSOLIDATION_PROMPT",
+    "MemoryConsolidator",
+]
+
 logger = logging.getLogger(__name__)
 
 CONSOLIDATION_PROMPT = """Summarize the following conversation into 3-5 concise facts.

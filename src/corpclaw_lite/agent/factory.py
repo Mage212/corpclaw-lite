@@ -13,6 +13,11 @@ from typing import TYPE_CHECKING
 from corpclaw_lite.agent.loop import AgentLoop
 from corpclaw_lite.users.manager import UserManager
 
+__all__ = [
+    "PROJECT_ROOT",
+    "build_agent_stack",
+]
+
 if TYPE_CHECKING:
     from corpclaw_lite.extensions.tools.registry import ToolRegistry
 

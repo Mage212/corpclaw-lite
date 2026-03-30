@@ -6,6 +6,10 @@ from typing import Any
 from corpclaw_lite.llm.base import ToolCall
 from corpclaw_lite.users.models import User
 
+__all__ = [
+    "ContextBuilder",
+]
+
 
 class ContextBuilder:
     """Builds LLM context from history, system prompts, and tool results."""

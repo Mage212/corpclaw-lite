@@ -4,6 +4,11 @@ from typing import TYPE_CHECKING, Any
 
 from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
 
+__all__ = [
+    "MemoryRecallTool",
+    "MemoryStoreTool",
+]
+
 if TYPE_CHECKING:
     from corpclaw_lite.memory.sqlite import SQLiteMemory
     from corpclaw_lite.users.models import User

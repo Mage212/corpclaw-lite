@@ -26,6 +26,22 @@ import asyncio
 import os
 import sys
 
+__all__ = [
+    "cmd_chat",
+    "cmd_containers",
+    "cmd_generate",
+    "cmd_plugin_list",
+    "cmd_prune",
+    "cmd_skill_list",
+    "cmd_telegram",
+    "cmd_user_allow",
+    "cmd_user_create",
+    "cmd_user_deny",
+    "cmd_user_list",
+    "cmd_user_revoke",
+    "main",
+]
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────────────────────────────────────

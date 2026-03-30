@@ -6,6 +6,10 @@ import yaml
 
 from corpclaw_lite.extensions.skills.base import Skill
 
+__all__ = [
+    "SkillLoader",
+]
+
 logger = logging.getLogger(__name__)
 
 

@@ -6,6 +6,10 @@ from corpclaw_lite.agent.guards import SimpleBudgetGuardConfig
 from corpclaw_lite.departments.manager import DepartmentManager
 from corpclaw_lite.users.models import User
 
+__all__ = [
+    "PermissionChecker",
+]
+
 logger = logging.getLogger(__name__)
 
 

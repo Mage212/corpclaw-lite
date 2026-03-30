@@ -5,6 +5,12 @@ import time
 from collections import Counter
 from typing import Any
 
+__all__ = [
+    "get_stats",
+    "increment",
+    "run_health_server",
+]
+
 _start_time = time.time()
 _counters: Counter[str] = Counter()
 

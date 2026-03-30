@@ -9,6 +9,12 @@ import time
 import uuid
 from typing import Any
 
+__all__ = [
+    "IPCAuth",
+    "IPCAuthError",
+    "MAX_NONCES",
+]
+
 logger = logging.getLogger(__name__)
 
 

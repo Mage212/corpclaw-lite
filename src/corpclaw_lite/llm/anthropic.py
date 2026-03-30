@@ -9,6 +9,10 @@ import anthropic
 from corpclaw_lite.config.settings import ProviderSettings
 from corpclaw_lite.llm.base import LLMResponse, Provider, StreamChunk, ToolCall
 
+__all__ = [
+    "AnthropicProvider",
+]
+
 
 class AnthropicProvider(Provider):
     """LLM Provider passing through to Anthropic Claude models."""

@@ -37,6 +37,10 @@ from telegram.ext import (
     filters,
 )
 
+__all__ = [
+    "TelegramChannel",
+]
+
 logger = logging.getLogger(__name__)
 
 _APPROVAL_TIMEOUT = 300.0  # seconds

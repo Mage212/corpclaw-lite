@@ -12,6 +12,10 @@ from typing import TYPE_CHECKING, Any
 from corpclaw_lite.extensions.mcp.client import MCPClient, MCPToolDef
 from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
 
+__all__ = [
+    "MCPToolAdapter",
+]
+
 if TYPE_CHECKING:
     from corpclaw_lite.users.models import User
 

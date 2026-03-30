@@ -5,6 +5,11 @@ from typing import Any
 
 from corpclaw_lite.security.ipc_auth import IPCAuth
 
+__all__ = [
+    "ContainerIPC",
+    "ContainerIPCError",
+]
+
 logger = logging.getLogger(__name__)
 
 

@@ -11,6 +11,10 @@ from corpclaw_lite.extensions.subagents.base import SubagentSpec
 from corpclaw_lite.extensions.tools.registry import ToolRegistry
 from corpclaw_lite.users.models import User
 
+__all__ = [
+    "SubagentDispatcher",
+]
+
 if TYPE_CHECKING:
     from corpclaw_lite.departments.permissions import PermissionChecker
     from corpclaw_lite.llm.base import Provider

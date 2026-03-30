@@ -1,5 +1,9 @@
 from dataclasses import dataclass, field
 
+__all__ = [
+    "SubagentSpec",
+]
+
 
 @dataclass(frozen=True)
 class SubagentSpec:

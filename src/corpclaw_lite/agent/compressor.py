@@ -14,6 +14,11 @@ from typing import TYPE_CHECKING, Any
 
 from corpclaw_lite.config.settings import CompressionSettings
 
+__all__ = [
+    "ContextCompressor",
+    "PLACEHOLDER",
+]
+
 if TYPE_CHECKING:
     from corpclaw_lite.llm.base import Provider
 

@@ -3,6 +3,10 @@ from typing import Any, cast
 from corpclaw_lite.config.settings import ContainerSettings
 from corpclaw_lite.security.network_policy import NetworkPolicy
 
+__all__ = [
+    "ContainerPolicies",
+]
+
 
 class ContainerPolicies:
     """Builder for Docker SDK container args applying resource limits and network isolation."""

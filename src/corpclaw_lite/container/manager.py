@@ -7,6 +7,11 @@ from corpclaw_lite.config.settings import ContainerSettings
 from corpclaw_lite.container.policies import ContainerPolicies
 from corpclaw_lite.security.network_policy import NetworkPolicy
 
+__all__ = [
+    "ContainerManager",
+    "ContainerManagerError",
+]
+
 try:
     import docker
 except ImportError:

@@ -10,6 +10,10 @@ from corpclaw_lite.extensions.plugins.base import Plugin, PluginManifest
 from corpclaw_lite.extensions.skills.loader import SkillLoader
 from corpclaw_lite.extensions.tools.base import Tool
 
+__all__ = [
+    "PluginLoader",
+]
+
 logger = logging.getLogger(__name__)
 
 

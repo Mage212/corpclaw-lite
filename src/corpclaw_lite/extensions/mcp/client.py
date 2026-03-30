@@ -13,6 +13,12 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, cast
 
+__all__ = [
+    "MCPClient",
+    "MCPClientError",
+    "MCPToolDef",
+]
+
 logger = logging.getLogger(__name__)
 
 _JSONRPC = "2.0"

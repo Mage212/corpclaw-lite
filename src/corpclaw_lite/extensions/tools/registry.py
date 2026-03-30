@@ -4,6 +4,10 @@ from typing import TYPE_CHECKING, Any
 
 from corpclaw_lite.extensions.tools.base import Tool
 
+__all__ = [
+    "ToolRegistry",
+]
+
 if TYPE_CHECKING:
     from corpclaw_lite.users.models import User
 

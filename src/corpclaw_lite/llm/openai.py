@@ -11,6 +11,10 @@ from corpclaw_lite.config.settings import ProviderSettings
 from corpclaw_lite.llm.base import LLMResponse, Provider, StreamChunk, ToolCall
 from corpclaw_lite.llm.xml_tool_calling import parse_xml_tool_call
 
+__all__ = [
+    "OpenAIProvider",
+]
+
 
 class OpenAIProvider(Provider):
     """LLM Provider passing through to OpenAI-compatible models."""

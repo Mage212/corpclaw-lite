@@ -9,6 +9,10 @@ from corpclaw_lite.extensions.tools.builtin.files import (
     resolve_and_validate_path,
 )
 
+__all__ = [
+    "ReadImageTool",
+]
+
 if TYPE_CHECKING:
     from corpclaw_lite.users.models import User
 

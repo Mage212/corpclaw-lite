@@ -22,6 +22,10 @@ from corpclaw_lite.extensions.tools.builtin.files import (
 from corpclaw_lite.extensions.tools.registry import ToolRegistry
 from corpclaw_lite.security.ipc_auth import IPCAuth
 
+__all__ = [
+    "process_request",
+]
+
 logging.basicConfig(level=logging.ERROR)
 
 

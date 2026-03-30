@@ -6,6 +6,10 @@ import logging
 
 from telegram import Bot as TelegramBot
 
+__all__ = [
+    "AdminNotifier",
+]
+
 logger = logging.getLogger(__name__)
 
 

@@ -6,6 +6,10 @@ from typing import Any, cast
 
 import yaml
 
+__all__ = [
+    "NetworkPolicy",
+]
+
 logger = logging.getLogger(__name__)
 
 

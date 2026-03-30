@@ -7,6 +7,11 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
+__all__ = [
+    "AgentLogger",
+    "setup_logging",
+]
+
 
 def setup_logging(log_dir: Path | str = "logs") -> None:
     """

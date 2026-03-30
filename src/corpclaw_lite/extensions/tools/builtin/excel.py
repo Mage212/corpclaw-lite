@@ -8,6 +8,10 @@ from typing import Any
 from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
 from corpclaw_lite.extensions.tools.builtin.files import resolve_and_validate_path
 
+__all__ = [
+    "NormalizeExcelTool",
+]
+
 
 class NormalizeExcelTool(Tool):
     """Normalize an Excel (.xlsx) file: fix headers, remove duplicates and empty rows."""

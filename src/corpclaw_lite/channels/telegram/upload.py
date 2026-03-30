@@ -8,6 +8,18 @@ from __future__ import annotations
 import ntpath
 import os
 
+__all__ = [
+    "ALLOWED_EXTENSIONS",
+    "DANGEROUS_DOUBLE_EXTENSIONS",
+    "FORBIDDEN_EXTENSIONS",
+    "IMAGE_EXTENSIONS",
+    "MAX_FILE_SIZE",
+    "build_agent_directive",
+    "is_image",
+    "is_safe_extension",
+    "sanitize_filename",
+]
+
 MAX_FILE_SIZE = 20 * 1024 * 1024  # 20 MB
 
 ALLOWED_EXTENSIONS = {

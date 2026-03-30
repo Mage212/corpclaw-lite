@@ -9,6 +9,10 @@ import anyio
 from corpclaw_lite.extensions.skills.loader import SkillLoader
 from corpclaw_lite.extensions.skills.registry import SkillRegistry
 
+__all__ = [
+    "SkillHotReloader",
+]
+
 logger = logging.getLogger(__name__)
 
 

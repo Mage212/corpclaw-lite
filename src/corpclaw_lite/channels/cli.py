@@ -10,6 +10,10 @@ from rich.markdown import Markdown
 from corpclaw_lite.channels.base import Channel
 from corpclaw_lite.users.models import User
 
+__all__ = [
+    "CLIChannel",
+]
+
 
 class CLIChannel(Channel):
     """Command-line interface channel."""

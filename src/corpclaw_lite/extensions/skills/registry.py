@@ -5,6 +5,10 @@ from corpclaw_lite.extensions.skills.base import Skill
 from corpclaw_lite.extensions.skills.loader import SkillLoader
 from corpclaw_lite.users.models import User
 
+__all__ = [
+    "SkillRegistry",
+]
+
 logger = logging.getLogger(__name__)
 
 

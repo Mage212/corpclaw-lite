@@ -5,6 +5,10 @@ from typing import Any, Protocol
 
 from corpclaw_lite.users.models import User
 
+__all__ = [
+    "Channel",
+]
+
 
 class Channel(Protocol):
     """Protocol for communication channels (CLI, Telegram, etc)."""

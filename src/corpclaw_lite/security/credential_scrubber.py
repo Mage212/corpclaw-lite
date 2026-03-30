@@ -4,6 +4,10 @@ import logging
 import os
 import re
 
+__all__ = [
+    "CredentialScrubber",
+]
+
 logger = logging.getLogger(__name__)
 
 

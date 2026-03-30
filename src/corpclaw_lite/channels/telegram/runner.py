@@ -17,6 +17,10 @@ from typing import Any
 
 from corpclaw_lite.agent.factory import PROJECT_ROOT, build_agent_stack
 
+__all__ = [
+    "run_telegram_bot",
+]
+
 logger = logging.getLogger(__name__)
 
 

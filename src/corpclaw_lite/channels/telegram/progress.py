@@ -8,6 +8,10 @@ import logging
 import time
 from typing import Any
 
+__all__ = [
+    "StatusMessageSession",
+]
+
 logger = logging.getLogger(__name__)
 
 _TOOL_STATUS_MAP: dict[str, str] = {

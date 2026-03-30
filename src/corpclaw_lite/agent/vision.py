@@ -7,6 +7,10 @@ from typing import TYPE_CHECKING, Any
 
 import anyio
 
+__all__ = [
+    "VisionProcessor",
+]
+
 if TYPE_CHECKING:
     from corpclaw_lite.llm.base import Provider
     from corpclaw_lite.users.models import User

@@ -4,6 +4,10 @@ from datetime import UTC, datetime
 
 from pydantic import BaseModel, Field
 
+__all__ = [
+    "User",
+]
+
 
 class User(BaseModel):
     """User representation in the system."""

@@ -19,6 +19,10 @@ from corpclaw_lite.memory.sqlite import SQLiteMemory
 from corpclaw_lite.security.tool_guard import ApprovalRequest, ToolGuardError
 from corpclaw_lite.users.models import User
 
+__all__ = [
+    "AgentLoop",
+]
+
 if TYPE_CHECKING:
     from corpclaw_lite.agent.compressor import ContextCompressor
     from corpclaw_lite.departments.permissions import PermissionChecker

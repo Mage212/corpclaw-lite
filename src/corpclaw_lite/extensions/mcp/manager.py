@@ -22,6 +22,10 @@ from corpclaw_lite.extensions.mcp.adapter import MCPToolAdapter
 from corpclaw_lite.extensions.mcp.client import MCPClient
 from corpclaw_lite.extensions.tools.registry import ToolRegistry
 
+__all__ = [
+    "MCPManager",
+]
+
 logger = logging.getLogger(__name__)
 
 
