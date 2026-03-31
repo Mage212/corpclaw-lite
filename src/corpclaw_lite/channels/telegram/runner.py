@@ -47,11 +47,9 @@ async def run_telegram_bot(token: str) -> None:
     )
     agent_activity_logger = AgentLogger(log_dir=PROJECT_ROOT / log_cfg.log_dir)
 
-    agent_loop, user_manager, tool_registry, mcp_manager = build_agent_stack()
-    # ContainerManager is attached by factory if container.enabled=true
-    from corpclaw_lite.container.manager import ContainerManager, ContainerManagerError
+    agent_loop, user_manager, tool_registry, mcp_manager, container_manager = build_agent_stack()
+    from corpclaw_lite.container.manager import ContainerManagerError
 
-    container_manager: ContainerManager | None = getattr(user_manager, "_container_manager", None)
     bootstrap = BootstrapLoader(PROJECT_ROOT / "config" / "bootstrap")
     tg_settings = full_settings.telegram
     rate_limiter = RateLimiter(max_per_minute=tg_settings.rate_limit_per_minute)
@@ -247,7 +245,8 @@ async def run_telegram_bot(token: str) -> None:
             await asyncio.sleep(300)
             await rate_limiter.cleanup()
 
-    # ── Health endpoint ───────────────────────────────────────────────────
+    # ── Health endpoint ───────────────────────────────────────────────────────
+    _health_runner: Any = None
     try:
         import importlib.util
 
@@ -256,9 +255,7 @@ async def run_telegram_bot(token: str) -> None:
 
         from corpclaw_lite.logging import health
 
-        _health_task = asyncio.create_task(health.run_health_server())
-        _background_tasks.add(_health_task)
-        _health_task.add_done_callback(_background_tasks.discard)
+        _health_runner = await health.run_health_server()
         logger.info("Health endpoint started on :8080/health")
     except ImportError:
         logger.info("aiohttp not installed — health endpoint disabled")
@@ -307,6 +304,8 @@ async def run_telegram_bot(token: str) -> None:
     except asyncio.CancelledError:
         pass
     finally:
+        if _health_runner is not None:
+            await _health_runner.cleanup()
         if cleanup_task is not None:
             cleanup_task.cancel()
         for task in _background_tasks:

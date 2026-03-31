@@ -16,8 +16,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from corpclaw_lite.config.settings import ContainerSettings
 from corpclaw_lite.container.policies import ContainerPolicies
@@ -27,6 +28,9 @@ __all__ = [
     "ContainerManager",
     "ContainerManagerError",
 ]
+
+if TYPE_CHECKING:
+    from corpclaw_lite.container.ipc import ContainerIPC
 
 try:
     import docker.errors  # type: ignore[import-untyped]
@@ -58,12 +62,14 @@ class ContainerManager:
         settings: ContainerSettings | None = None,
         network_policy: NetworkPolicy | None = None,
         workspace_base: Path | None = None,
+        ipc: ContainerIPC | None = None,
     ) -> None:
         self.settings = settings or ContainerSettings()
         self.network_policy = network_policy
         # Per-user workspace root — each user gets workspace_base/user_{id}/
         self._workspace_base = workspace_base or Path(self.settings.workspace_base)
         self._client = docker.from_env() if docker else None  # type: ignore[union-attr]
+        self._ipc = ipc
 
         # A simple state map for idle tracking
         self._active_containers: dict[int, asyncio.Task[Any]] = {}
@@ -127,8 +133,9 @@ class ContainerManager:
                 logger.debug("Container %s already running.", name)
             return name
         except Exception as _e:
-            # docker.errors.NotFound → container doesn't exist yet, fall through
-            if "404" not in str(_e) and "Not Found" not in str(_e):
+            # docker.errors.NotFound → container doesn't exist, fall through to create
+            _is_not_found = docker is not None and isinstance(_e, docker.errors.NotFound)
+            if not _is_not_found:
                 raise ContainerManagerError(f"Error checking container: {_e}") from _e
 
         # Container doesn't exist — create it
@@ -160,7 +167,8 @@ class ContainerManager:
             container.remove(v=True, force=True)
             logger.info("Stopped and removed container %s", name)
         except Exception as e:
-            if "404" not in str(e) and "Not Found" not in str(e):
+            _is_not_found = docker is not None and isinstance(e, docker.errors.NotFound)
+            if not _is_not_found:
                 logger.error("Failed to stop container %s: %s", name, e)
 
     async def list_active(self) -> list[str]:
@@ -176,6 +184,9 @@ class ContainerManager:
     async def prune_idle(self) -> int:
         """Prune containers that have been idle past settings.idle_timeout_seconds.
 
+        Idle time is determined by the last IPC call timestamp (if available),
+        falling back to the container's StartedAt time from Docker.
+
         Returns the number of containers removed.
         """
         if not self._client:
@@ -188,10 +199,7 @@ class ContainerManager:
             logger.error("Failed to list containers for pruning: %s", exc)
             return 0
 
-        import datetime as dt
-
-        now = dt.datetime.now(tz=dt.UTC)
-        idle_seconds = self.settings.idle_timeout_seconds
+        idle_timeout = self.settings.idle_timeout_seconds
 
         for container in containers:
             try:
@@ -203,36 +211,59 @@ class ContainerManager:
                     removed += 1
                     continue
 
-                # For running containers, check age as a proxy for idle time
+                # For running containers, check real idle time
                 if status == "running":
-                    attrs: dict[str, Any] = container.attrs or {}
-                    state = attrs.get("State", {})
-                    started_at_str: str = state.get("StartedAt", "")
-                    if started_at_str:
-                        started_at_str = started_at_str.replace("Z", "+00:00")
-                        if "." in started_at_str:
-                            base, frac_tz = started_at_str.split(".", 1)
-                            frac = ""
-                            tz_part = ""
-                            for i, ch in enumerate(frac_tz):
-                                if ch in ("+", "-"):
-                                    frac = frac_tz[:i]
-                                    tz_part = frac_tz[i:]
-                                    break
-                            else:
-                                frac = frac_tz
-                            started_at_str = f"{base}.{frac[:6]}{tz_part}"
-
-                        started_at = dt.datetime.fromisoformat(started_at_str)
-                        age = (now - started_at).total_seconds()
-                        if age > idle_seconds:
-                            container.stop(timeout=2)
-                            container.remove(v=True, force=True)
-                            logger.info(
-                                "Pruned idle container %s (age=%ds)", container.name, int(age)
-                            )
-                            removed += 1
+                    idle = self._get_idle_seconds(container)
+                    if idle > idle_timeout:
+                        container.stop(timeout=2)
+                        container.remove(v=True, force=True)
+                        logger.info(
+                            "Pruned idle container %s (idle=%ds)", container.name, int(idle)
+                        )
+                        removed += 1
             except Exception as exc:
                 logger.debug("Error pruning container %s: %s", container.name, exc)
 
         return removed
+
+    def _get_idle_seconds(self, container: Any) -> float:
+        """Return seconds since the container was last used.
+
+        Checks IPC last-used time first (real activity), then falls back
+        to container age from Docker StartedAt attribute.
+        """
+        # Try real idle time from IPC
+        if self._ipc is not None:
+            try:
+                uid = int(str(container.name).split("_")[-1])
+                last_used = self._ipc.get_last_used(uid)
+                if last_used is not None:
+                    return time.monotonic() - last_used
+            except (ValueError, IndexError):
+                pass
+
+        # Fallback: container age from Docker attrs
+        import datetime as dt
+
+        now = dt.datetime.now(tz=dt.UTC)
+        attrs: dict[str, Any] = container.attrs or {}
+        started_at_str: str = attrs.get("State", {}).get("StartedAt", "")
+        if not started_at_str:
+            return float("inf")  # unknown age → prune
+
+        started_at_str = started_at_str.replace("Z", "+00:00")
+        if "." in started_at_str:
+            base, frac_tz = started_at_str.split(".", 1)
+            frac = ""
+            tz_part = ""
+            for i, ch in enumerate(frac_tz):
+                if ch in ("+", "-"):
+                    frac = frac_tz[:i]
+                    tz_part = frac_tz[i:]
+                    break
+            else:
+                frac = frac_tz
+            started_at_str = f"{base}.{frac[:6]}{tz_part}"
+
+        started_at = dt.datetime.fromisoformat(started_at_str)
+        return (now - started_at).total_seconds()

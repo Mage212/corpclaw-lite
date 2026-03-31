@@ -146,7 +146,13 @@ def cmd_chat(telegram_id: int) -> None:
 
         install_signal_handlers(shutdown)
 
-        agent_loop, user_manager, tool_registry, mcp_manager = build_agent_stack()
+        (
+            agent_loop,
+            _,
+            tool_registry,
+            mcp_manager,
+            _container_manager,
+        ) = build_agent_stack()
         bootstrap = BootstrapLoader(Path("config/bootstrap"))
         system_prompt = bootstrap.get_system_prompt() or None
 
@@ -184,9 +190,8 @@ def cmd_chat(telegram_id: int) -> None:
             )
             return
         print(f"[INFO] Вошёл как: {user.name} (department={user.department})")
-        container_manager = getattr(user_manager, "_container_manager", None)
-        if container_manager:
-            container_manager.ensure_running(user.telegram_id)
+        if _container_manager and user.telegram_id is not None:
+            _container_manager.ensure_running(user.telegram_id)
 
         # Inject skills + plugin skills into system prompt (same as Telegram runner)
         from corpclaw_lite.agent.prompt import build_skill_block
@@ -264,8 +269,8 @@ def cmd_chat(telegram_id: int) -> None:
             await channel.stop()
             if mcp_manager is not None:
                 await mcp_manager.disconnect_all()
-            if container_manager is not None:
-                container_manager.stop(user.telegram_id)
+            if _container_manager is not None and user.telegram_id is not None:
+                _container_manager.stop(user.telegram_id)
             logger.info("CLI chat shut down cleanly for user %d.", telegram_id)
 
     asyncio.run(_run())
@@ -402,103 +407,40 @@ def cmd_plugin_list() -> None:
         print(f"{p.manifest.name:<30} {p.manifest.version:<10} {p.manifest.description[:28]}")
 
 
-_SKILL_TEMPLATE = """\
----
-id: {name}
-description: Short description of what this skill teaches the agent
-version: "1.0.0"
-allowed_for:
-  - "*"   # or specific departments: [marketing, hr]
----
-
-# {title} Skill
-
-## Context
-
-Describe when and why the agent should use this skill.
-
-## Instructions
-
-1. Step one
-2. Step two
-3. Step three
-
-## Examples
-
-**Input:** User asks…
-**Output:** Agent does…
-"""
-
-_PLUGIN_MANIFEST_TEMPLATE = """\
-name: {name}
-version: "1.0.0"
-type: plugin
-description: Short description of {name}
-allowed_departments:
-  - "*"
-components:
-  skill: skill.md
-  # tool: tool.py
-  # script: scripts/run.sh
-"""
-
-_PLUGIN_SKILL_TEMPLATE = """\
----
-id: {name}
-description: {name} plugin skill
-version: "1.0.0"
-allowed_for:
-  - "*"
----
-
-# {title} Plugin
-
-## Instructions
-
-Describe what this plugin does and how the agent should use it.
-"""
-
-_SUBAGENT_TEMPLATE = """\
-id: {name}
-description: Short description of what this subagent specialises in
-capabilities:
-  - capability_one
-  - capability_two
-allowed_tools:
-  - read_file
-  - write_file
-  - list_files
-prompt_path: config/bootstrap/SOUL.md
-"""
-
-
 def cmd_generate(ext_type: str, name: str) -> None:
     """Scaffold a new skill, plugin, or subagent."""
     from pathlib import Path
+
+    from corpclaw_lite.templates import (
+        PLUGIN_MANIFEST_TEMPLATE,
+        PLUGIN_SKILL_TEMPLATE,
+        SKILL_TEMPLATE,
+        SUBAGENT_TEMPLATE,
+    )
 
     title = name.replace("_", " ").replace("-", " ").title()
 
     if ext_type == "skill":
         path = Path("skills") / f"{name}.md"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(_SKILL_TEMPLATE.format(name=name, title=title), encoding="utf-8")
+        path.write_text(SKILL_TEMPLATE.format(name=name, title=title), encoding="utf-8")
         print(f"Created skill: {path}")
 
     elif ext_type == "plugin":
         base = Path("plugins") / name
         base.mkdir(parents=True, exist_ok=True)
         (base / "manifest.yaml").write_text(
-            _PLUGIN_MANIFEST_TEMPLATE.format(name=name), encoding="utf-8"
+            PLUGIN_MANIFEST_TEMPLATE.format(name=name), encoding="utf-8"
         )
         (base / "skill.md").write_text(
-            _PLUGIN_SKILL_TEMPLATE.format(name=name, title=title), encoding="utf-8"
+            PLUGIN_SKILL_TEMPLATE.format(name=name, title=title), encoding="utf-8"
         )
         print(f"Created plugin: {base}/")
 
     elif ext_type == "subagent":
         path = Path("config") / "subagents" / f"{name}.yaml"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(_SUBAGENT_TEMPLATE.format(name=name), encoding="utf-8")
+        path.write_text(SUBAGENT_TEMPLATE.format(name=name), encoding="utf-8")
         print(f"Created subagent spec: {path}")
 
 

@@ -33,6 +33,7 @@ __all__ = [
 ]
 
 if TYPE_CHECKING:
+    from corpclaw_lite.container.manager import ContainerManager
     from corpclaw_lite.extensions.mcp.manager import MCPManager
     from corpclaw_lite.extensions.tools.registry import ToolRegistry
     from corpclaw_lite.llm.base import Provider
@@ -147,8 +148,10 @@ def _register_local_tools(registry: ToolRegistry) -> None:
         logger.debug("Registered local tool (no container): %s", tool.name)
 
 
-def build_agent_stack() -> tuple[AgentLoop, UserManager, ToolRegistry, MCPManager | None]:
-    """Build and return (AgentLoop, UserManager, ToolRegistry) from config + env.
+def build_agent_stack() -> tuple[
+    AgentLoop, UserManager, ToolRegistry, MCPManager | None, ContainerManager | None
+]:
+    """Build and return the complete agent stack from config + env.
 
     Container isolation:
         - container.enabled=true (default): file/script tools run inside Docker
@@ -159,7 +162,8 @@ def build_agent_stack() -> tuple[AgentLoop, UserManager, ToolRegistry, MCPManage
         - Falls back to env vars if no named providers configured
 
     Returns:
-        (AgentLoop, UserManager, ToolRegistry, MCPManager | None) ready to serve requests.
+        (AgentLoop, UserManager, ToolRegistry, MCPManager | None, ContainerManager | None)
+        ready to serve requests.
         MCPManager is not yet connected — callers must ``await mcp_manager.connect_all(registry)``
         since build_agent_stack() is synchronous.
 
@@ -210,12 +214,6 @@ def build_agent_stack() -> tuple[AgentLoop, UserManager, ToolRegistry, MCPManage
         if network_policy_cfg.exists():
             network_policy.load_file(network_policy_cfg)
 
-        workspace_base = PROJECT_ROOT / container_cfg.workspace_base
-        container_manager = ContainerManager(
-            settings=container_cfg,
-            network_policy=network_policy,
-            workspace_base=workspace_base,
-        )
         # Build shared IPC client (stateless — one instance handles all users)
         try:
             from corpclaw_lite.security.ipc_auth import IPCAuth
@@ -225,6 +223,14 @@ def build_agent_stack() -> tuple[AgentLoop, UserManager, ToolRegistry, MCPManage
             raise RuntimeError(
                 f"Failed to initialise ContainerIPC: {e}. Is CORPCLAW_IPC_SECRET set in .env?"
             ) from e
+
+        workspace_base = PROJECT_ROOT / container_cfg.workspace_base
+        container_manager = ContainerManager(
+            settings=container_cfg,
+            network_policy=network_policy,
+            workspace_base=workspace_base,
+            ipc=container_ipc,
+        )
 
         _register_sandboxed_tools(registry, container_ipc)
         logger.info(
@@ -332,8 +338,4 @@ def build_agent_stack() -> tuple[AgentLoop, UserManager, ToolRegistry, MCPManage
     )
     user_manager = UserManager()
 
-    # Return container_manager bundled into UserManager for use in runner
-    # We store it as an attribute so runner.py can access it without changing the signature
-    user_manager._container_manager = container_manager  # type: ignore[attr-defined]
-
-    return loop, user_manager, registry, mcp_manager
+    return loop, user_manager, registry, mcp_manager, container_manager

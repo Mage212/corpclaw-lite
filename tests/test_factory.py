@@ -57,7 +57,7 @@ def test_build_agent_stack_local_provider() -> None:
     ):
         # Remove anthropic key if present
         os.environ.pop("ANTHROPIC_API_KEY", None)
-        loop, user_manager, registry, mcp_manager = build_agent_stack()
+        loop, user_manager, registry, mcp_manager, _ = build_agent_stack()
 
     assert isinstance(loop, AgentLoop)
     assert isinstance(user_manager, UserManager)
@@ -90,7 +90,7 @@ def test_build_agent_stack_anthropic_provider() -> None:
         {"ANTHROPIC_API_KEY": "sk-ant-test", "ANTHROPIC_MODEL": "claude-3-haiku-20240307"},
         clear=False,
     ):
-        loop, _, _, _ = build_agent_stack()
+        loop, _, _, _, _ = build_agent_stack()
 
     assert isinstance(loop, AgentLoop)
     # Provider is internal, but we can verify the loop was created successfully
@@ -103,7 +103,7 @@ def test_compressor_enabled_by_default() -> None:
 
     with patch.dict(os.environ, {"OPENAI_BASE_URL": "http://test:11434/v1"}, clear=False):
         os.environ.pop("ANTHROPIC_API_KEY", None)
-        loop, _, _, _ = build_agent_stack()
+        loop, _, _, _, _ = build_agent_stack()
 
     # Compressor should be set (default CompressionSettings.enabled=True)
     assert loop._compressor is not None
@@ -115,7 +115,7 @@ def test_consolidator_enabled_by_default() -> None:
 
     with patch.dict(os.environ, {"OPENAI_BASE_URL": "http://test:11434/v1"}, clear=False):
         os.environ.pop("ANTHROPIC_API_KEY", None)
-        loop, _, _, _ = build_agent_stack()
+        loop, _, _, _, _ = build_agent_stack()
 
     # Consolidator should be set (default AgentSettings.consolidation_enabled=True)
     assert loop._consolidator is not None
@@ -127,7 +127,7 @@ def test_tool_guard_loaded() -> None:
 
     with patch.dict(os.environ, {"OPENAI_BASE_URL": "http://test:11434/v1"}, clear=False):
         os.environ.pop("ANTHROPIC_API_KEY", None)
-        loop, _, _, _ = build_agent_stack()
+        loop, _, _, _, _ = build_agent_stack()
 
     assert loop._tool_guard is not None
 
@@ -138,7 +138,7 @@ def test_memory_wired() -> None:
 
     with patch.dict(os.environ, {"OPENAI_BASE_URL": "http://test:11434/v1"}, clear=False):
         os.environ.pop("ANTHROPIC_API_KEY", None)
-        loop, _, _, _ = build_agent_stack()
+        loop, _, _, _, _ = build_agent_stack()
 
     assert loop.memory is not None
 
@@ -198,7 +198,7 @@ def test_container_enabled_registers_ipc_proxies() -> None:
         ),
         patch("corpclaw_lite.container.manager.docker", mock_docker),
     ):
-        _, _, registry, _ = build_agent_stack()
+        _, _, registry, _, _ = build_agent_stack()
 
     # File tools should now be IPCToolProxy instances
     read_file_tool = registry.get("read_file")

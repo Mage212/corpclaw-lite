@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Any
 
 from corpclaw_lite.security.ipc_auth import IPCAuth
@@ -50,6 +51,7 @@ class ContainerIPC:
     def __init__(self, auth: IPCAuth, timeout_seconds: float = 30.0) -> None:
         self.auth = auth
         self.timeout = timeout_seconds
+        self._last_used: dict[int, float] = {}
 
     @classmethod
     def from_env(cls, timeout_seconds: float = 30.0) -> ContainerIPC:
@@ -81,6 +83,7 @@ class ContainerIPC:
             Tool result string, or an error string if execution failed.
         """
         name = self.container_name(user_id)
+        self._last_used[user_id] = time.monotonic()
         payload = {"type": "tool_call", "tool": tool_name, "args": args}
         signed_message = self.auth.sign(payload)
         input_data = (json.dumps(signed_message) + "\n").encode("utf-8")
@@ -143,3 +146,7 @@ class ContainerIPC:
             return f"Error: Container tool '{tool_name}' timed out after {self.timeout}s"
         except Exception as e:
             return f"Error in Container IPC: {e}"
+
+    def get_last_used(self, user_id: int) -> float | None:
+        """Return the monotonic timestamp of the last IPC call for a user, or None."""
+        return self._last_used.get(user_id)

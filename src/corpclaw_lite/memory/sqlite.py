@@ -5,13 +5,13 @@ import json
 import logging
 import os
 import sqlite3
-from collections.abc import Generator
-from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
 from typing import Any
 
 import anyio
+
+from corpclaw_lite.utils.db import db_connect
 
 __all__ = [
     "SQLiteMemory",
@@ -23,25 +23,6 @@ logger = logging.getLogger(__name__)
 _DATA_DIR = Path(
     os.environ.get("CORPCLAW_DATA_DIR", "") or Path(__file__).parent.parent.parent.parent / "data"
 )
-
-
-@contextmanager
-def _db_connect(db_path: Path) -> Generator[sqlite3.Connection, None, None]:
-    """Open a SQLite connection and explicitly close it on exit.
-
-    ``with sqlite3.connect()`` only manages transactions (commit/rollback) but
-    does NOT close the connection. This helper adds explicit ``.close()`` to
-    prevent ResourceWarning in Python 3.12+ during garbage collection.
-    """
-    conn = sqlite3.connect(db_path)
-    try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
 
 
 class SQLiteMemory:
@@ -59,7 +40,7 @@ class SQLiteMemory:
         """Create the necessary tables if they don't exist."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with _db_connect(self.db_path) as conn:
+            with db_connect(self.db_path) as conn:
                 conn.execute("PRAGMA journal_mode=WAL")
                 conn.execute(
                     """
@@ -103,7 +84,7 @@ class SQLiteMemory:
 
     def _sync_add_message(self, user_id: str, role: str, content_str: str) -> None:
         try:
-            with _db_connect(self.db_path) as conn:
+            with db_connect(self.db_path) as conn:
                 conn.execute(
                     "INSERT INTO messages (user_id, role, content) VALUES (?, ?, ?)",
                     (str(user_id), role, content_str),
@@ -118,7 +99,7 @@ class SQLiteMemory:
 
     def _sync_get_history(self, user_id: str, limit: int) -> list[dict[str, Any]]:
         try:
-            with _db_connect(self.db_path) as conn:
+            with db_connect(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute(
                     """
@@ -151,7 +132,7 @@ class SQLiteMemory:
 
     def _sync_clear(self, user_id: str) -> None:
         try:
-            with _db_connect(self.db_path) as conn:
+            with db_connect(self.db_path) as conn:
                 conn.execute("DELETE FROM messages WHERE user_id = ?", (str(user_id),))
         except Exception as e:
             logger.error("Failed to clear memory for user %s: %s", user_id, e)
@@ -162,7 +143,7 @@ class SQLiteMemory:
 
     def _sync_count_messages(self, user_id: str) -> int:
         try:
-            with _db_connect(self.db_path) as conn:
+            with db_connect(self.db_path) as conn:
                 cursor = conn.execute(
                     "SELECT COUNT(*) FROM messages WHERE user_id = ?",
                     (str(user_id),),
@@ -179,7 +160,7 @@ class SQLiteMemory:
 
     def _sync_get_oldest_message_ids(self, user_id: str, count: int) -> list[int]:
         try:
-            with _db_connect(self.db_path) as conn:
+            with db_connect(self.db_path) as conn:
                 cursor = conn.execute(
                     """
                     SELECT id FROM messages
@@ -203,7 +184,7 @@ class SQLiteMemory:
     def _sync_replace_oldest(self, user_id: str, count: int, summary: str) -> None:
         """Replace the N oldest messages with a summary in a single atomic transaction."""
         try:
-            with _db_connect(self.db_path) as conn:
+            with db_connect(self.db_path) as conn:
                 # SELECT + DELETE + INSERT in one connection = atomic
                 cursor = conn.execute(
                     """
@@ -240,7 +221,7 @@ class SQLiteMemory:
 
     def _sync_store_fact(self, user_id: str, key: str, value: str) -> None:
         try:
-            with _db_connect(self.db_path) as conn:
+            with db_connect(self.db_path) as conn:
                 conn.execute(
                     """
                     INSERT INTO memory_facts (user_id, key, value)
@@ -262,7 +243,7 @@ class SQLiteMemory:
         self, user_id: str, query: str | None, limit: int
     ) -> list[dict[str, str]]:
         try:
-            with _db_connect(self.db_path) as conn:
+            with db_connect(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
                 if query:
                     like = f"%{query}%"
@@ -298,7 +279,7 @@ class SQLiteMemory:
 
     def _sync_clear_facts(self, user_id: str) -> None:
         try:
-            with _db_connect(self.db_path) as conn:
+            with db_connect(self.db_path) as conn:
                 conn.execute("DELETE FROM memory_facts WHERE user_id = ?", (str(user_id),))
         except Exception as e:
             logger.error("Failed to clear facts for user %s: %s", user_id, e)

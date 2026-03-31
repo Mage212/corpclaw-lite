@@ -31,8 +31,11 @@ def get_stats() -> dict[str, Any]:
     }
 
 
-async def run_health_server(host: str = "0.0.0.0", port: int = 8080) -> None:
-    """Start a minimal aiohttp server exposing GET /health."""
+async def run_health_server(host: str = "0.0.0.0", port: int = 8080) -> Any:
+    """Start a minimal aiohttp server exposing GET /health.
+
+    Returns the ``AppRunner`` so callers can call ``runner.cleanup()`` on shutdown.
+    """
     try:
         from aiohttp import web  # type: ignore[import-untyped]
     except ImportError as e:
@@ -47,3 +50,4 @@ async def run_health_server(host: str = "0.0.0.0", port: int = 8080) -> None:
     await runner.setup()
     site = web.TCPSite(runner, host, port)
     await site.start()
+    return runner

@@ -71,6 +71,7 @@ def process_request() -> None:
         return
 
     response_payload: dict[str, str] = {"status": "error", "error": "Unknown error"}
+    auth: IPCAuth | None = None
     try:
         req = json.loads(input_data)
 
@@ -104,7 +105,8 @@ def process_request() -> None:
     finally:
         # Sign and respond
         try:
-            auth = IPCAuth()
+            if auth is None:
+                auth = IPCAuth()
             signed_resp = auth.sign(response_payload)
             print(json.dumps(signed_resp))
         except Exception:
