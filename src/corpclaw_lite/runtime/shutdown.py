@@ -17,15 +17,11 @@ The cleanup coroutine is **guaranteed** to run even if main raises.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import signal
-from collections.abc import Coroutine
-from typing import Any
 
 __all__ = [
     "install_signal_handlers",
-    "run_with_graceful_shutdown",
 ]
 
 logger = logging.getLogger(__name__)
@@ -48,54 +44,3 @@ def install_signal_handlers(shutdown_event: asyncio.Event) -> None:
     except (NotImplementedError, AttributeError):
         # Windows / environments without signal support
         logger.debug("Signal handlers not available on this platform (Windows?)")
-
-
-async def run_with_graceful_shutdown(
-    main_coro: Coroutine[Any, Any, None],
-    cleanup_coro: Coroutine[Any, Any, None] | None = None,
-    *,
-    timeout: float = 10.0,
-) -> None:
-    """Run *main_coro*, then *cleanup_coro* on SIGINT/SIGTERM.
-
-    Args:
-        main_coro:    The primary coroutine (runs until signal or natural exit).
-        cleanup_coro: Optional teardown coroutine (containers, channels…).
-                      Always awaited, even if main raised an exception.
-        timeout:      Seconds to wait for cleanup before forcing exit.
-    """
-    shutdown_event = asyncio.Event()
-    install_signal_handlers(shutdown_event)
-
-    main_task = asyncio.create_task(main_coro)
-
-    # Wait for either: main finishes naturally OR shutdown signal
-    shutdown_task = asyncio.create_task(shutdown_event.wait())
-    done, pending = await asyncio.wait(
-        [main_task, shutdown_task],
-        return_when=asyncio.FIRST_COMPLETED,
-    )
-
-    # Cancel what's still running
-    for task in pending:
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await task
-
-    # If main raised (and wasn't cancelled), propagate the exception
-    if main_task in done and not main_task.cancelled():
-        exc = main_task.exception()
-        if exc is not None:
-            logger.error("Main coroutine raised: %s", exc)
-
-    # Always run cleanup
-    if cleanup_coro is not None:
-        logger.info("Running shutdown cleanup…")
-        try:
-            await asyncio.wait_for(cleanup_coro, timeout=timeout)
-        except TimeoutError:
-            logger.warning("Cleanup timed out after %.1fs — forcing exit", timeout)
-        except Exception as e:
-            logger.error("Cleanup error: %s", e)
-
-    logger.info("Shutdown complete.")

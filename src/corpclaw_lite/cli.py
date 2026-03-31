@@ -237,12 +237,28 @@ def cmd_chat(telegram_id: int) -> None:
                     async def approval_cb(action: str, details: str) -> bool:
                         return await channel.request_approval(user, action, details)
 
-                    reply, _ = await agent_loop.run(
+                    reply, run_stats = await agent_loop.run(
                         user,
                         msg,
                         system_prompt=system_prompt,
                         approval_callback=approval_cb,
                     )
+
+                    # ── Structured activity log ────────────────────────────────────────
+                    from corpclaw_lite.logging.agent_logger import AgentLogger
+
+                    _log = _settings.logging
+                    agent_activity_logger = AgentLogger(log_dir=PROJECT_ROOT / _log.log_dir)
+                    agent_activity_logger.log_request(
+                        user_id=str(telegram_id),
+                        department=user.department,
+                        message_preview=msg[:100],
+                        duration_ms=run_stats.duration_ms,
+                        tools_used=run_stats.tools_used,
+                        status=run_stats.status,
+                        error=run_stats.error,
+                    )
+
                     await channel.send_message(user, reply)
         finally:
             await channel.stop()
