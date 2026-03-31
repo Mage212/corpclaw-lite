@@ -83,7 +83,7 @@ class ContainerIPC:
         name = self.container_name(user_id)
         payload = {"type": "tool_call", "tool": tool_name, "args": args}
         signed_message = self.auth.sign(payload)
-        input_data = json.dumps(signed_message).encode("utf-8")
+        input_data = (json.dumps(signed_message) + "\n").encode("utf-8")
 
         cmd = [
             "docker",

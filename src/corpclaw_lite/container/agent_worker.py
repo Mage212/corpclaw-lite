@@ -8,36 +8,31 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import sys
+import logging
 
-from corpclaw_lite.extensions.tools.builtin.excel import NormalizeExcelTool
-from corpclaw_lite.extensions.tools.builtin.exec_script import ExecScriptTool
-from corpclaw_lite.extensions.tools.builtin.files import (
-    EditFileTool,
-    ListFilesTool,
-    ReadFileTool,
-    SearchFilesTool,
-    WriteFileTool,
-)
-from corpclaw_lite.extensions.tools.registry import ToolRegistry
 from corpclaw_lite.security.ipc_auth import IPCAuth
 
-__all__ = [
-    "process_request",
-]
+__all__ = ["process_request"]
 
 logging.basicConfig(level=logging.ERROR)
-
 
 def _build_container_registry() -> ToolRegistry:
     """Build a ToolRegistry with tools available inside containers.
 
-    This is a subset of the full registry — only tools that make sense
-    in a sandboxed container environment (file ops + shell execution).
-    Host-side tools (send_file, memory_*, web_fetch, read_image, dispatch_subagent)
-    are excluded.
+    Lazy-loading tools here to speed up python startup in the container.
     """
+    from corpclaw_lite.extensions.tools.builtin.excel import NormalizeExcelTool
+    from corpclaw_lite.extensions.tools.builtin.exec_script import ExecScriptTool
+    from corpclaw_lite.extensions.tools.builtin.files import (
+        EditFileTool,
+        ListFilesTool,
+        ReadFileTool,
+        SearchFilesTool,
+        WriteFileTool,
+    )
+    from corpclaw_lite.extensions.tools.registry import ToolRegistry
+
     registry = ToolRegistry()
     for tool in [
         ReadFileTool(),
@@ -52,12 +47,21 @@ def _build_container_registry() -> ToolRegistry:
     return registry
 
 
-registry = _build_container_registry()
+_registry: ToolRegistry | None = None
+
+
+def get_registry() -> ToolRegistry:
+    global _registry
+    if _registry is None:
+        _registry = _build_container_registry()
+    return _registry
 
 
 def process_request() -> None:
     """Read from stdin, verify, execute tool, sign response, print to stdout."""
-    input_data = sys.stdin.read()
+    # sys.stdin.read() hangs indefinitely on Docker Desktop for Mac because of EOF handling issues.
+    # Since payload is sent as a single line JSON string, we use readline().
+    input_data = sys.stdin.readline().strip()
     if not input_data:
         return
 
@@ -81,6 +85,7 @@ def process_request() -> None:
             raise ValueError("'args' must be a dict")
 
         # Look up and execute the tool
+        registry = get_registry()
         tool = registry.get(tool_name)
         if tool is None:
             raise ValueError(f"Unknown tool: {tool_name}")
