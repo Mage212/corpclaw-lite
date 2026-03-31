@@ -45,8 +45,14 @@ class PluginLoader:
             return None
 
     @classmethod
-    def load_plugin(cls, plugin_dir: Path) -> Plugin | None:
-        """Load an entire plugin directory."""
+    def load_plugin(cls, plugin_dir: Path, *, force_reload: bool = False) -> Plugin | None:
+        """Load an entire plugin directory.
+
+        Args:
+            plugin_dir: Path to the plugin directory (must contain manifest.yaml).
+            force_reload: If True, clear the importlib module cache before
+                re-importing tool.py so that changes are picked up by hot-reload.
+        """
         if not plugin_dir.exists() or not plugin_dir.is_dir():
             return None
 
@@ -95,6 +101,11 @@ class PluginLoader:
             if tool_path.exists():
                 try:
                     module_name = f"plugin_{manifest.name}_tool"
+
+                    # Clear cached module so hot-reload picks up changed code
+                    if force_reload and module_name in sys.modules:
+                        del sys.modules[module_name]
+
                     spec = importlib.util.spec_from_file_location(module_name, tool_path)
 
                     if spec and spec.loader:

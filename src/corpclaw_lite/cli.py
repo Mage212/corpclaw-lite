@@ -150,12 +150,28 @@ def cmd_chat(telegram_id: int) -> None:
         bootstrap = BootstrapLoader(Path("config/bootstrap"))
         system_prompt = bootstrap.get_system_prompt() or None
 
+        from corpclaw_lite.extensions.plugins.registry import PluginRegistry
         from corpclaw_lite.extensions.skills.registry import SkillRegistry
 
         skill_registry = SkillRegistry()
         skills_dir = Path("skills")
         if skills_dir.exists():
             skill_registry.load_directory(skills_dir)
+
+        plugin_registry = PluginRegistry()
+        plugins_dir = Path("plugins")
+        if plugins_dir.exists():
+            plugin_registry.load_directory(plugins_dir)
+            for plugin in plugin_registry.list_all():
+                for tool in plugin.tools:
+                    try:
+                        tool_registry.register(tool)
+                    except ValueError:
+                        logger.warning(
+                            "Plugin '%s': tool '%s' conflicts, skipping.",
+                            plugin.manifest.name,
+                            tool.name,
+                        )
 
         # Load user from DB — same flow as Telegram bot
         standalone_manager = UserManager()
@@ -172,12 +188,15 @@ def cmd_chat(telegram_id: int) -> None:
         if container_manager:
             container_manager.ensure_running(user.telegram_id)
 
-        # Inject allowed skill instructions into system prompt (same as Telegram runner)
+        # Inject skills + plugin skills into system prompt (same as Telegram runner)
+        from corpclaw_lite.agent.prompt import build_skill_block
+
         allowed_skills = skill_registry.get_allowed_skills(user)
-        if allowed_skills:
-            skill_block = "\n\n## Available Skills\n"
-            for s in allowed_skills:
-                skill_block += f"\n### {s.id}: {s.description}\n{s.instructions}\n"
+        plugin_skills = [
+            p.skill for p in plugin_registry.get_allowed_plugins(user) if p.skill is not None
+        ]
+        skill_block = build_skill_block(allowed_skills, plugin_skills)
+        if skill_block:
             system_prompt = (system_prompt or "") + skill_block
 
         # Connect MCP servers (no hot-reload — CLI session is short-lived)

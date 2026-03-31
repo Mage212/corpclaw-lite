@@ -70,6 +70,27 @@ async def run_telegram_bot(token: str) -> None:
     if skills_dir.exists():
         skill_registry.load_directory(skills_dir)
 
+    # ── Plugins ───────────────────────────────────────────────────────────────
+    from corpclaw_lite.extensions.plugins.registry import PluginRegistry
+
+    plugin_registry = PluginRegistry()
+    plugins_dir = PROJECT_ROOT / "plugins"
+    if plugins_dir.exists():
+        plugin_registry.load_directory(plugins_dir)
+        for plugin in plugin_registry.list_all():
+            for tool in plugin.tools:
+                try:
+                    tool_registry.register(tool)
+                    logger.info(
+                        "Plugin '%s': registered tool '%s'", plugin.manifest.name, tool.name
+                    )
+                except ValueError:
+                    logger.warning(
+                        "Plugin '%s': tool '%s' conflicts with an existing tool, skipping.",
+                        plugin.manifest.name,
+                        tool.name,
+                    )
+
     # Seed whitelist from config into persistent JSON
     if tg_settings.whitelist:
         user_manager.seed_whitelist(tg_settings.whitelist, tg_settings.default_department)
@@ -149,10 +170,13 @@ async def run_telegram_bot(token: str) -> None:
 
             # Inject allowed skill instructions into system prompt
             allowed_skills = skill_registry.get_allowed_skills(user)
-            if allowed_skills:
-                skill_block = "\n\n## Available Skills\n"
-                for s in allowed_skills:
-                    skill_block += f"\n### {s.id}: {s.description}\n{s.instructions}\n"
+            plugin_skills = [
+                p.skill for p in plugin_registry.get_allowed_plugins(user) if p.skill is not None
+            ]
+            from corpclaw_lite.agent.prompt import build_skill_block
+
+            skill_block = build_skill_block(allowed_skills, plugin_skills)
+            if skill_block:
                 system_prompt = (system_prompt or "") + skill_block
 
             async def approval_cb(action: str, details: str) -> bool:
@@ -254,6 +278,13 @@ async def run_telegram_bot(token: str) -> None:
         mcp_reloader.start()
         logger.info("MCP hot-reloader started watching %s", mcp_cfg_path)
 
+    # ── Plugin Hot-Reloader ──────────────────────────────────────────────────
+    from corpclaw_lite.extensions.plugins.watcher import PluginHotReloader
+
+    plugin_reloader = PluginHotReloader(plugins_dir, plugin_registry, tool_registry, skill_registry)
+    plugin_reloader.start()
+    logger.info("Plugin hot-reloader started watching %s", plugins_dir)
+
     # ── Start ─────────────────────────────────────────────────────────────
     logger.info("Starting Telegram bot...")
     cleanup_task: asyncio.Task[None] | None = None
@@ -283,6 +314,7 @@ async def run_telegram_bot(token: str) -> None:
         reloader.stop()
         if mcp_reloader is not None:
             mcp_reloader.stop()
+        plugin_reloader.stop()
         await channel.stop()
         # Disconnect MCP servers
         if mcp_manager is not None:
