@@ -8,6 +8,7 @@ from typing import Any
 __all__ = [
     "get_stats",
     "increment",
+    "reset_stats",
     "run_health_server",
 ]
 
@@ -18,6 +19,13 @@ _counters: Counter[str] = Counter()
 def increment(metric: str, value: int = 1) -> None:
     """Increment a named metric counter."""
     _counters[metric] += value
+
+
+def reset_stats() -> None:
+    """Reset all counters and restart uptime clock. For testing only."""
+    global _start_time
+    _start_time = time.time()
+    _counters.clear()
 
 
 def get_stats() -> dict[str, Any]:

@@ -131,23 +131,3 @@ async def test_openai_stream() -> None:
             chunks.append(chunk.content)
 
     assert chunks == ["Hey! ", "There."]
-
-
-# ── Health Endpoint ───────────────────────────────────────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_run_health_server() -> None:
-    pytest.importorskip("aiohttp")
-
-    from corpclaw_lite.logging import health
-
-    # We don't want to actually bind to a port during unit tests, so we mock runner
-    with (
-        patch("aiohttp.web.AppRunner.setup", new_callable=AsyncMock) as mock_setup,
-        patch("aiohttp.web.TCPSite.start", new_callable=AsyncMock) as mock_start,
-    ):
-        runner = await health.run_health_server(host="127.0.0.1", port=9999)
-        assert runner is not None
-        mock_setup.assert_awaited_once()
-        mock_start.assert_awaited_once()

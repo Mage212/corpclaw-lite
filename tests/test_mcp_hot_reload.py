@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -53,7 +53,6 @@ async def test_hotreloader_detects_mtime_change(tmp_path: Path) -> None:
     await reloader._check()
 
     # Simulate file change by modifying mtime
-    import time
 
     reloader._last_mtime = reloader._last_mtime - 1  # type: ignore[operator]
 
@@ -69,9 +68,7 @@ async def test_hotreloader_adds_new_server(tmp_path: Path) -> None:
 
     manager = MagicMock(spec=MCPManager)
     manager.get_server_names.return_value = []  # no servers connected yet
-    manager.load_config_raw.return_value = [
-        {"name": "new-srv", "command": "echo", "args": []}
-    ]
+    manager.load_config_raw.return_value = [{"name": "new-srv", "command": "echo", "args": []}]
     manager.reconnect_server = AsyncMock(return_value=2)
     registry = ToolRegistry()
 

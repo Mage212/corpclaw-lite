@@ -20,6 +20,7 @@ dependencies = [
     "telegramify-markdown>=0.5.4",
     "mistletoe>=1.4.0",
     "python-dotenv>=1.2.1",
+    "aiohttp>=3.13.4",
 ]
 
 [project.scripts]
