@@ -47,7 +47,7 @@ async def run_telegram_bot(token: str) -> None:
     )
     agent_activity_logger = AgentLogger(log_dir=PROJECT_ROOT / log_cfg.log_dir)
 
-    agent_loop, user_manager, tool_registry = build_agent_stack()
+    agent_loop, user_manager, tool_registry, mcp_manager = build_agent_stack()
     # ContainerManager is attached by factory if container.enabled=true
     from corpclaw_lite.container.manager import ContainerManager, ContainerManagerError
 
@@ -56,7 +56,15 @@ async def run_telegram_bot(token: str) -> None:
     tg_settings = full_settings.telegram
     rate_limiter = RateLimiter(max_per_minute=tg_settings.rate_limit_per_minute)
 
-    # ── Skills ─────────────────────────────────────────────────────────────
+    # ── MCP Servers ────────────────────────────────────────────────
+    if mcp_manager is not None:
+        try:
+            mcp_count = await mcp_manager.connect_all(tool_registry)
+            logger.info("MCP: connected, %d tools registered", mcp_count)
+        except Exception as e:
+            logger.error("MCP: failed to connect — %s (continuing without MCP tools)", e)
+
+    # ── Skills ────────────────────────────────────────────────
     skill_registry = SkillRegistry()
     skills_dir = PROJECT_ROOT / "skills"
     if skills_dir.exists():
@@ -236,6 +244,16 @@ async def run_telegram_bot(token: str) -> None:
     reloader.start()
     logger.info("Skill hot-reloader started watching %s", skills_dir)
 
+    # ── MCP Hot-Reloader ────────────────────────────────────────────
+    mcp_reloader: MCPHotReloader | None = None
+    if mcp_manager is not None:
+        from corpclaw_lite.extensions.mcp.watcher import MCPHotReloader
+
+        mcp_cfg_path = PROJECT_ROOT / "config" / "mcp_servers.yaml"
+        mcp_reloader = MCPHotReloader(mcp_cfg_path, mcp_manager, tool_registry)
+        mcp_reloader.start()
+        logger.info("MCP hot-reloader started watching %s", mcp_cfg_path)
+
     # ── Start ─────────────────────────────────────────────────────────────
     logger.info("Starting Telegram bot...")
     cleanup_task: asyncio.Task[None] | None = None
@@ -263,7 +281,13 @@ async def run_telegram_bot(token: str) -> None:
         for task in _background_tasks:
             task.cancel()
         reloader.stop()
+        if mcp_reloader is not None:
+            mcp_reloader.stop()
         await channel.stop()
+        # Disconnect MCP servers
+        if mcp_manager is not None:
+            await mcp_manager.disconnect_all()
+            logger.info("MCP servers disconnected.")
         # Stop all per-user Docker containers so no ghost containers remain
         if container_manager is not None:
             active = await container_manager.list_active()

@@ -146,7 +146,7 @@ def cmd_chat(telegram_id: int) -> None:
 
         install_signal_handlers(shutdown)
 
-        agent_loop, user_manager, _ = build_agent_stack()
+        agent_loop, user_manager, tool_registry, mcp_manager = build_agent_stack()
         bootstrap = BootstrapLoader(Path("config/bootstrap"))
         system_prompt = bootstrap.get_system_prompt() or None
 
@@ -179,6 +179,14 @@ def cmd_chat(telegram_id: int) -> None:
             for s in allowed_skills:
                 skill_block += f"\n### {s.id}: {s.description}\n{s.instructions}\n"
             system_prompt = (system_prompt or "") + skill_block
+
+        # Connect MCP servers (no hot-reload — CLI session is short-lived)
+        if mcp_manager is not None:
+            try:
+                mcp_count = await mcp_manager.connect_all(tool_registry)
+                logger.info("MCP: %d tools registered", mcp_count)
+            except Exception as e:
+                logger.warning("MCP init failed, continuing without MCP tools: %s", e)
 
         channel = CLIChannel()
         await channel.start()
@@ -219,6 +227,8 @@ def cmd_chat(telegram_id: int) -> None:
                     await channel.send_message(user, reply)
         finally:
             await channel.stop()
+            if mcp_manager is not None:
+                await mcp_manager.disconnect_all()
             if container_manager is not None:
                 container_manager.stop(user.telegram_id)
             logger.info("CLI chat shut down cleanly for user %d.", telegram_id)

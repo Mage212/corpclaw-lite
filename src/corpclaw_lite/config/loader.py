@@ -14,42 +14,15 @@ Usage:
 from __future__ import annotations
 
 import os
-import re
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from corpclaw_lite.config.interpolation import interpolate_recursive
 from corpclaw_lite.config.settings import Settings
 
 __all__ = ["load_settings"]
-
-# Matches ${VAR} and ${VAR:-default}
-_ENV_PATTERN = re.compile(r"\$\{([^}]+)\}")
-
-
-def _interpolate(value: str) -> str:
-    """Replace ${VAR:-default} patterns with environment values."""
-
-    def _replace(match: re.Match[str]) -> str:
-        expr = match.group(1)
-        if ":-" in expr:
-            var, default = expr.split(":-", 1)
-            return os.environ.get(var.strip(), default)
-        return os.environ.get(expr.strip(), "")
-
-    return _ENV_PATTERN.sub(_replace, value)
-
-
-def _interpolate_recursive(obj: Any) -> Any:
-    """Recursively interpolate env variables in a parsed YAML structure."""
-    if isinstance(obj, str):
-        return _interpolate(obj)
-    if isinstance(obj, dict):
-        return {str(k): _interpolate_recursive(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_interpolate_recursive(item) for item in obj]
-    return obj
 
 
 def load_settings(path: Path | str | None = None) -> Settings:
@@ -75,7 +48,7 @@ def load_settings(path: Path | str | None = None) -> Settings:
 
     raw = yaml_path.read_text(encoding="utf-8")
     data: dict[str, Any] = yaml.safe_load(raw) or {}
-    interpolated: dict[str, Any] = _interpolate_recursive(data)
+    interpolated: dict[str, Any] = interpolate_recursive(data)
 
     # Filter out empty strings for optional secrets (api_key, base_url)
     # so Pydantic uses None defaults instead of ""

@@ -33,6 +33,7 @@ __all__ = [
 ]
 
 if TYPE_CHECKING:
+    from corpclaw_lite.extensions.mcp.manager import MCPManager
     from corpclaw_lite.extensions.tools.registry import ToolRegistry
     from corpclaw_lite.llm.base import Provider
 
@@ -146,7 +147,7 @@ def _register_local_tools(registry: ToolRegistry) -> None:
         logger.debug("Registered local tool (no container): %s", tool.name)
 
 
-def build_agent_stack() -> tuple[AgentLoop, UserManager, ToolRegistry]:
+def build_agent_stack() -> tuple[AgentLoop, UserManager, ToolRegistry, MCPManager | None]:
     """Build and return (AgentLoop, UserManager, ToolRegistry) from config + env.
 
     Container isolation:
@@ -158,7 +159,9 @@ def build_agent_stack() -> tuple[AgentLoop, UserManager, ToolRegistry]:
         - Falls back to env vars if no named providers configured
 
     Returns:
-        (AgentLoop, UserManager, ToolRegistry) ready to serve requests.
+        (AgentLoop, UserManager, ToolRegistry, MCPManager | None) ready to serve requests.
+        MCPManager is not yet connected — callers must ``await mcp_manager.connect_all(registry)``
+        since build_agent_stack() is synchronous.
 
     Raises:
         RuntimeError: If container.enabled=true but Docker is not available.
@@ -277,6 +280,15 @@ def build_agent_stack() -> tuple[AgentLoop, UserManager, ToolRegistry]:
     registry.register(MemoryStoreTool(memory))
     registry.register(MemoryRecallTool(memory))
 
+    # ── MCP (connect_all is async — callers must await it) ────────────────────
+    mcp_manager: MCPManager | None = None
+    mcp_config = PROJECT_ROOT / "config" / "mcp_servers.yaml"
+    if mcp_config.exists():
+        from corpclaw_lite.extensions.mcp.manager import MCPManager
+
+        mcp_manager = MCPManager(config_path=mcp_config)
+        logger.info("MCPManager ready (config=%s) — callers must await connect_all()", mcp_config)
+
     # ── Host-side tools (always on host, regardless of container mode) ────────
     registry.register(WebFetchTool())
 
@@ -324,4 +336,4 @@ def build_agent_stack() -> tuple[AgentLoop, UserManager, ToolRegistry]:
     # We store it as an attribute so runner.py can access it without changing the signature
     user_manager._container_manager = container_manager  # type: ignore[attr-defined]
 
-    return loop, user_manager, registry
+    return loop, user_manager, registry, mcp_manager

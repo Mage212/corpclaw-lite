@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -56,13 +57,24 @@ class MCPClient:
         self._process: asyncio.subprocess.Process | None = None
         self._request_id = 0
 
-    async def connect(self, command: list[str]) -> None:
-        """Launch the MCP server subprocess and perform the initialization handshake."""
+    async def connect(self, command: list[str], env: dict[str, str] | None = None) -> None:
+        """Launch the MCP server subprocess and perform the initialization handshake.
+
+        Args:
+            command: The server executable and its arguments.
+            env: Extra environment variables to pass to the server process.
+                 These are merged with the current process environment.
+        """
+        proc_env: dict[str, str] | None = None
+        if env:
+            proc_env = {**os.environ, **env}
+
         self._process = await asyncio.create_subprocess_exec(
             *command,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
+            env=proc_env,
         )
         logger.info("MCP server started: %s", " ".join(command))
 

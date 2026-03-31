@@ -18,11 +18,22 @@ class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
 
-    def register(self, tool: Tool) -> None:
-        """Register a tool."""
-        if tool.name in self._tools:
+    def register(self, tool: Tool, *, allow_replace: bool = False) -> None:
+        """Register a tool.
+
+        Args:
+            tool: The tool to register.
+            allow_replace: If True, silently replace an existing tool with the
+                same name (used by MCPHotReloader). If False (default), raises
+                ValueError on name conflict.
+        """
+        if tool.name in self._tools and not allow_replace:
             raise ValueError(f"Tool '{tool.name}' is already registered.")
         self._tools[tool.name] = tool
+
+    def unregister(self, name: str) -> None:
+        """Remove a tool by name. No-op if the tool is not registered."""
+        self._tools.pop(name, None)
 
     def get(self, name: str) -> Tool | None:
         """Get a tool by name."""
