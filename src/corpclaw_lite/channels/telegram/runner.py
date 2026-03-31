@@ -33,7 +33,6 @@ async def run_telegram_bot(token: str) -> None:
     from corpclaw_lite.channels.telegram.rate_limit import RateLimiter
     from corpclaw_lite.config.bootstrap import BootstrapLoader
     from corpclaw_lite.config.loader import load_settings
-    from corpclaw_lite.config.settings import TelegramSettings
     from corpclaw_lite.extensions.skills.registry import SkillRegistry
     from corpclaw_lite.extensions.skills.watcher import SkillHotReloader
     from corpclaw_lite.logging.agent_logger import AgentLogger, setup_logging
@@ -54,7 +53,7 @@ async def run_telegram_bot(token: str) -> None:
 
     container_manager: ContainerManager | None = getattr(user_manager, "_container_manager", None)
     bootstrap = BootstrapLoader(PROJECT_ROOT / "config" / "bootstrap")
-    tg_settings = TelegramSettings()
+    tg_settings = full_settings.telegram
     rate_limiter = RateLimiter(max_per_minute=tg_settings.rate_limit_per_minute)
 
     # ── Skills ─────────────────────────────────────────────────────────────

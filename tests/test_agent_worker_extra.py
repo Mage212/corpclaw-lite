@@ -17,14 +17,15 @@ def mock_env():
 
 
 def test_process_request_empty_input():
-    with patch("sys.stdin.read", return_value=""), patch("builtins.print") as mock_print:
+    # Process reads via readline() — patch that
+    with patch("sys.stdin.readline", return_value=""), patch("builtins.print") as mock_print:
         process_request()
         mock_print.assert_not_called()
 
 
 def test_process_request_invalid_json():
     with (
-        patch("sys.stdin.read", return_value="invalid"),
+        patch("sys.stdin.readline", return_value="invalid"),
         patch("builtins.print") as mock_print,
         patch("corpclaw_lite.security.ipc_auth.IPCAuth.sign") as mock_sign,
     ):
@@ -42,23 +43,28 @@ def test_process_request_invalid_json():
 def test_process_request_success():
     req = '{"payload": "test"}'
 
+    mock_tool = MagicMock()
+
+    async def dummy_execute(**kwargs):
+        return "tool result"
+
+    mock_tool.execute = dummy_execute
+
+    mock_registry = MagicMock()
+    mock_registry.get.return_value = mock_tool
+
     with (
-        patch("sys.stdin.read", return_value=req),
+        patch("sys.stdin.readline", return_value=req),
         patch("builtins.print") as mock_print,
         patch("corpclaw_lite.security.ipc_auth.IPCAuth.verify") as mock_verify,
         patch("corpclaw_lite.security.ipc_auth.IPCAuth.sign") as mock_sign,
-        patch("corpclaw_lite.container.agent_worker.registry") as mock_registry,
+        # Patch the get_registry() function so it returns our mock
+        patch(
+            "corpclaw_lite.container.agent_worker.get_registry",
+            return_value=mock_registry,
+        ),
     ):
         mock_verify.return_value = {"type": "tool_call", "tool": "test_tool", "args": {"a": 1}}
-        mock_tool = MagicMock()
-        mock_registry.get.return_value = mock_tool
-
-        # Async execution mocked since tool.execute is async
-        async def dummy_execute(**kwargs):
-            return "tool result"
-
-        mock_tool.execute = dummy_execute
-
         mock_sign.return_value = {"signed": "response"}
 
         process_request()
@@ -75,7 +81,7 @@ def test_process_request_auth_failure():
     req = '{"payload": "test"}'
 
     with (
-        patch("sys.stdin.read", return_value=req),
+        patch("sys.stdin.readline", return_value=req),
         patch("builtins.print"),
         patch(
             "corpclaw_lite.security.ipc_auth.IPCAuth.verify", side_effect=ValueError("Auth failed")

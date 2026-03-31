@@ -150,6 +150,13 @@ def cmd_chat(telegram_id: int) -> None:
         bootstrap = BootstrapLoader(Path("config/bootstrap"))
         system_prompt = bootstrap.get_system_prompt() or None
 
+        from corpclaw_lite.extensions.skills.registry import SkillRegistry
+
+        skill_registry = SkillRegistry()
+        skills_dir = Path("skills")
+        if skills_dir.exists():
+            skill_registry.load_directory(skills_dir)
+
         # Load user from DB — same flow as Telegram bot
         standalone_manager = UserManager()
         user = standalone_manager.get_by_telegram_id(telegram_id)
@@ -164,6 +171,14 @@ def cmd_chat(telegram_id: int) -> None:
         container_manager = getattr(user_manager, "_container_manager", None)
         if container_manager:
             container_manager.ensure_running(user.telegram_id)
+
+        # Inject allowed skill instructions into system prompt (same as Telegram runner)
+        allowed_skills = skill_registry.get_allowed_skills(user)
+        if allowed_skills:
+            skill_block = "\n\n## Available Skills\n"
+            for s in allowed_skills:
+                skill_block += f"\n### {s.id}: {s.description}\n{s.instructions}\n"
+            system_prompt = (system_prompt or "") + skill_block
 
         channel = CLIChannel()
         await channel.start()

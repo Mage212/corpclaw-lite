@@ -8,14 +8,19 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
 import logging
+import sys
+from typing import TYPE_CHECKING
 
 from corpclaw_lite.security.ipc_auth import IPCAuth
+
+if TYPE_CHECKING:
+    from corpclaw_lite.extensions.tools.registry import ToolRegistry
 
 __all__ = ["process_request"]
 
 logging.basicConfig(level=logging.ERROR)
+
 
 def _build_container_registry() -> ToolRegistry:
     """Build a ToolRegistry with tools available inside containers.

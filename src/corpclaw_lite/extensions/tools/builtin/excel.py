@@ -109,7 +109,7 @@ class NormalizeExcelTool(Tool):
                 cell = ws.cell(row=1, column=col)
                 val = cell.value
                 val_str = str(val) if val is not None else ""
-                
+
                 # Detect type for later value normalization
                 col_types[col] = _detect_column_type(val_str)
 
@@ -129,19 +129,21 @@ class NormalizeExcelTool(Tool):
                 for c in range(1, total_cols + 1):
                     cell = ws.cell(row=row_idx, column=c)
                     val = cell.value
-                    
+
                     # Fix value based on detected column type
                     fixed_val = _fix_value(val, col_types.get(c, "text"))
                     if fixed_val != val:
                         cell.value = fixed_val  # type: ignore[misc]
                         stats["values_fixed"] += 1
-                    
+
                     row_raw_values.append(fixed_val)
 
                 values = tuple(row_raw_values)
 
                 # Empty row check
-                is_empty = all(v is None or (isinstance(v, str) and v.strip() == "") for v in values)
+                is_empty = all(
+                    v is None or (isinstance(v, str) and v.strip() == "") for v in values
+                )
                 if do_empty and is_empty:
                     rows_to_delete.append(row_idx)
                     stats["empty_removed"] += 1
@@ -189,7 +191,7 @@ class NormalizeExcelTool(Tool):
         if stats["empty_removed"]:
             parts.append(f"Empty rows removed: {stats['empty_removed']}")
         parts.append(f"Output: {output_path}")
-        
+
         return "\n".join(parts)
 
 
@@ -224,9 +226,7 @@ def _fix_value(val: Any, col_type: str) -> Any:
                 # 7.7E+09 -> 7700000000 -> "7700000000"
                 s = str(int(val))
                 # Restore leading zeros if looks like a short INN
-                if len(s) == 9: 
-                    s = "0" + s
-                elif len(s) == 11: 
+                if len(s) == 9 or len(s) == 11:
                     s = "0" + s
                 return s
             if isinstance(val, str):
@@ -240,11 +240,13 @@ def _fix_value(val: Any, col_type: str) -> Any:
 
     elif col_type == "date":
         from datetime import datetime
+
         if isinstance(val, datetime):
             return val.strftime("%d.%m.%Y")
         # If it's a serial date (float in Excel)
         if isinstance(val, (int, float)) and 40000 < val < 60000:
             from datetime import datetime, timedelta
+
             return (datetime(1899, 12, 30) + timedelta(days=int(val))).strftime("%d.%m.%Y")
         return val
 
@@ -265,9 +267,17 @@ def _clean_chars(text: str) -> str:
     """Remove invisible and problematic characters."""
     # Common invisible chars
     chars = {
-        "\u00ad": "", "\u200b": "", "\u200c": "", "\u200d": "",
-        "\ufeff": "", "\u200e": "", "\u200f": "", "\u2060": "",
-        "\u2028": " ", "\u2029": " ", "\u00a0": " ",
+        "\u00ad": "",
+        "\u200b": "",
+        "\u200c": "",
+        "\u200d": "",
+        "\ufeff": "",
+        "\u200e": "",
+        "\u200f": "",
+        "\u2060": "",
+        "\u2028": " ",
+        "\u2029": " ",
+        "\u00a0": " ",
     }
     for char, repl in chars.items():
         text = text.replace(char, repl)

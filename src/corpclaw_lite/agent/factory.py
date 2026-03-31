@@ -200,9 +200,17 @@ def build_agent_stack() -> tuple[AgentLoop, UserManager, ToolRegistry]:
                 "but Docker daemon is not available. "
                 "Start Docker or set container.enabled=false in settings.yaml to use dev mode."
             )
+        from corpclaw_lite.security.network_policy import NetworkPolicy
+
+        network_policy = NetworkPolicy()
+        network_policy_cfg = PROJECT_ROOT / "config" / "network_policy.yaml"
+        if network_policy_cfg.exists():
+            network_policy.load_file(network_policy_cfg)
+
         workspace_base = PROJECT_ROOT / container_cfg.workspace_base
         container_manager = ContainerManager(
             settings=container_cfg,
+            network_policy=network_policy,
             workspace_base=workspace_base,
         )
         # Build shared IPC client (stateless — one instance handles all users)
@@ -230,7 +238,10 @@ def build_agent_stack() -> tuple[AgentLoop, UserManager, ToolRegistry]:
         )
 
     # ── Security ───────────────────────────────────────────────────────────────
-    guard = ToolGuard()
+    guard = ToolGuard(
+        provider=provider if agent_settings.approval_mode == "smart" else None,
+        approval_mode=agent_settings.approval_mode,
+    )
     guard_rules = PROJECT_ROOT / "config" / "tool_guard_rules.yaml"
     if guard_rules.exists():
         guard.load_file(guard_rules)
