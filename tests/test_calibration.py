@@ -12,12 +12,10 @@ from corpclaw_lite.calibration.editor import ConfigEditor
 from corpclaw_lite.calibration.scenarios import (
     CalibrationScenario,
     ScenarioExpectation,
-    ScenarioSetup,
     load_scenarios,
 )
-from corpclaw_lite.calibration.scorer import CalibrationScorer, ScenarioResult
+from corpclaw_lite.calibration.scorer import CalibrationScorer
 from corpclaw_lite.calibration.trajectory import Trajectory, TrajectoryRecorder, TrajectoryStep
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Scenarios

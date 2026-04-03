@@ -30,13 +30,21 @@ llm:
       base_url: "${OPENAI_BASE_URL:-http://localhost:11434/v1}"
       api_key: "${OPENAI_API_KEY:-ollama}"
 
-    # Cloud provider: Anthropic Claude for heavier tasks (summarisation, code review)
-    # Only active if ANTHROPIC_API_KEY is set in .env
+    # Cloud provider for calibration analysis and heavy tasks.
+    # Option A: Anthropic Claude (requires ANTHROPIC_API_KEY in .env)
     cloud:
       type: "anthropic"
-      model: "claude-3-5-sonnet-20241022"
+      model: "claude-sonnet-4-20250514"
       api_key: "${ANTHROPIC_API_KEY:-}"
       base_url: "${ANTHROPIC_BASE_URL:-}"
+
+    # Option B: OpenAI-compatible cloud (OpenRouter, DeepSeek, etc.)
+    # Uncomment and set as 'cloud' or use --cloud-provider cloud-openai
+    # cloud-openai:
+    #   type: "openai"
+    #   model: "deepseek/deepseek-chat-v3-0324:free"
+    #   base_url: "https://openrouter.ai/api/v1"
+    #   api_key: "${OPENROUTER_API_KEY:-}"
 
   # Routing rules — checked top-to-bottom, first match wins
   # task_kind and subagent_id are optional; both may be set for specificity

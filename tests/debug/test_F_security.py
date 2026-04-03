@@ -111,8 +111,8 @@ async def test_F4_budget_guard_stops_loop(
     complete a multi-step task, exercising the BudgetGuard.
     """
     from corpclaw_lite.agent.factory import PROJECT_ROOT
-    from corpclaw_lite.llm.router import LLMRouter
     from corpclaw_lite.config.loader import load_settings
+    from corpclaw_lite.llm.router import LLMRouter
 
     _, registry = agent_stack_no_container
 
