@@ -86,7 +86,7 @@ def agent_stack_with_container(
 
 @pytest.fixture(scope="module")
 def c_user() -> User:
-    return User(id=_DEBUG_USER_ID, name="ContainerDebugUser", department="debug")
+    return User(id=_DEBUG_USER_ID, name="ContainerDebugUser", department="debug", telegram_id=_DEBUG_USER_ID)
 
 
 # ---------------------------------------------------------------------------
@@ -163,8 +163,8 @@ async def test_C3_ipc_write_file_creates_workspace_file(
 
     assert "error" not in result.lower(), f"write_file via IPC failed: {result}"
 
-    # File must exist in the host workspace
-    expected = workspace / f"user_{c_user.id}" / "ipc_test.txt"
+    # File must exist in the host workspace — ask the manager for the real path
+    expected = container_mgr.get_user_workspace(c_user.id) / "ipc_test.txt"
     assert expected.exists(), (
         f"File not found at host path {expected}.\nIPC result: {result}"
     )

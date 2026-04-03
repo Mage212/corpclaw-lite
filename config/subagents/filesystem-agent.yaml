@@ -1,0 +1,18 @@
+id: filesystem-agent
+name: Filesystem Agent
+description: >
+  Specialised agent for file system operations: listing, reading, writing,
+  searching and editing files inside the user workspace.
+capabilities:
+  - list files in a directory
+  - read file contents
+  - write or create files
+  - search for text patterns across files
+  - edit (find-and-replace) file contents
+allowed_tools:
+  - list_files
+  - read_file
+  - write_file
+  - edit_file
+  - search_files
+prompt_path: ""

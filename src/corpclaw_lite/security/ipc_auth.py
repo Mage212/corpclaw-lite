@@ -34,7 +34,7 @@ class IPCAuth:
         _raw = secret or os.environ.get("CORPCLAW_IPC_SECRET")
         if not _raw:
             raise IPCAuthError("CORPCLAW_IPC_SECRET is required to secure IPC channels")
-        self._secret: str = _raw
+        self._secret: str | bytes = _raw
 
         self.nonce_ttl = nonce_ttl_seconds
         self._seen_nonces: dict[str, float] = {}
@@ -55,7 +55,8 @@ class IPCAuth:
         payload_str = json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
         msg = f"{nonce}:{timestamp}:{payload_str}"
-        signature = hmac.new(self._secret.encode(), msg.encode(), hashlib.sha256).hexdigest()
+        secret_bytes = self._secret if isinstance(self._secret, bytes) else self._secret.encode()
+        signature = hmac.new(secret_bytes, msg.encode(), hashlib.sha256).hexdigest()
 
         return {
             "signature": signature,
@@ -87,7 +88,8 @@ class IPCAuth:
         payload_str = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         msg = f"{nonce}:{timestamp}:{payload_str}"
 
-        expected_sig = hmac.new(self._secret.encode(), msg.encode(), hashlib.sha256).hexdigest()
+        secret_bytes = self._secret if isinstance(self._secret, bytes) else self._secret.encode()
+        expected_sig = hmac.new(secret_bytes, msg.encode(), hashlib.sha256).hexdigest()
 
         if not hmac.compare_digest(signature, expected_sig):
             raise IPCAuthError("Invalid signature")

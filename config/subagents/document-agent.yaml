@@ -1,0 +1,15 @@
+id: document-agent
+name: Document Agent
+description: >
+  Specialised agent for creating and managing documents. Writes structured
+  content (markdown, reports, summaries) to files and confirms the result.
+capabilities:
+  - create markdown documents
+  - write structured text files
+  - generate summaries and reports
+  - read and verify created files
+allowed_tools:
+  - write_file
+  - read_file
+  - list_files
+prompt_path: ""

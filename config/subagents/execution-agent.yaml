@@ -1,0 +1,14 @@
+id: execution-agent
+name: Execution Agent
+description: >
+  Specialised agent for running code and scripts. Executes Python scripts
+  and shell commands, then returns the output.
+capabilities:
+  - execute Python code via exec_script
+  - run shell commands
+  - report stdout/stderr output
+allowed_tools:
+  - exec_script
+  - write_file
+  - read_file
+prompt_path: ""

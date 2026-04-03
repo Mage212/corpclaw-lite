@@ -1,0 +1,14 @@
+id: research-agent
+name: Research Agent
+description: >
+  Specialised agent for web research tasks. Fetches URLs, retrieves
+  information from the web and returns a concise summary.
+capabilities:
+  - fetch web pages via web_fetch
+  - summarise retrieved content
+  - answer questions based on web content
+allowed_tools:
+  - web_fetch
+  - memory_store
+  - memory_recall
+prompt_path: ""
