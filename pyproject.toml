@@ -43,6 +43,12 @@ venv = ".venv"
 asyncio_mode = "auto"
 pythonpath = ["src"]
 testpaths = ["tests"]
+addopts = "--ignore=tests/debug"
+markers = [
+    "integration: Full pipeline integration test (requires LLM + optionally Docker)",
+    "docker_required: Requires running Docker daemon and corpclaw-agent-base:latest image",
+    "llm_required: Requires a real LLM provider (Anthropic API key or local Ollama)",
+]
 
 [tool.ruff]
 line-length = 100

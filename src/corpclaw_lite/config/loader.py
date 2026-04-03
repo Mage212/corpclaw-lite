@@ -54,7 +54,19 @@ def load_settings(path: Path | str | None = None) -> Settings:
     # so Pydantic uses None defaults instead of ""
     _clean_empty_strings(interpolated)
 
-    return Settings.model_validate(interpolated)
+    settings = Settings.model_validate(interpolated)
+
+    # Merge calibrated settings override if present
+    calibrated_override = yaml_path.parent / "calibrated" / "settings_override.yaml"
+    if calibrated_override.exists():
+        from corpclaw_lite.config.settings import AgentSettings
+
+        override_raw = yaml.safe_load(calibrated_override.read_text(encoding="utf-8")) or {}
+        if override_raw and "agent" in override_raw:
+            merged: dict[str, Any] = {**settings.agent.model_dump(), **override_raw["agent"]}
+            settings.agent = AgentSettings.model_validate(merged)
+
+    return settings
 
 
 def _clean_empty_strings(obj: Any) -> None:

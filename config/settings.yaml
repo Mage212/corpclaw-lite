@@ -17,7 +17,7 @@ llm:
     # Primary provider: resolves to whatever is set in .env
     default:
       type: "openai"
-      model: "nvidia/nemotron-3-nano-30b-a3b:free"
+      model: "stepfun/step-3.5-flash:free"
       base_url: "${OPENAI_BASE_URL:-http://localhost:11434/v1}"
       api_key: "${OPENAI_API_KEY:-ollama}"
 

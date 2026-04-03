@@ -33,6 +33,7 @@ __all__ = [
 ]
 
 if TYPE_CHECKING:
+    from corpclaw_lite.config.settings import Settings
     from corpclaw_lite.container.manager import ContainerManager
     from corpclaw_lite.extensions.mcp.manager import MCPManager
     from corpclaw_lite.extensions.tools.registry import ToolRegistry
@@ -148,9 +149,9 @@ def _register_local_tools(registry: ToolRegistry) -> None:
         logger.debug("Registered local tool (no container): %s", tool.name)
 
 
-def build_agent_stack() -> tuple[
-    AgentLoop, UserManager, ToolRegistry, MCPManager | None, ContainerManager | None
-]:
+def build_agent_stack(
+    settings: Settings | None = None,
+) -> tuple[AgentLoop, UserManager, ToolRegistry, MCPManager | None, ContainerManager | None]:
     """Build and return the complete agent stack from config + env.
 
     Container isolation:
@@ -188,7 +189,11 @@ def build_agent_stack() -> tuple[
     from corpclaw_lite.security.tool_guard import ToolGuard
 
     # ── Load settings ─────────────────────────────────────────────────────────
-    full_settings = load_settings(PROJECT_ROOT / "config" / "settings.yaml")
+    full_settings: Settings = (
+        settings
+        if settings is not None
+        else load_settings(PROJECT_ROOT / "config" / "settings.yaml")
+    )
     container_cfg = full_settings.container
     agent_settings = full_settings.agent if full_settings.agent else AgentSettings()
 
@@ -325,6 +330,17 @@ def build_agent_stack() -> tuple[
             agent_settings.compression.threshold_ratio,
         )
 
+    # ── Bootstrap system prompt ───────────────────────────────────────────────
+    from corpclaw_lite.config.bootstrap import BootstrapLoader
+
+    bootstrap_dir = PROJECT_ROOT / "config" / "bootstrap"
+    bootstrap = BootstrapLoader(bootstrap_dir)
+    system_prompt = bootstrap.get_system_prompt() or None
+    if system_prompt:
+        logger.info("Loaded system prompt from %s (%d chars)", bootstrap_dir, len(system_prompt))
+    else:
+        logger.warning("No bootstrap/*.md files found — using minimal default system prompt")
+
     # ── Agent Loop ────────────────────────────────────────────────────────────
     loop = AgentLoop(
         provider=provider,
@@ -335,6 +351,7 @@ def build_agent_stack() -> tuple[
         permission_checker=permission_checker,
         consolidator=consolidator,
         compressor=compressor,
+        default_system_prompt=system_prompt,
     )
     user_manager = UserManager()
 

@@ -30,6 +30,7 @@ import sys
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "cmd_calibrate",
     "cmd_chat",
     "cmd_containers",
     "cmd_generate",
@@ -110,6 +111,40 @@ def _build_parser() -> argparse.ArgumentParser:
     gen_p = sub.add_parser("generate", help="Generate extension scaffolding")
     gen_p.add_argument("type", choices=["skill", "plugin", "subagent"])
     gen_p.add_argument("name", help="Name of the new extension")
+
+    # calibrate
+    cal_p = sub.add_parser("calibrate", help="Calibrate agent config for local model")
+    cal_p.add_argument(
+        "--local-provider",
+        default="default",
+        help="Named provider for the local model (default: 'default')",
+    )
+    cal_p.add_argument(
+        "--cloud-provider",
+        default="cloud",
+        help="Named provider for cloud analysis (default: 'cloud')",
+    )
+    cal_p.add_argument(
+        "--scenarios",
+        default="config/calibration_scenarios.yaml",
+        help="Path to calibration scenarios YAML",
+    )
+    cal_p.add_argument(
+        "--max-iterations",
+        type=int,
+        default=5,
+        help="Max calibration iterations (default: 5)",
+    )
+    cal_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Run scenarios and show score only, without cloud calibration",
+    )
+    cal_p.add_argument(
+        "--reset",
+        action="store_true",
+        help="Clear previous calibration before starting",
+    )
 
     return parser
 
@@ -407,6 +442,49 @@ def cmd_plugin_list() -> None:
         print(f"{p.manifest.name:<30} {p.manifest.version:<10} {p.manifest.description[:28]}")
 
 
+def cmd_calibrate(
+    local_provider: str,
+    cloud_provider: str,
+    scenarios: str,
+    max_iterations: int,
+    dry_run: bool,
+    reset: bool,
+) -> None:
+    """Run the calibration phase to adapt config for the local model."""
+    from pathlib import Path
+
+    from corpclaw_lite.agent.factory import PROJECT_ROOT
+    from corpclaw_lite.config.loader import load_settings
+    from corpclaw_lite.logging.agent_logger import setup_logging
+
+    _settings = load_settings(PROJECT_ROOT / "config" / "settings.yaml")
+    _log = _settings.logging
+    setup_logging(
+        log_dir=PROJECT_ROOT / _log.log_dir,
+        level=_log.level,
+        console_level=_log.console_level,
+    )
+
+    if reset:
+        from corpclaw_lite.calibration.editor import ConfigEditor
+
+        editor = ConfigEditor(PROJECT_ROOT)
+        editor.reset()
+        print("Cleared previous calibration.")
+
+    from corpclaw_lite.calibration.loop import CalibrationLoop
+
+    loop = CalibrationLoop(
+        local_provider_name=local_provider,
+        cloud_provider_name=cloud_provider,
+        scenarios_path=Path(scenarios),
+        project_root=PROJECT_ROOT,
+        max_iterations=max_iterations,
+        dry_run=dry_run,
+    )
+    asyncio.run(loop.run())
+
+
 def cmd_generate(ext_type: str, name: str) -> None:
     """Scaffold a new skill, plugin, or subagent."""
     from pathlib import Path
@@ -481,6 +559,15 @@ def main() -> None:
         cmd_plugin_list()
     elif args.command == "generate":
         cmd_generate(args.type, args.name)
+    elif args.command == "calibrate":
+        cmd_calibrate(
+            local_provider=args.local_provider,
+            cloud_provider=args.cloud_provider,
+            scenarios=args.scenarios,
+            max_iterations=args.max_iterations,
+            dry_run=args.dry_run,
+            reset=args.reset,
+        )
     else:
         parser.print_help()
 

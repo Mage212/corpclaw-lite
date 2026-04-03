@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+import yaml
 
 from corpclaw_lite.extensions.tools.base import Tool
 
@@ -17,6 +20,7 @@ class ToolRegistry:
 
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
+        self._description_overrides: dict[str, dict[str, Any]] = {}
 
     def register(self, tool: Tool, *, allow_replace: bool = False) -> None:
         """Register a tool.
@@ -47,6 +51,29 @@ class ToolRegistry:
         """Return a copy of the name→tool mapping."""
         return dict(self._tools)
 
+    def load_overrides(self, path: Path | str) -> None:
+        """Load tool description overrides from a YAML file.
+
+        Expected format::
+
+            overrides:
+              tool_name:
+                description: "new description"
+                params:
+                  param_name:
+                    description: "new param description"
+        """
+        path = Path(path)
+        if not path.exists():
+            return
+        data: dict[str, Any] = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        overrides: dict[str, Any] = data.get("overrides", {})
+        self._description_overrides.update(overrides)
+
+    def load_overrides_dict(self, overrides: dict[str, Any]) -> None:
+        """Load tool description overrides from a dictionary (used by calibration)."""
+        self._description_overrides.update(overrides)
+
     async def execute(
         self,
         name: str,
@@ -70,16 +97,32 @@ class ToolRegistry:
             return f"Error executing '{name}': {e}"
 
     def to_schemas(self) -> list[dict[str, Any]]:
-        """Convert registered tools to OpenAI function calling schemas."""
+        """Convert registered tools to OpenAI function calling schemas.
+
+        If calibration overrides are loaded, they take priority for descriptions.
+        """
         schemas: list[dict[str, Any]] = []
         for tool in self._tools.values():
+            # Check for calibrated overrides
+            override = self._description_overrides.get(tool.name)
+            tool_description = (
+                override["description"]
+                if override and "description" in override
+                else tool.description
+            )
+            param_overrides: dict[str, Any] = override.get("params", {}) if override else {}
+
             properties: dict[str, Any] = {}
             required: list[str] = []
 
             for param in tool.params:
+                # Use overridden param description if available
+                p_override = param_overrides.get(param.name, {})
+                param_desc = p_override.get("description", param.description)
+
                 param_def: dict[str, Any] = {
                     "type": param.type,
-                    "description": param.description,
+                    "description": param_desc,
                 }
                 if param.enum:
                     param_def["enum"] = param.enum
@@ -92,7 +135,7 @@ class ToolRegistry:
                 "type": "function",
                 "function": {
                     "name": tool.name,
-                    "description": tool.description,
+                    "description": tool_description,
                     "parameters": {
                         "type": "object",
                         "properties": properties,

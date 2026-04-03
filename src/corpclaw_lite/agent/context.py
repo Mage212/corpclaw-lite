@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, cast
 
 from corpclaw_lite.llm.base import ToolCall
 from corpclaw_lite.users.models import User
@@ -111,11 +111,20 @@ class ContextBuilder:
         message: str,
         history: list[dict[str, Any]] | None = None,
         system_prompt_override: str | None = None,
+        few_shots: list[dict[str, Any]] | None = None,
     ) -> ContextBuilder:
         """Build the initial context for a new user message.
 
         History (if provided) is inserted before the current message so the LLM
-        sees: [system, ...history..., current_user_message].
+        sees: [system, ...few_shots..., ...history..., current_user_message].
+
+        Args:
+            user: Current user.
+            message: User's message.
+            history: Previous conversation messages.
+            system_prompt_override: Custom system prompt.
+            few_shots: Calibrated few-shot examples. Each dict has "user" (str)
+                and "assistant" (dict with "content" or "tool_calls") keys.
         """
         system = system_prompt_override or (
             f"You are CorpClaw Lite, a helpful assistant. "
@@ -123,6 +132,23 @@ class ContextBuilder:
             f"Use the available tools to help the user. If a tool returns an error, try to fix it."
         )
         builder = cls(system_prompt=system)
+
+        # Inject few-shot examples before history (calibration support)
+        for shot in few_shots or []:
+            user_msg = str(shot.get("user", ""))
+            assistant_raw: Any = shot.get("assistant", {})
+            if user_msg:
+                builder.add_user_message(user_msg)
+            if isinstance(assistant_raw, dict) and "content" in assistant_raw:
+                builder.add_assistant_message(str(cast(Any, assistant_raw["content"])))
+            elif isinstance(assistant_raw, dict) and "tool_calls" in assistant_raw:
+                # Simplified: show tool call as assistant text for pattern matching
+                raw_calls = cast(list[dict[str, Any]], assistant_raw["tool_calls"])
+                calls_desc = ", ".join(
+                    f"{tc.get('name', '?')}({tc.get('arguments', {})})" for tc in raw_calls
+                )
+                builder.add_assistant_message(f"[Tool call: {calls_desc}]")
+
         for item in history or []:
             role = item["role"]
             content_str = str(item["content"])

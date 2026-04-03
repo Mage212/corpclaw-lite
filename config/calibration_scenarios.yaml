@@ -1,0 +1,141 @@
+# CorpClaw Lite — Standard Calibration Scenarios
+#
+# Used by `corpclaw-lite calibrate` to measure how well the local model
+# handles typical agent tasks. Each scenario defines:
+#   - user_message:  what the user says
+#   - setup:         files to create before running (optional)
+#   - expected:      what the agent should do
+#
+# Categories:
+#   tool_use       — must call specific tool(s)
+#   no_tool        — must answer without calling any tools
+#   multi_step     — requires multiple sequential tool calls
+#   error_recovery — must handle errors gracefully
+
+scenarios:
+  # ── Basic Tool Use ──────────────────────────────────────────────
+  - id: read_file_basic
+    category: tool_use
+    user_message: "Прочитай файл test.txt"
+    setup:
+      files:
+        - path: "test.txt"
+          content: "Hello World"
+    expected:
+      tool_calls: ["read_file"]
+      has_content: true
+
+  - id: list_files_basic
+    category: tool_use
+    user_message: "Какие файлы есть в текущей папке?"
+    setup:
+      files:
+        - path: "readme.md"
+          content: "# Project"
+        - path: "data.csv"
+          content: "a,b,c"
+    expected:
+      tool_calls: ["list_files"]
+      has_content: true
+
+  - id: write_file_basic
+    category: tool_use
+    user_message: "Создай файл hello.txt с текстом 'Привет мир'"
+    expected:
+      tool_calls: ["write_file"]
+      has_content: true
+
+  - id: search_files_basic
+    category: tool_use
+    user_message: "Найди все файлы, содержащие слово 'TODO'"
+    setup:
+      files:
+        - path: "main.py"
+          content: "# TODO: fix this\nprint('hello')"
+        - path: "utils.py"
+          content: "def helper(): pass"
+    expected:
+      tool_calls: ["search_files"]
+      has_content: true
+
+  - id: edit_file_basic
+    category: tool_use
+    user_message: "Замени слово 'old' на 'new' в файле config.txt"
+    setup:
+      files:
+        - path: "config.txt"
+          content: "value=old\nmode=production"
+    expected:
+      tool_calls: ["edit_file"]
+      has_content: true
+
+  # ── No Tool Needed ─────────────────────────────────────────────
+  - id: math_question
+    category: no_tool
+    user_message: "Сколько будет 15 * 7?"
+    expected:
+      tool_calls: []
+      contains: "105"
+
+  - id: greeting
+    category: no_tool
+    user_message: "Привет!"
+    expected:
+      tool_calls: []
+      has_content: true
+
+  - id: factual_question
+    category: no_tool
+    user_message: "Что такое JSON?"
+    expected:
+      tool_calls: []
+      has_content: true
+
+  - id: translation_simple
+    category: no_tool
+    user_message: "Переведи на английский: Добрый день"
+    expected:
+      tool_calls: []
+      has_content: true
+
+  # ── Multi-Step ─────────────────────────────────────────────────
+  - id: list_then_read
+    category: multi_step
+    user_message: "Посмотри какие файлы есть и прочитай файл alpha.txt"
+    setup:
+      files:
+        - path: "alpha.txt"
+          content: "First file content"
+        - path: "beta.txt"
+          content: "Second file content"
+    expected:
+      tool_calls: ["list_files", "read_file"]
+      must_read: "alpha.txt"
+
+  - id: read_and_edit
+    category: multi_step
+    user_message: "Прочитай config.txt и замени 'debug=true' на 'debug=false'"
+    setup:
+      files:
+        - path: "config.txt"
+          content: "mode=production\ndebug=true\nlog=info"
+    expected:
+      tool_calls: ["read_file", "edit_file"]
+      has_content: true
+
+  # ── Error Recovery ─────────────────────────────────────────────
+  - id: read_nonexistent
+    category: error_recovery
+    user_message: "Прочитай файл data.csv"
+    # No setup — file doesn't exist
+    expected:
+      tool_calls: ["read_file"]
+      has_content: true
+
+  # ── Script Execution ───────────────────────────────────────────
+  - id: exec_script_basic
+    category: tool_use
+    user_message: "Выполни Python скрипт: print(2 + 2)"
+    expected:
+      tool_calls: ["exec_script"]
+      contains: "4"

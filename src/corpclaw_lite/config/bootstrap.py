@@ -38,15 +38,24 @@ class BootstrapLoader:
         Build and return the full system prompt by joining all .md files found
         in the bootstrap directory.
 
+        If calibrated versions exist in ``config/calibrated/bootstrap/``, they
+        take priority over the originals (per-file override).
+
         Args:
             extras: Additional sections to inject, keyed by title (e.g. {"Skills": "..."}).
         """
         if not self._dir.exists():
             return ""
 
+        # Calibrated overrides directory (sibling path: config/calibrated/bootstrap/)
+        calibrated_dir = self._dir.parent / "calibrated" / "bootstrap"
+
         parts: list[str] = []
         for path in sorted(self._dir.glob("*.md")):
-            content = self._load_cached(path)
+            # Use calibrated version if it exists
+            calibrated_path = calibrated_dir / path.name
+            source = calibrated_path if calibrated_path.exists() else path
+            content = self._load_cached(source)
             if content.strip():
                 parts.append(content.strip())
 

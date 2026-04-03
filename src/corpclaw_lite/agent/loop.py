@@ -30,6 +30,7 @@ __all__ = [
 
 if TYPE_CHECKING:
     from corpclaw_lite.agent.compressor import ContextCompressor
+    from corpclaw_lite.calibration.trajectory import TrajectoryRecorder
     from corpclaw_lite.departments.permissions import PermissionChecker
     from corpclaw_lite.memory.consolidation import MemoryConsolidator
     from corpclaw_lite.security.tool_guard import ToolGuard
@@ -71,6 +72,7 @@ class AgentLoop:
         approval_callback: Callable[[str, str], Awaitable[bool]] | None = None,
         consolidator: MemoryConsolidator | None = None,
         compressor: ContextCompressor | None = None,
+        default_system_prompt: str | None = None,
     ):
         self._provider = provider
         self._registry = registry
@@ -81,6 +83,7 @@ class AgentLoop:
         self._approval_callback = approval_callback
         self._consolidator = consolidator
         self._compressor = compressor
+        self._default_system_prompt = default_system_prompt
         self._approval_lock = asyncio.Lock()
 
     @property
@@ -96,6 +99,7 @@ class AgentLoop:
         approval_callback: Callable[[str, str], Awaitable[bool]] | None = None,
         on_tool_start: Callable[[str], None] | None = None,
         tools_enabled: bool = True,
+        trajectory_recorder: TrajectoryRecorder | None = None,
     ) -> tuple[str, RunStats]:
         """Run the ReAct loop until a final answer is given or limits are reached.
 
@@ -121,11 +125,20 @@ class AgentLoop:
         if self._memory:
             history = await self._memory.get_history(str(user.id), limit=self._settings.max_history)
 
+        # Prepend dynamic user context to the system prompt
+        base_prompt = system_prompt or self._default_system_prompt or ""
+        dynamic_prompt = (
+            f"Current User Context:\n"
+            f"- Name: {user.name}\n"
+            f"- Department: {user.department}\n\n"
+            f"{base_prompt}"
+        )
+
         context = ContextBuilder.build_initial(
             user,
             message,
             history=history,
-            system_prompt_override=system_prompt,
+            system_prompt_override=dynamic_prompt,
         )
 
         # Save new user message
@@ -215,7 +228,11 @@ class AgentLoop:
 
                 if self._can_parallelize(response.tool_calls):
                     results = await self._execute_parallel(
-                        response.tool_calls, user, _approval_cb, on_tool_start
+                        response.tool_calls,
+                        user,
+                        _approval_cb,
+                        on_tool_start,
+                        trajectory_recorder,
                     )
                     # Add ALL results first to keep context valid (no orphaned tool_calls)
                     loop_detected = False
@@ -234,7 +251,11 @@ class AgentLoop:
                     should_stop = False
                     for tc in response.tool_calls:
                         result = await self._execute_single_tool(
-                            tc, user, _approval_cb, on_tool_start
+                            tc,
+                            user,
+                            _approval_cb,
+                            on_tool_start,
+                            trajectory_recorder,
                         )
                         context.add_tool_result(tc.id, tc.name, result)
                         stats.tools_used.append(tc.name)
@@ -289,11 +310,18 @@ class AgentLoop:
         user: User,
         approval_callback: Callable[[str, str], Awaitable[bool]] | None,
         on_tool_start: Callable[[str], None] | None,
+        trajectory_recorder: TrajectoryRecorder | None = None,
     ) -> list[str]:
         """Execute multiple tools in parallel and return results."""
 
         async def execute_one(tc: ToolCall) -> str:
-            return await self._execute_single_tool(tc, user, approval_callback, on_tool_start)
+            return await self._execute_single_tool(
+                tc,
+                user,
+                approval_callback,
+                on_tool_start,
+                trajectory_recorder,
+            )
 
         results = await asyncio.gather(*[execute_one(tc) for tc in tool_calls])
         return list(results)
@@ -304,6 +332,7 @@ class AgentLoop:
         user: User,
         approval_callback: Callable[[str, str], Awaitable[bool]] | None,
         on_tool_start: Callable[[str], None] | None,
+        trajectory_recorder: TrajectoryRecorder | None = None,
     ) -> str:
         """Execute a single tool with all checks."""
         if self._permission_checker and not self._permission_checker.can_use_tool(user, tc.name):
@@ -318,6 +347,10 @@ class AgentLoop:
             tc.name,
             json.dumps(tc.arguments, ensure_ascii=False)[:_LOG_TRUNCATE],
         )
+
+        # Calibration trajectory recording
+        if trajectory_recorder is not None:
+            trajectory_recorder.record_tool_call(tc.name, tc.arguments)
 
         try:
             if self._tool_guard:
@@ -356,4 +389,9 @@ class AgentLoop:
             tc.name,
             result[:_LOG_TRUNCATE],
         )
+
+        # Calibration trajectory recording
+        if trajectory_recorder is not None:
+            trajectory_recorder.record_tool_result(tc.name, result)
+
         return result
