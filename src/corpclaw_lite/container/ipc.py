@@ -106,9 +106,15 @@ class ContainerIPC:
                 stderr=asyncio.subprocess.PIPE,
             )
 
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(input=input_data), timeout=self.timeout
-            )
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(input=input_data), timeout=self.timeout
+                )
+            except TimeoutError:
+                # Kill the docker exec process to prevent orphans
+                process.kill()
+                await process.wait()
+                return f"Error: Container tool '{tool_name}' timed out after {self.timeout}s"
 
             if process.returncode != 0:
                 err_msg = stderr.decode("utf-8").strip()
@@ -142,8 +148,6 @@ class ContainerIPC:
                 logger.error("Container signature verification failed (user=%d): %s", user_id, e)
                 return "Error: Security verification failed for container response."
 
-        except TimeoutError:
-            return f"Error: Container tool '{tool_name}' timed out after {self.timeout}s"
         except Exception as e:
             return f"Error in Container IPC: {e}"
 

@@ -23,9 +23,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import concurrent.futures
 import logging
 import os
 import sys
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -170,6 +172,13 @@ def cmd_chat(telegram_id: int) -> None:
 
     shutdown: asyncio.Event = asyncio.Event()
 
+    # Daemon-thread executor for blocking input() — daemon threads
+    # do NOT prevent process exit, unlike the default ThreadPoolExecutor.
+    _input_executor = concurrent.futures.ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix="cli-input",
+    )
+
     async def _run() -> None:
         from pathlib import Path
 
@@ -253,9 +262,12 @@ def cmd_chat(telegram_id: int) -> None:
         loop = asyncio.get_running_loop()
         try:
             while not shutdown.is_set():
-                # Race input() against the shutdown event so Ctrl+C exits immediately
+                # Race input() against the shutdown event so Ctrl+C exits immediately.
+                # IMPORTANT: use daemon-thread executor — the default executor
+                # blocks process exit because it waits for all threads to finish,
+                # but input() in a thread CANNOT be cancelled.
                 input_future: asyncio.Future[str] = loop.run_in_executor(
-                    None, lambda: input("You: ")
+                    _input_executor, lambda: input("You: ")
                 )
                 shutdown_wait = asyncio.ensure_future(shutdown.wait())
                 _, _ = await asyncio.wait(
@@ -301,14 +313,32 @@ def cmd_chat(telegram_id: int) -> None:
 
                     await channel.send_message(user, reply)
         finally:
-            await channel.stop()
+            try:
+                await channel.stop()
+            except Exception as e:
+                logger.warning("CLI channel stop failed: %s", e)
             if mcp_manager is not None:
-                await mcp_manager.disconnect_all()
+                try:
+                    await mcp_manager.disconnect_all()
+                except Exception as e:
+                    logger.warning("MCP disconnect failed: %s", e)
             if _container_manager is not None and user.telegram_id is not None:
-                _container_manager.stop(user.telegram_id)
+                try:
+                    _container_manager.stop(user.telegram_id)
+                except Exception as e:
+                    logger.warning("Container stop failed: %s", e)
             logger.info("CLI chat shut down cleanly for user %d.", telegram_id)
 
-    asyncio.run(_run())
+    try:
+        asyncio.run(_run())
+    finally:
+        _input_executor.shutdown(wait=False)
+        # Safety net: if a blocking input() thread is still alive,
+        # force-exit so we never leave ghost processes.
+        for t in threading.enumerate():
+            if t.name.startswith("cli-input") and t.is_alive():
+                logger.debug("Force-exiting: blocking input thread still alive.")
+                os._exit(0)
 
 
 def cmd_telegram() -> None:

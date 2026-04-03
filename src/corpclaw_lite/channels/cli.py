@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,13 @@ class CLIChannel(Channel):
     """Command-line interface channel."""
 
     name = "cli"
+
+    # Daemon-thread executor for blocking input() calls.
+    # Daemon threads do NOT prevent process exit.
+    _input_executor = concurrent.futures.ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix="cli-input",
+    )
 
     def __init__(self) -> None:
         self.console = Console()
@@ -57,5 +65,5 @@ class CLIChannel(Channel):
         def _get_input() -> str:
             return input("Approve? [y/N]: ").strip().lower()
 
-        result = await loop.run_in_executor(None, _get_input)
+        result = await loop.run_in_executor(self._input_executor, _get_input)
         return result in ("y", "yes")

@@ -8,6 +8,7 @@ Implements the minimal subset needed for tool listing and invocation.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -119,13 +120,27 @@ class MCPClient:
         return "\n".join(parts) if parts else str(result)
 
     async def disconnect(self) -> None:
-        """Terminate the MCP server subprocess."""
+        """Terminate the MCP server subprocess.
+
+        Sends SIGTERM first, then escalates to SIGKILL if the process
+        doesn't exit within 5 seconds — prevents ghost MCP processes.
+        """
         if self._process:
             try:
                 self._process.terminate()
                 await asyncio.wait_for(self._process.wait(), timeout=5.0)
+            except TimeoutError:
+                logger.warning("MCP server did not terminate in 5s, sending SIGKILL...")
+                try:
+                    self._process.kill()
+                    await self._process.wait()
+                except Exception:
+                    pass
             except Exception as e:
                 logger.warning("Error terminating MCP server: %s", e)
+                # Last resort — ensure no ghost process
+                with contextlib.suppress(Exception):
+                    self._process.kill()
             self._process = None
 
     # ── Internal helpers ──────────────────────────────────────────────────────

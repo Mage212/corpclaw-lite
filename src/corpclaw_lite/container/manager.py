@@ -157,10 +157,13 @@ class ContainerManager:
 
     def stop(self, user_id: int) -> None:
         """Stop and remove a user's container immediately."""
+        self.stop_by_name(f"corpclaw_agent_{user_id}")
+
+    def stop_by_name(self, name: str) -> None:
+        """Stop and remove a container by its Docker name."""
         if not self._client:
             return
 
-        name = f"corpclaw_agent_{user_id}"
         try:
             container = self._client.containers.get(name)
             container.stop(timeout=2)

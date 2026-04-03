@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
+import signal
 from pathlib import Path
 from typing import Any
 
@@ -89,11 +91,18 @@ class ExecScriptTool(Tool):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(workspace),
+                # Run in a new session so we can kill the entire process tree
+                # on timeout — prevents orphan processes.
+                start_new_session=True,
             )
             try:
                 stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_val)
             except TimeoutError:
-                proc.kill()
+                # Kill entire process group — catches child processes too
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except (ProcessLookupError, OSError):
+                    proc.kill()
                 await proc.wait()
                 return f"Error: Command timed out after {timeout_val}s"
 

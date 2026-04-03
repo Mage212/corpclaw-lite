@@ -152,6 +152,9 @@ async def test_send_tool_call_verify_fails(ipc) -> None:
 async def test_send_tool_call_timeout(ipc) -> None:
     proc = AsyncMock()
     proc.communicate = AsyncMock(side_effect=TimeoutError())
+    # kill() is sync on asyncio.subprocess.Process, wait() is async
+    proc.kill = lambda: None
+    proc.wait = AsyncMock(return_value=0)
 
     with patch("asyncio.create_subprocess_exec", return_value=proc):
         result = await ipc.send_tool_call(user_id=1, tool_name="slow_tool", args={})

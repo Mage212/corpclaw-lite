@@ -304,30 +304,54 @@ async def run_telegram_bot(token: str) -> None:
     except asyncio.CancelledError:
         pass
     finally:
+        # Each cleanup step is individually guarded so that a failure
+        # in one step never prevents subsequent steps from running.
+        # This is the #1 cause of ghost processes: an exception in
+        # early cleanup skips later cleanup (MCP, containers, etc.).
         if _health_runner is not None:
-            await _health_runner.cleanup()
+            try:
+                await _health_runner.cleanup()
+            except Exception as e:
+                logger.warning("Health server cleanup failed: %s", e)
         if cleanup_task is not None:
             cleanup_task.cancel()
         for task in _background_tasks:
             task.cancel()
-        reloader.stop()
+        try:
+            reloader.stop()
+        except Exception as e:
+            logger.warning("SkillHotReloader stop failed: %s", e)
         if mcp_reloader is not None:
-            mcp_reloader.stop()
-        plugin_reloader.stop()
-        await channel.stop()
+            try:
+                mcp_reloader.stop()
+            except Exception as e:
+                logger.warning("MCPHotReloader stop failed: %s", e)
+        try:
+            plugin_reloader.stop()
+        except Exception as e:
+            logger.warning("PluginHotReloader stop failed: %s", e)
+        try:
+            await channel.stop()
+        except Exception as e:
+            logger.warning("Channel stop failed: %s", e)
         # Disconnect MCP servers
         if mcp_manager is not None:
-            await mcp_manager.disconnect_all()
-            logger.info("MCP servers disconnected.")
+            try:
+                await mcp_manager.disconnect_all()
+                logger.info("MCP servers disconnected.")
+            except Exception as e:
+                logger.warning("MCP disconnect failed: %s", e)
         # Stop all per-user Docker containers so no ghost containers remain
         if container_manager is not None:
-            active = await container_manager.list_active()
-            for cname in active:
-                try:
-                    uid = int(cname.split("_")[-1])
-                    container_manager.stop(uid)
-                except Exception as e:
-                    logger.warning("Could not stop container %s: %s", cname, e)
+            try:
+                active = await container_manager.list_active()
+                for cname in active:
+                    try:
+                        container_manager.stop_by_name(cname)
+                    except Exception as e:
+                        logger.warning("Could not stop container %s: %s", cname, e)
+            except Exception as e:
+                logger.warning("Container cleanup failed: %s", e)
         logger.info("Telegram bot stopped cleanly.")
 
 
