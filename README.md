@@ -2,7 +2,7 @@
 
 Надёжный Python AI-агент для корпоративного закрытого контура — Telegram-бот, который выполняет рутинные задачи через скиллы/плагины/субагенты, работает с **локальными LLM** и управляет доступом по департаментам.
 
-> **Статус: Готов к эксплуатации (Production-Ready).** Ядро стабилизировано, покрыто тестами (507 pass / 0 fail), решены все проблемы зависания процессов (Graceful Shutdown) и безопасной изоляции внутри Docker-контейнеров (Secure Sandbox).
+> **Статус: Готов к эксплуатации (Production-Ready).** Ядро стабилизировано, покрыто тестами (533 pass / 0 fail), решены все проблемы зависания процессов (Graceful Shutdown) и безопасной изоляции внутри Docker-контейнеров (Secure Sandbox).
 
 ---
 
@@ -70,6 +70,7 @@ graph TD
 | Departments / RBAC | ✅ Готов |
 | Admin Notifier | ✅ Готов |
 | Graceful Shutdown | ✅ Готов (без ghost-контейнеров) |
+| **User Onboarding** | ✅ **Готов — гибридный детерминистический + LLM-финализация** |
 | **Calibration Phase** | ✅ **Готов — автоматическая адаптация под локальную модель** |
 
 ---
@@ -126,6 +127,9 @@ container:
 # Интерактивный CLI чат (симулирует реального пользователя из БД)
 # Требует предварительного создания пользователя через user-create
 uv run corpclaw-lite chat --telegram-id <tg_id>
+
+# Запустить/перезапустить настройку общения (онбординг)
+uv run corpclaw-lite chat --telegram-id <tg_id> --setup
 
 # Telegram-бот (требует Docker + .env)
 uv run corpclaw-lite telegram
@@ -326,6 +330,52 @@ config/calibrated/
 
 ---
 
+## Онбординг пользователя
+
+При первом обращении (или по команде `/setup` в Telegram / `--setup` в CLI) пользователь проходит короткую настройку из 6 вопросов:
+
+1. **Как тебя называть?** (обязательный)
+2. **Манера общения** — формально, неформально, коротко
+3. **Язык общения** — русский, English, другой
+4. **О себе** — роль, проекты
+5. **Типичные задачи** — что чаще делать
+6. **Дополнительно** — любые предпочтения
+
+### Как это работает
+
+```mermaid
+flowchart LR
+    Q["6 вопросов\n(без LLM)"] --> LLM["1 LLM-вызов\n(финализация)"]
+    LLM --> MD["config/bootstrap/users/{id}.md\n(agent instructions)"]
+    LLM --> Facts["memory_facts\n(структурированные данные)"]
+    LLM --> Name["users.name обновлён"]
+    LLM -->|ошибка| Fallback["Fallback: raw-ответы напрямую"]
+```
+
+- **Phase 1 (сбор)** — детерминистический flow, вопрос за вопросом, без LLM
+- **Phase 2 (финализация)** — один LLM-вызов генерирует:
+  - Per-user bootstrap `.md` — actionable инструкции для агента
+  - Structured facts — key-value пары в `memory_facts`
+  - Обновление `user.name` в БД
+- **Fallback** — если LLM недоступна, raw-ответы сохраняются напрямую
+
+### Где хранится
+
+| Данные | Расположение |
+|--------|--------------|
+| Прогресс онбординга | `data/users.db` → таблица `onboarding_state` |
+| Per-user промпт | `config/bootstrap/users/{telegram_id}.md` |
+| Факты о пользователе | `data/memory.db` → таблица `memory_facts` |
+| Имя пользователя | `data/users.db` → таблица `users` |
+
+### Интеграция
+
+- **Telegram:** автоматически при первом сообщении + `/setup` для перенастройки
+- **CLI:** автоматически при первом `chat` + `--setup` для перенастройки
+- **AgentLoop:** user facts инжектируются в system prompt при каждом вызове
+
+---
+
 ## Логирование
 
 После запуска логи пишутся в папку `logs/`:
@@ -348,20 +398,21 @@ logging:
 ## CLI команды
 
 ```bash
-uv run corpclaw-lite chat --telegram-id <tg_id> # Интерактивный CLI чат
-uv run corpclaw-lite telegram                   # Запуск Telegram-бота
-uv run corpclaw-lite user-list                  # Список пользователей
+uv run corpclaw-lite chat --telegram-id <tg_id>         # Интерактивный CLI чат
+uv run corpclaw-lite chat --telegram-id <tg_id> --setup # Перенастроить общение
+uv run corpclaw-lite telegram                           # Запуск Telegram-бота
+uv run corpclaw-lite user-list                          # Список пользователей
 uv run corpclaw-lite user-create -t <tg_id> -d <dept> -n <name>
 uv run corpclaw-lite user-allow -t <tg_id> -d <dept>
-uv run corpclaw-lite skill list                 # Скилы
-uv run corpclaw-lite plugin list                # Плагины
-uv run corpclaw-lite containers                 # Активные Docker-контейнеры
-uv run corpclaw-lite prune                      # Удаление idle-контейнеров
-uv run corpclaw-lite generate skill <name>      # Шаблон скила
-uv run corpclaw-lite generate plugin <name>     # Шаблон плагина
-uv run corpclaw-lite generate subagent <name>   # Шаблон субагента
-uv run corpclaw-lite calibrate                  # Калибровка под локальную модель
-uv run corpclaw-lite calibrate --dry-run        # Только baseline score
+uv run corpclaw-lite skill list                         # Скилы
+uv run corpclaw-lite plugin list                        # Плагины
+uv run corpclaw-lite containers                         # Активные Docker-контейнеры
+uv run corpclaw-lite prune                              # Удаление idle-контейнеров
+uv run corpclaw-lite generate skill <name>              # Шаблон скила
+uv run corpclaw-lite generate plugin <name>             # Шаблон плагина
+uv run corpclaw-lite generate subagent <name>           # Шаблон субагента
+uv run corpclaw-lite calibrate                          # Калибровка под локальную модель
+uv run corpclaw-lite calibrate --dry-run                # Только baseline score
 ```
 
 ---
@@ -385,7 +436,7 @@ uv run pyright src/
 uv run ruff check src/ --fix && uv run ruff format src/ && uv run pyright src/ && uv run pytest tests/ -v
 ```
 
-**Текущие метрики:** 507 тестов (0 failed), pyright strict 0 errors, 100% ruff compliance.
+**Текущие метрики:** 533 теста (0 failed), pyright strict 0 errors, 100% ruff compliance.
 
 ---
 
@@ -401,9 +452,10 @@ uv run ruff check src/ --fix && uv run ruff format src/ && uv run pyright src/ &
 | Container (Manager, IPC, Proxy, Policies) | ~600 | 5 |
 | Memory | ~350 | 2 |
 | Config + RBAC + Logging | ~500 | 8 |
+| **Onboarding** | **~550** | **5** |
 | **Calibration** | **~900** | **8** |
-| **Исходники** | **~10200** | **78** |
-| **Тесты** | **~8000** | **58** |
+| **Исходники** | **~10750** | **83** |
+| **Тесты** | **~8500** | **59** |
 
 ---
 
@@ -414,7 +466,7 @@ uv run ruff check src/ --fix && uv run ruff format src/ && uv run pyright src/ &
 - [ ] `config/bootstrap/SOUL.md` и `COMPANY.md` написаны под вашу компанию
 - [ ] `config/departments.yaml` настроен под ваши департаменты
 - [x] `CORPCLAW_IPC_SECRET` — уникальный секрет ≥32 символов
-- [x] `uv run pytest tests/ -v` — все тесты зелёные (507/507)
+- [x] `uv run pytest tests/ -v` — все тесты зелёные (533/533)
 - [x] `uv run corpclaw-lite telegram` запускает бота и отвечает на сообщения
 - [ ] Тест сценария: маркетолог отправляет Excel → бот возвращает нормализованный файл
 - [ ] `uv run corpclaw-lite calibrate --dry-run` — baseline score для выбранной модели
