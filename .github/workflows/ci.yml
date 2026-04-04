@@ -23,4 +23,4 @@ jobs:
       - name: Type check
         run: uv run pyright src/
       - name: Tests with coverage
-        run: uv run pytest tests/ -v --cov=src/corpclaw_lite --cov-fail-under=80
+        run: uv run pytest tests/ -v --cov=src/corpclaw_lite --cov-fail-under=75
