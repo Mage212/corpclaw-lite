@@ -93,6 +93,25 @@ async def run_telegram_bot(token: str) -> None:
     if tg_settings.whitelist:
         user_manager.seed_whitelist(tg_settings.whitelist, tg_settings.default_department)
 
+    # ── Onboarding ────────────────────────────────────────────────────────
+    from corpclaw_lite.onboarding.engine import OnboardingEngine
+    from corpclaw_lite.onboarding.finalizer import OnboardingFinalizer
+    from corpclaw_lite.onboarding.storage import OnboardingStorage
+
+    onboarding_storage = OnboardingStorage(db_path=Path("data/users.db"))
+    _onboarding_memory = agent_loop.memory
+    onboarding_finalizer: OnboardingFinalizer | None = None
+    if _onboarding_memory is not None:
+        onboarding_finalizer = OnboardingFinalizer(
+            provider=agent_loop.provider,
+            memory=_onboarding_memory,
+            bootstrap_users_dir=PROJECT_ROOT / "config" / "bootstrap" / "users",
+            user_manager=user_manager,
+        )
+    onboarding_engine: OnboardingEngine | None = None
+    if onboarding_finalizer is not None:
+        onboarding_engine = OnboardingEngine(onboarding_storage, onboarding_finalizer)
+
     # Placeholder for admin notifier — set after channel.start()
     admin_notifier: AdminNotifier | None = None
     _background_tasks: set[asyncio.Task[Any]] = set()
@@ -117,6 +136,42 @@ async def run_telegram_bot(token: str) -> None:
             dept = user_manager.get_whitelist_department(tid)
             user = await user_manager.async_create_user(telegram_id=tid, department=dept)
             logger.info("Auto-registered user telegram_id=%d (dept=%s)", tid, dept)
+
+        # ── Onboarding intercept ──────────────────────────────────────────
+        if onboarding_engine is not None and await onboarding_engine.needs_onboarding(tid):
+            if not await onboarding_engine.is_in_progress(tid):
+                # First contact — start onboarding, send first question
+                question = await onboarding_engine.start(tid, user.department)
+                if question:
+                    text = (
+                        "👋 Добро пожаловать! Давай настроим меня под тебя "
+                        "— это займёт пару минут.\n\n"
+                        f"{question.prompt}"
+                    )
+                    if question.hint:
+                        text += f"\n💡 {question.hint}"
+                    await channel.send_message(user, text)
+                    return
+            else:
+                # Onboarding in progress — treat message as answer
+                next_q = await onboarding_engine.submit_answer(tid, message, user.department)
+                if next_q:
+                    text = next_q.prompt
+                    if next_q.hint:
+                        text += f"\n💡 {next_q.hint}"
+                    await channel.send_message(user, text)
+                else:
+                    # Finalization done — refresh user from DB (name may have changed)
+                    user = await user_manager.async_get_by_telegram_id(tid) or user
+                    answers = await onboarding_engine.get_summary(tid)
+                    name = answers.get("preferred_name", user.name)
+                    await channel.send_message(
+                        user,
+                        f"✅ Готово, {name}! Я настроен под тебя.\n\n"
+                        "Можешь задавать вопросы и давать задачи. "
+                        "Для перенастройки — /setup",
+                    )
+                return
 
         # ── Rate limiting ─────────────────────────────────────────────────
         allowed = await rate_limiter.check(tid)
@@ -162,8 +217,9 @@ async def run_telegram_bot(token: str) -> None:
         try:
             base_prompt = bootstrap.get_system_prompt()
             dept_prompt = bootstrap.get_department_prompt(user.department)
+            user_prompt = bootstrap.get_user_prompt(user.telegram_id) if user.telegram_id else None
             user_ctx = f"You are talking to {user.name} from the {user.department} department."
-            parts_list = [p for p in [base_prompt, dept_prompt, user_ctx] if p]
+            parts_list = [p for p in [base_prompt, dept_prompt, user_prompt, user_ctx] if p]
             system_prompt: str | None = "\n\n".join(parts_list) if parts_list else None
 
             # Inject allowed skill instructions into system prompt
@@ -228,6 +284,7 @@ async def run_telegram_bot(token: str) -> None:
         workspace_base=tg_settings.workspace_base,
         tool_registry=tool_registry,
         memory=agent_loop.memory,
+        onboarding_engine=onboarding_engine,
     )
 
     # ── SendFile tool ─────────────────────────────────────────────────────

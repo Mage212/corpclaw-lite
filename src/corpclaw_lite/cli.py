@@ -76,6 +76,11 @@ def _build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Telegram ID пользователя (должен быть в БД, user-create)",
     )
+    chat_p.add_argument(
+        "--setup",
+        action="store_true",
+        help="Запустить/перезапустить настройку общения",
+    )
 
     # telegram
     sub.add_parser("telegram", help="Start the Telegram bot (polling)")
@@ -156,7 +161,7 @@ def _build_parser() -> argparse.ArgumentParser:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def cmd_chat(telegram_id: int) -> None:
+def cmd_chat(telegram_id: int, *, setup_mode: bool = False) -> None:
     """Launch an interactive CLI chat loop for a registered user."""
     from corpclaw_lite.agent.factory import PROJECT_ROOT
     from corpclaw_lite.config.loader import load_settings
@@ -237,8 +242,61 @@ def cmd_chat(telegram_id: int) -> None:
         if _container_manager and user.telegram_id is not None:
             _container_manager.ensure_running(user.telegram_id)
 
+        # ── Onboarding ─────────────────────────────────────────────────────────────
+        from corpclaw_lite.onboarding.engine import OnboardingEngine
+        from corpclaw_lite.onboarding.finalizer import OnboardingFinalizer
+        from corpclaw_lite.onboarding.storage import OnboardingStorage
+
+        onboarding_storage = OnboardingStorage(db_path=Path("data/users.db"))
+        _cli_memory = agent_loop.memory
+        onboarding_engine: OnboardingEngine | None = None
+        if _cli_memory is not None:
+            onboarding_finalizer = OnboardingFinalizer(
+                provider=agent_loop.provider,
+                memory=_cli_memory,
+                bootstrap_users_dir=Path("config/bootstrap/users"),
+                user_manager=standalone_manager,
+            )
+            onboarding_engine = OnboardingEngine(onboarding_storage, onboarding_finalizer)
+
+        run_onboarding = onboarding_engine is not None and (
+            setup_mode or await onboarding_engine.needs_onboarding(telegram_id)
+        )
+        if run_onboarding:
+            assert onboarding_engine is not None  # guaranteed by run_onboarding guard
+            if setup_mode:
+                await onboarding_engine.reset(telegram_id)
+            print("\n🎯 Давай настроим общение!")
+            print("   (Напиши 'skip' чтобы пропустить вопрос)\n")
+            question = await onboarding_engine.start(telegram_id, user.department)
+            while question is not None:
+                prompt_text = question.prompt
+                if question.hint:
+                    prompt_text += f"\n   ({question.hint})"
+                print(prompt_text)
+                try:
+                    answer = await asyncio.get_running_loop().run_in_executor(
+                        _input_executor, lambda: input("> ")
+                    )
+                except (EOFError, KeyboardInterrupt):
+                    print("\n❌ Настройка прервана.")
+                    return
+                if answer.strip().lower() == "skip" and question.skippable:
+                    answer = ""
+                question = await onboarding_engine.submit_answer(
+                    telegram_id, answer, user.department
+                )
+            # Refresh user from DB (name may have changed)
+            user = standalone_manager.get_by_telegram_id(telegram_id) or user
+            print(f"\n✅ Настройка завершена, {user.name}!\n")
+
         # Inject skills + plugin skills into system prompt (same as Telegram runner)
         from corpclaw_lite.agent.prompt import build_skill_block
+
+        # Inject per-user prompt
+        user_prompt = bootstrap.get_user_prompt(telegram_id)
+        if user_prompt:
+            system_prompt = (system_prompt or "") + "\n\n" + user_prompt
 
         allowed_skills = skill_registry.get_allowed_skills(user)
         plugin_skills = [
@@ -566,7 +624,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.command == "chat":
-        cmd_chat(args.telegram_id)
+        cmd_chat(args.telegram_id, setup_mode=args.setup)
     elif args.command == "telegram":
         cmd_telegram()
     elif args.command == "user-list":

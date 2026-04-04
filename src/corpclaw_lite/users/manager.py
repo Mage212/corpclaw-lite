@@ -243,3 +243,16 @@ class UserManager:
         return await anyio.to_thread.run_sync(
             partial(self.create_user, telegram_id=telegram_id, department=department, name=name)
         )
+
+    def update_name(self, telegram_id: int, name: str) -> None:
+        """Update user display name (e.g. after onboarding)."""
+        with db_connect(self._db) as conn:
+            conn.execute(
+                "UPDATE users SET name = ? WHERE telegram_id = ?",
+                (name, telegram_id),
+            )
+        logger.info("Updated name for telegram_id=%d: %s", telegram_id, name)
+
+    async def async_update_name(self, telegram_id: int, name: str) -> None:
+        """Async wrapper around update_name."""
+        await anyio.to_thread.run_sync(partial(self.update_name, telegram_id, name))

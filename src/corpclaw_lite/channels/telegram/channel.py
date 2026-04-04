@@ -60,6 +60,7 @@ class TelegramChannel(Channel):
         workspace_base: Path | None = None,
         tool_registry: ToolRegistry | None = None,
         memory: SQLiteMemory | None = None,
+        onboarding_engine: Any | None = None,
     ) -> None:
         """
         Args:
@@ -68,6 +69,7 @@ class TelegramChannel(Channel):
             workspace_base: Base directory for per-user workspaces
             tool_registry: For /help command — lists available tools
             memory: For /new command — clears user history
+            onboarding_engine: OnboardingEngine instance for /setup command
         """
         self.token = token
         self._app: Application | None = None  # type: ignore
@@ -75,6 +77,7 @@ class TelegramChannel(Channel):
         self._workspace_base = workspace_base or Path("workspaces")
         self._tool_registry = tool_registry
         self._memory = memory
+        self._onboarding_engine = onboarding_engine
 
         # Approval system: message_id → (Future[bool], expected_telegram_user_id)
         self._pending_approvals: dict[str, tuple[asyncio.Future[bool], int]] = {}
@@ -111,6 +114,7 @@ class TelegramChannel(Channel):
         self._app.add_handler(CommandHandler("delete", self._handle_delete))
         self._app.add_handler(CommandHandler("chat", self._handle_chat))
         self._app.add_handler(CommandHandler("execute", self._handle_execute))
+        self._app.add_handler(CommandHandler("setup", self._handle_setup))
 
         # Messages
         self._app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_text))
@@ -148,6 +152,7 @@ class TelegramChannel(Channel):
                 BotCommand("start", "Регистрация и приветствие"),
                 BotCommand("help", "Справка и доступные инструменты"),
                 BotCommand("new", "Сбросить текущую сессию"),
+                BotCommand("setup", "Перенастроить общение"),
                 BotCommand("delete", "Открыть удаление файлов"),
                 BotCommand("chat", "Режим диалога (без инструментов)"),
                 BotCommand("execute", "Режим исполнения (с инструментами)"),
@@ -268,11 +273,29 @@ class TelegramChannel(Channel):
             await update.effective_chat.send_message(
                 "👋 Добро пожаловать в CorpClaw Lite!\n\n"
                 "/help — справка\n"
+                "/setup — настроить общение\n"
                 "/new — сбросить сессию\n"
                 "/delete — удаление файлов\n"
                 "/chat — режим диалога\n"
                 "/execute — режим исполнения",
             )
+
+    async def _handle_setup(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Reset and restart onboarding for the user."""
+        if not update.effective_user or not update.effective_chat:
+            return
+        if self._onboarding_engine is None:
+            await update.effective_chat.send_message("⚠️ Настройка недоступна.")
+            return
+        tid = update.effective_user.id
+        await self._onboarding_engine.reset(tid)
+        question = await self._onboarding_engine.start(tid, "default")
+        if question:
+            text = f"🔄 Перенастройка! Предыдущие настройки будут обновлены.\n\n{question.prompt}"
+            if question.hint:
+                text += f"\n💡 {question.hint}"
+            await update.effective_chat.send_message(text)
+        logger.info("User %d started /setup", tid)
 
     async def _handle_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Show available tools."""

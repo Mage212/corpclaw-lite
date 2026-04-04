@@ -91,6 +91,11 @@ class AgentLoop:
         """Access the memory backend (if configured)."""
         return self._memory
 
+    @property
+    def provider(self) -> Provider:
+        """Access the LLM provider."""
+        return self._provider
+
     async def run(
         self,
         user: User,
@@ -127,10 +132,20 @@ class AgentLoop:
 
         # Prepend dynamic user context to the system prompt
         base_prompt = system_prompt or self._default_system_prompt or ""
+
+        # Load user facts from memory (onboarding + manually stored via memory_store)
+        user_facts_block = ""
+        if self._memory:
+            facts = await self._memory.recall_facts(str(user.id), limit=20)
+            if facts:
+                lines = [f"- {f['key']}: {f['value']}" for f in facts]
+                user_facts_block = "\n\n## Known Facts About This User\n" + "\n".join(lines)
+
         dynamic_prompt = (
             f"Current User Context:\n"
             f"- Name: {user.name}\n"
-            f"- Department: {user.department}\n\n"
+            f"- Department: {user.department}\n"
+            f"{user_facts_block}\n\n"
             f"{base_prompt}"
         )
 
