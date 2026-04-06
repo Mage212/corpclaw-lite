@@ -55,10 +55,25 @@ class OpenAIProvider(Provider):
 
         # Strip <think>…</think> wrapper that some local models include inline
         # in the content field (e.g. DeepSeek-R1, some Qwen3 configs).
-        # reasoning_content (LM Studio separate field) is intentionally NOT used
-        # as a fallback — it is internal chain-of-thought, not a final answer.
         import re as _re
         content = _re.sub(r"<think>.*?</think>", "", raw_content, flags=_re.DOTALL).strip()
+
+        # Qwen3 Extended Thinking (LM Studio): on the FINAL response turn the model
+        # sometimes "thinks" its answer but outputs nothing to content, leaving it empty.
+        # We can detect this specific pattern: finish_reason="stop" + no tool_calls +
+        # empty content — the model is done, it just forgot to "speak".
+        # Only in this case do we use reasoning_content as a fallback, because it
+        # IS the intended answer. During tool-call turns (finish_reason="tool_calls")
+        # reasoning_content is internal chain-of-thought and must NOT be shown.
+        if (
+            not content
+            and not choice.message.tool_calls
+            and choice.finish_reason == "stop"
+        ):
+            raw_msg = choice.message  # type: ignore[attr-defined]
+            reasoning: str = getattr(raw_msg, "reasoning_content", None) or ""
+            if reasoning:
+                content = reasoning.strip()
 
         tool_calls: list[ToolCall] = []
 
