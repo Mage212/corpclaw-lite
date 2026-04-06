@@ -304,7 +304,10 @@ def build_agent_stack(
     registry.register(WebFetchTool())
 
     vision = VisionProcessor(provider)
-    registry.register(ReadImageTool(vision))
+    # workspace_base may be None when container isolation is disabled (dev mode);
+    # ReadImageTool falls back to CWD-relative resolution in that case.
+    _image_workspace_base = workspace_base if container_cfg.enabled else None
+    registry.register(ReadImageTool(vision, workspace_base=_image_workspace_base))
 
     # ── Memory Consolidation ──────────────────────────────────────────────────
     consolidator = None
