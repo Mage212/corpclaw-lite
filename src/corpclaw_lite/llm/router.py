@@ -23,6 +23,7 @@ from typing import Any
 
 from corpclaw_lite.config.settings import LLMSettings, ProviderSettings
 from corpclaw_lite.llm.base import LLMResponse, Provider, StreamChunk, VisionProvider
+from corpclaw_lite.llm.presets import PresetRegistry
 
 __all__ = [
     "LLMRouter",
@@ -32,18 +33,28 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 
-def build_provider(settings: ProviderSettings) -> Provider | None:
+def build_provider(
+    settings: ProviderSettings,
+    preset_registry: PresetRegistry | None = None,
+) -> Provider | None:
     """Build a concrete Provider from a ProviderSettings spec.
 
     Returns None if the provider cannot be built (e.g., missing required API key).
     The caller should decide whether this is a fatal error or just skip the provider.
     """
+    # Resolve preset by name
+    preset = None
+    if settings.preset and preset_registry:
+        preset = preset_registry.get(settings.preset)
+        if preset is None:
+            logger.warning("Unknown preset '%s' for provider, ignoring", settings.preset)
+
     if settings.type == "anthropic":
         if not settings.api_key:
             return None  # Anthropic requires a key; skip silently
         from corpclaw_lite.llm.anthropic import AnthropicProvider
 
-        return AnthropicProvider(settings)
+        return AnthropicProvider(settings, preset=preset)
 
     # Default: openai-compatible (Ollama, vLLM, LM Studio, OpenRouter, etc.)
     from corpclaw_lite.llm.openai import OpenAIProvider
@@ -51,7 +62,7 @@ def build_provider(settings: ProviderSettings) -> Provider | None:
     # openai-compatible providers work without a real key (local models)
     if not settings.api_key:
         settings = ProviderSettings(**{**settings.model_dump(), "api_key": "dummy"})
-    return OpenAIProvider(settings)
+    return OpenAIProvider(settings, preset=preset)
 
 
 class LLMRouter:
@@ -85,11 +96,13 @@ class LLMRouter:
         )
 
     @classmethod
-    def from_settings(cls, llm: LLMSettings) -> LLMRouter:
+    def from_settings(
+        cls, llm: LLMSettings, preset_registry: PresetRegistry | None = None
+    ) -> LLMRouter:
         """Build an LLMRouter from LLMSettings (populated from settings.yaml)."""
         providers: dict[str, Provider] = {}
         for name, spec in llm.named.items():
-            built = build_provider(spec)
+            built = build_provider(spec, preset_registry=preset_registry)
             if built is None:
                 logger.warning(
                     "  [provider] %s skipped (type=%s, missing required credentials)",
@@ -98,7 +111,10 @@ class LLMRouter:
                 )
                 continue
             providers[name] = built
-            logger.info("  [provider] %s: type=%s model=%s", name, spec.type, spec.model)
+            preset_info = f" preset={spec.preset}" if spec.preset else ""
+            logger.info(
+                "  [provider] %s: type=%s model=%s%s", name, spec.type, spec.model, preset_info
+            )
 
         # Build routing table: list of (task_kind, subagent_id, provider_name)
         routing: list[tuple[str | None, str | None, str]] = []

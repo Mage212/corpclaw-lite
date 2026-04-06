@@ -26,6 +26,7 @@ class LLMResponse(BaseModel):
     """Standardized response from an LLM provider."""
 
     content: str
+    reasoning: str = ""
     tool_calls: list[ToolCall] = []
     usage: dict[str, int] = {}
 

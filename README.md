@@ -52,6 +52,7 @@ graph TD
 |-----------|--------|
 | AgentLoop (ReAct) | ✅ Готов, протестирован |
 | LLM Router (Ollama / Anthropic / любой OpenAI-compatible) | ✅ Готов |
+| **Model Presets** (inference params, thinking config per model) | ✅ **Готов** |
 | XML Tool Calling Fallback | ✅ Готов |
 | Builtin Tools (файлы, Excel, web, скрипты) | ✅ Готов |
 | ToolGuard (YAML-правила) | ✅ Готов |
@@ -142,6 +143,7 @@ uv run corpclaw-lite telegram
 | Файл | Описание |
 |------|----------|
 | `config/settings.yaml` | LLM-провайдеры, роутинг, агент, контейнер, логирование |
+| `config/model_presets.yaml` | **Пресеты моделей: inference params, thinking tags, reasoning config** |
 | `config/departments.yaml` | RBAC: инструменты и бюджеты по департаментам |
 | `config/tool_guard_rules.yaml` | Правила безопасности ToolGuard |
 | `config/network_policy.yaml` | Network allowlist для контейнеров |
@@ -161,11 +163,17 @@ llm:
   named:
     default:
       type: "openai"
-      model: "qwen2.5:7b"
+      model: "qwen3.5-4b@q4_k_m"
       base_url: "${OPENAI_BASE_URL:-http://localhost:11434/v1}"
+      preset: "qwen3-thinking"     # ← пресет из model_presets.yaml
+    vision:
+      type: "openai"
+      model: "qwen3.5-4b@q4_k_m"
+      base_url: "${OPENAI_BASE_URL:-http://localhost:11434/v1}"
+      preset: "qwen3-no-think"     # ← vision без thinking
     cloud:
       type: "anthropic"
-      model: "claude-3-5-sonnet-20241022"
+      model: "claude-sonnet-4-20250514"
       api_key: "${ANTHROPIC_API_KEY:-}"
   routing:
     - task_kind: "vision"
@@ -173,6 +181,58 @@ llm:
     - task_kind: "consolidate"
       provider: "default"
 ```
+
+### Model Presets (`config/model_presets.yaml`)
+
+Пресеты стандартизируют настройки для разных моделей: inference-параметры, thinking-теги и стратегии парсинга reasoning. Каждый named-провайдер может ссылаться на пресет по имени.
+
+**Приоритет параметров:** `request-level > preset > provider defaults`
+
+```yaml
+presets:
+  # Gemma 4 — reasoning через инжекцию <|think|> в system prompt
+  gemma4-thinking:
+    system_prompt_prefix: "<|think|>"
+    thinking:
+      open_tag: "<|channel>thought"
+      close_tag: "<channel|>"
+      source: "content"         # парсим теги из content поля ответа
+    inference_params:
+      temperature: 1.0
+      top_p: 0.95
+      top_k: 64
+
+  # Qwen 3/3.5 — нативное reasoning_content поле
+  qwen3-thinking:
+    thinking:
+      source: "native"          # берём из reasoning_content поля API
+    thinking_budget_tokens: 1024
+    inference_params:
+      temperature: 1.0
+      top_p: 0.95
+      top_k: 20
+      presence_penalty: 1.5
+
+  # Qwen 3/3.5 — с подавлением reasoning
+  qwen3-no-think:
+    system_prompt_prefix: "/no_think"
+    thinking:
+      source: "native"
+    thinking_budget_tokens: 512
+```
+
+**Как работает:**
+1. При старте `factory.py` загружает `config/model_presets.yaml` в `PresetRegistry`
+2. `LLMRouter` передаёт соответствующий `ModelPreset` в конструктор провайдера
+3. Провайдер при каждом вызове `chat()` мерджит inference-параметры, инжектит `system_prompt_prefix` и парсит reasoning
+4. Reasoning сохраняется в `SQLiteMemory` (для аудита) и логируется, но **не попадает** в контекст агента
+
+**Поддерживаемые стратегии reasoning:**
+| Стратегия | source | Модели | Описание |
+|-----------|--------|--------|----------|
+| Content tags | `"content"` | Gemma 4 | Парсинг `open_tag`...`close_tag` из `content` |
+| Native field | `"native"` | Qwen 3/3.5 | Чтение `reasoning_content` из API |
+| Без пресета | — | Любые | Content возвращается as-is |
 
 ---
 
@@ -445,7 +505,7 @@ uv run ruff check src/ --fix && uv run ruff format src/ && uv run pyright src/ &
 | Компонент | LOC | Файлов |
 |-----------|-----|--------|
 | Agent Core | ~1300 | 8 |
-| LLM Providers + Router | ~500 | 5 |
+| LLM Providers + Router + **Presets** | ~600 | 6 |
 | Extensions (Tools, Skills, Plugins, MCP) | ~2000 | 24 |
 | Security | ~450 | 4 |
 | Channels (Telegram + CLI) | ~2100 | 12 |

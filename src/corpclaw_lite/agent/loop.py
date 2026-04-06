@@ -223,11 +223,25 @@ class AgentLoop:
                     len(response.tool_calls or []),
                 )
 
+                # Log reasoning (if present) — does NOT enter agent context
+                if response.reasoning:
+                    logger.debug(
+                        "[user=%s] reasoning (%d chars): %s",
+                        user.id,
+                        len(response.reasoning),
+                        response.reasoning[:200],
+                    )
+
                 if not response.tool_calls:
                     # Agent provided text directly — save and return
                     final = response.content if response.content else "Agent provided no response."
                     if self._memory:
-                        await self._memory.add_message(mem_key, "assistant", final)
+                        await self._memory.add_message(
+                            mem_key,
+                            "assistant",
+                            final,
+                            reasoning=response.reasoning or None,
+                        )
                         if self._consolidator:
                             await self._consolidator.maybe_consolidate(self._memory, mem_key)
                     stats.duration_ms = (time.monotonic() - t0) * 1000

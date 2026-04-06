@@ -22,6 +22,7 @@ llm:
       model: "qwen3.5-4b@q4_k_m"
       base_url: "${OPENAI_BASE_URL:-http://localhost:11434/v1}"
       api_key: "${OPENAI_API_KEY:-ollama}"
+      preset: "qwen3-thinking"
 
     # Vision provider: same base by default, override to use a dedicated vision model
     vision:
@@ -29,6 +30,7 @@ llm:
       model: "qwen3.5-4b@q4_k_m"
       base_url: "${OPENAI_BASE_URL:-http://localhost:11434/v1}"
       api_key: "${OPENAI_API_KEY:-ollama}"
+      preset: "qwen3-no-think"
 
     # Cloud provider for calibration analysis and heavy tasks.
     # Option A: Anthropic Claude (requires ANTHROPIC_API_KEY in .env)

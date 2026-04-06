@@ -75,7 +75,7 @@ class ReadImageTool(Tool):
                 )
             ):
                 # Strip /workspace prefix and resolve against host workspace
-                relative = path_str[len(_CONTAINER_WS):].lstrip("/\\")
+                relative = path_str[len(_CONTAINER_WS) :].lstrip("/\\")
                 user_workspace = Path(self._workspace_base) / f"user_{user.telegram_id}"
                 resolved = (user_workspace / relative).resolve()
 

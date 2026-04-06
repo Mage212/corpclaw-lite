@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -15,17 +16,81 @@ __all__ = [
     "OpenAIProvider",
 ]
 
+logger = logging.getLogger(__name__)
+
 
 class OpenAIProvider(Provider):
     """LLM Provider passing through to OpenAI-compatible models."""
 
-    def __init__(self, settings: ProviderSettings):
+    def __init__(
+        self,
+        settings: ProviderSettings,
+        preset: Any | None = None,
+    ):
         self._model = settings.model
+        self._preset = preset  # ModelPreset | None (lazy import to avoid circular)
         api_key = settings.api_key or "dummy"  # local models may not need a real key
         if settings.base_url:
             self._client = openai.AsyncOpenAI(api_key=api_key, base_url=settings.base_url)
         else:
             self._client = openai.AsyncOpenAI(api_key=api_key)
+
+    # ── Preset helpers ────────────────────────────────────────────────────────
+
+    def _apply_preset(self, system: str | None, kwargs: dict[str, Any]) -> str | None:
+        """Merge preset inference params and inject system_prompt_prefix.
+
+        Priority: request-level params > preset params > provider defaults.
+        Uses ``setdefault`` so request-level values are never overwritten.
+        """
+        if not self._preset:
+            return system
+
+        # 1. Merge inference params — setdefault keeps request-level values
+        for k, v in self._preset.inference_params.items():
+            kwargs.setdefault(k, v)
+
+        # 2. Thinking budget → cap max_tokens
+        if self._preset.thinking_budget_tokens:
+            budget = self._preset.thinking_budget_tokens
+            kwargs.setdefault("max_tokens", budget + 1024)
+
+        # 3. System prompt prefix injection
+        if self._preset.system_prompt_prefix:
+            prefix = self._preset.system_prompt_prefix
+            return f"{prefix}\n{system}" if system else prefix
+
+        return system
+
+    def _parse_reasoning(self, message: Any) -> tuple[str, str]:
+        """Extract (reasoning, content) based on preset thinking config.
+
+        Returns:
+            (reasoning_text, clean_content) — reasoning is empty string if
+            no thinking config is set or no reasoning was found.
+        """
+        if not self._preset or not self._preset.thinking:
+            # No preset / no thinking config — return content as-is
+            return "", message.content or ""
+
+        cfg = self._preset.thinking
+        if cfg.source == "native":
+            # Qwen3-style: API returns reasoning in a dedicated field
+            reasoning = getattr(message, "reasoning_content", None) or ""
+            return reasoning, message.content or ""
+
+        # source == "content" — parse tags from content (Gemma4-style)
+        raw = message.content or ""
+        if cfg.open_tag in raw and cfg.close_tag in raw:
+            s = raw.index(cfg.open_tag) + len(cfg.open_tag)
+            e = raw.index(cfg.close_tag)
+            reasoning = raw[s:e].strip()
+            content = raw[e + len(cfg.close_tag) :].strip()
+            return reasoning, content
+
+        return "", raw
+
+    # ── Main chat ─────────────────────────────────────────────────────────────
 
     async def chat(
         self,
@@ -36,14 +101,18 @@ class OpenAIProvider(Provider):
         """Execute a full chat message and return response with potential tool calls."""
         # Convert system prompt to a message if provided
         final_messages: list[dict[str, Any]] = []
-        if system:
-            final_messages.append({"role": "system", "content": system})
-        final_messages.extend(messages)
 
         kwargs: dict[str, Any] = {
             "model": self._model,
-            "messages": final_messages,
         }
+
+        # Apply preset: merge inference params + inject system_prompt_prefix
+        system = self._apply_preset(system, kwargs)
+
+        if system:
+            final_messages.append({"role": "system", "content": system})
+        final_messages.extend(messages)
+        kwargs["messages"] = final_messages
 
         if tools:
             # OpenAI format usually accepts tools directly
@@ -51,12 +120,9 @@ class OpenAIProvider(Provider):
 
         response = await self._client.chat.completions.create(**kwargs)
         choice = response.choices[0]
-        raw_content: str = choice.message.content or ""
 
-        # Strip <think>…</think> wrapper that some local models include inline
-        # in the content field (e.g. DeepSeek-R1, some Qwen3 configs).
-        import re as _re
-        content = _re.sub(r"<think>.*?</think>", "", raw_content, flags=_re.DOTALL).strip()
+        # ── Extract reasoning + content ───────────────────────────────────────
+        reasoning, content = self._parse_reasoning(choice.message)
 
         tool_calls: list[ToolCall] = []
 
@@ -67,11 +133,7 @@ class OpenAIProvider(Provider):
         #   a) reasoning has XML tool calls → parse them (NOT a final answer)
         #   b) reasoning is plain text → use as the final answer
         _reasoning_text: str = ""
-        if (
-            not content
-            and not choice.message.tool_calls
-            and choice.finish_reason == "stop"
-        ):
+        if not content and not choice.message.tool_calls and choice.finish_reason == "stop":
             raw_msg = choice.message  # type: ignore[attr-defined]
             _reasoning_text = getattr(raw_msg, "reasoning_content", None) or ""
 
@@ -126,7 +188,12 @@ class OpenAIProvider(Provider):
                 "output_tokens": response.usage.completion_tokens or 0,
             }
 
-        return LLMResponse(content=content, tool_calls=tool_calls, usage=usage)
+        return LLMResponse(
+            content=content,
+            reasoning=reasoning,
+            tool_calls=tool_calls,
+            usage=usage,
+        )
 
     async def chat_with_image(
         self,
@@ -150,13 +217,20 @@ class OpenAIProvider(Provider):
                 ],
             }
         ]
+
+        kwargs: dict[str, Any] = {"model": self._model}
+
+        # Apply preset inference params (but NOT system_prompt_prefix for vision)
+        if self._preset:
+            for k, v in self._preset.inference_params.items():
+                kwargs.setdefault(k, v)
+
         if system:
             messages.insert(0, {"role": "system", "content": system})
 
-        response = await self._client.chat.completions.create(
-            model=self._model,
-            messages=messages,  # type: ignore[arg-type]
-        )
+        kwargs["messages"] = messages
+
+        response = await self._client.chat.completions.create(**kwargs)
         choice = response.choices[0]
         content = choice.message.content or ""
 

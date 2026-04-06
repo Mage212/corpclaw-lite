@@ -94,9 +94,7 @@ def parse_xml_tool_call(
 ) -> XMLToolCallParseResult:
     """Parse a single XML tool-call envelope into an internal ToolCall."""
     # Try Qwen3-style format first (most specific)
-    qwen3_result = _parse_qwen3_tool_call(
-        content, allowed_tool_names=allowed_tool_names
-    )
+    qwen3_result = _parse_qwen3_tool_call(content, allowed_tool_names=allowed_tool_names)
     if qwen3_result is not None:
         return qwen3_result
 

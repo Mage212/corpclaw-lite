@@ -80,13 +80,18 @@ def _build_provider_from_env() -> Provider:
 def _build_router() -> Provider:
     """Load settings.yaml and build an LLMRouter (or a single fallback provider)."""
     from corpclaw_lite.config.loader import load_settings
+    from corpclaw_lite.llm.presets import PresetRegistry
     from corpclaw_lite.llm.router import LLMRouter
 
     settings = load_settings(PROJECT_ROOT / "config" / "settings.yaml")
 
+    # Load model presets (optional — file may not exist)
+    presets_path = PROJECT_ROOT / "config" / "model_presets.yaml"
+    preset_registry = PresetRegistry.from_yaml(presets_path) if presets_path.exists() else None
+
     if settings.llm.named:
         logger.info("Building LLMRouter from settings.yaml (%d providers)", len(settings.llm.named))
-        return LLMRouter.from_settings(settings.llm)
+        return LLMRouter.from_settings(settings.llm, preset_registry=preset_registry)
 
     logger.info(
         "No named providers in settings.yaml — falling back to env-based provider selection"

@@ -17,8 +17,9 @@ __all__ = [
 class AnthropicProvider(Provider):
     """LLM Provider passing through to Anthropic Claude models."""
 
-    def __init__(self, settings: ProviderSettings):
+    def __init__(self, settings: ProviderSettings, preset: Any | None = None):
         self._model = settings.model
+        self._preset = preset  # ModelPreset | None
         if not settings.api_key:
             raise ValueError("Anthropic requires an API key in settings")
 
@@ -52,6 +53,10 @@ class AnthropicProvider(Provider):
             "messages": messages,
             "max_tokens": 4096,
         }
+        # Merge preset inference params (request-level > preset > defaults)
+        if self._preset:
+            for k, v in self._preset.inference_params.items():
+                kwargs.setdefault(k, v)
         if system:
             kwargs["system"] = system
 

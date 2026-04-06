@@ -285,6 +285,7 @@ async def run_telegram_bot(token: str) -> None:
 
     # Retrieve the VisionProcessor from the ReadImageTool registered in the registry
     from corpclaw_lite.extensions.tools.builtin.image import ReadImageTool as _RIT
+
     _rit = tool_registry.get("read_image")
     if isinstance(_rit, _RIT):
         _vision_processor = _rit._processor

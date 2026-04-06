@@ -1,0 +1,57 @@
+# CorpClaw Lite — Model Presets
+#
+# Named presets define inference parameters and thinking/reasoning configuration
+# for specific models. Reference a preset by name in settings.yaml:
+#
+#   llm:
+#     named:
+#       default:
+#         model: "qwen3.5-4b"
+#         preset: "qwen3-thinking"    # ← uses this preset
+#
+# All fields are optional — include only what the model needs.
+# Priority: request-level params > preset params > provider defaults.
+
+presets:
+  # ── Gemma 4 ────────────────────────────────────────────────────────────────
+  gemma4-thinking:
+    description: "Gemma 4 with extended thinking via <|think|> tag injection"
+    system_prompt_prefix: "<|think|>"
+    thinking:
+      open_tag: "<|channel>thought"
+      close_tag: "<channel|>"
+      source: "content"
+    inference_params:
+      temperature: 1.0
+      top_p: 0.95
+      top_k: 64
+
+  gemma4-fast:
+    description: "Gemma 4 without thinking — fast mode"
+    inference_params:
+      temperature: 0.7
+      top_p: 0.9
+
+  # ── Qwen 3 / 3.5 ──────────────────────────────────────────────────────────
+  qwen3-thinking:
+    description: "Qwen3/3.5 with native reasoning_content field"
+    thinking:
+      source: "native"
+    thinking_budget_tokens: 1024
+    inference_params:
+      temperature: 1.0
+      top_p: 0.95
+      top_k: 20
+      min_p: 0.0
+      presence_penalty: 1.5
+
+  qwen3-no-think:
+    description: "Qwen3/3.5 with /no_think — reduced reasoning overhead"
+    system_prompt_prefix: "/no_think"
+    thinking:
+      source: "native"
+    thinking_budget_tokens: 512
+    inference_params:
+      temperature: 1.0
+      top_p: 0.95
+      top_k: 20

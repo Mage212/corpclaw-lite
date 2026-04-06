@@ -77,25 +77,49 @@ class SQLiteMemory:
                     ON memory_facts(user_id)
                     """
                 )
+                # Migration: add reasoning column if not present
+                try:
+                    conn.execute("ALTER TABLE messages ADD COLUMN reasoning TEXT")
+                    logger.debug("Added 'reasoning' column to messages table")
+                except sqlite3.OperationalError:
+                    pass  # Column already exists
         except Exception as e:
             logger.error("Failed to initialize SQLite Memory: %s", e)
 
     # ── Messages ─────────────────────────────────────────────────────────────
 
-    def _sync_add_message(self, user_id: str, role: str, content_str: str) -> None:
+    def _sync_add_message(
+        self, user_id: str, role: str, content_str: str, reasoning: str | None
+    ) -> None:
         try:
             with db_connect(self.db_path) as conn:
                 conn.execute(
-                    "INSERT INTO messages (user_id, role, content) VALUES (?, ?, ?)",
-                    (str(user_id), role, content_str),
+                    "INSERT INTO messages (user_id, role, content, reasoning) VALUES (?, ?, ?, ?)",
+                    (str(user_id), role, content_str, reasoning),
                 )
         except Exception as e:
             logger.error("Failed to insert message into memory for user %s: %s", user_id, e)
 
-    async def add_message(self, user_id: str, role: str, content: str | dict[str, Any]) -> None:
-        """Add a message to the memory store."""
+    async def add_message(
+        self,
+        user_id: str,
+        role: str,
+        content: str | dict[str, Any],
+        reasoning: str | None = None,
+    ) -> None:
+        """Add a message to the memory store.
+
+        Args:
+            user_id: User identifier.
+            role: Message role (user, assistant, system).
+            content: Message content (string or JSON-serializable dict).
+            reasoning: Optional model reasoning/chain-of-thought (stored for
+                audit and future context injection, not returned by get_history).
+        """
         content_str = json.dumps(content) if isinstance(content, dict) else str(content)
-        await anyio.to_thread.run_sync(partial(self._sync_add_message, user_id, role, content_str))
+        await anyio.to_thread.run_sync(
+            partial(self._sync_add_message, user_id, role, content_str, reasoning)
+        )
 
     def _sync_get_history(self, user_id: str, limit: int) -> list[dict[str, Any]]:
         try:

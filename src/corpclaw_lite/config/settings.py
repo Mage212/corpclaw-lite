@@ -26,6 +26,7 @@ class ProviderSettings(BaseModel):
     model: str = "gpt-4o-mini"
     api_key: str | None = None
     base_url: str | None = None
+    preset: str | None = None
 
 
 class RoutingRule(BaseModel):
