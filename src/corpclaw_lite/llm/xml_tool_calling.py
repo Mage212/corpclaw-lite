@@ -13,8 +13,20 @@ _TOOL_CALL_RE = re.compile(
     r"<tool_call>\s*<name>(?P<name>[^<]+)</name>\s*<arguments>(?P<arguments>.*?)</arguments>\s*</tool_call>",
     re.DOTALL,
 )
+
+# Qwen3-style format used in reasoning_content:
+# <tool_call><function=name><parameter=key>value</parameter>...</function></tool_call>
+_QWEN3_TOOL_CALL_RE = re.compile(
+    r"<tool_call>\s*<function=(?P<name>[^>]+)>\s*(?P<params>(?:<parameter=[^>]+>.*?</parameter>\s*)*)\s*</function>\s*</tool_call>",
+    re.DOTALL,
+)
+_QWEN3_PARAM_RE = re.compile(
+    r"<parameter=(?P<key>[^>]+)>\s*(?P<value>.*?)\s*</parameter>",
+    re.DOTALL,
+)
+
 _XML_TOOL_HINT_RE = re.compile(
-    r"<\s*/?\s*(?:tool_call|name|arguments)\b",
+    r"<\s*/?\s*(?:tool_call|name|arguments|function=)\b",
     re.IGNORECASE,
 )
 
@@ -29,12 +41,66 @@ class XMLToolCallParseResult:
     error_message: str | None = None
 
 
+def _parse_qwen3_tool_call(
+    content: str,
+    *,
+    allowed_tool_names: set[str] | None = None,
+) -> XMLToolCallParseResult | None:
+    """Try to parse Qwen3-style <function=...><parameter=...> XML.
+
+    Returns None if no match found (caller should try other patterns).
+    """
+    matches = list(_QWEN3_TOOL_CALL_RE.finditer(content))
+    if not matches:
+        return None
+    if len(matches) > 1:
+        return XMLToolCallParseResult(
+            status="multiple_tool_calls",
+            error_code="multiple_tool_calls",
+            error_message="Only one XML tool call is allowed per response.",
+        )
+    match = matches[0]
+    name = match.group("name").strip()
+    params_block = match.group("params")
+
+    if allowed_tool_names is not None and name not in allowed_tool_names:
+        return XMLToolCallParseResult(
+            status="invalid_tool_name",
+            error_code="invalid_tool_name",
+            error_message=f"Tool {name!r} is not in the allowed tool set.",
+        )
+
+    # Parse <parameter=key>value</parameter> pairs into a dict
+    arguments: dict[str, Any] = {}
+    for pm in _QWEN3_PARAM_RE.finditer(params_block):
+        key = pm.group("key").strip()
+        value = pm.group("value").strip()
+        # Try to parse as JSON value (numbers, booleans, etc.)
+        try:
+            arguments[key] = json.loads(value)
+        except (json.JSONDecodeError, ValueError):
+            arguments[key] = value
+
+    return XMLToolCallParseResult(
+        status="valid",
+        tool_call=ToolCall(id="xml-tool-call", name=name, arguments=arguments),
+    )
+
+
 def parse_xml_tool_call(
     content: str,
     *,
     allowed_tool_names: set[str] | None = None,
 ) -> XMLToolCallParseResult:
     """Parse a single XML tool-call envelope into an internal ToolCall."""
+    # Try Qwen3-style format first (most specific)
+    qwen3_result = _parse_qwen3_tool_call(
+        content, allowed_tool_names=allowed_tool_names
+    )
+    if qwen3_result is not None:
+        return qwen3_result
+
+    # Standard format: <tool_call><name>X</name><arguments>JSON</arguments></tool_call>
     matches = list(_TOOL_CALL_RE.finditer(content))
     if not matches:
         if not _XML_TOOL_HINT_RE.search(content):

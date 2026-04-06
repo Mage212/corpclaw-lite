@@ -58,24 +58,44 @@ class OpenAIProvider(Provider):
         import re as _re
         content = _re.sub(r"<think>.*?</think>", "", raw_content, flags=_re.DOTALL).strip()
 
-        # Qwen3 Extended Thinking (LM Studio): on the FINAL response turn the model
-        # sometimes "thinks" its answer but outputs nothing to content, leaving it empty.
-        # We can detect this specific pattern: finish_reason="stop" + no tool_calls +
-        # empty content — the model is done, it just forgot to "speak".
-        # Only in this case do we use reasoning_content as a fallback, because it
-        # IS the intended answer. During tool-call turns (finish_reason="tool_calls")
-        # reasoning_content is internal chain-of-thought and must NOT be shown.
+        tool_calls: list[ToolCall] = []
+
+        # ── Qwen3 Extended Thinking fallback ──────────────────────────────────
+        # LM Studio + Qwen3: the model sometimes puts everything into
+        # reasoning_content and leaves content + tool_calls empty.
+        # Two sub-cases:
+        #   a) reasoning has XML tool calls → parse them (NOT a final answer)
+        #   b) reasoning is plain text → use as the final answer
+        _reasoning_text: str = ""
         if (
             not content
             and not choice.message.tool_calls
             and choice.finish_reason == "stop"
         ):
             raw_msg = choice.message  # type: ignore[attr-defined]
-            reasoning: str = getattr(raw_msg, "reasoning_content", None) or ""
-            if reasoning:
-                content = reasoning.strip()
+            _reasoning_text = getattr(raw_msg, "reasoning_content", None) or ""
 
-        tool_calls: list[ToolCall] = []
+        if _reasoning_text and tools:
+            # Check if reasoning contains an XML tool call attempt
+            _TOOL_CALL_MARKERS = ("<tool_call>", "<function=")
+            if any(marker in _reasoning_text for marker in _TOOL_CALL_MARKERS):
+                # Parse the XML tool call from reasoning — it's a "leaked" tool call
+                allowed_names = {t["function"]["name"] for t in tools if "function" in t}
+                parse_result = parse_xml_tool_call(
+                    _reasoning_text, allowed_tool_names=allowed_names
+                )
+                if parse_result.tool_call:
+                    tool_calls.append(parse_result.tool_call)
+                    # Don't set content — this was a tool call, not a response
+                else:
+                    # XML markers present but couldn't parse — use as text fallback
+                    content = _reasoning_text.strip()
+            else:
+                # Pure text reasoning — this is the "silent final answer" case
+                content = _reasoning_text.strip()
+        elif _reasoning_text:
+            # No tools context (chat mode) — reasoning IS the answer
+            content = _reasoning_text.strip()
 
         if choice.message.tool_calls:
             for tc in choice.message.tool_calls:
