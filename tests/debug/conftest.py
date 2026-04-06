@@ -148,13 +148,29 @@ def _clear_test_user_memory(
             asyncio.run(memory.clear_facts(str(_TEST_TELEGRAM_ID)))
 
 
-@pytest.fixture(scope="function")
-def tmp_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Isolated tmp directory set as CWD for the duration of a single test.
+_WORKSPACE_ROOT = _PROJECT_ROOT / "tests" / "debug" / ".workspace"
 
-    File tools (read_file, write_file, list_files, search_files) use CWD as
-    their workspace root in dev mode. Changing CWD per-test ensures complete
-    isolation — no test can see files written by another test.
+
+@pytest.fixture(scope="function")
+def tmp_workspace(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Isolated per-test directory under tests/debug/.workspace/ (gitignored).
+
+    Unlike pytest's tmp_path, this directory lives inside the project tree so
+    that ``resolve_and_validate_path`` (which anchors to CWD) always resolves
+    paths inside the workspace even when anyio runs code in thread-pool workers
+    on Windows (threads share CWD with the main process after os.chdir).
+
+    The directory is wiped before use and left after the test for debugging.
+    tests/debug/.workspace/ is listed in .gitignore.
     """
-    monkeypatch.chdir(tmp_path)
-    return tmp_path
+    import shutil
+
+    # Safe name: replace characters that are invalid in directory names
+    safe_name = request.node.name.replace("[", "_").replace("]", "_").replace("/", "_")
+    workspace = _WORKSPACE_ROOT / safe_name
+    if workspace.exists():
+        shutil.rmtree(workspace)
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.chdir(workspace)
+    return workspace

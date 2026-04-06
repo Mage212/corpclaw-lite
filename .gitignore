@@ -32,5 +32,12 @@ token_usage.json
 config/calibrated/
 .calibration_workspace/
 
+# Debug test workspaces (created by tests/debug/ integration tests)
+tests/debug/.workspace/
+
+# Artefacts created by agent during tests (stale, not committed)
+reports/
+hello.txt
+
 # MacOS
 .DS_Store
