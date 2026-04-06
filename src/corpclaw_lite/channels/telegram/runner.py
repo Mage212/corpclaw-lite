@@ -314,6 +314,15 @@ async def run_telegram_bot(token: str) -> None:
             with contextlib.suppress(Exception):
                 await bot.send_chat_action(chat_id=int(telegram_id), action="typing")
         result = await _vision_processor.describe(image_path, prompt, user)
+
+        # Persist in agent memory so subsequent turns know about this image
+        mem = agent_loop.memory
+        if mem is not None:
+            mem_key = str(user.telegram_id)
+            user_msg = f"[Пользователь отправил изображение: {image_path.name}] {prompt}"
+            await mem.add_message(mem_key, "user", user_msg)
+            await mem.add_message(mem_key, "assistant", result)
+
         await channel.send_message(user, result)
 
     # ── Build channel ─────────────────────────────────────────────────────
