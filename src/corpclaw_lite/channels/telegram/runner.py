@@ -48,6 +48,7 @@ async def run_telegram_bot(token: str) -> None:
     agent_activity_logger = AgentLogger(log_dir=PROJECT_ROOT / log_cfg.log_dir)
 
     agent_loop, user_manager, tool_registry, mcp_manager, container_manager = build_agent_stack()
+    from corpclaw_lite.agent.vision import VisionProcessor
     from corpclaw_lite.container.manager import ContainerManagerError
 
     bootstrap = BootstrapLoader(PROJECT_ROOT / "config" / "bootstrap")
@@ -277,6 +278,44 @@ async def run_telegram_bot(token: str) -> None:
 
         await channel.send_message(user, reply)
 
+    # ── Direct image handler (bypasses agent loop) ────────────────────────
+    # Vision model full response goes directly to the user — no re-paraphrase.
+    _vision_processor: VisionProcessor | None = None
+    _vision_workspace_base = tg_settings.workspace_base
+
+    # Retrieve the VisionProcessor from the ReadImageTool registered in the registry
+    from corpclaw_lite.extensions.tools.builtin.image import ReadImageTool as _RIT
+    _rit = tool_registry.get("read_image")
+    if isinstance(_rit, _RIT):
+        _vision_processor = _rit._processor
+
+    async def _on_image(telegram_id: str, image_path: Path, caption: str | None) -> None:
+        """Route photo uploads directly to vision LLM, bypassing agent loop."""
+        if not user_manager.is_allowed(int(telegram_id)):
+            return
+        user = await user_manager.async_get_by_telegram_id(int(telegram_id))
+        if user is None:
+            return
+        if _vision_processor is None:
+            # Fallback: route through agent if vision processor unavailable
+            directive = (
+                f"Немедленно проанализируй изображение '{image_path.name}' "
+                f"с помощью read_image и верни результат. "
+                + (f"Запрос: {caption}" if caption else "")
+            )
+            await _handle_and_reply(telegram_id, directive, "execute")
+            return
+        prompt = caption or "Опиши это изображение подробно."
+        import contextlib
+
+        bot = channel.bot
+        # Show typing indicator during vision call
+        if bot is not None:
+            with contextlib.suppress(Exception):
+                await bot.send_chat_action(chat_id=int(telegram_id), action="typing")
+        result = await _vision_processor.describe(image_path, prompt, user)
+        await channel.send_message(user, result)
+
     # ── Build channel ─────────────────────────────────────────────────────
     channel = TelegramChannel(
         token=token,
@@ -285,6 +324,7 @@ async def run_telegram_bot(token: str) -> None:
         tool_registry=tool_registry,
         memory=agent_loop.memory,
         onboarding_engine=onboarding_engine,
+        image_handler=_on_image,
     )
 
     # ── SendFile tool ─────────────────────────────────────────────────────

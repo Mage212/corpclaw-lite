@@ -61,6 +61,7 @@ class TelegramChannel(Channel):
         tool_registry: ToolRegistry | None = None,
         memory: SQLiteMemory | None = None,
         onboarding_engine: Any | None = None,
+        image_handler: Callable[..., Any] | None = None,
     ) -> None:
         """
         Args:
@@ -70,10 +71,15 @@ class TelegramChannel(Channel):
             tool_registry: For /help command — lists available tools
             memory: For /new command — clears user history
             onboarding_engine: OnboardingEngine instance for /setup command
+            image_handler: Optional async function(telegram_id, image_path, caption) for
+                           direct image processing that bypasses the agent loop. When set,
+                           uploaded images are routed here instead of through message_handler
+                           so the raw vision-model response reaches the user unmodified.
         """
         self.token = token
         self._app: Application | None = None  # type: ignore
         self._on_message = message_handler
+        self._image_handler = image_handler
         self._workspace_base = workspace_base or Path("workspaces")
         self._tool_registry = tool_registry
         self._memory = memory
@@ -465,9 +471,16 @@ class TelegramChannel(Channel):
             await update.message.reply_text("❌ Не удалось сохранить файл. Попробуйте снова.")
             return
 
-        # Notify agent in execute mode
-        directive = build_agent_directive(safe_name, caption)
-        await self._on_message(str(telegram_id), directive, "execute")
+        # Route images directly to image_handler (if registered) to skip the agent loop.
+        # This preserves the full, structured vision-model response without re-paraphrase.
+        from corpclaw_lite.channels.telegram.upload import is_image
+
+        if self._image_handler is not None and is_image(safe_name):
+            await self._image_handler(str(telegram_id), target_path, caption)
+        else:
+            # For non-image files (or when no image_handler set), route through agent
+            directive = build_agent_directive(safe_name, caption)
+            await self._on_message(str(telegram_id), directive, "execute")
 
     # ── Callback handler ──────────────────────────────────────────────────────
 
