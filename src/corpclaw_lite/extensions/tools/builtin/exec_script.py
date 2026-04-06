@@ -6,6 +6,7 @@ import asyncio
 import os
 import re
 import signal
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -86,21 +87,25 @@ class ExecScriptTool(Tool):
                 return "Error: command blocked by built-in safety filter."
 
         try:
-            proc = await asyncio.create_subprocess_shell(
-                script,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=str(workspace),
-                # Run in a new session so we can kill the entire process tree
-                # on timeout — prevents orphan processes.
-                start_new_session=True,
-            )
+            proc_kwargs: dict[str, Any] = {
+                "stdout": asyncio.subprocess.PIPE,
+                "stderr": asyncio.subprocess.PIPE,
+                "cwd": str(workspace),
+            }
+            if sys.platform != "win32":
+                # Unix: new session allows killing the entire process group
+                proc_kwargs["start_new_session"] = True
+
+            proc = await asyncio.create_subprocess_shell(script, **proc_kwargs)
             try:
                 stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_val)
             except TimeoutError:
-                # Kill entire process group — catches child processes too
+                # Kill the process (and its group on Unix) on timeout
                 try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    if sys.platform != "win32":
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)  # type: ignore[attr-defined]
+                    else:
+                        proc.kill()
                 except (ProcessLookupError, OSError):
                     proc.kill()
                 await proc.wait()

@@ -288,7 +288,7 @@ async def run_telegram_bot(token: str) -> None:
 
     _rit = tool_registry.get("read_image")
     if isinstance(_rit, _RIT):
-        _vision_processor = _rit._processor
+        _vision_processor = _rit.processor
 
     async def _on_image(telegram_id: str, image_path: Path, caption: str | None) -> None:
         """Route photo uploads directly to vision LLM, bypassing agent loop."""

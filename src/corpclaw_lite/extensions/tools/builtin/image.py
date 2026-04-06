@@ -46,6 +46,11 @@ class ReadImageTool(Tool):
         # workspaces/user_<telegram_id>/image_20260406_181307.jpg.
         self._workspace_base = workspace_base
 
+    @property
+    def processor(self) -> VisionProcessor:
+        """Public access to the VisionProcessor instance."""
+        return self._processor
+
     async def execute(self, user: User | None = None, **kwargs: Any) -> str:
         path = kwargs.get("path")
         prompt = kwargs.get("prompt", "Describe this image in detail.")

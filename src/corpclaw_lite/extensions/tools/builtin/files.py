@@ -282,7 +282,7 @@ class SearchFilesTool(Tool):
 
                             if matches:
                                 rel_path = file_path.relative_to(resolved)
-                                results.append(f"--- {rel_path} ---")
+                                results.append(f"--- {rel_path.as_posix()} ---")
                                 results.extend(matches)
                                 if len(results) > 100:
                                     results.append("... search truncated.")

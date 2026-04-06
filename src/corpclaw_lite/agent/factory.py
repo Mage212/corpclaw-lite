@@ -210,6 +210,7 @@ def build_agent_stack(
 
     # ── Container Isolation ────────────────────────────────────────────────────
     container_manager: ContainerManager | None = None
+    workspace_base: Path | None = None
     if container_cfg.enabled:
         if not ContainerManager.is_docker_available():
             raise RuntimeError(

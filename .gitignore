@@ -32,6 +32,9 @@ token_usage.json
 config/calibrated/
 .calibration_workspace/
 
+# Per-user onboarding profiles (auto-generated, contain personal data)
+config/bootstrap/users/
+
 # Debug test workspaces (created by tests/debug/ integration tests)
 tests/debug/.workspace/
 

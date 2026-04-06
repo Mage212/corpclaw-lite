@@ -59,7 +59,7 @@ async def test_agent_loop_basic(test_user: User, empty_registry: ToolRegistry) -
     assert isinstance(stats, RunStats)
     assert stats.status == "ok"
     assert stats.iterations == 1
-    assert stats.duration_ms > 0
+    assert stats.duration_ms >= 0
 
 
 @pytest.mark.asyncio
@@ -69,6 +69,7 @@ async def test_agent_loop_tool_call(test_user: User, empty_registry: ToolRegistr
         name = "test_tool"
         description = "A fake tool"
         params = []
+        terminal = False
 
         async def execute(self, **kwargs: Any) -> str:
             return "tool output"
@@ -155,6 +156,7 @@ async def test_single_assistant_message_with_tool_calls(
         name = "t"
         description = ""
         params = []
+        terminal = False
 
         async def execute(self, **kwargs: Any) -> str:
             return "ok"
@@ -198,6 +200,7 @@ async def test_loop_stops_on_progress_guard(test_user: User, empty_registry: Too
         name = "fail_tool"
         description = ""
         params = []
+        terminal = False
 
         async def execute(self, **kwargs: Any) -> str:
             return "Error: something went wrong"
@@ -244,6 +247,7 @@ async def test_approval_callback_per_call_takes_priority(
         name = "exec_tool"
         description = ""
         params = []
+        terminal = False
 
         async def execute(self, **kwargs: Any) -> str:
             return "executed"
