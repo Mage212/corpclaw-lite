@@ -51,7 +51,24 @@ class OpenAIProvider(Provider):
 
         response = await self._client.chat.completions.create(**kwargs)
         choice = response.choices[0]
-        content = choice.message.content or ""
+        raw_content: str = choice.message.content or ""
+
+        # Qwen3 / LM Studio "Extended Thinking": the model puts its reasoning in
+        # a separate `reasoning_content` field and may leave `content` empty.
+        # Fall back to reasoning_content so the agent has something to act on.
+        if not raw_content:
+            raw_msg = choice.message  # type: ignore[attr-defined]
+            reasoning: str = getattr(raw_msg, "reasoning_content", None) or ""
+            if reasoning:
+                raw_content = reasoning
+
+        # Strip <think>…</think> wrapper that some local models include inline.
+        import re as _re
+        content = _re.sub(r"<think>.*?</think>", "", raw_content, flags=_re.DOTALL).strip()
+        # If stripping left us with nothing but thinking existed, keep thinking text
+        if not content and raw_content:
+            content = raw_content.strip()
+
         tool_calls: list[ToolCall] = []
 
         if choice.message.tool_calls:
