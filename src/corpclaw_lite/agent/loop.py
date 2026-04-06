@@ -279,6 +279,31 @@ class AgentLoop:
                         )
                         context.add_tool_result(tc.id, tc.name, result)
                         stats.tools_used.append(tc.name)
+
+                        # Terminal tool: return result directly (no LLM re-paraphrase).
+                        # Used for tools like read_image where the vision model already
+                        # produces a complete user-facing response.
+                        tool_obj = self._registry.get(tc.name)
+                        if (
+                            tool_obj is not None
+                            and tool_obj.terminal
+                            and len(response.tool_calls) == 1
+                            and not result.startswith("Error")
+                        ):
+                            if self._memory:
+                                await self._memory.add_message(mem_key, "assistant", result)
+                                if self._consolidator:
+                                    await self._consolidator.maybe_consolidate(
+                                        self._memory, mem_key
+                                    )
+                            stats.duration_ms = (time.monotonic() - t0) * 1000
+                            logger.debug(
+                                "[user=%s] terminal_tool=%s | returning result directly",
+                                user.id,
+                                tc.name,
+                            )
+                            return result, stats
+
                         if progress.detect_loop(tc.name, result):
                             context.add_assistant_message(
                                 "System Guard: You seem to be stuck in a loop repeating the same"

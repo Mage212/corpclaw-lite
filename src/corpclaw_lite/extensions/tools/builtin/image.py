@@ -35,6 +35,7 @@ class ReadImageTool(Tool):
         ),
     ]
     risk_level = RiskLevel.LOW
+    terminal = True  # Vision response goes directly to user, no LLM re-paraphrase
 
     def __init__(self, processor: VisionProcessor, workspace_base: Any | None = None) -> None:
         self._processor = processor

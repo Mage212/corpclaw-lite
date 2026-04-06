@@ -40,6 +40,10 @@ class Tool(ABC):
     params: list[ToolParam]
     risk_level: RiskLevel = RiskLevel.LOW
     parallel_safe: bool = True
+    # When True, the tool result is returned directly to the user without
+    # passing through an additional LLM re-paraphrase step.  Use for tools
+    # that already produce a complete, user-facing response (e.g. vision).
+    terminal: bool = False
 
     @abstractmethod
     async def execute(self, **kwargs: Any) -> str:
