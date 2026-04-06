@@ -343,7 +343,7 @@ async def run_telegram_bot(token: str) -> None:
         await channel.send_file(user, path, caption)
         return f"File '{path.name}' sent to user."
 
-    tool_registry.register(SendFileTool(_send_file_cb))
+    tool_registry.register(SendFileTool(_send_file_cb, workspace_base=tg_settings.workspace_base))
 
     # ── Rate limit cleanup ────────────────────────────────────────────────
     async def _rate_limit_cleanup_loop() -> None:
