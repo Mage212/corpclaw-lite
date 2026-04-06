@@ -26,7 +26,7 @@ llm:
     # Vision provider: same base by default, override to use a dedicated vision model
     vision:
       type: "openai"
-      model: "qwen2.5-vl:7b"
+      model: "qwen3.5-4b@q4_k_m"
       base_url: "${OPENAI_BASE_URL:-http://localhost:11434/v1}"
       api_key: "${OPENAI_API_KEY:-ollama}"
 

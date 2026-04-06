@@ -125,10 +125,15 @@ class AgentLoop:
             approval_callback if approval_callback is not None else self._approval_callback
         )
 
+        # Memory key: use telegram_id where available for consistency with the
+        # onboarding finalizer which stores facts under telegram_id, not the
+        # internal DB id. Falling back to internal id keeps CLI mode working.
+        mem_key = str(user.telegram_id) if user.telegram_id else str(user.id)
+
         # Load history BEFORE building context so it precedes the current message
         history: list[dict[str, Any]] = []
         if self._memory:
-            history = await self._memory.get_history(str(user.id), limit=self._settings.max_history)
+            history = await self._memory.get_history(mem_key, limit=self._settings.max_history)
 
         # Prepend dynamic user context to the system prompt
         base_prompt = system_prompt or self._default_system_prompt or ""
@@ -136,7 +141,7 @@ class AgentLoop:
         # Load user facts from memory (onboarding + manually stored via memory_store)
         user_facts_block = ""
         if self._memory:
-            facts = await self._memory.recall_facts(str(user.id), limit=20)
+            facts = await self._memory.recall_facts(mem_key, limit=20)
             if facts:
                 lines = [f"- {f['key']}: {f['value']}" for f in facts]
                 user_facts_block = "\n\n## Known Facts About This User\n" + "\n".join(lines)
@@ -158,7 +163,7 @@ class AgentLoop:
 
         # Save new user message
         if self._memory:
-            await self._memory.add_message(str(user.id), "user", message)
+            await self._memory.add_message(mem_key, "user", message)
 
         # Get budget from department if permission checker is available
         guard_config = (
@@ -222,9 +227,9 @@ class AgentLoop:
                     # Agent provided text directly — save and return
                     final = response.content if response.content else "Agent provided no response."
                     if self._memory:
-                        await self._memory.add_message(str(user.id), "assistant", final)
+                        await self._memory.add_message(mem_key, "assistant", final)
                         if self._consolidator:
-                            await self._consolidator.maybe_consolidate(self._memory, str(user.id))
+                            await self._consolidator.maybe_consolidate(self._memory, mem_key)
                     stats.duration_ms = (time.monotonic() - t0) * 1000
                     logger.debug(
                         "[user=%s] final_answer | len=%d | iterations=%d | duration_ms=%.0f",
@@ -289,7 +294,7 @@ class AgentLoop:
             health.increment("errors")
             msg = f"I reached my resource limit and had to stop: {e}"
             if self._memory:
-                await self._memory.add_message(str(user.id), "assistant", msg)
+                await self._memory.add_message(mem_key, "assistant", msg)
             stats.status = "budget"
             stats.error = str(e)
             stats.duration_ms = (time.monotonic() - t0) * 1000
@@ -298,7 +303,7 @@ class AgentLoop:
 
         fallback = "I detected a loop and stopped to avoid repeating the same actions."
         if self._memory:
-            await self._memory.add_message(str(user.id), "assistant", fallback)
+            await self._memory.add_message(mem_key, "assistant", fallback)
         stats.status = "loop"
         stats.duration_ms = (time.monotonic() - t0) * 1000
         logger.warning("[user=%s] loop detected after %d iterations", user.id, stats.iterations)

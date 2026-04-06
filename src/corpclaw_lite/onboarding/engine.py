@@ -43,11 +43,20 @@ class OnboardingEngine:
         return not state.completed
 
     async def is_in_progress(self, user_id: int) -> bool:
-        """Return True if onboarding is started but not completed."""
+        """Return True if onboarding has been started but not completed.
+
+        A state record is created by :meth:`start` (via ``get_or_create``) the
+        moment the first question is sent to the user.  At that point
+        ``current_step`` is still 0 because the user hasn't answered yet —
+        the step is incremented only after :meth:`submit_answer` is called.
+        Therefore we must NOT check ``current_step > 0`` here: any existing
+        non-completed record means the flow is in progress and the next
+        message should be treated as an answer, not a fresh start.
+        """
         state = await self._storage.get_state(user_id)
         if state is None:
             return False
-        return not state.completed and state.current_step > 0
+        return not state.completed
 
     async def start(self, user_id: int, department: str) -> OnboardingQuestion | None:
         """Start onboarding and return the first question.

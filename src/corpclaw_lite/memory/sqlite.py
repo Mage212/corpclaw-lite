@@ -205,7 +205,7 @@ class SQLiteMemory:
                 )
                 conn.execute(
                     "INSERT INTO messages (user_id, role, content) VALUES (?, ?, ?)",
-                    (str(user_id), "system", f"[Conversation summary]: {summary}"),
+                    (str(user_id), "assistant", f"[Conversation summary]: {summary}"),
                 )
         except Exception as e:
             logger.error("Failed to consolidate messages for user %s: %s", user_id, e)
