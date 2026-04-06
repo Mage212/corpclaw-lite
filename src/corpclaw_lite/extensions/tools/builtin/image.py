@@ -56,21 +56,41 @@ class ReadImageTool(Tool):
 
         try:
             resolved: Path
-            path_obj = Path(path)
 
-            # If path is relative AND we have a workspace_base AND a user with
-            # telegram_id, resolve against the user's workspace directory.
+            # Docker container mounts the user workspace as /workspace.
+            # File tools (list_files, read_file) run inside the container and
+            # return /workspace/... paths. ReadImageTool is a HOST tool, so we
+            # must translate container paths to the equivalent host path.
+            _CONTAINER_WS = "/workspace"
+            path_str = path.strip()
             if (
-                not path_obj.is_absolute()
+                self._workspace_base is not None
+                and user is not None
+                and user.telegram_id is not None
+                and (
+                    path_str == _CONTAINER_WS
+                    or path_str.startswith(_CONTAINER_WS + "/")
+                    or path_str.startswith(_CONTAINER_WS + "\\")
+                )
+            ):
+                # Strip /workspace prefix and resolve against host workspace
+                relative = path_str[len(_CONTAINER_WS):].lstrip("/\\")
+                user_workspace = Path(self._workspace_base) / f"user_{user.telegram_id}"
+                resolved = (user_workspace / relative).resolve()
+
+            elif (
+                not Path(path_str).is_absolute()
                 and self._workspace_base is not None
                 and user is not None
                 and user.telegram_id is not None
             ):
+                # Relative path → resolve against user workspace
                 user_workspace = Path(self._workspace_base) / f"user_{user.telegram_id}"
-                resolved = (user_workspace / path_obj).resolve()
+                resolved = (user_workspace / path_str).resolve()
+
             else:
-                # Fallback: CWD-relative (CLI mode or absolute paths)
-                resolved = resolve_and_validate_path(path)
+                # Absolute non-container path or CLI mode
+                resolved = resolve_and_validate_path(path_str)
 
             if not resolved.exists() or not resolved.is_file():
                 return f"Error: Image File '{resolved}' does not exist or is not a file."
