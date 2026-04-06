@@ -82,8 +82,20 @@ class MemoryRecallTool(Tool):
             query = None
 
         facts = await self._memory.recall_facts(str(user.id), query)
+
+        # Fallback: if query-based search missed (e.g. cross-language key mismatch),
+        # return ALL facts so the LLM can find the right one itself.
+        if not facts and query:
+            facts = await self._memory.recall_facts(str(user.id), None)
+            if facts:
+                lines = [f"- {f['key']}: {f['value']}" for f in facts]
+                return (
+                    f"No facts matched '{query}' directly, "
+                    f"but here are all stored facts:\n" + "\n".join(lines)
+                )
+
         if not facts:
-            return "No facts stored." if not query else f"No facts matching '{query}'."
+            return "No facts stored."
 
         lines = [f"- {f['key']}: {f['value']}" for f in facts]
         return "Stored facts:\n" + "\n".join(lines)

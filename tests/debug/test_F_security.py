@@ -120,7 +120,7 @@ async def test_F4_budget_guard_stops_loop(
     provider = LLMRouter.from_settings(settings.llm)
 
     tight_settings = AgentSettings(
-        max_steps=2,
+        max_steps=1,
         max_tool_calls=50,
         max_wall_time_ms=120_000,
     )

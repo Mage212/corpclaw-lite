@@ -142,6 +142,10 @@ def _clear_test_user_memory(
     memory = loop.memory
     if memory is not None:
         asyncio.run(memory.clear(str(_TEST_USER_ID)))
+        asyncio.run(memory.clear(str(_TEST_TELEGRAM_ID)))
+        if hasattr(memory, "clear_facts"):
+            asyncio.run(memory.clear_facts(str(_TEST_USER_ID)))
+            asyncio.run(memory.clear_facts(str(_TEST_TELEGRAM_ID)))
 
 
 @pytest.fixture(scope="function")
