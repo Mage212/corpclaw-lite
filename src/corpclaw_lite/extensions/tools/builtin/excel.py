@@ -190,7 +190,9 @@ class NormalizeExcelTool(Tool):
             parts.append(f"Duplicates removed: {stats['duplicates_removed']}")
         if stats["empty_removed"]:
             parts.append(f"Empty rows removed: {stats['empty_removed']}")
-        parts.append(f"Output: {output_path}")
+        # Return only the filename (not absolute path) so the model can pass it directly to send_file.
+        # Absolute paths confuse small local LLMs — they don't know how to translate them.
+        parts.append(f"Output filename: {output_path.name}")
 
         return "\n".join(parts)
 

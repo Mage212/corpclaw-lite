@@ -19,18 +19,18 @@ llm:
       type: "openai"
       # model: "stepfun/step-3.5-flash:free"
       # model: "lfm2.5-1.2b-thinking"
-      model: "qwen3.5-4b@q4_k_m"
+      model: "qwen3.5-4b"
       base_url: "${OPENAI_BASE_URL:-http://localhost:11434/v1}"
       api_key: "${OPENAI_API_KEY:-ollama}"
-      preset: "qwen3-thinking"
+      preset: ""
 
     # Vision provider: same base by default, override to use a dedicated vision model
     vision:
       type: "openai"
-      model: "qwen3.5-4b@q4_k_m"
+      model: "qwen3.5-4b"
       base_url: "${OPENAI_BASE_URL:-http://localhost:11434/v1}"
       api_key: "${OPENAI_API_KEY:-ollama}"
-      preset: "qwen3-no-think"
+      preset: ""
 
     # Cloud provider for calibration analysis and heavy tasks.
     # Option A: Anthropic Claude (requires ANTHROPIC_API_KEY in .env)

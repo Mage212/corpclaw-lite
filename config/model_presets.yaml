@@ -33,25 +33,64 @@ presets:
       top_p: 0.9
 
   # ── Qwen 3 / 3.5 ──────────────────────────────────────────────────────────
-  qwen3-thinking:
-    description: "Qwen3/3.5 with native reasoning_content field"
+  #
+  # SAFETY NOTES (from LM Studio docs):
+  #   presence_penalty  — penalizes tokens already present in INPUT (prompt + tool schemas).
+  #                       NEVER use with tool calling — it blocks tool name generation.
+  #   repeat_penalty    — penalizes tokens repeated in OUTPUT only.
+  #                       Safe for tool calling, prevents looping. (routed via extra_body)
+  #   frequency_penalty — like repeat_penalty but proportional to occurrence count. Safe.
+  #
+  qwen3.5-thinking:
+    description: "Qwen3.5 with native reasoning_content field"
     thinking:
       source: "native"
-    thinking_budget_tokens: 1024
+    # thinking_budget_tokens: 1024
     inference_params:
-      temperature: 1.0
+      temperature: 0.7
       top_p: 0.95
       top_k: 20
       min_p: 0.0
-      presence_penalty: 1.5
+      repeat_penalty: 1.1           # safe for tool calling (output-only penalty)
+      # presence_penalty: DO NOT USE — kills tool calling (see notes above)
 
-  qwen3-no-think:
-    description: "Qwen3/3.5 with /no_think — reduced reasoning overhead"
-    system_prompt_prefix: "/no_think"
-    thinking:
-      source: "native"
-    thinking_budget_tokens: 512
-    inference_params:
-      temperature: 1.0
-      top_p: 0.95
-      top_k: 20
+  # ── Structured Output (example for models ≥7B) ─────────────────────────────
+  #
+  # LM Studio supports response_format with JSON Schema (same as OpenAI Structured Output).
+  # The model will only generate valid JSON conforming to the provided schema.
+  #
+  # LIMITATIONS:
+  #   - Models <7B parameters may not reliably follow the schema (LM Studio docs warning)
+  #   - NOT COMPATIBLE with tool calling in the same request — use separately
+  #   - For GGUF: uses grammar-based sampling via llama.cpp
+  #   - For MLX: uses Outlines
+  #
+  # USE CASE:
+  #   Suitable for structured data extraction tasks (document parsing, NER, classification)
+  #   where tool calling is not needed.
+  #
+  # qwen3-structured:
+  #   description: "Qwen3 with structured JSON output (no tool calling)"
+  #   thinking:
+  #     source: "native"
+  #   thinking_budget_tokens: 512
+  #   inference_params:
+  #     temperature: 0.3              # low temp for deterministic structured output
+  #     top_p: 0.9
+  #     response_format:              # OpenAI-compatible, passed as standard param
+  #       type: "json_schema"
+  #       json_schema:
+  #         name: "extraction_result"
+  #         strict: true
+  #         schema:
+  #           type: "object"
+  #           properties:
+  #             entities:
+  #               type: "array"
+  #               items:
+  #                 type: "object"
+  #                 properties:
+  #                   name: { type: "string" }
+  #                   type: { type: "string", enum: ["person", "org", "location"] }
+  #                 required: ["name", "type"]
+  #           required: ["entities"]
