@@ -35,20 +35,55 @@ class OpenAIProvider(Provider):
         else:
             self._client = openai.AsyncOpenAI(api_key=api_key)
 
-    # ── Preset helpers ────────────────────────────────────────────────────────
+    # OpenAI SDK accepts these top-level params in chat.completions.create().
+    # Everything else (top_k, min_p, repeat_penalty, etc.) must go into
+    # extra_body — the SDK merges it into the JSON body, so LM Studio / vLLM
+    # receive them without the SDK rejecting them client-side.
+    _OPENAI_STANDARD_PARAMS = frozenset(
+        {
+            "temperature",
+            "max_tokens",
+            "max_completion_tokens",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty",
+            "stop",
+            "n",
+            "seed",
+            "stream",
+            "logit_bias",
+            "logprobs",
+            "top_logprobs",
+            "user",
+            "response_format",
+            "tool_choice",
+            "parallel_tool_calls",
+        }
+    )
 
     def _apply_preset(self, system: str | None, kwargs: dict[str, Any]) -> str | None:
         """Merge preset inference params and inject system_prompt_prefix.
 
         Priority: request-level params > preset params > provider defaults.
         Uses ``setdefault`` so request-level values are never overwritten.
+
+        Non-standard params (top_k, min_p, etc.) are routed to ``extra_body``
+        so the OpenAI SDK doesn't reject them.
         """
         if not self._preset:
             return system
 
-        # 1. Merge inference params — setdefault keeps request-level values
+        extra_body: dict[str, Any] = dict(kwargs.pop("extra_body", None) or {})
+
+        # 1. Merge inference params — split standard vs extended
         for k, v in self._preset.inference_params.items():
-            kwargs.setdefault(k, v)
+            if k in self._OPENAI_STANDARD_PARAMS:
+                kwargs.setdefault(k, v)
+            else:
+                extra_body.setdefault(k, v)
+
+        if extra_body:
+            kwargs["extra_body"] = extra_body
 
         # 2. Thinking budget → cap max_tokens
         if self._preset.thinking_budget_tokens:
@@ -220,10 +255,17 @@ class OpenAIProvider(Provider):
 
         kwargs: dict[str, Any] = {"model": self._model}
 
-        # Apply preset inference params (but NOT system_prompt_prefix for vision)
+        # Apply preset inference params (but NOT system_prompt_prefix for vision).
+        # Non-standard params (top_k, min_p, etc.) go into extra_body.
         if self._preset:
+            extra_body: dict[str, Any] = {}
             for k, v in self._preset.inference_params.items():
-                kwargs.setdefault(k, v)
+                if k in self._OPENAI_STANDARD_PARAMS:
+                    kwargs.setdefault(k, v)
+                else:
+                    extra_body.setdefault(k, v)
+            if extra_body:
+                kwargs["extra_body"] = extra_body
 
         if system:
             messages.insert(0, {"role": "system", "content": system})
