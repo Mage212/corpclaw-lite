@@ -193,10 +193,11 @@ async def test_B06_B07_memory_store_and_recall(
     )
     DebugAssertions.assert_tool_used(stats1, "memory_store")
 
-    # Second turn: recall — new message, same user → history continues
+    # Second turn: recall — explicitly prohibit answering from conversation context
     reply2, stats2 = await loop.run(
         test_user,
-        "Какой мой любимый фрукт? Используй memory_recall чтобы вспомнить.",
+        "Какой мой любимый фрукт? Обязательно используй инструмент memory_recall "
+        "чтобы найти ответ — не отвечай из памяти разговора.",
     )
     DebugAssertions.assert_tool_used(stats2, "memory_recall")
     DebugAssertions.assert_reply_contains(reply2, "MANGO_B07")

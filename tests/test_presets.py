@@ -104,7 +104,12 @@ def test_invalid_preset_skipped(tmp_path: Path) -> None:
 
 
 def test_inference_params_merge_request_priority() -> None:
-    """Request-level params take priority over preset params."""
+    """Request-level params take priority over preset params.
+
+    Standard OpenAI params (temperature, top_p) land in kwargs directly.
+    Non-standard params (top_k) are routed to kwargs["extra_body"] so the
+    OpenAI SDK doesn't reject them client-side.
+    """
     from corpclaw_lite.llm.openai import OpenAIProvider
     from corpclaw_lite.config.settings import ProviderSettings
 
@@ -120,9 +125,11 @@ def test_inference_params_merge_request_priority() -> None:
     kwargs: dict[str, Any] = {"temperature": 0.3}
     provider._apply_preset(None, kwargs)
 
-    assert kwargs["temperature"] == 0.3  # request wins
-    assert kwargs["top_p"] == 0.95  # from preset
-    assert kwargs["top_k"] == 64  # from preset
+    assert kwargs["temperature"] == 0.3       # request-level wins
+    assert kwargs["top_p"] == 0.95            # standard param → in kwargs
+    # top_k is non-standard → routed to extra_body, not top-level kwargs
+    assert "top_k" not in kwargs
+    assert kwargs["extra_body"]["top_k"] == 64
 
 
 def test_inference_params_merge_no_preset() -> None:

@@ -117,8 +117,10 @@ async def test_D3_search_and_summarise(
     DebugAssertions.assert_tool_used(stats, "search_files")
     DebugAssertions.assert_status_ok(stats)
     DebugAssertions.assert_min_iterations(stats, 2)
-    # At least one report name must appear
-    assert any(f"report_{i}" in reply for i in range(1, 4)), (
+    # At least one report name must appear.
+    # Normalize markdown-escaped underscores (report\_1 → report_1) before check.
+    reply_normalized = reply.replace("\\_ ", "_").replace("\\_ ", "_").replace("\\_", "_")
+    assert any(f"report_{i}" in reply_normalized for i in range(1, 4)), (
         f"Reply should mention found report files.\nReply: {reply[:400]}"
     )
     print(f"\n[D3] {summarise_run(reply, stats)}")
@@ -146,10 +148,11 @@ async def test_D4_memory_across_runs(
     )
     DebugAssertions.assert_tool_used(stats1, "memory_store")
 
-    # Second turn: recall
+    # Second turn: recall — explicitly forbid answering from memory/history
     reply2, stats2 = await loop.run(
         test_user,
-        "Какой токен я тебе дал? Используй memory_recall.",
+        "Какой токен я тебе дал? Обязательно используй инструмент memory_recall "
+        "чтобы найти ответ — не отвечай из памяти разговора.",
     )
     DebugAssertions.assert_tool_used(stats2, "memory_recall")
     DebugAssertions.assert_reply_contains(reply2, unique_token)

@@ -89,7 +89,11 @@ async def test_E2_dispatch_to_execution_agent(
 
     DebugAssertions.assert_tool_used(stats, "dispatch_subagent")
     DebugAssertions.assert_status_ok(stats)
-    DebugAssertions.assert_reply_contains(reply, "HELLO_FROM_SUBAGENT_E02")
+    # Use case-insensitive check: model may normalise 'HELLO' → 'Hello' in output
+    assert "HELLO_FROM_SUBAGENT_E02".lower() in reply.lower(), (
+        f"Expected reply to contain 'HELLO_FROM_SUBAGENT_E02' (case-insensitive).\n"
+        f"Reply (first 600 chars):\n{reply[:600]}"
+    )
     print(f"\n[E2] {summarise_run(reply, stats)}")
 
 
