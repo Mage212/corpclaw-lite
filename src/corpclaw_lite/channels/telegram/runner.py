@@ -33,7 +33,6 @@ async def run_telegram_bot(token: str) -> None:
     from corpclaw_lite.channels.telegram.rate_limit import RateLimiter
     from corpclaw_lite.config.bootstrap import BootstrapLoader
     from corpclaw_lite.config.loader import load_settings
-    from corpclaw_lite.extensions.skills.registry import SkillRegistry
     from corpclaw_lite.extensions.skills.watcher import SkillHotReloader
     from corpclaw_lite.logging.agent_logger import AgentLogger, setup_logging
     from corpclaw_lite.users.models import User
@@ -63,53 +62,16 @@ async def run_telegram_bot(token: str) -> None:
         except Exception as e:
             logger.error("MCP: failed to connect — %s (continuing without MCP tools)", e)
 
-    # ── Skills ────────────────────────────────────────────────
-    skill_registry = SkillRegistry()
+    # ── Skills + Plugins + SkillMatcher ─────────────────────────────────────
+    from corpclaw_lite.extensions.bootstrap import load_extensions
+
+    skill_registry, plugin_registry, skill_matcher = load_extensions(
+        PROJECT_ROOT,
+        tool_registry,
+        full_settings.skills,
+    )
     skills_dir = PROJECT_ROOT / "skills"
-    if skills_dir.exists():
-        skill_registry.load_directory(skills_dir)
-
-    # ── Skill Matcher (semantic selection) ────────────────────────────────
-    from corpclaw_lite.extensions.skills.matcher import SkillMatcher, SkillMatcherConfig
-
-    skills_cfg = full_settings.skills
-    skill_matcher: SkillMatcher | None = None
-    if skills_cfg.selection_mode == "semantic":
-        matcher_config = SkillMatcherConfig(
-            enabled=True,
-            top_k=skills_cfg.top_k,
-            tfidf_threshold=skills_cfg.tfidf_threshold,
-            keyword_boost=skills_cfg.keyword_boost,
-        )
-        skill_matcher = SkillMatcher(matcher_config)
-        logger.info(
-            "Skill semantic selection enabled (top_k=%d, threshold=%.2f)",
-            skills_cfg.top_k,
-            skills_cfg.tfidf_threshold,
-        )
-    else:
-        logger.info("Skill selection mode: all (injecting every allowed skill)")
-
-    # ── Plugins ───────────────────────────────────────────────────────────────
-    from corpclaw_lite.extensions.plugins.registry import PluginRegistry
-
-    plugin_registry = PluginRegistry()
     plugins_dir = PROJECT_ROOT / "plugins"
-    if plugins_dir.exists():
-        plugin_registry.load_directory(plugins_dir)
-        for plugin in plugin_registry.list_all():
-            for tool in plugin.tools:
-                try:
-                    tool_registry.register(tool)
-                    logger.info(
-                        "Plugin '%s': registered tool '%s'", plugin.manifest.name, tool.name
-                    )
-                except ValueError:
-                    logger.warning(
-                        "Plugin '%s': tool '%s' conflicts with an existing tool, skipping.",
-                        plugin.manifest.name,
-                        tool.name,
-                    )
 
     # Seed whitelist from config into persistent JSON
     if tg_settings.whitelist:

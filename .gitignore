@@ -11,6 +11,7 @@ wheels/
 .ruff_cache/
 .ipynb_checkpoints/
 .coverage
+*_coverage*.txt
 htmlcov/
 
 # Virtual environments

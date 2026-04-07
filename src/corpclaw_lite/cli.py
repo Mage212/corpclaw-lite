@@ -205,28 +205,13 @@ def cmd_chat(telegram_id: int, *, setup_mode: bool = False) -> None:
         bootstrap = BootstrapLoader(Path("config/bootstrap"))
         system_prompt = bootstrap.get_system_prompt() or None
 
-        from corpclaw_lite.extensions.plugins.registry import PluginRegistry
-        from corpclaw_lite.extensions.skills.registry import SkillRegistry
+        from corpclaw_lite.extensions.bootstrap import load_extensions
 
-        skill_registry = SkillRegistry()
-        skills_dir = Path("skills")
-        if skills_dir.exists():
-            skill_registry.load_directory(skills_dir)
-
-        plugin_registry = PluginRegistry()
-        plugins_dir = Path("plugins")
-        if plugins_dir.exists():
-            plugin_registry.load_directory(plugins_dir)
-            for plugin in plugin_registry.list_all():
-                for tool in plugin.tools:
-                    try:
-                        tool_registry.register(tool)
-                    except ValueError:
-                        logger.warning(
-                            "Plugin '%s': tool '%s' conflicts, skipping.",
-                            plugin.manifest.name,
-                            tool.name,
-                        )
+        skill_registry, plugin_registry, skill_matcher = load_extensions(
+            PROJECT_ROOT,
+            tool_registry,
+            _settings.skills,
+        )
 
         # Load user from DB — same flow as Telegram bot
         standalone_manager = UserManager()
@@ -290,21 +275,15 @@ def cmd_chat(telegram_id: int, *, setup_mode: bool = False) -> None:
             user = standalone_manager.get_by_telegram_id(telegram_id) or user
             print(f"\n✅ Настройка завершена, {user.name}!\n")
 
-        # Inject skills + plugin skills into system prompt (same as Telegram runner)
+        # Per-user prompt (static, set once)
         from corpclaw_lite.agent.prompt import build_skill_block
 
-        # Inject per-user prompt
         user_prompt = bootstrap.get_user_prompt(telegram_id)
         if user_prompt:
             system_prompt = (system_prompt or "") + "\n\n" + user_prompt
 
-        allowed_skills = skill_registry.get_allowed_skills(user)
-        plugin_skills = [
-            p.skill for p in plugin_registry.get_allowed_plugins(user) if p.skill is not None
-        ]
-        skill_block = build_skill_block(allowed_skills, plugin_skills)
-        if skill_block:
-            system_prompt = (system_prompt or "") + skill_block
+        # Base system prompt without skills — skills are injected per-message
+        base_system_prompt = system_prompt
 
         # Connect MCP servers (no hot-reload — CLI session is short-lived)
         if mcp_manager is not None:
@@ -343,6 +322,22 @@ def cmd_chat(telegram_id: int, *, setup_mode: bool = False) -> None:
                     break  # EOFError / piped input exhausted
 
                 if msg.strip():
+                    # Per-message skill matching (same as Telegram runner)
+                    allowed_skills = skill_registry.get_allowed_skills(user)
+                    plugin_skills = [
+                        p.skill
+                        for p in plugin_registry.get_allowed_plugins(user)
+                        if p.skill is not None
+                    ]
+                    all_candidate_skills = allowed_skills + plugin_skills
+                    if skill_matcher is not None:
+                        matched_skills = skill_matcher.match(msg, all_candidate_skills)
+                    else:
+                        matched_skills = all_candidate_skills
+                    skill_block = build_skill_block(matched_skills, [])
+                    system_prompt = base_system_prompt
+                    if skill_block:
+                        system_prompt = (system_prompt or "") + skill_block
 
                     async def approval_cb(action: str, details: str) -> bool:
                         return await channel.request_approval(user, action, details)
