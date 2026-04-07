@@ -15,6 +15,7 @@ __all__ = [
     "ProviderSettings",
     "RoutingRule",
     "Settings",
+    "SkillsSettings",
     "TelegramSettings",
 ]
 
@@ -95,6 +96,19 @@ class TelegramSettings(BaseModel):
     admin_ids: list[int] = []
 
 
+class SkillsSettings(BaseModel):
+    """Settings for semantic skill selection."""
+
+    # "all" = inject every allowed skill (legacy), "semantic" = match by message
+    selection_mode: Literal["all", "semantic"] = "semantic"
+    # Max skills injected into the prompt per request
+    top_k: int = 3
+    # Minimum TF-IDF + keyword combined score to include a skill
+    tfidf_threshold: float = 0.08
+    # Weight multiplier for keyword hits (on top of TF-IDF score)
+    keyword_boost: float = 0.5
+
+
 class LoggingSettings(BaseModel):
     """Settings for the logging pipeline."""
 
@@ -113,6 +127,7 @@ class Settings(BaseSettings):
     agent: AgentSettings = AgentSettings()
     container: ContainerSettings = ContainerSettings()
     telegram: TelegramSettings = TelegramSettings()
+    skills: SkillsSettings = SkillsSettings()
     logging: LoggingSettings = LoggingSettings()
 
     model_config = {"env_nested_delimiter": "__"}

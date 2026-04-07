@@ -6,6 +6,27 @@ allowed_for:
   - marketing
   - hr
   - default
+keywords:
+  - контент
+  - content
+  - пост
+  - post
+  - текст
+  - напиши
+  - написа
+  - статья
+  - article
+  - маркетинг
+  - marketing
+  - соцсет
+  - social
+  - рассылк
+  - newsletter
+  - email
+  - копирайт
+  - copywrite
+  - объявлен
+  - announcement
 ---
 
 # Content Writer Skill

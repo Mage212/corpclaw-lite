@@ -69,6 +69,27 @@ async def run_telegram_bot(token: str) -> None:
     if skills_dir.exists():
         skill_registry.load_directory(skills_dir)
 
+    # ── Skill Matcher (semantic selection) ────────────────────────────────
+    from corpclaw_lite.extensions.skills.matcher import SkillMatcher, SkillMatcherConfig
+
+    skills_cfg = full_settings.skills
+    skill_matcher: SkillMatcher | None = None
+    if skills_cfg.selection_mode == "semantic":
+        matcher_config = SkillMatcherConfig(
+            enabled=True,
+            top_k=skills_cfg.top_k,
+            tfidf_threshold=skills_cfg.tfidf_threshold,
+            keyword_boost=skills_cfg.keyword_boost,
+        )
+        skill_matcher = SkillMatcher(matcher_config)
+        logger.info(
+            "Skill semantic selection enabled (top_k=%d, threshold=%.2f)",
+            skills_cfg.top_k,
+            skills_cfg.tfidf_threshold,
+        )
+    else:
+        logger.info("Skill selection mode: all (injecting every allowed skill)")
+
     # ── Plugins ───────────────────────────────────────────────────────────────
     from corpclaw_lite.extensions.plugins.registry import PluginRegistry
 
@@ -223,14 +244,19 @@ async def run_telegram_bot(token: str) -> None:
             parts_list = [p for p in [base_prompt, dept_prompt, user_prompt, user_ctx] if p]
             system_prompt: str | None = "\n\n".join(parts_list) if parts_list else None
 
-            # Inject allowed skill instructions into system prompt
+            # Inject only relevant skill instructions into system prompt
             allowed_skills = skill_registry.get_allowed_skills(user)
             plugin_skills = [
                 p.skill for p in plugin_registry.get_allowed_plugins(user) if p.skill is not None
             ]
             from corpclaw_lite.agent.prompt import build_skill_block
 
-            skill_block = build_skill_block(allowed_skills, plugin_skills)
+            all_candidate_skills = allowed_skills + plugin_skills
+            if skill_matcher is not None:
+                matched_skills = skill_matcher.match(message, all_candidate_skills)
+            else:
+                matched_skills = all_candidate_skills
+            skill_block = build_skill_block(matched_skills, [])
             if skill_block:
                 system_prompt = (system_prompt or "") + skill_block
 

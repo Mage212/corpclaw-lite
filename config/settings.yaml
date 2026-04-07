@@ -87,6 +87,15 @@ container:
   cpus: 0.5
   idle_timeout_seconds: 600
 
+# Semantic skill selection — only inject relevant skills into the prompt.
+# Reduces context usage for local LLMs with limited context windows.
+# Set selection_mode to "all" to revert to the legacy behaviour (inject everything).
+skills:
+  selection_mode: "semantic"  # "all" | "semantic"
+  top_k: 3                    # max skills injected per request
+  tfidf_threshold: 0.08       # minimum score to include a skill
+  keyword_boost: 0.5          # weight multiplier for keyword hits
+
 telegram:
   rate_limit_per_minute: 10
   default_department: "default"

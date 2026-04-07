@@ -66,4 +66,6 @@ class SkillLoader:
             instructions=instructions,
             path=path,
             version=metadata.get("version", "1.0.0"),
+            keywords=metadata.get("keywords", []),
+            always=metadata.get("always", False),
         )

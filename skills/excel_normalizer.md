@@ -8,6 +8,23 @@ allowed_for:
   - hr
   - analytics
   - default
+keywords:
+  - excel
+  - xlsx
+  - csv
+  - таблиц
+  - нормализ
+  - дубликат
+  - очист
+  - данны
+  - столбец
+  - колонк
+  - заголов
+  - формат
+  - normalize
+  - clean
+  - header
+  - spreadsheet
 ---
 
 # Excel Normalizer Skill

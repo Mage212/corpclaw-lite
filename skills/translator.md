@@ -4,6 +4,24 @@ description: Translate text between languages
 version: "1.0.0"
 allowed_for:
   - "*"
+keywords:
+  - перевед
+  - перевод
+  - translat
+  - язык
+  - language
+  - английск
+  - english
+  - немецк
+  - german
+  - французск
+  - french
+  - испанск
+  - spanish
+  - китайск
+  - chinese
+  - русск
+  - russian
 ---
 
 # Translator Skill

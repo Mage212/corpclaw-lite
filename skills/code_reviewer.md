@@ -6,6 +6,22 @@ allowed_for:
   - engineering
   - it
   - default
+keywords:
+  - review
+  - код
+  - code
+  - баг
+  - bug
+  - ревью
+  - проверь
+  - провер
+  - ошибк
+  - error
+  - security
+  - безопасност
+  - рефактор
+  - refactor
+  - lint
 ---
 
 # Code Reviewer Skill

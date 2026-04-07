@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 __all__ = [
@@ -17,6 +17,8 @@ class Skill:
         instructions: The full markdown instructions for the agent
         path: Optional file path where this skill was loaded from
         version: Skill version string
+        keywords: Matching terms/prefixes for semantic selection (e.g. ["excel", "нормализ"])
+        always: If True, this skill is always injected into the prompt regardless of matching
     """
 
     id: str
@@ -25,3 +27,5 @@ class Skill:
     instructions: str
     path: Path | None = None
     version: str = "1.0.0"
+    keywords: list[str] = field(default_factory=lambda: list[str]())
+    always: bool = False

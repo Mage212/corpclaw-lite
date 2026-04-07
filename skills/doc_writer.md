@@ -7,6 +7,20 @@ allowed_for:
   - it
   - product
   - default
+keywords:
+  - документац
+  - document
+  - readme
+  - api
+  - гайд
+  - guide
+  - инструкц
+  - instruction
+  - runbook
+  - adr
+  - описан
+  - описа
+  - docstring
 ---
 
 # Documentation Writer Skill
