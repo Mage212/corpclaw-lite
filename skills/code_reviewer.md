@@ -3,8 +3,8 @@ id: code_reviewer
 description: Review code for bugs, style issues, and best practices
 version: "1.0.0"
 allowed_for:
-  - engineering
   - it
+  - admin
   - default
 keywords:
   - review

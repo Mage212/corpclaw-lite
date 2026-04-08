@@ -5,7 +5,7 @@ version: "1.0.0"
 allowed_for:
   - marketing
   - hr
-  - engineering
+  - admin
   - default
 keywords:
   - контент

@@ -7,7 +7,7 @@ allowed_for:
   - finance
   - hr
   - analytics
-  - engineering
+  - admin
   - default
 keywords:
   - excel

@@ -3,9 +3,9 @@ id: doc_writer
 description: Write technical documentation, READMEs, API docs, and user guides
 version: "1.0.0"
 allowed_for:
-  - engineering
   - it
   - product
+  - admin
   - default
 keywords:
   - документац
