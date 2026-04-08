@@ -55,6 +55,25 @@ class TestShouldCompress:
         messages = [{"role": "user", "content": "x" * 3000}]
         assert compressor.should_compress(messages)
 
+    def test_does_not_compress_when_last_message_is_tool_result(
+        self, provider: MockProvider, settings: CompressionSettings
+    ) -> None:
+        """Regression: compressor must not fire mid-ReAct between web_fetch and LLM processing.
+
+        When the last context message is a tool result (role=tool), the agent hasn't
+        yet processed the output. Compressing at this point generates a summary in
+        place of the real answer and causes the task to be abandoned.
+        """
+        compressor = ContextCompressor(provider, settings)
+        # Even with massive content that clearly exceeds the threshold...
+        messages = [
+            {"role": "user", "content": "x" * 3000},
+            {"role": "assistant", "content": None, "tool_calls": [{"id": "1", "function": {"name": "web_fetch", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "1", "name": "web_fetch", "content": "x" * 3000},
+        ]
+        # ...it must NOT compress because the last message is a pending tool result
+        assert not compressor.should_compress(messages)
+
 
 class TestSanitizeToolPairs:
     def test_no_orphans(self, provider: MockProvider, settings: CompressionSettings) -> None:

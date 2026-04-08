@@ -42,6 +42,28 @@ logger = logging.getLogger(__name__)
 _LOG_TRUNCATE = 400
 
 
+def _format_tool_marker(tools_used: list[str]) -> str:
+    """Build a compact marker showing which tools were actually called.
+
+    Always emitted so the model has hard evidence in subsequent turns:
+    - ``[Called tools: none]`` — means the previous turn produced NO real
+      tool invocations.  The model can detect its own hallucinations:
+      if it claimed to send a file but the marker says ``none``, the
+      action never happened.
+    - ``[Called tools: normalize_excel, send_file]`` — proof the tools ran.
+    """
+    if not tools_used:
+        return "[Called tools: none]\n"
+    # Deduplicate while preserving order
+    seen: set[str] = set()
+    unique: list[str] = []
+    for t in tools_used:
+        if t not in seen:
+            seen.add(t)
+            unique.append(t)
+    return f"[Called tools: {', '.join(unique)}]\n"
+
+
 @dataclass
 class RunStats:
     """Metrics for a single AgentLoop.run() call.
@@ -236,10 +258,14 @@ class AgentLoop:
                     # Agent provided text directly — save and return
                     final = response.content if response.content else "Agent provided no response."
                     if self._memory:
+                        # Prepend tool-usage marker so subsequent requests
+                        # show the model hard proof of what was actually called.
+                        marker = _format_tool_marker(stats.tools_used)
+                        mem_text = f"{marker}{final}" if marker else final
                         await self._memory.add_message(
                             mem_key,
                             "assistant",
-                            final,
+                            mem_text,
                             reasoning=response.reasoning or None,
                         )
                         if self._consolidator:
@@ -305,7 +331,9 @@ class AgentLoop:
                             and not result.startswith("Error")
                         ):
                             if self._memory:
-                                await self._memory.add_message(mem_key, "assistant", result)
+                                marker = _format_tool_marker(stats.tools_used)
+                                mem_text = f"{marker}{result}" if marker else result
+                                await self._memory.add_message(mem_key, "assistant", mem_text)
                                 if self._consolidator:
                                     await self._consolidator.maybe_consolidate(
                                         self._memory, mem_key
@@ -333,7 +361,9 @@ class AgentLoop:
             health.increment("errors")
             msg = f"I reached my resource limit and had to stop: {e}"
             if self._memory:
-                await self._memory.add_message(mem_key, "assistant", msg)
+                marker = _format_tool_marker(stats.tools_used)
+                mem_text = f"{marker}{msg}" if marker else msg
+                await self._memory.add_message(mem_key, "assistant", mem_text)
             stats.status = "budget"
             stats.error = str(e)
             stats.duration_ms = (time.monotonic() - t0) * 1000
@@ -342,7 +372,9 @@ class AgentLoop:
 
         fallback = "I detected a loop and stopped to avoid repeating the same actions."
         if self._memory:
-            await self._memory.add_message(mem_key, "assistant", fallback)
+            marker = _format_tool_marker(stats.tools_used)
+            mem_text = f"{marker}{fallback}" if marker else fallback
+            await self._memory.add_message(mem_key, "assistant", mem_text)
         stats.status = "loop"
         stats.duration_ms = (time.monotonic() - t0) * 1000
         logger.warning("[user=%s] loop detected after %d iterations", user.id, stats.iterations)

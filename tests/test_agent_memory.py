@@ -78,6 +78,63 @@ async def test_agent_loop_with_memory(tmp_path, mock_provider, mock_registry, te
 
     # newest message is last in SQLite get_history order
     assert hist[-1]["role"] == "assistant"
-    assert hist[-1]["content"] == "I remember now."
+    # When no tools are used, the marker is "[Called tools: none]"
+    assert "[Called tools: none]" in hist[-1]["content"]
+    assert "I remember now." in hist[-1]["content"]
     assert hist[-2]["role"] == "user"
     assert hist[-2]["content"] == "Can you remind me again?"
+
+
+@pytest.mark.asyncio
+async def test_tool_marker_saved_in_memory(tmp_path):
+    """When tools are used, the saved assistant message must include a tool-usage marker.
+
+    This prevents hallucination: the model can see proof of real tool calls
+    in its conversation history for subsequent requests.
+    """
+    from corpclaw_lite.agent.loop import AgentLoop
+    from corpclaw_lite.config.settings import AgentSettings
+    from corpclaw_lite.extensions.tools.registry import ToolRegistry
+    from corpclaw_lite.llm.base import LLMResponse, ToolCall
+
+    class FakeTool:
+        name = "normalize_excel"
+        description = "Normalize Excel"
+        params = []
+        terminal = False
+
+        async def execute(self, **kwargs):
+            return "Normalized 100 rows."
+
+    registry = ToolRegistry()
+    registry._tools["normalize_excel"] = FakeTool()  # type: ignore
+
+    provider = AsyncMock(spec=Provider)
+    provider.chat.side_effect = [
+        LLMResponse(
+            content="",
+            tool_calls=[ToolCall(id="tc1", name="normalize_excel", arguments={"path": "test.xlsx"})],
+        ),
+        LLMResponse(content="File normalized successfully."),
+    ]
+
+    mem = SQLiteMemory(str(tmp_path / "marker_test.db"))
+    user = User(id=42, name="Marker Test", department="engineering")
+
+    loop = AgentLoop(
+        provider=provider,
+        registry=registry,
+        settings=AgentSettings(),
+        memory=mem,
+    )
+    result, stats = await loop.run(user, "Normalize my file")
+
+    assert result == "File normalized successfully."
+    assert stats.tools_used == ["normalize_excel"]
+
+    # Check that the saved assistant message contains the tool marker
+    hist = await mem.get_history(str(user.id))
+    assistant_msg = [m for m in hist if m["role"] == "assistant"][-1]
+    assert "[Called tools: normalize_excel]" in assistant_msg["content"]
+    assert "File normalized successfully." in assistant_msg["content"]
+

@@ -36,8 +36,23 @@ class ContextCompressor:
         self._previous_summary: str | None = None
 
     def should_compress(self, messages: list[dict[str, Any]]) -> bool:
-        """Check if compression is needed based on token threshold."""
+        """Check if compression is needed based on token threshold.
+
+        Returns False if a tool result is the last message — compressing mid-ReAct
+        iteration (between tool execution and the next LLM call) corrupts the agent
+        context and causes tasks to be abandoned.
+        """
         if not self._settings.enabled:
+            return False
+
+        # Safety guard: never compress while a tool call is still "in flight".
+        # The last message being a tool result means the agent hasn't yet processed
+        # the output — compressing here would produce a summary *instead of* the
+        # actual answer and lose the task context entirely.
+        if messages and messages[-1].get("role") == "tool":
+            logger.debug(
+                "ContextCompressor: skipping compression — last message is a pending tool result"
+            )
             return False
 
         tokens = self._estimate_tokens(messages)

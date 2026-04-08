@@ -105,3 +105,44 @@ async def test_consolidator_formats_messages(memory, mock_provider):
     prompt = call_args.kwargs["messages"][0]["content"]
     assert "Question" in prompt
     assert "Answer" in prompt
+
+
+@pytest.mark.asyncio
+async def test_consolidator_cooldown(memory, mock_provider):
+    """Second consolidation within the cooldown window is skipped."""
+    for i in range(12):
+        await memory.add_message("u1", "user", f"Message {i}")
+        await memory.add_message("u1", "assistant", f"Reply {i}")
+
+    consolidator = MemoryConsolidator(mock_provider, threshold=20)
+    # First consolidation should succeed
+    first = await consolidator.maybe_consolidate(memory, "u1")
+    assert first is True
+
+    # Re-populate above threshold
+    for i in range(12):
+        await memory.add_message("u1", "user", f"More {i}")
+        await memory.add_message("u1", "assistant", f"Extra {i}")
+
+    # Second consolidation within 60s cooldown should be skipped
+    second = await consolidator.maybe_consolidate(memory, "u1")
+    assert second is False
+    # LLM was only called once (first consolidation)
+    assert mock_provider.chat.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_consolidator_skips_on_active_workflow_marker(memory, mock_provider):
+    """Consolidation is skipped when recent messages contain tool markers."""
+    for i in range(12):
+        await memory.add_message("u1", "user", f"Message {i}")
+        await memory.add_message("u1", "assistant", f"Reply {i}")
+
+    # Add a message with a tool-call marker in the tail
+    await memory.add_message("u1", "assistant", "[Called tools: web_fetch] fetching...")
+
+    consolidator = MemoryConsolidator(mock_provider, threshold=20)
+    result = await consolidator.maybe_consolidate(memory, "u1")
+    assert result is False
+    mock_provider.chat.assert_not_called()
+
