@@ -125,6 +125,44 @@ class OpenAIProvider(Provider):
 
         return "", raw
 
+    def _resolve_reasoning_fallback(
+        self,
+        content: str,
+        finish_reason: str | None,
+        raw_message: Any,
+        tools: list[dict[str, Any]] | None,
+        tool_calls: list[ToolCall],
+    ) -> tuple[str, list[ToolCall]]:
+        """Handle Qwen3/LM Studio edge case: response stuck in reasoning_content.
+
+        LM Studio + Qwen3: the model sometimes puts everything into
+        reasoning_content and leaves content + tool_calls empty.
+        Two sub-cases:
+          a) reasoning_content has XML tool calls → parse them (NOT a final answer)
+          b) reasoning_content is plain text → use as the final answer
+
+        Returns updated (content, tool_calls). Unchanged if no fallback needed.
+        """
+        # Only trigger when content is empty, no native tool calls, and stop
+        if content or getattr(raw_message, "tool_calls", None) or finish_reason != "stop":
+            return content, tool_calls
+
+        reasoning_text: str = getattr(raw_message, "reasoning_content", None) or ""
+        if not reasoning_text:
+            return content, tool_calls
+
+        if tools:
+            _MARKERS = ("<tool_call>", "<function=")
+            if any(m in reasoning_text for m in _MARKERS):
+                allowed_names = {t["function"]["name"] for t in tools if "function" in t}
+                parse_result = parse_xml_tool_call(reasoning_text, allowed_tool_names=allowed_names)
+                if parse_result.tool_call:
+                    return "", [*tool_calls, parse_result.tool_call]
+                return reasoning_text.strip(), tool_calls
+            return reasoning_text.strip(), tool_calls
+
+        return reasoning_text.strip(), tool_calls
+
     # ── Main chat ─────────────────────────────────────────────────────────────
 
     async def chat(
@@ -162,37 +200,9 @@ class OpenAIProvider(Provider):
         tool_calls: list[ToolCall] = []
 
         # ── Qwen3 Extended Thinking fallback ──────────────────────────────────
-        # LM Studio + Qwen3: the model sometimes puts everything into
-        # reasoning_content and leaves content + tool_calls empty.
-        # Two sub-cases:
-        #   a) reasoning has XML tool calls → parse them (NOT a final answer)
-        #   b) reasoning is plain text → use as the final answer
-        _reasoning_text: str = ""
-        if not content and not choice.message.tool_calls and choice.finish_reason == "stop":
-            raw_msg = choice.message  # type: ignore[attr-defined]
-            _reasoning_text = getattr(raw_msg, "reasoning_content", None) or ""
-
-        if _reasoning_text and tools:
-            # Check if reasoning contains an XML tool call attempt
-            _TOOL_CALL_MARKERS = ("<tool_call>", "<function=")
-            if any(marker in _reasoning_text for marker in _TOOL_CALL_MARKERS):
-                # Parse the XML tool call from reasoning — it's a "leaked" tool call
-                allowed_names = {t["function"]["name"] for t in tools if "function" in t}
-                parse_result = parse_xml_tool_call(
-                    _reasoning_text, allowed_tool_names=allowed_names
-                )
-                if parse_result.tool_call:
-                    tool_calls.append(parse_result.tool_call)
-                    # Don't set content — this was a tool call, not a response
-                else:
-                    # XML markers present but couldn't parse — use as text fallback
-                    content = _reasoning_text.strip()
-            else:
-                # Pure text reasoning — this is the "silent final answer" case
-                content = _reasoning_text.strip()
-        elif _reasoning_text:
-            # No tools context (chat mode) — reasoning IS the answer
-            content = _reasoning_text.strip()
+        content, tool_calls = self._resolve_reasoning_fallback(
+            content, choice.finish_reason, choice.message, tools, tool_calls
+        )
 
         if choice.message.tool_calls:
             for tc in choice.message.tool_calls:

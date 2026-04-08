@@ -276,12 +276,16 @@ class PermissionDeniedError(Exception):
 ## Правила работы с расширениями
 
 ### Tool
-- Только 5 атрибутов: `name`, `description`, `params`, `execute`, `risk_level`
+- Атрибуты: `name`, `description`, `params`, `execute`, `risk_level`, `parallel_safe`, `terminal`
+- `parallel_safe` — `False` для инструментов с race conditions (по умолчанию `True`)
+- `terminal` — `True` если инструмент возвращает результат напрямую без LLM re-paraphrase (напр. vision)
 - **НЕЛЬЗЯ** добавлять: `api_version`, `deprecated_since`, `removal_in`, `replacement`, `migration_doc`, `provenance`, `compatibility`, `warning_code`
 - Проверка типов файлов **на уровне кода** — IMAGE не читается ReadFileTool и наоборот
 
 ### Skill
-- Только 6 атрибутов: `id`, `description`, `allowed_for`, `instructions`, `path`, `version`
+- Атрибуты: `id`, `description`, `allowed_for`, `instructions`, `path`, `version`, `keywords`, `always`
+- `keywords` — список ключевых слов/префиксов для semantic selection (напр. `["excel", "нормализ"]`)
+- `always` — `True` если скилл всегда инжектируется в промпт независимо от semantic matching
 - **НЕЛЬЗЯ** добавлять: `dependencies`, `resources`, `override_chain`, `pack_id`, `compatibility`, `provenance`
 - Markdown-файл в `skills/` — единственный источник
 

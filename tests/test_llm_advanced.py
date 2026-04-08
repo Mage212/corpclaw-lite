@@ -131,3 +131,78 @@ async def test_openai_stream() -> None:
             chunks.append(chunk.content)
 
     assert chunks == ["Hey! ", "There."]
+
+
+# ── _resolve_reasoning_fallback ───────────────────────────────────────────────
+
+
+def _make_provider() -> OpenAIProvider:
+    with patch("corpclaw_lite.llm.openai.openai.AsyncOpenAI"):
+        return OpenAIProvider(_openai_settings())
+
+
+def _raw_msg(
+    *,
+    content: str = "",
+    tool_calls: object = None,
+    reasoning_content: str = "",
+) -> object:
+    """Build a minimal fake message object matching what OpenAI SDK returns."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        content=content,
+        tool_calls=tool_calls,
+        reasoning_content=reasoning_content,
+    )
+
+
+def test_resolve_reasoning_fallback_no_op_content_present() -> None:
+    """If content is already set, fallback must not fire."""
+    provider = _make_provider()
+    msg = _raw_msg(content="Hello!", reasoning_content="some reasoning")
+    content, tool_calls = provider._resolve_reasoning_fallback(
+        "Hello!", "stop", msg, None, []
+    )
+    assert content == "Hello!"
+    assert tool_calls == []
+
+
+def test_resolve_reasoning_fallback_plain_text_no_tools() -> None:
+    """Empty content + reasoning_content + no tools → reasoning becomes answer."""
+    provider = _make_provider()
+    msg = _raw_msg(reasoning_content="Here is my answer.")
+    content, tool_calls = provider._resolve_reasoning_fallback(
+        "", "stop", msg, None, []
+    )
+    assert content == "Here is my answer."
+    assert tool_calls == []
+
+
+def test_resolve_reasoning_fallback_xml_tool_call_extracted() -> None:
+    """XML tool call in reasoning_content → extracted as ToolCall, content cleared."""
+    provider = _make_provider()
+    xml = '<tool_call><name>read_file</name><arguments>{"path": "foo.txt"}</arguments></tool_call>'
+    msg = _raw_msg(reasoning_content=xml)
+    tools = [{"function": {"name": "read_file", "parameters": {}}}]
+    content, tool_calls = provider._resolve_reasoning_fallback(
+        "", "stop", msg, tools, []
+    )
+    # Content must be cleared when a valid tool call was found
+    assert content == ""
+    assert len(tool_calls) == 1
+    assert tool_calls[0].name == "read_file"
+
+
+def test_resolve_reasoning_fallback_unparseable_xml_falls_back_to_text() -> None:
+    """XML markers present but parse fails → treat reasoning as text content."""
+    provider = _make_provider()
+    bad_xml = "<tool_call>BROKEN XML</tool_call>"
+    msg = _raw_msg(reasoning_content=bad_xml)
+    tools = [{"function": {"name": "some_tool", "parameters": {}}}]
+    content, tool_calls = provider._resolve_reasoning_fallback(
+        "", "stop", msg, tools, []
+    )
+    assert content == bad_xml.strip()
+    assert tool_calls == []
+
