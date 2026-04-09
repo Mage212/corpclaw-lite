@@ -93,7 +93,7 @@ class MemoryConsolidator:
 
         # Cooldown: don't consolidate more than once per minute per user.
         now = time.monotonic()
-        last = self._last_consolidated.get(user_id, 0.0)
+        last = self._last_consolidated.get(user_id, float("-inf"))
         if now - last < _COOLDOWN_SECONDS:
             logger.debug(
                 "Consolidation skipped for user %s — cooldown (%ds remaining)",
