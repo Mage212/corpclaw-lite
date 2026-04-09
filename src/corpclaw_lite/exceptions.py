@@ -2,7 +2,7 @@ from __future__ import annotations
 
 __all__ = [
     "CorpClawError",
-    "MemoryError",
+    "StorageError",
     "ToolExecutionError",
     "ContainerIPCError",
 ]
@@ -12,8 +12,8 @@ class CorpClawError(Exception):
     """Base for all CorpClaw typed exceptions."""
 
 
-class MemoryError(CorpClawError):
-    """Raised when a memory/DB operation fails."""
+class StorageError(CorpClawError):
+    """Raised when a memory/DB storage operation fails."""
 
 
 class ToolExecutionError(CorpClawError):

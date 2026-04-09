@@ -467,12 +467,18 @@ class TelegramBotOrchestrator:
                 await bot.send_chat_action(chat_id=int(telegram_id), action="typing")
         result = await self._vision_processor.describe(image_path, prompt, user)
 
+        # Persist in agent memory — non-critical, don't block user response
         mem = self._stack.loop.memory
         if mem is not None:
             mem_key = str(user.telegram_id)
             user_msg = f"[Пользователь отправил изображение: {image_path.name}] {prompt}"
-            await mem.add_message(mem_key, "user", user_msg)
-            await mem.add_message(mem_key, "assistant", result)
+            try:
+                await mem.add_message(mem_key, "user", user_msg)
+                await mem.add_message(mem_key, "assistant", result)
+            except Exception:
+                logger.error(
+                    "Failed to persist image interaction in memory for user %s", telegram_id
+                )
 
         await channel.send_message(user, result)
 

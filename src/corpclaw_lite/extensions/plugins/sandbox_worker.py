@@ -99,6 +99,11 @@ def _run_interactive(tool_path: str) -> None:
         elif method == "execute":
             kwargs = params.get("kwargs", {})
             try:
+                # TODO: asyncio.run() creates and destroys an event loop per call.
+                # This is fine for current plugin tools (file ops, simple computations),
+                # but will break plugins that need persistent async resources (httpx
+                # sessions, DB pools). When such plugins appear, refactor to a single
+                # asyncio.run() wrapping the entire interactive loop with async stdin.
                 result = asyncio.run(tool.execute(**kwargs))
                 resp = {"jsonrpc": "2.0", "id": req_id, "result": result}
             except Exception as e:

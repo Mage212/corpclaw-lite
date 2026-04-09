@@ -16,7 +16,7 @@ from corpclaw_lite.agent.guards import (
     SimpleProgressGuard,
 )
 from corpclaw_lite.config.settings import AgentSettings
-from corpclaw_lite.exceptions import ContainerIPCError, MemoryError
+from corpclaw_lite.exceptions import ContainerIPCError, StorageError
 from corpclaw_lite.extensions.tools.base import TOOL_ERROR_PREFIX
 from corpclaw_lite.extensions.tools.registry import ToolRegistry
 from corpclaw_lite.llm.base import Provider, ToolCall
@@ -159,7 +159,7 @@ class AgentLoop:
         if self._memory:
             try:
                 history = await self._memory.get_history(mem_key, limit=self._settings.max_history)
-            except MemoryError:
+            except StorageError:
                 logger.error("[user=%s] Failed to load history", user.id)
 
         # Prepend dynamic user context to the system prompt
@@ -173,7 +173,7 @@ class AgentLoop:
                 facts = await self._memory.recall_facts(
                     mem_key, limit=self._settings.max_facts_recall
                 )
-            except MemoryError:
+            except StorageError:
                 logger.error("[user=%s] Failed to recall facts", user.id)
             if facts:
                 lines = [f"- {f['key']}: {f['value']}" for f in facts]
@@ -198,7 +198,7 @@ class AgentLoop:
         if self._memory:
             try:
                 await self._memory.add_message(mem_key, "user", message)
-            except MemoryError:
+            except StorageError:
                 logger.error("[user=%s] Failed to save user message", user.id)
 
         # Get budget from department if permission checker is available
@@ -245,7 +245,7 @@ class AgentLoop:
                     if self._memory:
                         try:
                             await self._memory.add_message(mem_key, "assistant", msg)
-                        except MemoryError:
+                        except StorageError:
                             logger.error("[user=%s] Failed to save timeout message", user.id)
                     stats.status = "timeout"
                     stats.duration_ms = (time.monotonic() - t0) * 1000
@@ -286,7 +286,7 @@ class AgentLoop:
                                 mem_text,
                                 reasoning=response.reasoning or None,
                             )
-                        except MemoryError:
+                        except StorageError:
                             logger.error("[user=%s] Failed to save final message", user.id)
                         if self._consolidator:
                             await self._consolidator.maybe_consolidate(self._memory, mem_key)
@@ -355,7 +355,7 @@ class AgentLoop:
                                 mem_text = f"{marker}{result}" if marker else result
                                 try:
                                     await self._memory.add_message(mem_key, "assistant", mem_text)
-                                except MemoryError:
+                                except StorageError:
                                     logger.error(
                                         "[user=%s] Failed to save terminal tool result", user.id
                                     )
@@ -390,7 +390,7 @@ class AgentLoop:
                 mem_text = f"{marker}{msg}" if marker else msg
                 try:
                     await self._memory.add_message(mem_key, "assistant", mem_text)
-                except MemoryError:
+                except StorageError:
                     logger.error("[user=%s] Failed to save budget exceeded message", user.id)
             stats.status = "budget"
             stats.error = str(e)
@@ -404,7 +404,7 @@ class AgentLoop:
             mem_text = f"{marker}{fallback}" if marker else fallback
             try:
                 await self._memory.add_message(mem_key, "assistant", mem_text)
-            except MemoryError:
+            except StorageError:
                 logger.error("[user=%s] Failed to save loop detection message", user.id)
         stats.status = "loop"
         stats.duration_ms = (time.monotonic() - t0) * 1000

@@ -18,7 +18,7 @@ import logging
 import time
 from typing import Any
 
-from corpclaw_lite.exceptions import MemoryError
+from corpclaw_lite.exceptions import StorageError
 from corpclaw_lite.llm.base import Provider
 from corpclaw_lite.memory.sqlite import SQLiteMemory
 
@@ -85,7 +85,7 @@ class MemoryConsolidator:
         """
         try:
             count = await memory.count_messages(user_id)
-        except MemoryError:
+        except StorageError:
             logger.error("Consolidation skipped — failed to count messages for user %s", user_id)
             return False
         if count < self._threshold:
@@ -105,7 +105,7 @@ class MemoryConsolidator:
         # Load full history to inspect tail for active-workflow signals
         try:
             history = await memory.get_history(user_id, limit=count)
-        except MemoryError:
+        except StorageError:
             logger.error("Consolidation skipped — failed to load history for user %s", user_id)
             return False
 
@@ -142,7 +142,7 @@ class MemoryConsolidator:
                 user_id,
             )
             return True
-        except MemoryError as e:
+        except StorageError as e:
             logger.error("Consolidation failed for user %s: %s", user_id, e)
             return False
         except Exception as e:
