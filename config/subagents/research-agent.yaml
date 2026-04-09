@@ -9,6 +9,9 @@ capabilities:
   - answer questions based on web content
 allowed_tools:
   - web_fetch
+  - read_file
+  - search_files
+  - list_files
   - memory_store
   - memory_recall
 prompt_path: "config/bootstrap/subagents/research.md"

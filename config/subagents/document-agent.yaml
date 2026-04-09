@@ -11,5 +11,7 @@ capabilities:
 allowed_tools:
   - write_file
   - read_file
+  - edit_file
+  - normalize_excel
   - list_files
 prompt_path: "config/bootstrap/subagents/document.md"

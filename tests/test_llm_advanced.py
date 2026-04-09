@@ -197,3 +197,96 @@ def test_resolve_reasoning_fallback_unparseable_xml_falls_back_to_text() -> None
     content, tool_calls = provider._resolve_reasoning_fallback("", "stop", msg, tools, [])
     assert content == bad_xml.strip()
     assert tool_calls == []
+
+
+# ── Anthropic Preset Bugs ────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_anthropic_thinking_budget_overrides_max_tokens() -> None:
+    """thinking_budget_tokens must override provider default max_tokens=4096."""
+    from corpclaw_lite.llm.presets import ModelPreset
+
+    mock_client = AsyncMock()
+    block = MagicMock()
+    block.type = "text"
+    block.text = "response"
+    mock_msg = MagicMock()
+    mock_msg.content = [block]
+    mock_msg.usage.input_tokens = 1
+    mock_msg.usage.output_tokens = 1
+    mock_client.messages.create = AsyncMock(return_value=mock_msg)
+
+    preset = ModelPreset(thinking_budget_tokens=2048)
+    with patch("corpclaw_lite.llm.anthropic.anthropic.AsyncAnthropic", return_value=mock_client):
+        provider = AnthropicProvider(_anthropic_settings(), preset=preset)
+        await provider.chat([{"role": "user", "content": "hi"}])
+
+    args = mock_client.messages.create.await_args.kwargs
+    assert args["max_tokens"] == 3072, f"Expected 3072 (2048+1024), got {args['max_tokens']}"
+
+
+@pytest.mark.asyncio
+async def test_anthropic_chat_with_image_applies_system_prompt_prefix() -> None:
+    """chat_with_image must apply system_prompt_prefix from preset."""
+    from corpclaw_lite.llm.presets import ModelPreset
+
+    mock_client = AsyncMock()
+    block = MagicMock()
+    block.type = "text"
+    block.text = "desc"
+    mock_msg = MagicMock()
+    mock_msg.content = [block]
+    mock_msg.usage.input_tokens = 1
+    mock_msg.usage.output_tokens = 1
+    mock_client.messages.create = AsyncMock(return_value=mock_msg)
+
+    preset = ModelPreset(system_prompt_prefix="<|think|>")
+    with patch("corpclaw_lite.llm.anthropic.anthropic.AsyncAnthropic", return_value=mock_client):
+        provider = AnthropicProvider(_anthropic_settings(), preset=preset)
+        await provider.chat_with_image(
+            image_data="data", image_media_type="image/png", prompt="What?", system="You are AI."
+        )
+
+    args = mock_client.messages.create.await_args.kwargs
+    assert "<|think|>" in args["system"]
+    assert "You are AI." in args["system"]
+
+
+@pytest.mark.asyncio
+async def test_anthropic_stream_applies_system_prompt_prefix() -> None:
+    """stream() must apply system_prompt_prefix from preset."""
+
+    from corpclaw_lite.llm.presets import ModelPreset
+
+    mock_client = AsyncMock()
+
+    class MockStreamContext:
+        async def __aenter__(self):
+            class _Inner:
+                async def _text_stream(self):
+                    yield "chunk"
+
+                @property
+                def text_stream(self):
+                    return self._text_stream()
+
+            return _Inner()
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+    mock_client.messages.stream = MagicMock(return_value=MockStreamContext())
+
+    preset = ModelPreset(system_prompt_prefix="<|think|>")
+    with patch("corpclaw_lite.llm.anthropic.anthropic.AsyncAnthropic", return_value=mock_client):
+        provider = AnthropicProvider(_anthropic_settings(), preset=preset)
+        chunks = []
+        async for chunk in provider.stream(
+            [{"role": "user", "content": "Hi"}], system="Base system"
+        ):
+            chunks.append(chunk.content)
+
+    call_kwargs = mock_client.messages.stream.call_args.kwargs
+    assert "<|think|>" in call_kwargs["system"]
+    assert "Base system" in call_kwargs["system"]

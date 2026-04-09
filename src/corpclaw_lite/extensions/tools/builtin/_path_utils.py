@@ -16,6 +16,11 @@ if TYPE_CHECKING:
 _CONTAINER_WS = "/workspace"
 
 
+def _validate_boundary(resolved: Path, workspace: Path, original: str) -> None:
+    if resolved != workspace and workspace not in resolved.parents:
+        raise PermissionError(f"Path escapes user workspace: {original}")
+
+
 def resolve_container_path(
     path_str: str,
     workspace_base: Path | None,
@@ -45,7 +50,9 @@ def resolve_container_path(
     ):
         relative = path_str[len(_CONTAINER_WS) :].lstrip("/\\")
         user_workspace = Path(workspace_base) / f"user_{user.telegram_id}"
-        return (user_workspace / relative).resolve()
+        result = (user_workspace / relative).resolve()
+        _validate_boundary(result, user_workspace, path_str)
+        return result
 
     if (
         not Path(path_str).is_absolute()
@@ -54,6 +61,10 @@ def resolve_container_path(
         and user.telegram_id is not None
     ):
         user_workspace = Path(workspace_base) / f"user_{user.telegram_id}"
-        return (user_workspace / path_str).resolve()
+        result = (user_workspace / path_str).resolve()
+        _validate_boundary(result, user_workspace, path_str)
+        return result
 
-    return Path(path_str).resolve()
+    from corpclaw_lite.extensions.tools.builtin.files import resolve_and_validate_path
+
+    return resolve_and_validate_path(path_str)

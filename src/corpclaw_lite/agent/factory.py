@@ -187,6 +187,7 @@ def _build_extensions_stack(
     registry: ToolRegistry,
     guard: ToolGuard,
     permission_checker: PermissionChecker,
+    workspace_base: Path | None = None,
 ) -> SubagentRegistry:
     """Register subagents, MCP, host-side tools."""
     from corpclaw_lite.agent.subagent import SubagentDispatcher
@@ -216,7 +217,7 @@ def _build_extensions_stack(
         )
 
     registry.register(WebFetchTool())
-    registry.register(ReadImageTool(VisionProcessor(provider)))
+    registry.register(ReadImageTool(VisionProcessor(provider), workspace_base=workspace_base))
     return subagent_registry
 
 
@@ -336,7 +337,9 @@ def build_agent_stack(
         )
 
     guard, permission_checker = _build_security_stack(full_settings, provider)
-    _build_extensions_stack(agent_settings, provider, registry, guard, permission_checker)
+    _build_extensions_stack(
+        agent_settings, provider, registry, guard, permission_checker, workspace_base=workspace_base
+    )
     memory, consolidator, compressor = _build_memory_stack(agent_settings, provider, registry)
 
     mcp_manager: MCPManager | None = None

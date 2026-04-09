@@ -301,7 +301,12 @@ class OpenAIProvider(Provider):
         tools: list[dict[str, Any]] | None = None,
         system: str | None = None,
     ) -> AsyncIterator[StreamChunk]:
-        """Stream a chat response without parsing tool calls."""
+        """Stream a chat response without parsing tool calls.
+
+        Note: Model presets (inference_params, thinking_budget, system_prompt_prefix)
+        are NOT applied to streaming requests. Streaming is intended for cloud-hosted
+        models that don't require preset-based parameter tuning.
+        """
         final_messages: list[dict[str, Any]] = []
         if system:
             final_messages.append({"role": "system", "content": system})

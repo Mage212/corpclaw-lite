@@ -599,59 +599,7 @@ async def test_parallel_tool_one_approved_one_denied(
     result, stats = await loop.run(test_user, "run selective")
 
     assert result == "Done."
-    assert max_concurrent <= 1
-
-
-@pytest.mark.asyncio
-async def test_parallel_tool_one_approved_one_denied(
-    test_user: User, empty_registry: ToolRegistry
-) -> None:
-    """When one tool is approved and another denied, results reflect both."""
-
-    from corpclaw_lite.security.tool_guard import ApprovalRequest, ToolGuard
-
-    call_index = 0
-
-    class SelectiveGuard(ToolGuard):
-        async def check(  # type: ignore[override]
-            self, tool_name: str, arguments: Any, risk_level: str | None = None
-        ) -> None:
-            raise ApprovalRequest(action=tool_name, details="test")
-
-    class FakeTool:
-        name = "exec_tool"
-        description = ""
-        params = []
-        terminal = False
-        risk_level = None
-        parallel_safe = True
-
-        async def execute(self, **kwargs: Any) -> str:
-            return "executed"
-
-    empty_registry._tools["exec_tool"] = FakeTool()  # type: ignore
-
-    async def selective_cb(action: str, details: str) -> bool:
-        nonlocal call_index
-        call_index += 1
-        return call_index == 1
-
-    tool_calls = [ToolCall(id=str(i), name="exec_tool", arguments={}) for i in range(2)]
-    provider = MockProvider(
-        responses=[
-            LLMResponse(content="", tool_calls=tool_calls),
-            LLMResponse(content="Done."),
-        ]
+    assert call_index == 2, f"Expected 2 approval callbacks, got {call_index}"
+    assert len(stats.tools_used) == 2, (
+        f"Expected 2 tool entries (1 approved, 1 denied), got {len(stats.tools_used)}"
     )
-    loop = AgentLoop(
-        AgentConfig(
-            provider,
-            empty_registry,
-            AgentSettings(),
-            tool_guard=SelectiveGuard(),
-            approval_callback=selective_cb,
-        )
-    )
-    result, stats = await loop.run(test_user, "run selective")
-
-    assert result == "Done."

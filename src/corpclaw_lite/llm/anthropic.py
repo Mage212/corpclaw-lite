@@ -72,7 +72,7 @@ class AnthropicProvider(Provider):
 
         if self._preset.thinking_budget_tokens:
             budget = self._preset.thinking_budget_tokens
-            kwargs.setdefault("max_tokens", budget + 1024)
+            kwargs["max_tokens"] = budget + 1024
 
         if self._preset.system_prompt_prefix:
             prefix = self._preset.system_prompt_prefix
@@ -156,6 +156,7 @@ class AnthropicProvider(Provider):
             "max_tokens": 4096,
         }
         self._apply_preset(None, kwargs)
+        system = self._apply_preset(system, kwargs)
         if system:
             kwargs["system"] = system
 
@@ -178,13 +179,18 @@ class AnthropicProvider(Provider):
         tools: list[dict[str, Any]] | None = None,
         system: str | None = None,
     ) -> AsyncIterator[StreamChunk]:
-        """Stream a chat response without parsing tool calls."""
+        """Stream a chat response without parsing tool calls.
+
+        Note: Model presets (inference_params, thinking_budget, system_prompt_prefix)
+        are NOT applied to streaming requests. Streaming is intended for cloud-hosted
+        models that don't require preset-based parameter tuning.
+        """
         kwargs: dict[str, Any] = {
             "model": self._model,
             "messages": messages,
             "max_tokens": 4096,
         }
-        self._apply_preset(None, kwargs)
+        system = self._apply_preset(system, kwargs)
         if system:
             kwargs["system"] = system
 

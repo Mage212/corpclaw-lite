@@ -181,6 +181,22 @@ def test_resolve_container_path_relative(tmp_path: Path) -> None:
     assert "report.xlsx" in str(result)
 
 
+def test_resolve_container_path_traversal_relative(tmp_path: Path) -> None:
+    from corpclaw_lite.extensions.tools.builtin._path_utils import resolve_container_path
+
+    user = User(id=1, name="test", department="hr", telegram_id=12345)
+    with pytest.raises(PermissionError, match="escapes user workspace"):
+        resolve_container_path("../../etc/passwd", tmp_path, user)
+
+
+def test_resolve_container_path_traversal_prefix(tmp_path: Path) -> None:
+    from corpclaw_lite.extensions.tools.builtin._path_utils import resolve_container_path
+
+    user = User(id=1, name="test", department="hr", telegram_id=12345)
+    with pytest.raises(PermissionError, match="escapes user workspace"):
+        resolve_container_path("/workspace/../../etc/shadow", tmp_path, user)
+
+
 # ── Runtime Shutdown ────────────────────────────────────────────────────────
 
 
