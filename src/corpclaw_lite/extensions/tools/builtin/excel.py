@@ -47,7 +47,7 @@ class NormalizeExcelTool(Tool):
     ]
     risk_level = RiskLevel.MEDIUM
 
-    async def execute(self, **kwargs: Any) -> str:  # noqa: C901
+    async def execute(self, **kwargs: Any) -> str:
         path_str = kwargs.get("path")
         if not path_str or not isinstance(path_str, str):
             return "Error: 'path' parameter is required."
@@ -63,7 +63,6 @@ class NormalizeExcelTool(Tool):
         if resolved.suffix.lower() != ".xlsx":
             return "Error: Only .xlsx files are supported. Use a different tool for CSV."
 
-        # Output path
         output_str = kwargs.get("output_path")
         if output_str and isinstance(output_str, str):
             try:
@@ -100,78 +99,14 @@ class NormalizeExcelTool(Tool):
         total_rows = ws.max_row or 0
         total_cols = ws.max_column or 0
 
-        # Mapping of column index (1-based) to its detected type
-        col_types: dict[int, str] = {}
+        col_types = _normalize_headers(ws, total_cols, total_rows, do_headers, stats)
+        rows_to_delete = _process_data_rows(
+            ws, total_rows, total_cols, col_types, do_dedup, do_empty, stats
+        )
 
-        # 1. Detect column types and normalize headers
-        if total_rows > 0:
-            for col in range(1, total_cols + 1):
-                cell = ws.cell(row=1, column=col)
-                val = cell.value
-                val_str = str(val) if val is not None else ""
-
-                # Detect type for later value normalization
-                col_types[col] = _detect_column_type(val_str)
-
-                # Normalize headers if requested
-                if do_headers and val and isinstance(val, str):
-                    normalized = _normalize_header(val)
-                    if normalized != val:
-                        cell.value = normalized  # type: ignore[misc]
-                        stats["headers_changed"] += 1
-
-        # 2. Process data rows
-        rows_to_delete: list[int] = []
-        if total_rows > 1:
-            seen: set[tuple[Any, ...]] = set()
-            for row_idx in range(total_rows, 1, -1):  # reverse to safely delete
-                row_raw_values: list[Any] = []
-                for c in range(1, total_cols + 1):
-                    cell = ws.cell(row=row_idx, column=c)
-                    val = cell.value
-
-                    # Fix value based on detected column type
-                    fixed_val = _fix_value(val, col_types.get(c, "text"))
-                    if fixed_val != val:
-                        cell.value = fixed_val  # type: ignore[misc]
-                        stats["values_fixed"] += 1
-
-                    row_raw_values.append(fixed_val)
-
-                values = tuple(row_raw_values)
-
-                # Empty row check
-                is_empty = all(
-                    v is None or (isinstance(v, str) and v.strip() == "") for v in values
-                )
-                if do_empty and is_empty:
-                    rows_to_delete.append(row_idx)
-                    stats["empty_removed"] += 1
-                    continue
-
-                # Duplicate check
-                if do_dedup:
-                    key = tuple(str(v) if v is not None else "" for v in values)
-                    if key in seen:
-                        rows_to_delete.append(row_idx)
-                        stats["duplicates_removed"] += 1
-                    else:
-                        seen.add(key)
-
-        # 3. Bulk delete rows
         if rows_to_delete:
-            current_start = rows_to_delete[0]
-            current_count = 1
-            for r in rows_to_delete[1:]:
-                if r == current_start - current_count:
-                    current_count += 1
-                else:
-                    ws.delete_rows(current_start - current_count + 1, current_count)
-                    current_start = r
-                    current_count = 1
-            ws.delete_rows(current_start - current_count + 1, current_count)
+            _bulk_delete_rows(ws, rows_to_delete)
 
-        # 4. Save
         try:
             wb.save(str(output_path))
         except Exception as e:
@@ -190,11 +125,85 @@ class NormalizeExcelTool(Tool):
             parts.append(f"Duplicates removed: {stats['duplicates_removed']}")
         if stats["empty_removed"]:
             parts.append(f"Empty rows removed: {stats['empty_removed']}")
-        # Return filename (not absolute path) so the model can pass it
-        # to send_file. Absolute paths confuse small local LLMs.
         parts.append(f"Output filename: {output_path.name}")
 
         return "\n".join(parts)
+
+
+def _normalize_headers(
+    ws: Any,
+    total_cols: int,
+    total_rows: int,
+    do_headers: bool,
+    stats: dict[str, int],
+) -> dict[int, str]:
+    col_types: dict[int, str] = {}
+    if total_rows > 0:
+        for col in range(1, total_cols + 1):
+            cell = ws.cell(row=1, column=col)
+            val = cell.value
+            val_str = str(val) if val is not None else ""
+            col_types[col] = _detect_column_type(val_str)
+            if do_headers and val and isinstance(val, str):
+                normalized = _clean_header(val)
+                if normalized != val:
+                    cell.value = normalized  # type: ignore[misc]
+                    stats["headers_changed"] += 1
+    return col_types
+
+
+def _process_data_rows(
+    ws: Any,
+    total_rows: int,
+    total_cols: int,
+    col_types: dict[int, str],
+    do_dedup: bool,
+    do_empty: bool,
+    stats: dict[str, int],
+) -> list[int]:
+    rows_to_delete: list[int] = []
+    if total_rows > 1:
+        seen: set[tuple[Any, ...]] = set()
+        for row_idx in range(total_rows, 1, -1):
+            row_raw_values: list[Any] = []
+            for c in range(1, total_cols + 1):
+                cell = ws.cell(row=row_idx, column=c)
+                val = cell.value
+                fixed_val = _fix_value(val, col_types.get(c, "text"))
+                if fixed_val != val:
+                    cell.value = fixed_val  # type: ignore[misc]
+                    stats["values_fixed"] += 1
+                row_raw_values.append(fixed_val)
+
+            values = tuple(row_raw_values)
+
+            is_empty = all(v is None or (isinstance(v, str) and v.strip() == "") for v in values)
+            if do_empty and is_empty:
+                rows_to_delete.append(row_idx)
+                stats["empty_removed"] += 1
+                continue
+
+            if do_dedup:
+                key = tuple(str(v) if v is not None else "" for v in values)
+                if key in seen:
+                    rows_to_delete.append(row_idx)
+                    stats["duplicates_removed"] += 1
+                else:
+                    seen.add(key)
+    return rows_to_delete
+
+
+def _bulk_delete_rows(ws: Any, rows_to_delete: list[int]) -> None:
+    current_start = rows_to_delete[0]
+    current_count = 1
+    for r in rows_to_delete[1:]:
+        if r == current_start - current_count:
+            current_count += 1
+        else:
+            ws.delete_rows(current_start - current_count + 1, current_count)
+            current_start = r
+            current_count = 1
+    ws.delete_rows(current_start - current_count + 1, current_count)
 
 
 def _detect_column_type(header: str) -> str:
@@ -288,8 +297,14 @@ def _clean_chars(text: str) -> str:
     return text.strip()
 
 
-def _normalize_header(header: str) -> str:
-    """Normalize a column header to snake_case."""
+def _clean_header(header: str) -> str:
+    """Clean a column header.
+
+    For Latin headers this produces snake_case.  For Cyrillic headers the
+    characters are preserved with underscores replacing spaces — this is
+    intentional because the LLM expects Cyrillic column names (typical in
+    Russian Excel files).
+    """
     h = _clean_chars(header)
     h = re.sub(r"[^\w\s]", "", h)
     h = re.sub(r"\s+", "_", h)

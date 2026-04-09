@@ -2,7 +2,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from corpclaw_lite.agent.loop import AgentLoop
+from corpclaw_lite.agent.loop import AgentConfig, AgentLoop
 from corpclaw_lite.config.settings import AgentSettings
 from corpclaw_lite.extensions.tools.registry import ToolRegistry
 from corpclaw_lite.llm.base import LLMResponse, Provider
@@ -42,7 +42,9 @@ async def test_agent_loop_with_memory(tmp_path, mock_provider, mock_registry, te
 
     settings = AgentSettings(max_steps=5, max_tool_calls=5, max_wall_time_ms=5000)
 
-    loop = AgentLoop(provider=mock_provider, registry=mock_registry, settings=settings, memory=mem)
+    loop = AgentLoop(
+        AgentConfig(provider=mock_provider, registry=mock_registry, settings=settings, memory=mem)
+    )
 
     result, _ = await loop.run(test_user, "Can you remind me again?")
 
@@ -92,7 +94,6 @@ async def test_tool_marker_saved_in_memory(tmp_path):
     This prevents hallucination: the model can see proof of real tool calls
     in its conversation history for subsequent requests.
     """
-    from corpclaw_lite.agent.loop import AgentLoop
     from corpclaw_lite.config.settings import AgentSettings
     from corpclaw_lite.extensions.tools.registry import ToolRegistry
     from corpclaw_lite.llm.base import LLMResponse, ToolCall
@@ -124,10 +125,12 @@ async def test_tool_marker_saved_in_memory(tmp_path):
     user = User(id=42, name="Marker Test", department="engineering")
 
     loop = AgentLoop(
-        provider=provider,
-        registry=registry,
-        settings=AgentSettings(),
-        memory=mem,
+        AgentConfig(
+            provider=provider,
+            registry=registry,
+            settings=AgentSettings(),
+            memory=mem,
+        )
     )
     result, stats = await loop.run(user, "Normalize my file")
 

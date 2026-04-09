@@ -140,3 +140,12 @@ departments:
       max_iterations: 10
       max_tool_calls: 20
       max_time_ms: 60000
+
+  development:
+    description: "Software development team"
+    allowed_tools:
+      - "*"
+    budget:
+      max_iterations: 20
+      max_tool_calls: 50
+      max_time_ms: 120000

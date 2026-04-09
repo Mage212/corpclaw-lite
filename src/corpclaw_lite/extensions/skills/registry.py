@@ -64,8 +64,8 @@ class SkillRegistry:
 
     def get_allowed_skills(self, user: User) -> list[Skill]:
         """Return only the skills the user is allowed to see (based on their department)."""
-        allowed: list[Skill] = []
-        for skill in self._skills.values():
-            if "*" in skill.allowed_for or user.department in skill.allowed_for:
-                allowed.append(skill)
-        return allowed
+        return [
+            skill
+            for skill in self._skills.values()
+            if "*" in skill.allowed_for or user.department in skill.allowed_for
+        ]

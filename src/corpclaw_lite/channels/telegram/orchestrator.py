@@ -486,7 +486,7 @@ class TelegramBotOrchestrator:
         # Persist in agent memory — non-critical, don't block user response
         mem = stack.loop.memory
         if mem is not None:
-            mem_key = str(user.telegram_id)
+            mem_key = user.memory_key()
             user_msg = f"[Пользователь отправил изображение: {image_path.name}] {prompt}"
             try:
                 await mem.add_message(mem_key, "user", user_msg)

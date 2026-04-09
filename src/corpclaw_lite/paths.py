@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
@@ -7,6 +8,8 @@ __all__ = [
     "DATA_DIR",
     "PROJECT_ROOT",
 ]
+
+logger = logging.getLogger(__name__)
 
 
 def get_project_root() -> Path:
@@ -18,7 +21,13 @@ def get_project_root() -> Path:
         if (current / "pyproject.toml").exists():
             return current
         current = current.parent
-    raise RuntimeError("Cannot find project root (no pyproject.toml found)")
+    fallback = Path(__file__).resolve().parent.parent
+    logger.warning(
+        "Cannot find project root (no pyproject.toml found). "
+        "Using fallback: %s. Set CORPCLAW_ROOT env var to override.",
+        fallback,
+    )
+    return fallback
 
 
 PROJECT_ROOT = get_project_root()

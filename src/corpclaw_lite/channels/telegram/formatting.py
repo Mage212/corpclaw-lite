@@ -155,8 +155,7 @@ def split_message(text: str, max_length: int = SPLIT_MAX_LENGTH) -> list[str]:
                 current_chunk = (code_fence + "\n") if in_code_block else ""
 
             # Split long line into fixed-size pieces
-            for i in range(0, len(line), max_length):
-                chunks.append(line[i : i + max_length])
+            chunks.extend(line[i : i + max_length] for i in range(0, len(line), max_length))
         elif len(current_chunk) + len(line) + 1 > max_length:
             # Current chunk is full, start a new one
             chunk_text = current_chunk.rstrip("\n")

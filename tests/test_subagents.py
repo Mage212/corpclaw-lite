@@ -60,9 +60,9 @@ async def test_subagent_dispatcher():
         res = await dispatcher.dispatch(spec, user, "Do something")
 
         assert res == "Subagent result"
-        # Verify the AgentLoop was created with an isolated registry containing ONLY "tool_a"
-        call_args = MockLoop.call_args.kwargs
-        isolated_registry = call_args["registry"]
+        call_args = MockLoop.call_args
+        agent_config = call_args.args[0] if call_args.args else call_args.kwargs["config"]
+        isolated_registry = agent_config.registry
         assert "tool_a" in isolated_registry._tools
         assert "tool_b" not in isolated_registry._tools
 

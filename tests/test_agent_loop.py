@@ -1,10 +1,11 @@
+import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
 
 from corpclaw_lite.agent.context import ContextBuilder
-from corpclaw_lite.agent.loop import AgentLoop, RunStats
+from corpclaw_lite.agent.loop import AgentConfig, AgentLoop, RunStats
 from corpclaw_lite.config.settings import AgentSettings
 from corpclaw_lite.extensions.tools.registry import ToolRegistry
 from corpclaw_lite.llm.base import LLMResponse, Provider, StreamChunk, ToolCall
@@ -52,7 +53,7 @@ async def test_agent_loop_basic(test_user: User, empty_registry: ToolRegistry) -
             LLMResponse(content="Hello! How can I help?"),
         ]
     )
-    loop = AgentLoop(provider, empty_registry, AgentSettings())
+    loop = AgentLoop(AgentConfig(provider, empty_registry, AgentSettings()))
     res, stats = await loop.run(test_user, "Hi")
     assert res == "Hello! How can I help?"
     assert provider.call_count == 1
@@ -82,7 +83,7 @@ async def test_agent_loop_tool_call(test_user: User, empty_registry: ToolRegistr
             LLMResponse(content="I ran the tool and it worked."),
         ]
     )
-    loop = AgentLoop(provider, empty_registry, AgentSettings())
+    loop = AgentLoop(AgentConfig(provider, empty_registry, AgentSettings()))
     res, stats = await loop.run(test_user, "Run test tool")
     assert res == "I ran the tool and it worked."
     assert provider.call_count == 2
@@ -104,7 +105,7 @@ async def test_agent_loop_budget_exceeded_returns_string(
             LLMResponse(content="", tool_calls=[ToolCall(id="3", name="no_tool", arguments={})]),
         ]
     )
-    loop = AgentLoop(provider, empty_registry, settings)
+    loop = AgentLoop(AgentConfig(provider, empty_registry, settings))
 
     result, stats = await loop.run(test_user, "Loop forever")
     assert isinstance(result, str)
@@ -135,7 +136,7 @@ async def test_history_order(test_user: User, empty_registry: ToolRegistry) -> N
             return LLMResponse(content="done")
 
     provider = CapturingProvider(responses=[])
-    loop = AgentLoop(provider, empty_registry, AgentSettings(), memory=memory)
+    loop = AgentLoop(AgentConfig(provider, empty_registry, AgentSettings(), memory=memory))
     await loop.run(test_user, "new question")
 
     msgs = captured_messages[0]
@@ -179,7 +180,7 @@ async def test_single_assistant_message_with_tool_calls(
             LLMResponse(content="Done."),
         ]
     )
-    loop = AgentLoop(provider, empty_registry, AgentSettings())
+    loop = AgentLoop(AgentConfig(provider, empty_registry, AgentSettings()))
     await loop.run(test_user, "go")
 
     # Check the second call's messages — should have exactly ONE assistant
@@ -218,7 +219,7 @@ async def test_loop_stops_on_progress_guard(test_user: User, empty_registry: Too
         ]
     )
     settings = AgentSettings(max_steps=20, max_tool_calls=100)
-    loop = AgentLoop(provider, empty_registry, settings)
+    loop = AgentLoop(AgentConfig(provider, empty_registry, settings))
     result, stats = await loop.run(test_user, "do it")
 
     # Should have stopped due to loop detection, not budget
@@ -273,11 +274,13 @@ async def test_approval_callback_per_call_takes_priority(
         ]
     )
     loop = AgentLoop(
-        provider,
-        empty_registry,
-        AgentSettings(),
-        tool_guard=AlwaysApprovalGuard(),
-        approval_callback=instance_cb,  # instance-level cb would deny
+        AgentConfig(
+            provider,
+            empty_registry,
+            AgentSettings(),
+            tool_guard=AlwaysApprovalGuard(),
+            approval_callback=instance_cb,
+        )
     )
 
     result, stats = await loop.run(test_user, "run it", approval_callback=per_call_cb)
@@ -315,7 +318,7 @@ async def test_on_tool_start_callback_called(test_user: User, empty_registry: To
             LLMResponse(content="Done."),
         ]
     )
-    loop = AgentLoop(provider, empty_registry, AgentSettings())
+    loop = AgentLoop(AgentConfig(provider, empty_registry, AgentSettings()))
 
     started_tools: list[str] = []
     result, stats = await loop.run(
@@ -409,7 +412,7 @@ async def test_pruning_in_loop_reduces_context(
             LLMResponse(content="Done."),
         ]
     )
-    loop = AgentLoop(provider, empty_registry, AgentSettings())
+    loop = AgentLoop(AgentConfig(provider, empty_registry, AgentSettings()))
     await loop.run(test_user, "run tools")
 
     first_call = captured_contexts[0]
@@ -470,7 +473,7 @@ async def test_parallel_loop_all_results_added(
         ]
     )
     settings = AgentSettings(max_steps=10, max_tool_calls=50)
-    loop = AgentLoop(provider, empty_registry, settings)
+    loop = AgentLoop(AgentConfig(provider, empty_registry, settings))
     result, stats = await loop.run(test_user, "run parallel")
 
     # Loop was detected → fallback message
@@ -481,3 +484,174 @@ async def test_parallel_loop_all_results_added(
 
     # The context sent to the first LLM call had the user message
     assert any(m.get("role") == "user" for m in captured_contexts[0])
+
+
+@pytest.mark.asyncio
+async def test_parallel_tool_approval_serialized(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """_approval_lock must serialize concurrent approval callbacks."""
+
+    from corpclaw_lite.security.tool_guard import ApprovalRequest, ToolGuard
+
+    class AlwaysApprovalGuard(ToolGuard):
+        async def check(  # type: ignore[override]
+            self, tool_name: str, arguments: Any, risk_level: str | None = None
+        ) -> None:
+            raise ApprovalRequest(action=tool_name, details="test")
+
+    class FakeTool:
+        name = "exec_tool"
+        description = ""
+        params = []
+        terminal = False
+        risk_level = None
+        parallel_safe = True
+
+        async def execute(self, **kwargs: Any) -> str:
+            return "executed"
+
+    empty_registry._tools["exec_tool"] = FakeTool()  # type: ignore
+
+    concurrent_count = 0
+    max_concurrent = 0
+
+    async def approval_cb(action: str, details: str) -> bool:
+        nonlocal concurrent_count, max_concurrent
+        concurrent_count += 1
+        max_concurrent = max(max_concurrent, concurrent_count)
+        await asyncio.sleep(0.05)
+        concurrent_count -= 1
+        return True
+
+    tool_calls = [ToolCall(id=str(i), name="exec_tool", arguments={}) for i in range(3)]
+    provider = MockProvider(
+        responses=[
+            LLMResponse(content="", tool_calls=tool_calls),
+            LLMResponse(content="Done."),
+        ]
+    )
+    loop = AgentLoop(
+        AgentConfig(
+            provider,
+            empty_registry,
+            AgentSettings(),
+            tool_guard=AlwaysApprovalGuard(),
+            approval_callback=approval_cb,
+        )
+    )
+    result, stats = await loop.run(test_user, "run parallel approvals")
+
+    assert result == "Done."
+    assert max_concurrent <= 1
+
+
+@pytest.mark.asyncio
+async def test_parallel_tool_one_approved_one_denied(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """When one tool is approved and another denied, results reflect both."""
+
+    from corpclaw_lite.security.tool_guard import ApprovalRequest, ToolGuard
+
+    call_index = 0
+
+    class SelectiveGuard(ToolGuard):
+        async def check(  # type: ignore[override]
+            self, tool_name: str, arguments: Any, risk_level: str | None = None
+        ) -> None:
+            raise ApprovalRequest(action=tool_name, details="test")
+
+    class FakeTool:
+        name = "exec_tool"
+        description = ""
+        params = []
+        terminal = False
+        risk_level = None
+        parallel_safe = True
+
+        async def execute(self, **kwargs: Any) -> str:
+            return "executed"
+
+    empty_registry._tools["exec_tool"] = FakeTool()  # type: ignore
+
+    async def selective_cb(action: str, details: str) -> bool:
+        nonlocal call_index
+        call_index += 1
+        return call_index == 1
+
+    tool_calls = [ToolCall(id=str(i), name="exec_tool", arguments={}) for i in range(2)]
+    provider = MockProvider(
+        responses=[
+            LLMResponse(content="", tool_calls=tool_calls),
+            LLMResponse(content="Done."),
+        ]
+    )
+    loop = AgentLoop(
+        AgentConfig(
+            provider,
+            empty_registry,
+            AgentSettings(),
+            tool_guard=SelectiveGuard(),
+            approval_callback=selective_cb,
+        )
+    )
+    result, stats = await loop.run(test_user, "run selective")
+
+    assert result == "Done."
+    assert max_concurrent <= 1
+
+
+@pytest.mark.asyncio
+async def test_parallel_tool_one_approved_one_denied(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """When one tool is approved and another denied, results reflect both."""
+
+    from corpclaw_lite.security.tool_guard import ApprovalRequest, ToolGuard
+
+    call_index = 0
+
+    class SelectiveGuard(ToolGuard):
+        async def check(  # type: ignore[override]
+            self, tool_name: str, arguments: Any, risk_level: str | None = None
+        ) -> None:
+            raise ApprovalRequest(action=tool_name, details="test")
+
+    class FakeTool:
+        name = "exec_tool"
+        description = ""
+        params = []
+        terminal = False
+        risk_level = None
+        parallel_safe = True
+
+        async def execute(self, **kwargs: Any) -> str:
+            return "executed"
+
+    empty_registry._tools["exec_tool"] = FakeTool()  # type: ignore
+
+    async def selective_cb(action: str, details: str) -> bool:
+        nonlocal call_index
+        call_index += 1
+        return call_index == 1
+
+    tool_calls = [ToolCall(id=str(i), name="exec_tool", arguments={}) for i in range(2)]
+    provider = MockProvider(
+        responses=[
+            LLMResponse(content="", tool_calls=tool_calls),
+            LLMResponse(content="Done."),
+        ]
+    )
+    loop = AgentLoop(
+        AgentConfig(
+            provider,
+            empty_registry,
+            AgentSettings(),
+            tool_guard=SelectiveGuard(),
+            approval_callback=selective_cb,
+        )
+    )
+    result, stats = await loop.run(test_user, "run selective")
+
+    assert result == "Done."

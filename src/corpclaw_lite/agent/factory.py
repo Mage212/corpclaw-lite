@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from corpclaw_lite.agent.loop import AgentLoop
+from corpclaw_lite.agent.loop import AgentConfig, AgentLoop
 from corpclaw_lite.paths import PROJECT_ROOT
 from corpclaw_lite.users.manager import UserManager
 
@@ -350,15 +350,17 @@ def build_agent_stack(
     system_prompt = _build_system_prompt()
 
     loop = AgentLoop(
-        provider=provider,
-        registry=registry,
-        settings=agent_settings,
-        memory=memory,
-        tool_guard=guard,
-        permission_checker=permission_checker,
-        consolidator=consolidator,
-        compressor=compressor,
-        default_system_prompt=system_prompt,
+        AgentConfig(
+            provider=provider,
+            registry=registry,
+            settings=agent_settings,
+            memory=memory,
+            tool_guard=guard,
+            permission_checker=permission_checker,
+            consolidator=consolidator,
+            compressor=compressor,
+            default_system_prompt=system_prompt,
+        )
     )
     user_manager = UserManager()
 

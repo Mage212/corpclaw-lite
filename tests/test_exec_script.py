@@ -43,3 +43,10 @@ async def test_exec_stderr_capture(tool: ExecScriptTool) -> None:
     result = await tool.execute(script="echo error_msg >&2")
     assert "error_msg" in result
     assert "Exit code: 0" in result
+
+
+@pytest.mark.asyncio
+async def test_exec_huge_output_truncated(tool: ExecScriptTool) -> None:
+    result = await tool.execute(script="python3 -c \"print('x' * 100000)\"")
+    assert "Exit code: 0" in result
+    assert "truncated" in result or len(result) < 100100

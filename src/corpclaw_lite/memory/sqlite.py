@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import time
 from functools import partial
 from typing import Any
 
@@ -19,8 +20,8 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-# Data directory: absolute path, supports CORPCLAW_DATA_DIR env var override.
 _DATA_DIR = DATA_DIR
+_VACUUM_INTERVAL = 3600
 
 
 class SQLiteMemory:
@@ -32,6 +33,7 @@ class SQLiteMemory:
 
     def __init__(self, db_path: str = "memory.db"):
         self.db_path = _DATA_DIR / db_path
+        self._last_vacuum: dict[str, float] = {}
         self._init_db()
 
     def _init_db(self) -> None:
@@ -232,6 +234,26 @@ class SQLiteMemory:
         Runs in a single transaction to avoid data loss.
         """
         await anyio.to_thread.run_sync(partial(self._sync_replace_oldest, user_id, count, summary))
+        now = time.monotonic()
+        last = self._last_vacuum.get(user_id, 0.0)
+        if now - last >= _VACUUM_INTERVAL:
+            await anyio.to_thread.run_sync(partial(self._sync_vacuum))
+            self._last_vacuum[user_id] = now
+
+    # ── Vacuum ──────────────────────────────────────────────────────────────
+
+    def _sync_vacuum(self) -> None:
+        try:
+            with db_connect(self.db_path) as conn:
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                conn.execute("VACUUM")
+            logger.info("SQLite vacuum completed for %s", self.db_path)
+        except Exception as e:
+            logger.warning("SQLite vacuum failed: %s", e)
+
+    async def vacuum(self) -> None:
+        """Manually trigger VACUUM + WAL checkpoint to reclaim disk space."""
+        await anyio.to_thread.run_sync(partial(self._sync_vacuum))
 
     # ── Fact storage ─────────────────────────────────────────────────────────
 

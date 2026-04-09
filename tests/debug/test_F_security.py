@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from corpclaw_lite.agent.loop import AgentLoop
+from corpclaw_lite.agent.loop import AgentConfig, AgentLoop
 from corpclaw_lite.config.settings import AgentSettings
 from corpclaw_lite.extensions.tools.registry import ToolRegistry
 from corpclaw_lite.users.models import User
@@ -126,9 +126,11 @@ async def test_F4_budget_guard_stops_loop(
     )
 
     tight_loop = AgentLoop(
-        provider=provider,
-        registry=registry,
-        settings=tight_settings,
+        AgentConfig(
+            provider=provider,
+            registry=registry,
+            settings=tight_settings,
+        )
     )
 
     # A task that naturally requires many steps

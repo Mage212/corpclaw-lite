@@ -79,6 +79,26 @@ Respond in EXACTLY this format:
 (markdown content for per-user system prompt)
 ===USER_FACTS===
 (key: value lines)
+===END===
+
+Example response:
+===AGENT_INSTRUCTIONS===
+## About This User
+- Алексей, маркетолог, работает с рекламными кампаниями.
+
+## Communication Style
+- Отвечай коротко, по делу. Используй маркированные списки.
+
+## Language
+- Русский
+
+## Typical Tasks
+- Анализ рекламных отчётов, подготовка Excel-файлов, генерация текстов для соцсетей.
+===USER_FACTS===
+name: Алексей
+role: маркетолог
+language: русский
+style: краткий и структурированный
 ===END===\
 """
 
@@ -156,6 +176,7 @@ class OnboardingFinalizer:
             # Always save preferred_name as explicit fact (user's exact choice)
             if preferred_name:
                 await self._memory.store_fact(str(user_id), "name", preferred_name)
+                # user_id in onboarding context is the telegram_id, equivalent to user.memory_key()
 
             logger.info(
                 "Onboarding finalized for user %d: %d facts, bootstrap saved",

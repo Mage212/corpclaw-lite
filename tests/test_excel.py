@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from corpclaw_lite.extensions.tools.builtin.excel import NormalizeExcelTool, _normalize_header
+from corpclaw_lite.extensions.tools.builtin.excel import NormalizeExcelTool, _clean_header
 
 
 @pytest.fixture
@@ -29,10 +29,10 @@ def _create_xlsx(path: Path, headers: list[str], rows: list[list[object]]) -> Pa
     return path
 
 
-def test_normalize_header() -> None:
-    assert _normalize_header("First Name ") == "first_name"
-    assert _normalize_header("  LAST   NAME  ") == "last_name"
-    assert _normalize_header("email") == "email"
+def test_clean_header() -> None:
+    assert _clean_header("First Name ") == "first_name"
+    assert _clean_header("  LAST   NAME  ") == "last_name"
+    assert _clean_header("email") == "email"
 
 
 @pytest.mark.asyncio

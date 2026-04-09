@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any, cast
 
+from corpclaw_lite.agent.constants import PLACEHOLDER
 from corpclaw_lite.llm.base import ToolCall
 from corpclaw_lite.users.models import User
 
@@ -33,18 +34,17 @@ class ContextBuilder:
         ``content`` so that a single assistant message is emitted (required
         by the OpenAI API format).
         """
-        calls: list[dict[str, Any]] = []
-        for tc in tool_calls:
-            calls.append(
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.name,
-                        "arguments": json.dumps(tc.arguments),
-                    },
-                }
-            )
+        calls = [
+            {
+                "id": tc.id,
+                "type": "function",
+                "function": {
+                    "name": tc.name,
+                    "arguments": json.dumps(tc.arguments),
+                },
+            }
+            for tc in tool_calls
+        ]
         self.messages.append(
             {
                 "role": "assistant",
@@ -79,8 +79,6 @@ class ContextBuilder:
         """
         if len(self.messages) <= protect_tail + 2:
             return 0
-
-        from corpclaw_lite.agent.compressor import PLACEHOLDER
 
         tool_result_indices = [
             i for i, msg in enumerate(self.messages) if msg.get("role") == "tool"

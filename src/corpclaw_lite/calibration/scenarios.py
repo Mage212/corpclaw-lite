@@ -48,9 +48,7 @@ def _parse_setup(raw: dict[str, Any] | None) -> ScenarioSetup | None:
     """Parse setup section from YAML."""
     if raw is None:
         return None
-    files: list[tuple[str, str]] = []
-    for f in raw.get("files", []):
-        files.append((f["path"], f["content"]))
+    files = [(f["path"], f["content"]) for f in raw.get("files", [])]
     return ScenarioSetup(files=files)
 
 

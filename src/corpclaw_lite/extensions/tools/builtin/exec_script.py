@@ -64,14 +64,18 @@ class ExecScriptTool(Tool):
                 "cwd": str(workspace),
             }
             if sys.platform != "win32":
-                # Unix: new session allows killing the entire process group
                 proc_kwargs["start_new_session"] = True
 
             proc = await asyncio.create_subprocess_shell(script, **proc_kwargs)
             try:
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_val)
+                stdout, stderr = await asyncio.wait_for(
+                    asyncio.gather(
+                        _read_stream_limited(proc.stdout, MAX_OUTPUT_BYTES),
+                        _read_stream_limited(proc.stderr, MAX_OUTPUT_BYTES),
+                    ),
+                    timeout=timeout_val,
+                )
             except TimeoutError:
-                # Kill the process (and its group on Unix) on timeout
                 try:
                     if sys.platform != "win32":
                         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)  # type: ignore[attr-defined]
@@ -84,9 +88,9 @@ class ExecScriptTool(Tool):
 
             output_parts: list[str] = []
             if stdout:
-                output_parts.append(stdout.decode("utf-8", errors="replace"))
+                output_parts.append(stdout)
             if stderr:
-                output_parts.append(stderr.decode("utf-8", errors="replace"))
+                output_parts.append(stderr)
 
             output = "\n".join(output_parts)
             if len(output) > MAX_OUTPUT_BYTES:
@@ -97,3 +101,23 @@ class ExecScriptTool(Tool):
 
         except Exception as e:
             return f"Error: {e}"
+
+
+async def _read_stream_limited(
+    stream: asyncio.StreamReader | None,
+    max_bytes: int,
+) -> str:
+    if stream is None:
+        return ""
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await stream.read(4096)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            chunks.append(chunk[: max_bytes - total + len(chunk)])
+            break
+        chunks.append(chunk)
+    return b"".join(chunks).decode("utf-8", errors="replace")

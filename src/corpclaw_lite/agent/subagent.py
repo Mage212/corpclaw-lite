@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import anyio
 
-from corpclaw_lite.agent.loop import AgentLoop
+from corpclaw_lite.agent.loop import AgentConfig, AgentLoop
 from corpclaw_lite.config.settings import AgentSettings
 from corpclaw_lite.extensions.subagents.base import SubagentSpec
 from corpclaw_lite.extensions.tools.registry import ToolRegistry
@@ -22,6 +22,8 @@ if TYPE_CHECKING:
     from corpclaw_lite.security.tool_guard import ToolGuard
 
 logger = logging.getLogger(__name__)
+
+_SUBAGENT_TIMEOUT_MULTIPLIER = 2
 
 
 class SubagentDispatcher:
@@ -79,14 +81,16 @@ class SubagentDispatcher:
 
         # Setup isolated loop — pass security guards through from parent
         loop = AgentLoop(
-            provider=effective_provider,
-            registry=isolated_registry,
-            settings=self._settings,
-            tool_guard=self._tool_guard,
-            permission_checker=self._permission_checker,
+            AgentConfig(
+                provider=effective_provider,
+                registry=isolated_registry,
+                settings=self._settings,
+                tool_guard=self._tool_guard,
+                permission_checker=self._permission_checker,
+            )
         )
 
-        timeout_seconds = self._settings.max_wall_time_ms / 1000 * 2
+        timeout_seconds = self._settings.max_wall_time_ms / 1000 * _SUBAGENT_TIMEOUT_MULTIPLIER
 
         try:
             result, _ = await asyncio.wait_for(

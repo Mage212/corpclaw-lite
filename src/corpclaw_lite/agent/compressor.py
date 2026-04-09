@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from corpclaw_lite.agent.constants import PLACEHOLDER
 from corpclaw_lite.config.settings import CompressionSettings
 
 __all__ = [
@@ -23,8 +24,6 @@ if TYPE_CHECKING:
     from corpclaw_lite.llm.base import Provider
 
 logger = logging.getLogger(__name__)
-
-PLACEHOLDER = "[Old tool output cleared to save context space]"
 
 
 class ContextCompressor:

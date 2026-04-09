@@ -29,7 +29,10 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 
 def resolve_and_validate_path(path_str: str) -> Path:
     """Resolve path to absolute and ensure it exists within allowed workspace boundaries.
-    For Phase 1 (CLI mode), we allow access to CWD and its subdirectories.
+
+    When container isolation is enabled, this function runs inside the container
+    where CWD=/workspace.  In dev mode (container.enabled=false), CWD is the
+    process working directory.
     """
     # Use CWD for initial Phase 1 boundary
     workspace_root = Path.cwd().resolve()

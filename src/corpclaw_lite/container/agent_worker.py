@@ -29,16 +29,20 @@ def _build_container_registry() -> ToolRegistry:
 
     Lazy-loading tools here to speed up python startup in the container.
     """
-    from corpclaw_lite.extensions.tools.builtin.excel import NormalizeExcelTool
-    from corpclaw_lite.extensions.tools.builtin.exec_script import ExecScriptTool
-    from corpclaw_lite.extensions.tools.builtin.files import (
-        EditFileTool,
-        ListFilesTool,
-        ReadFileTool,
-        SearchFilesTool,
-        WriteFileTool,
-    )
-    from corpclaw_lite.extensions.tools.registry import ToolRegistry
+    try:
+        from corpclaw_lite.extensions.tools.builtin.excel import NormalizeExcelTool
+        from corpclaw_lite.extensions.tools.builtin.exec_script import ExecScriptTool
+        from corpclaw_lite.extensions.tools.builtin.files import (
+            EditFileTool,
+            ListFilesTool,
+            ReadFileTool,
+            SearchFilesTool,
+            WriteFileTool,
+        )
+        from corpclaw_lite.extensions.tools.registry import ToolRegistry
+    except ImportError as e:
+        print(f"Container tool import failed: {e}", file=sys.stderr)
+        raise
 
     registry = ToolRegistry()
     for tool in [
@@ -93,11 +97,11 @@ def process_request() -> None:
         if not isinstance(args, dict):
             raise ValueError("'args' must be a dict")
 
-        # Look up and execute the tool
         registry = get_registry()
         tool = registry.get(tool_name)
         if tool is None:
-            raise ValueError(f"Unknown tool: {tool_name}")
+            available = list(registry.items().keys())
+            raise ValueError(f"Unknown tool: {tool_name}. Available: {available}")
 
         result = asyncio.run(tool.execute(**args))
         response_payload = {"status": "success", "result": result}

@@ -96,15 +96,14 @@ class MCPClient:
         """Return list of tools provided by the connected MCP server."""
         result = await self._send_request("tools/list", {})
         tools_raw = result.get("tools", [])
-        tools: list[MCPToolDef] = []
-        for t in tools_raw:
-            tools.append(
-                MCPToolDef(
-                    name=str(t.get("name", "")),
-                    description=str(t.get("description", "")),
-                    input_schema=dict(t.get("inputSchema", {})),
-                )
+        tools = [
+            MCPToolDef(
+                name=str(t.get("name", "")),
+                description=str(t.get("description", "")),
+                input_schema=dict(t.get("inputSchema", {})),
             )
+            for t in tools_raw
+        ]
         return tools
 
     async def call_tool(self, name: str, args: dict[str, Any]) -> str:

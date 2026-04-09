@@ -19,3 +19,11 @@ class User(BaseModel):
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(UTC), description="Creation time"
     )
+
+    def memory_key(self) -> str:
+        """Return the key used for memory storage.
+
+        Prefer telegram_id for consistency with onboarding which stores
+        facts under telegram_id.  Falls back to internal DB id for CLI users.
+        """
+        return str(self.telegram_id) if self.telegram_id else str(self.id)

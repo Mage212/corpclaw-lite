@@ -26,6 +26,7 @@ from corpclaw_lite.security.tool_guard import ApprovalRequest, ToolGuardError
 from corpclaw_lite.users.models import User
 
 __all__ = [
+    "AgentConfig",
     "AgentLoop",
     "RunStats",
 ]
@@ -81,32 +82,36 @@ class RunStats:
     error: str | None = None
 
 
+@dataclass
+class AgentConfig:
+    """Configuration for AgentLoop — groups all constructor parameters."""
+
+    provider: Provider
+    registry: ToolRegistry
+    settings: AgentSettings
+    permission_checker: PermissionChecker | None = None
+    tool_guard: ToolGuard | None = None
+    memory: SQLiteMemory | None = None
+    approval_callback: Callable[[str, str], Awaitable[bool]] | None = None
+    consolidator: MemoryConsolidator | None = None
+    compressor: ContextCompressor | None = None
+    default_system_prompt: str | None = None
+
+
 class AgentLoop:
     """Core ReAct loop for agent execution."""
 
-    def __init__(
-        self,
-        provider: Provider,
-        registry: ToolRegistry,
-        settings: AgentSettings,
-        permission_checker: PermissionChecker | None = None,
-        tool_guard: ToolGuard | None = None,
-        memory: SQLiteMemory | None = None,
-        approval_callback: Callable[[str, str], Awaitable[bool]] | None = None,
-        consolidator: MemoryConsolidator | None = None,
-        compressor: ContextCompressor | None = None,
-        default_system_prompt: str | None = None,
-    ):
-        self._provider = provider
-        self._registry = registry
-        self._settings = settings
-        self._permission_checker = permission_checker
-        self._tool_guard = tool_guard
-        self._memory = memory
-        self._approval_callback = approval_callback
-        self._consolidator = consolidator
-        self._compressor = compressor
-        self._default_system_prompt = default_system_prompt
+    def __init__(self, config: AgentConfig) -> None:
+        self._provider = config.provider
+        self._registry = config.registry
+        self._settings = config.settings
+        self._permission_checker = config.permission_checker
+        self._tool_guard = config.tool_guard
+        self._memory = config.memory
+        self._approval_callback = config.approval_callback
+        self._consolidator = config.consolidator
+        self._compressor = config.compressor
+        self._default_system_prompt = config.default_system_prompt
         self._approval_lock = asyncio.Lock()
 
     @property
@@ -148,10 +153,7 @@ class AgentLoop:
             approval_callback if approval_callback is not None else self._approval_callback
         )
 
-        # Memory key: use telegram_id where available for consistency with the
-        # onboarding finalizer which stores facts under telegram_id, not the
-        # internal DB id. Falling back to internal id keeps CLI mode working.
-        mem_key = str(user.telegram_id) if user.telegram_id else str(user.id)
+        mem_key = user.memory_key()
 
         # Load history BEFORE building context so it precedes the current message
         history: list[dict[str, Any]] = []

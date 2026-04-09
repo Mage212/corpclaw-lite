@@ -58,3 +58,14 @@ async def test_dict_storage(memory):
     assert len(history) == 1
     assert history[0]["role"] == "tool"
     assert history[0]["content"] == '{"name": "test_tool", "kwargs": {"a": 1}}'
+
+
+@pytest.mark.asyncio
+async def test_vacuuum(memory):
+    user_id = "user_vac"
+    for i in range(5):
+        await memory.add_message(user_id, "user", f"msg {i}")
+    await memory.clear(user_id)
+    await memory.vacuum()
+    history = await memory.get_history(user_id)
+    assert len(history) == 0
