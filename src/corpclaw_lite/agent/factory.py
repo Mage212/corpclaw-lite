@@ -36,11 +36,18 @@ __all__ = [
 ]
 
 if TYPE_CHECKING:
-    from corpclaw_lite.config.settings import Settings
+    from corpclaw_lite.agent.compressor import ContextCompressor
+    from corpclaw_lite.config.settings import AgentSettings, Settings
+    from corpclaw_lite.container.ipc import ContainerIPC
     from corpclaw_lite.container.manager import ContainerManager
+    from corpclaw_lite.departments.permissions import PermissionChecker
     from corpclaw_lite.extensions.mcp.manager import MCPManager
+    from corpclaw_lite.extensions.subagents.registry import SubagentRegistry
     from corpclaw_lite.extensions.tools.registry import ToolRegistry
     from corpclaw_lite.llm.base import Provider
+    from corpclaw_lite.memory.consolidation import MemoryConsolidator
+    from corpclaw_lite.memory.sqlite import SQLiteMemory
+    from corpclaw_lite.security.tool_guard import ToolGuard
 
 logger = logging.getLogger(__name__)
 
@@ -132,7 +139,7 @@ def _sandboxed_tool_classes() -> list[Any]:
 
 def _register_sandboxed_tools(
     registry: ToolRegistry,
-    ipc: Any,
+    ipc: ContainerIPC,
 ) -> None:
     """Register file/script tools as IPCToolProxy (execute inside container)."""
     from corpclaw_lite.container.proxy import IPCToolProxy
@@ -149,109 +156,16 @@ def _register_local_tools(registry: ToolRegistry) -> None:
         logger.debug("Registered local tool (no container): %s", tool.name)
 
 
-def build_agent_stack(
-    settings: Settings | None = None,
-) -> AgentStack:
-    """Build and return the complete agent stack from config + env.
-
-    Container isolation:
-        - container.enabled=true (default): file/script tools run inside Docker
-        - container.enabled=false: everything runs on host (dev mode)
-
-    LLM routing:
-        - Reads config/settings.yaml → builds LLMRouter with named providers
-        - Falls back to env vars if no named providers configured
-
-    Returns:
-        AgentStack with all components ready to serve requests.
-        MCPManager is not yet connected — callers must ``await mcp_manager.connect_all(registry)``
-        since build_agent_stack() is synchronous.
-
-    Raises:
-        RuntimeError: If container.enabled=true but Docker is not available.
-    """
-    from corpclaw_lite.agent.subagent import SubagentDispatcher
-    from corpclaw_lite.agent.vision import VisionProcessor
-    from corpclaw_lite.config.loader import load_settings
-    from corpclaw_lite.config.settings import AgentSettings
-    from corpclaw_lite.container.ipc import ContainerIPC
-    from corpclaw_lite.container.manager import ContainerManager
+def _build_security_stack(
+    settings: Settings, provider: Provider
+) -> tuple[ToolGuard, PermissionChecker]:
+    """Build ToolGuard + PermissionChecker from config."""
+    from corpclaw_lite.agent.loop import AgentSettings
     from corpclaw_lite.departments.manager import DepartmentManager
     from corpclaw_lite.departments.permissions import PermissionChecker
-    from corpclaw_lite.extensions.subagents.registry import SubagentRegistry
-    from corpclaw_lite.extensions.tools.builtin.dispatch import DispatchSubagentTool
-    from corpclaw_lite.extensions.tools.builtin.image import ReadImageTool
-    from corpclaw_lite.extensions.tools.builtin.memory import MemoryRecallTool, MemoryStoreTool
-    from corpclaw_lite.extensions.tools.builtin.web import WebFetchTool
-    from corpclaw_lite.extensions.tools.registry import ToolRegistry
-    from corpclaw_lite.memory.sqlite import SQLiteMemory
     from corpclaw_lite.security.tool_guard import ToolGuard
 
-    # ── Load settings ─────────────────────────────────────────────────────────
-    full_settings: Settings = (
-        settings
-        if settings is not None
-        else load_settings(PROJECT_ROOT / "config" / "settings.yaml")
-    )
-    container_cfg = full_settings.container
-    agent_settings = full_settings.agent if full_settings.agent else AgentSettings()
-
-    # ── Provider / Router ─────────────────────────────────────────────────────
-    provider = _build_router()
-
-    # ── Tool Registry ─────────────────────────────────────────────────────────
-    registry = ToolRegistry()
-
-    # ── Container Isolation ────────────────────────────────────────────────────
-    container_manager: ContainerManager | None = None
-    workspace_base: Path | None = None
-    if container_cfg.enabled:
-        if not ContainerManager.is_docker_available():
-            raise RuntimeError(
-                "Container isolation is enabled (container.enabled=true) "
-                "but Docker daemon is not available. "
-                "Start Docker or set container.enabled=false in settings.yaml to use dev mode."
-            )
-        from corpclaw_lite.security.network_policy import NetworkPolicy
-
-        network_policy = NetworkPolicy()
-        network_policy_cfg = PROJECT_ROOT / "config" / "network_policy.yaml"
-        if network_policy_cfg.exists():
-            network_policy.load_file(network_policy_cfg)
-
-        # Build shared IPC client (stateless — one instance handles all users)
-        try:
-            from corpclaw_lite.security.ipc_auth import IPCAuth
-
-            container_ipc = ContainerIPC(auth=IPCAuth(), timeout_seconds=120.0)
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to initialise ContainerIPC: {e}. Is CORPCLAW_IPC_SECRET set in .env?"
-            ) from e
-
-        workspace_base = PROJECT_ROOT / container_cfg.workspace_base
-        container_manager = ContainerManager(
-            settings=container_cfg,
-            network_policy=network_policy,
-            workspace_base=workspace_base,
-            ipc=container_ipc,
-        )
-
-        _register_sandboxed_tools(registry, container_ipc)
-        logger.info(
-            "Container isolation ENABLED — file/script tools routed to Docker "
-            "(image=%s, workspace_base=%s)",
-            container_cfg.image,
-            workspace_base,
-        )
-    else:
-        _register_local_tools(registry)
-        logger.warning(
-            "Container isolation DISABLED (container.enabled=false) — "
-            "file/script tools run on host. Dev mode only!"
-        )
-
-    # ── Security ───────────────────────────────────────────────────────────────
+    agent_settings = settings.agent if settings.agent else AgentSettings()
     guard = ToolGuard(
         provider=provider if agent_settings.approval_mode == "smart" else None,
         approval_mode=agent_settings.approval_mode,
@@ -264,9 +178,24 @@ def build_agent_stack(
     dept_config = PROJECT_ROOT / "config" / "departments.yaml"
     if dept_config.exists():
         dept_manager.load_file(dept_config)
-    permission_checker = PermissionChecker(dept_manager)
+    return guard, PermissionChecker(dept_manager)
 
-    # ── Subagents ──────────────────────────────────────────────────────────────
+
+def _build_extensions_stack(
+    agent_settings: AgentSettings,
+    provider: Provider,
+    registry: ToolRegistry,
+    guard: ToolGuard,
+    permission_checker: PermissionChecker,
+) -> SubagentRegistry:
+    """Register subagents, MCP, host-side tools."""
+    from corpclaw_lite.agent.subagent import SubagentDispatcher
+    from corpclaw_lite.agent.vision import VisionProcessor
+    from corpclaw_lite.extensions.subagents.registry import SubagentRegistry
+    from corpclaw_lite.extensions.tools.builtin.dispatch import DispatchSubagentTool
+    from corpclaw_lite.extensions.tools.builtin.image import ReadImageTool
+    from corpclaw_lite.extensions.tools.builtin.web import WebFetchTool
+
     subagent_registry = SubagentRegistry()
     subagent_dir = PROJECT_ROOT / "config" / "subagents"
     if subagent_dir.exists():
@@ -286,34 +215,28 @@ def build_agent_stack(
             len(subagent_registry.list_all()),
         )
 
-    # ── Memory ────────────────────────────────────────────────────────────────
+    registry.register(WebFetchTool())
+    registry.register(ReadImageTool(VisionProcessor(provider)))
+    return subagent_registry
+
+
+def _build_memory_stack(
+    agent_settings: AgentSettings,
+    provider: Provider,
+    registry: ToolRegistry,
+) -> tuple[SQLiteMemory, MemoryConsolidator | None, ContextCompressor | None]:
+    """Build memory, consolidation, compression."""
+    from corpclaw_lite.agent.compressor import ContextCompressor
+    from corpclaw_lite.extensions.tools.builtin.memory import MemoryRecallTool, MemoryStoreTool
+    from corpclaw_lite.memory.consolidation import MemoryConsolidator
+    from corpclaw_lite.memory.sqlite import SQLiteMemory
+
     memory = SQLiteMemory()
     registry.register(MemoryStoreTool(memory))
     registry.register(MemoryRecallTool(memory))
 
-    # ── MCP (connect_all is async — callers must await it) ────────────────────
-    mcp_manager: MCPManager | None = None
-    mcp_config = PROJECT_ROOT / "config" / "mcp_servers.yaml"
-    if mcp_config.exists():
-        from corpclaw_lite.extensions.mcp.manager import MCPManager
-
-        mcp_manager = MCPManager(config_path=mcp_config)
-        logger.info("MCPManager ready (config=%s) — callers must await connect_all()", mcp_config)
-
-    # ── Host-side tools (always on host, regardless of container mode) ────────
-    registry.register(WebFetchTool())
-
-    vision = VisionProcessor(provider)
-    # workspace_base may be None when container isolation is disabled (dev mode);
-    # ReadImageTool falls back to CWD-relative resolution in that case.
-    _image_workspace_base = workspace_base if container_cfg.enabled else None
-    registry.register(ReadImageTool(vision, workspace_base=_image_workspace_base))
-
-    # ── Memory Consolidation ──────────────────────────────────────────────────
     consolidator = None
     if agent_settings.consolidation_enabled:
-        from corpclaw_lite.memory.consolidation import MemoryConsolidator
-
         consolidator = MemoryConsolidator(
             provider=provider,
             threshold=agent_settings.consolidation_threshold,
@@ -322,18 +245,18 @@ def build_agent_stack(
             "Memory consolidation enabled (threshold=%d)", agent_settings.consolidation_threshold
         )
 
-    # ── Context Compression ────────────────────────────────────────────────────
     compressor = None
     if agent_settings.compression.enabled:
-        from corpclaw_lite.agent.compressor import ContextCompressor
-
         compressor = ContextCompressor(provider, agent_settings.compression)
         logger.info(
             "Context compression enabled (threshold_ratio=%.2f)",
             agent_settings.compression.threshold_ratio,
         )
+    return memory, consolidator, compressor
 
-    # ── Bootstrap system prompt ───────────────────────────────────────────────
+
+def _build_system_prompt() -> str | None:
+    """Load bootstrap system prompt."""
     from corpclaw_lite.config.bootstrap import BootstrapLoader
 
     bootstrap_dir = PROJECT_ROOT / "config" / "bootstrap"
@@ -343,8 +266,89 @@ def build_agent_stack(
         logger.info("Loaded system prompt from %s (%d chars)", bootstrap_dir, len(system_prompt))
     else:
         logger.warning("No bootstrap/*.md files found — using minimal default system prompt")
+    return system_prompt
 
-    # ── Agent Loop ────────────────────────────────────────────────────────────
+
+def build_agent_stack(
+    settings: Settings | None = None,
+) -> AgentStack:
+    """Build and return the complete agent stack from config + env."""
+    from corpclaw_lite.config.loader import load_settings
+    from corpclaw_lite.config.settings import AgentSettings
+    from corpclaw_lite.container.ipc import ContainerIPC
+    from corpclaw_lite.container.manager import ContainerManager
+    from corpclaw_lite.extensions.tools.registry import ToolRegistry
+
+    full_settings: Settings = (
+        settings
+        if settings is not None
+        else load_settings(PROJECT_ROOT / "config" / "settings.yaml")
+    )
+    container_cfg = full_settings.container
+    agent_settings = full_settings.agent if full_settings.agent else AgentSettings()
+
+    provider = _build_router()
+    registry = ToolRegistry()
+
+    container_manager: ContainerManager | None = None
+    workspace_base: Path | None = None
+    if container_cfg.enabled:
+        if not ContainerManager.is_docker_available():
+            raise RuntimeError(
+                "Container isolation is enabled (container.enabled=true) "
+                "but Docker daemon is not available. "
+                "Start Docker or set container.enabled=false in settings.yaml to use dev mode."
+            )
+        from corpclaw_lite.security.ipc_auth import IPCAuth
+        from corpclaw_lite.security.network_policy import NetworkPolicy
+
+        network_policy = NetworkPolicy()
+        network_policy_cfg = PROJECT_ROOT / "config" / "network_policy.yaml"
+        if network_policy_cfg.exists():
+            network_policy.load_file(network_policy_cfg)
+
+        try:
+            container_ipc = ContainerIPC(auth=IPCAuth(), timeout_seconds=120.0)
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to initialise ContainerIPC: {e}. Is CORPCLAW_IPC_SECRET set in .env?"
+            ) from e
+
+        workspace_base = PROJECT_ROOT / container_cfg.workspace_base
+        container_manager = ContainerManager(
+            settings=container_cfg,
+            network_policy=network_policy,
+            workspace_base=workspace_base,
+            ipc=container_ipc,
+        )
+        _register_sandboxed_tools(registry, container_ipc)
+        logger.info(
+            "Container isolation ENABLED — file/script tools routed to Docker "
+            "(image=%s, workspace_base=%s)",
+            container_cfg.image,
+            workspace_base,
+        )
+    else:
+        _register_local_tools(registry)
+        logger.warning(
+            "Container isolation DISABLED (container.enabled=false) — "
+            "file/script tools run on host. Dev mode only!"
+        )
+
+    guard, permission_checker = _build_security_stack(full_settings, provider)
+    _build_extensions_stack(agent_settings, provider, registry, guard, permission_checker)
+    memory, consolidator, compressor = _build_memory_stack(agent_settings, provider, registry)
+
+    mcp_manager: MCPManager | None = None
+    mcp_config = PROJECT_ROOT / "config" / "mcp_servers.yaml"
+    if mcp_config.exists():
+        from corpclaw_lite.extensions.mcp.manager import MCPManager
+
+        mcp_manager = MCPManager(config_path=mcp_config)
+        logger.info("MCPManager ready (config=%s) — callers must await connect_all()", mcp_config)
+
+    system_prompt = _build_system_prompt()
+
     loop = AgentLoop(
         provider=provider,
         registry=registry,

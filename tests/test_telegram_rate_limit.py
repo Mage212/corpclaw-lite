@@ -1,6 +1,5 @@
 """Tests for Telegram channel rate limiter."""
 
-from datetime import datetime, timedelta
 from unittest.mock import patch
 
 import pytest
@@ -14,56 +13,43 @@ async def test_rate_limiter_under_limit():
 
     assert await limiter.check(1) is True
     assert await limiter.check(1) is True
-    assert await limiter.check(1) is False  # Hits max 2
-    assert await limiter.check(2) is True  # Different user
+    assert await limiter.check(1) is False
+    assert await limiter.check(2) is True
 
 
 @pytest.mark.asyncio
 async def test_rate_limiter_window_reset():
     limiter = RateLimiter(max_per_minute=1)
 
-    # First request works
-    now = datetime.now()
-    with patch("corpclaw_lite.channels.telegram.rate_limit.datetime") as mock_dt:
-        mock_dt.now.return_value = now
+    base_time = 1000.0
+    with patch("corpclaw_lite.channels.telegram.rate_limit.time.monotonic", return_value=base_time):
         assert await limiter.check(1) is True
-
-        # Immediate second fails
         assert await limiter.check(1) is False
 
-        # Shift time by 61 seconds
-        future = now + timedelta(seconds=61)
-        mock_dt.now.return_value = future
-
-        # Request works again
-        assert await limiter.check(1) is True
+        with patch(
+            "corpclaw_lite.channels.telegram.rate_limit.time.monotonic",
+            return_value=base_time + 61.0,
+        ):
+            assert await limiter.check(1) is True
 
 
 @pytest.mark.asyncio
 async def test_rate_limiter_cleanup():
     limiter = RateLimiter(max_per_minute=5)
 
-    now = datetime.now()
-    with patch("corpclaw_lite.channels.telegram.rate_limit.datetime") as mock_dt:
-        mock_dt.now.return_value = now
-
-        # Give user 1 a request
+    base_time = 1000.0
+    with patch("corpclaw_lite.channels.telegram.rate_limit.time.monotonic", return_value=base_time):
         await limiter.check(1)
 
-        # Fast forward time to expire the request
-        future = now + timedelta(seconds=61)
-        mock_dt.now.return_value = future
+        with patch(
+            "corpclaw_lite.channels.telegram.rate_limit.time.monotonic",
+            return_value=base_time + 61.0,
+        ):
+            await limiter.check(2)
 
-        # Explicit check to trigger the rolling window cleanup internally
-        await limiter.check(2)
+            assert 1 in limiter._timestamps
 
-        # User 1 still has an empty list
-        assert 1 in limiter._timestamps
+            await limiter.cleanup()
 
-        # Run explicit cron cleanup
-        await limiter.cleanup()
-
-        # User 1 should be gone
-        assert 1 not in limiter._timestamps
-        # User 2 should remain
-        assert 2 in limiter._timestamps
+            assert 1 not in limiter._timestamps
+            assert 2 in limiter._timestamps

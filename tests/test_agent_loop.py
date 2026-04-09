@@ -248,6 +248,7 @@ async def test_approval_callback_per_call_takes_priority(
         description = ""
         params = []
         terminal = False
+        risk_level = None
 
         async def execute(self, **kwargs: Any) -> str:
             return "executed"

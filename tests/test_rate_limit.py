@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+import time
 
 import pytest
 
@@ -23,7 +23,6 @@ class TestRateLimiter:
         limiter = RateLimiter(max_per_minute=5)
         for _ in range(5):
             assert await limiter.check(2002)
-        # 6th should be blocked
         assert not await limiter.check(2002)
 
     @pytest.mark.asyncio
@@ -32,9 +31,7 @@ class TestRateLimiter:
         limiter = RateLimiter(max_per_minute=3)
         for _ in range(3):
             assert await limiter.check(100)
-        # User 100 is now blocked
         assert not await limiter.check(100)
-        # But user 200 is fine
         assert await limiter.check(200)
 
     @pytest.mark.asyncio
@@ -45,11 +42,9 @@ class TestRateLimiter:
         assert await limiter.check(300)
         assert not await limiter.check(300)
 
-        # Manually expire timestamps
-        old_time = datetime.now() - timedelta(minutes=2)
+        old_time = time.monotonic() - 120.0
         limiter._timestamps[300] = [old_time, old_time]
 
-        # Should be allowed again
         assert await limiter.check(300)
 
     @pytest.mark.asyncio
@@ -57,7 +52,6 @@ class TestRateLimiter:
         """Cleanup should remove users with empty timestamp lists."""
         limiter = RateLimiter(max_per_minute=10)
 
-        # Add some entries then clear their timestamps manually
         await limiter.check(400)
         limiter._timestamps[400] = []
         limiter._timestamps[500] = []

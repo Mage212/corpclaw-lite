@@ -91,10 +91,10 @@ async def test_cli_channel_send_file(tmp_path: Path) -> None:
 
 def test_container_policies_build_docker_args() -> None:
     from corpclaw_lite.config.settings import ContainerSettings
-    from corpclaw_lite.container.policies import ContainerPolicies
+    from corpclaw_lite.container.policies import build_docker_args
 
     settings = ContainerSettings()
-    args = ContainerPolicies.build_docker_args(user_id=123, settings=settings)
+    args = build_docker_args(user_id=123, settings=settings)
     assert args["name"] == "corpclaw_agent_123"
     assert args["detach"] is True
     assert "mem_limit" in args
@@ -103,14 +103,12 @@ def test_container_policies_build_docker_args() -> None:
 
 def test_container_policies_with_network_policy() -> None:
     from corpclaw_lite.config.settings import ContainerSettings
-    from corpclaw_lite.container.policies import ContainerPolicies
+    from corpclaw_lite.container.policies import build_docker_args
     from corpclaw_lite.security.network_policy import NetworkPolicy
 
     settings = ContainerSettings()
     policy = NetworkPolicy()
-    args = ContainerPolicies.build_docker_args(
-        user_id=456, settings=settings, network_policy=policy
-    )
+    args = build_docker_args(user_id=456, settings=settings, network_policy=policy)
     assert args["name"] == "corpclaw_agent_456"
 
 

@@ -36,13 +36,19 @@ class SkillRegistry:
 
         logger.info("Loaded %d skills from %s", loaded_count, dir_path)
 
-    def register(self, skill: Skill) -> None:
+    def register(self, skill: Skill, *, allow_replace: bool = False) -> None:
         """Register a single skill."""
+        if skill.id in self._skills and not allow_replace:
+            raise ValueError(f"Skill '{skill.id}' is already registered.")
         self._skills[skill.id] = skill
 
     def unregister(self, skill_id: str) -> None:
         """Remove a skill by ID (no-op if not found)."""
         self._skills.pop(skill_id, None)
+
+    def get(self, skill_id: str) -> Skill | None:
+        """Get a skill by ID. Alias for get_skill."""
+        return self._skills.get(skill_id)
 
     def get_skill(self, skill_id: str) -> Skill | None:
         """Get a skill by ID without checking permissions."""
@@ -51,6 +57,10 @@ class SkillRegistry:
     def list_all(self) -> list[Skill]:
         """List all loaded skills."""
         return list(self._skills.values())
+
+    def items(self) -> dict[str, Skill]:
+        """Return a copy of the id→skill mapping."""
+        return dict(self._skills)
 
     def get_allowed_skills(self, user: User) -> list[Skill]:
         """Return only the skills the user is allowed to see (based on their department)."""

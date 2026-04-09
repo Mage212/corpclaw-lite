@@ -6,7 +6,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from corpclaw_lite.agent.context import ContextBuilder
 from corpclaw_lite.agent.guards import (
@@ -77,8 +77,7 @@ class RunStats:
     iterations: int = 0
     tools_used: list[str] = field(default_factory=list[str])
     duration_ms: float = 0.0
-    # "ok" | "budget" | "loop" | "timeout" | "error"
-    status: str = "ok"
+    status: Literal["ok", "budget", "loop", "timeout", "error"] = "ok"
     error: str | None = None
 
 
@@ -194,12 +193,8 @@ class AgentLoop:
             system_prompt_override=dynamic_prompt,
         )
 
-        # Save new user message
         if self._memory:
-            try:
-                await self._memory.add_message(mem_key, "user", message)
-            except StorageError:
-                logger.error("[user=%s] Failed to save user message", user.id)
+            await self._save_memory(mem_key, "user", message)
 
         # Get budget from department if permission checker is available
         guard_config = (
@@ -229,7 +224,7 @@ class AgentLoop:
                     context.prune_old_tool_results(protect_tail=6)
 
                 if self._compressor and self._compressor.should_compress(context.messages):
-                    context.messages = await self._compressor.compress(context.messages)
+                    context.messages = await self._compressor.compress(context.messages, mem_key)
 
                 try:
                     response = await asyncio.wait_for(
@@ -242,11 +237,7 @@ class AgentLoop:
                     )
                 except TimeoutError:
                     msg = "I could not get a response from the language model (timed out)."
-                    if self._memory:
-                        try:
-                            await self._memory.add_message(mem_key, "assistant", msg)
-                        except StorageError:
-                            logger.error("[user=%s] Failed to save timeout message", user.id)
+                    await self._save_memory(mem_key, "assistant", msg)
                     stats.status = "timeout"
                     stats.duration_ms = (time.monotonic() - t0) * 1000
                     logger.warning(
@@ -275,19 +266,14 @@ class AgentLoop:
                     # Agent provided text directly — save and return
                     final = response.content if response.content else "Agent provided no response."
                     if self._memory:
-                        # Prepend tool-usage marker so subsequent requests
-                        # show the model hard proof of what was actually called.
                         marker = _format_tool_marker(stats.tools_used)
                         mem_text = f"{marker}{final}" if marker else final
-                        try:
-                            await self._memory.add_message(
-                                mem_key,
-                                "assistant",
-                                mem_text,
-                                reasoning=response.reasoning or None,
-                            )
-                        except StorageError:
-                            logger.error("[user=%s] Failed to save final message", user.id)
+                        await self._save_memory(
+                            mem_key,
+                            "assistant",
+                            mem_text,
+                            reasoning=response.reasoning or None,
+                        )
                         if self._consolidator:
                             await self._consolidator.maybe_consolidate(self._memory, mem_key)
                     stats.duration_ms = (time.monotonic() - t0) * 1000
@@ -353,12 +339,7 @@ class AgentLoop:
                             if self._memory:
                                 marker = _format_tool_marker(stats.tools_used)
                                 mem_text = f"{marker}{result}" if marker else result
-                                try:
-                                    await self._memory.add_message(mem_key, "assistant", mem_text)
-                                except StorageError:
-                                    logger.error(
-                                        "[user=%s] Failed to save terminal tool result", user.id
-                                    )
+                                await self._save_memory(mem_key, "assistant", mem_text)
                                 if self._consolidator:
                                     await self._consolidator.maybe_consolidate(
                                         self._memory, mem_key
@@ -388,10 +369,7 @@ class AgentLoop:
             if self._memory:
                 marker = _format_tool_marker(stats.tools_used)
                 mem_text = f"{marker}{msg}" if marker else msg
-                try:
-                    await self._memory.add_message(mem_key, "assistant", mem_text)
-                except StorageError:
-                    logger.error("[user=%s] Failed to save budget exceeded message", user.id)
+                await self._save_memory(mem_key, "assistant", mem_text)
             stats.status = "budget"
             stats.error = str(e)
             stats.duration_ms = (time.monotonic() - t0) * 1000
@@ -402,14 +380,20 @@ class AgentLoop:
         if self._memory:
             marker = _format_tool_marker(stats.tools_used)
             mem_text = f"{marker}{fallback}" if marker else fallback
-            try:
-                await self._memory.add_message(mem_key, "assistant", mem_text)
-            except StorageError:
-                logger.error("[user=%s] Failed to save loop detection message", user.id)
+            await self._save_memory(mem_key, "assistant", mem_text)
         stats.status = "loop"
         stats.duration_ms = (time.monotonic() - t0) * 1000
         logger.warning("[user=%s] loop detected after %d iterations", user.id, stats.iterations)
         return fallback, stats
+
+    async def _save_memory(self, mem_key: str, role: str, content: str, **kwargs: Any) -> None:
+        """Persist a message to memory, swallowing StorageError."""
+        if not self._memory:
+            return
+        try:
+            await self._memory.add_message(mem_key, role, content, **kwargs)
+        except StorageError:
+            logger.error("[user=%s] Failed to save %s message", mem_key, role)
 
     def _can_parallelize(self, tool_calls: list[ToolCall]) -> bool:
         """Check if all tools in batch can be safely executed in parallel.
@@ -477,7 +461,7 @@ class AgentLoop:
         try:
             if self._tool_guard:
                 tool = self._registry.get(tc.name)
-                risk_level = getattr(tool, "risk_level", None)
+                risk_level = tool.risk_level if tool else None
                 risk = risk_level.value if risk_level else None
                 await self._tool_guard.check(tc.name, tc.arguments, risk_level=risk)
 

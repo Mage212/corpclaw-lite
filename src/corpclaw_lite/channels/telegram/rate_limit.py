@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections import defaultdict
-from datetime import datetime, timedelta
 
 __all__ = [
     "RateLimiter",
@@ -23,16 +23,16 @@ class RateLimiter:
 
     def __init__(self, max_per_minute: int = 10) -> None:
         self._max = max_per_minute
-        self._timestamps: dict[int, list[datetime]] = defaultdict(list)
+        self._timestamps: dict[int, list[float]] = defaultdict(list)
         self._lock = asyncio.Lock()
 
     async def check(self, user_id: int) -> bool:
         """Return True if under limit, False if rate-limited."""
         async with self._lock:
-            now = datetime.now()
-            minute_ago = now - timedelta(minutes=1)
+            now = time.monotonic()
+            cutoff = now - 60.0
 
-            self._timestamps[user_id] = [ts for ts in self._timestamps[user_id] if ts > minute_ago]
+            self._timestamps[user_id] = [ts for ts in self._timestamps[user_id] if ts > cutoff]
 
             if len(self._timestamps[user_id]) >= self._max:
                 return False
@@ -46,12 +46,12 @@ class RateLimiter:
         Should be called periodically from a background task.
         """
         async with self._lock:
-            now = datetime.now()
-            minute_ago = now - timedelta(minutes=1)
+            now = time.monotonic()
+            cutoff = now - 60.0
 
             inactive: list[int] = []
             for uid, ts_list in self._timestamps.items():
-                active_ts = [ts for ts in ts_list if ts > minute_ago]
+                active_ts = [ts for ts in ts_list if ts > cutoff]
                 if not active_ts:
                     inactive.append(uid)
                 else:

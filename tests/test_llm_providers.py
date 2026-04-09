@@ -91,7 +91,8 @@ class TestAnthropicProvider:
         assert result.content == "Привет!"
         assert result.tool_calls == []
         # usage dict may have input/output tokens
-        assert isinstance(result.usage, dict)
+        assert isinstance(result.usage.input_tokens, int)
+        assert isinstance(result.usage.output_tokens, int)
 
     @pytest.mark.asyncio
     async def test_tool_call_response(self) -> None:
@@ -216,7 +217,8 @@ class TestOpenAIProvider:
         assert isinstance(result, LLMResponse)
         assert result.content == "Привет от локальной LLM!"
         assert result.tool_calls == []
-        assert isinstance(result.usage, dict)
+        assert isinstance(result.usage.input_tokens, int)
+        assert isinstance(result.usage.output_tokens, int)
 
     @pytest.mark.asyncio
     async def test_tool_call_response(self) -> None:

@@ -11,4 +11,4 @@ allowed_tools:
   - web_fetch
   - memory_store
   - memory_recall
-prompt_path: ""
+prompt_path: "config/bootstrap/subagents/research.md"

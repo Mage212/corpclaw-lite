@@ -37,8 +37,14 @@ class PluginRegistry:
 
         logger.info("Loaded %d plugins from %s", loaded_count, dir_path)
 
-    def register(self, plugin: Plugin) -> None:
+    def register(self, plugin: Plugin, *, allow_replace: bool = False) -> None:
+        if plugin.manifest.name in self._plugins and not allow_replace:
+            raise ValueError(f"Plugin '{plugin.manifest.name}' is already registered.")
         self._plugins[plugin.manifest.name] = plugin
+
+    def get(self, name: str) -> Plugin | None:
+        """Get a plugin by name. Alias for get_plugin."""
+        return self._plugins.get(name)
 
     def get_plugin(self, name: str) -> Plugin | None:
         return self._plugins.get(name)
@@ -49,6 +55,10 @@ class PluginRegistry:
 
     def list_all(self) -> list[Plugin]:
         return list(self._plugins.values())
+
+    def items(self) -> dict[str, Plugin]:
+        """Return a copy of the name→plugin mapping."""
+        return dict(self._plugins)
 
     def get_allowed_plugins(self, user: User) -> list[Plugin]:
         """Return plugins this user has department access to."""

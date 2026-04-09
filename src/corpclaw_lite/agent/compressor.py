@@ -33,7 +33,7 @@ class ContextCompressor:
     def __init__(self, provider: Provider, settings: CompressionSettings):
         self._provider = provider
         self._settings = settings
-        self._previous_summary: str | None = None
+        self._summaries: dict[str, str] = {}
 
     def should_compress(self, messages: list[dict[str, Any]]) -> bool:
         """Check if compression is needed based on token threshold.
@@ -66,7 +66,9 @@ class ContextCompressor:
             )
         return should
 
-    async def compress(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    async def compress(
+        self, messages: list[dict[str, Any]], mem_key: str | None = None
+    ) -> list[dict[str, Any]]:
         """Multi-phase compression pipeline.
 
         1. Prune old tool results (cheap, no LLM)
@@ -101,7 +103,7 @@ class ContextCompressor:
         tail = messages[tail_start:]
 
         if middle:
-            summary = await self._generate_summary(middle)
+            summary = await self._generate_summary(middle, mem_key)
             if summary:
                 summary_msg: dict[str, Any] = {
                     "role": "user",
@@ -173,15 +175,16 @@ class ContextCompressor:
         )
         return result
 
-    async def _generate_summary(self, turns: list[dict[str, Any]]) -> str | None:
+    async def _generate_summary(
+        self, turns: list[dict[str, Any]], mem_key: str | None = None
+    ) -> str | None:
         """Generate structured summary of conversation turns using LLM."""
         turns_text = self._format_turns_for_summary(turns)
         if not turns_text.strip():
             return None
 
-        prev = (
-            f"\n\nPrevious summary:\n{self._previous_summary}\n" if self._previous_summary else ""
-        )
+        prev_summary = mem_key and self._summaries.get(mem_key)
+        prev = f"\n\nPrevious summary:\n{prev_summary}\n" if prev_summary else ""
 
         prompt = f"""Summarize the following conversation history. Be concise and structured.
 
@@ -203,8 +206,8 @@ Summary:"""
                 tools=None,
             )
             summary = response.content
-            if summary:
-                self._previous_summary = summary.strip()
+            if summary and mem_key:
+                self._summaries[mem_key] = summary.strip()
             return summary
         except Exception as e:
             logger.warning("ContextCompressor: summary generation failed: %s", e)

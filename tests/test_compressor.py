@@ -208,10 +208,10 @@ class TestGenerateSummary:
         self, provider: MockProvider, settings: CompressionSettings
     ) -> None:
         compressor = ContextCompressor(provider, settings)
-        compressor._previous_summary = "Old summary"
+        compressor._summaries["user_123"] = "Old summary"
 
         turns = [{"role": "user", "content": "New message"}]
-        await compressor._generate_summary(turns)
+        await compressor._generate_summary(turns, mem_key="user_123")
 
         prompt = provider.calls[0][0]["content"]
         assert "Previous summary" in prompt

@@ -72,6 +72,33 @@ class TelegramBotOrchestrator:
         self._shutdown_event = asyncio.Event()
         self._agent_activity_logger: AgentLogger | None = None
 
+    def _require_started(
+        self,
+    ) -> tuple[
+        AgentStack, TelegramChannel, RateLimiter, SkillRegistry, PluginRegistry, BootstrapLoader
+    ]:
+        """Return all required components, raising RuntimeError if any is missing."""
+        if self._stack is None:
+            raise RuntimeError("AgentStack not initialized — call start() first")
+        if self._channel is None:
+            raise RuntimeError("TelegramChannel not initialized")
+        if self._rate_limiter is None:
+            raise RuntimeError("RateLimiter not initialized")
+        if self._skill_registry is None:
+            raise RuntimeError("SkillRegistry not initialized")
+        if self._plugin_registry is None:
+            raise RuntimeError("PluginRegistry not initialized")
+        if self._bootstrap is None:
+            raise RuntimeError("BootstrapLoader not initialized")
+        return (
+            self._stack,
+            self._channel,
+            self._rate_limiter,
+            self._skill_registry,
+            self._plugin_registry,
+            self._bootstrap,
+        )
+
     async def start(self) -> None:
         """Build agent stack, wire components, start bot."""
         log_cfg = self._settings.logging
@@ -195,7 +222,6 @@ class TelegramBotOrchestrator:
         logger.info("Starting Telegram bot...")
         install_signal_handlers(self._shutdown_event)
 
-        assert self._channel is not None
         await self._channel.start()
 
         if tg_settings.admin_ids and self._channel.app:
@@ -262,18 +288,14 @@ class TelegramBotOrchestrator:
 
     async def handle_message(self, telegram_id: str, message: str, mode: str = "execute") -> None:
         """Main message handler — replaces nested _handle_and_reply."""
-        assert self._stack is not None
-        assert self._channel is not None
-        assert self._rate_limiter is not None
-        assert self._skill_registry is not None
-        assert self._plugin_registry is not None
-        assert self._bootstrap is not None
+        stack, channel, rate_limiter, skill_registry, plugin_registry, bootstrap = (
+            self._require_started()
+        )
 
         tid = int(telegram_id)
-        user_manager = self._stack.user_manager
-        agent_loop = self._stack.loop
-        container_manager = self._stack.container_manager
-        channel = self._channel
+        user_manager = stack.user_manager
+        agent_loop = stack.loop
+        container_manager = stack.container_manager
 
         # Access control
         if user_manager.is_session_revoked(tid):
@@ -328,7 +350,7 @@ class TelegramBotOrchestrator:
                 return
 
         # Rate limiting
-        allowed = await self._rate_limiter.check(tid)
+        allowed = await rate_limiter.check(tid)
         if not allowed:
             await channel.send_message(
                 user,
@@ -368,21 +390,17 @@ class TelegramBotOrchestrator:
         # Agent execution
         run_stats = None
         try:
-            base_prompt = self._bootstrap.get_system_prompt()
-            dept_prompt = self._bootstrap.get_department_prompt(user.department)
-            user_prompt = (
-                self._bootstrap.get_user_prompt(user.telegram_id) if user.telegram_id else None
-            )
+            base_prompt = bootstrap.get_system_prompt()
+            dept_prompt = bootstrap.get_department_prompt(user.department)
+            user_prompt = bootstrap.get_user_prompt(user.telegram_id) if user.telegram_id else None
             user_ctx = f"You are talking to {user.name} from the {user.department} department."
             parts_list = [p for p in [base_prompt, dept_prompt, user_prompt, user_ctx] if p]
             system_prompt: str | None = "\n\n".join(parts_list) if parts_list else None
 
             # Inject only relevant skill instructions into system prompt
-            allowed_skills = self._skill_registry.get_allowed_skills(user)
+            allowed_skills = skill_registry.get_allowed_skills(user)
             plugin_skills = [
-                p.skill
-                for p in self._plugin_registry.get_allowed_plugins(user)
-                if p.skill is not None
+                p.skill for p in plugin_registry.get_allowed_plugins(user) if p.skill is not None
             ]
             from corpclaw_lite.agent.prompt import build_skill_block
 
@@ -440,11 +458,9 @@ class TelegramBotOrchestrator:
 
     async def handle_image(self, telegram_id: str, image_path: Path, caption: str | None) -> None:
         """Route photo uploads directly to vision LLM, bypassing agent loop."""
-        assert self._stack is not None
-        assert self._channel is not None
+        stack, channel, *_ = self._require_started()
 
-        user_manager = self._stack.user_manager
-        channel = self._channel
+        user_manager = stack.user_manager
 
         if not user_manager.is_allowed(int(telegram_id)):
             return
@@ -468,7 +484,7 @@ class TelegramBotOrchestrator:
         result = await self._vision_processor.describe(image_path, prompt, user)
 
         # Persist in agent memory — non-critical, don't block user response
-        mem = self._stack.loop.memory
+        mem = stack.loop.memory
         if mem is not None:
             mem_key = str(user.telegram_id)
             user_msg = f"[Пользователь отправил изображение: {image_path.name}] {prompt}"
@@ -484,13 +500,15 @@ class TelegramBotOrchestrator:
 
     async def send_file_callback(self, path: Path, user: User, caption: str) -> str:
         """File delivery callback for SendFileTool."""
-        assert self._channel is not None
+        if self._channel is None:
+            raise RuntimeError("TelegramChannel not initialized")
         await self._channel.send_file(user, path, caption)
         return f"File '{path.name}' sent to user."
 
     async def _rate_limit_cleanup_loop(self) -> None:
         """Periodic rate limiter cleanup."""
-        assert self._rate_limiter is not None
+        if self._rate_limiter is None:
+            raise RuntimeError("RateLimiter not initialized")
         while True:
             await asyncio.sleep(300)
             await self._rate_limiter.cleanup()

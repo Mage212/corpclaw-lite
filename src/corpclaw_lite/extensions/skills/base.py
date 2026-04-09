@@ -29,5 +29,5 @@ class Skill:
     instructions: str
     path: Path | None = None
     version: str = "1.0.0"
-    keywords: list[str] = field(default_factory=lambda: list[str]())
+    keywords: list[str] = field(default_factory=lambda: [])
     always: bool = False

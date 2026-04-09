@@ -7,7 +7,7 @@ from typing import Any
 import anthropic
 
 from corpclaw_lite.config.settings import ProviderSettings
-from corpclaw_lite.llm.base import LLMResponse, Provider, StreamChunk, ToolCall
+from corpclaw_lite.llm.base import LLMResponse, Provider, StreamChunk, TokenUsage, ToolCall
 from corpclaw_lite.llm.presets import ModelPreset
 
 __all__ = [
@@ -58,6 +58,28 @@ class AnthropicProvider(Provider):
             }
         return tool
 
+    def _apply_preset(self, system: str | None, kwargs: dict[str, Any]) -> str | None:
+        """Merge preset inference params and inject system_prompt_prefix.
+
+        Priority: request-level params > preset params > provider defaults.
+        """
+        if not self._preset:
+            return system
+
+        for k, v in self._preset.inference_params.items():
+            if k in self._ANTHROPIC_STANDARD_PARAMS:
+                kwargs.setdefault(k, v)
+
+        if self._preset.thinking_budget_tokens:
+            budget = self._preset.thinking_budget_tokens
+            kwargs.setdefault("max_tokens", budget + 1024)
+
+        if self._preset.system_prompt_prefix:
+            prefix = self._preset.system_prompt_prefix
+            return f"{prefix}\n{system}" if system else prefix
+
+        return system
+
     async def chat(
         self,
         messages: list[dict[str, Any]],
@@ -70,11 +92,7 @@ class AnthropicProvider(Provider):
             "messages": messages,
             "max_tokens": 4096,
         }
-        # Merge preset inference params (request-level > preset > defaults)
-        if self._preset:
-            for k, v in self._preset.inference_params.items():
-                if k in self._ANTHROPIC_STANDARD_PARAMS:
-                    kwargs.setdefault(k, v)
+        system = self._apply_preset(system, kwargs)
         if system:
             kwargs["system"] = system
 
@@ -101,10 +119,10 @@ class AnthropicProvider(Provider):
                 )
 
         # Build token usage
-        usage = {
-            "input_tokens": response.usage.input_tokens,
-            "output_tokens": response.usage.output_tokens,
-        }
+        usage = TokenUsage(
+            input_tokens=response.usage.input_tokens,
+            output_tokens=response.usage.output_tokens,
+        )
 
         return LLMResponse(content=content, tool_calls=tool_calls, usage=usage)
 
@@ -137,6 +155,7 @@ class AnthropicProvider(Provider):
             "messages": messages,
             "max_tokens": 4096,
         }
+        self._apply_preset(None, kwargs)
         if system:
             kwargs["system"] = system
 
@@ -147,10 +166,10 @@ class AnthropicProvider(Provider):
             if block.type == "text":
                 content += block.text
 
-        usage = {
-            "input_tokens": response.usage.input_tokens,
-            "output_tokens": response.usage.output_tokens,
-        }
+        usage = TokenUsage(
+            input_tokens=response.usage.input_tokens,
+            output_tokens=response.usage.output_tokens,
+        )
         return LLMResponse(content=content, usage=usage)
 
     async def stream(
@@ -165,6 +184,7 @@ class AnthropicProvider(Provider):
             "messages": messages,
             "max_tokens": 4096,
         }
+        self._apply_preset(None, kwargs)
         if system:
             kwargs["system"] = system
 

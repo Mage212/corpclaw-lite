@@ -116,15 +116,15 @@ def test_container_not_available_no_docker():
 
 
 def test_environment_merge_with_network_policy():
-    """ContainerPolicies must merge environment dicts without crashing."""
-    from corpclaw_lite.container.policies import ContainerPolicies
+    """build_docker_args must merge environment dicts without crashing."""
+    from corpclaw_lite.container.policies import build_docker_args
     from corpclaw_lite.security.network_policy import NetworkPolicy
 
     settings = ContainerSettings()
     policy = NetworkPolicy()
     policy.allowlist = ["example.com", "api.internal"]
 
-    args = ContainerPolicies.build_docker_args(user_id=1, settings=settings, network_policy=policy)
+    args = build_docker_args(user_id=1, settings=settings, network_policy=policy)
 
     env = args["environment"]
     assert isinstance(env, dict)

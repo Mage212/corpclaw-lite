@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
@@ -11,6 +11,9 @@ from corpclaw_lite.extensions.subagents.base import SubagentSpec
 __all__ = [
     "SubagentRegistry",
 ]
+
+if TYPE_CHECKING:
+    from corpclaw_lite.users.models import User
 
 logger = logging.getLogger(__name__)
 
@@ -52,8 +55,24 @@ class SubagentRegistry:
     def register(self, spec: SubagentSpec) -> None:
         self._subagents[spec.id] = spec
 
+    def get(self, subagent_id: str) -> SubagentSpec | None:
+        """Get a subagent spec by ID. Alias for get_spec."""
+        return self._subagents.get(subagent_id)
+
     def get_spec(self, subagent_id: str) -> SubagentSpec | None:
         return self._subagents.get(subagent_id)
 
+    def unregister(self, subagent_id: str) -> None:
+        """Remove a subagent by ID (no-op if not found)."""
+        self._subagents.pop(subagent_id, None)
+
     def list_all(self) -> list[SubagentSpec]:
+        return list(self._subagents.values())
+
+    def items(self) -> dict[str, SubagentSpec]:
+        """Return a copy of the id→spec mapping."""
+        return dict(self._subagents)
+
+    def get_allowed_subagents(self, user: User) -> list[SubagentSpec]:
+        """Return subagents the user's department can dispatch."""
         return list(self._subagents.values())

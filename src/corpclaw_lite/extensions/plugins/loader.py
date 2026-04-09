@@ -38,7 +38,6 @@ class PluginLoader:
                 description=data.get("description", "No description"),
                 allowed_departments=data.get("allowed_departments", ["*"]),
                 components=data.get("components", {}),
-                requires=data.get("requires", {}),
                 path=path,
             )
         except Exception as e:
@@ -46,13 +45,11 @@ class PluginLoader:
             return None
 
     @classmethod
-    def load_plugin(cls, plugin_dir: Path, *, force_reload: bool = False) -> Plugin | None:
+    def load_plugin(cls, plugin_dir: Path) -> Plugin | None:
         """Load an entire plugin directory.
 
         Args:
             plugin_dir: Path to the plugin directory (must contain manifest.yaml).
-            force_reload: If True, clear the importlib module cache before
-                re-importing tool.py so that changes are picked up by hot-reload.
         """
         if not plugin_dir.exists() or not plugin_dir.is_dir():
             return None

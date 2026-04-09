@@ -11,4 +11,4 @@ allowed_tools:
   - exec_script
   - write_file
   - read_file
-prompt_path: ""
+prompt_path: "config/bootstrap/subagents/execution.md"

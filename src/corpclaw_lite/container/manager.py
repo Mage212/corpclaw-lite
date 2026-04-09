@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from corpclaw_lite.config.settings import ContainerSettings
-from corpclaw_lite.container.policies import ContainerPolicies
+from corpclaw_lite.container.policies import build_docker_args
 from corpclaw_lite.security.network_policy import NetworkPolicy
 
 __all__ = [
@@ -136,7 +136,7 @@ class ContainerManager:
 
         # Container doesn't exist — create it
         logger.info("Creating new container %s for user %s", name, user_id)
-        args = ContainerPolicies.build_docker_args(
+        args = build_docker_args(
             user_id=user_id,
             settings=self.settings,
             network_policy=self.network_policy,

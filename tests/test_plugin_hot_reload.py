@@ -166,7 +166,7 @@ def test_force_reload_with_subprocess_isolation(tmp_path: Path) -> None:
     assert isinstance(plugin.tools[0], PluginToolProxy)
     assert plugin.tools[0].name == "cached_tool"
 
-    # force_reload should also work (new proxy, no stale state)
-    plugin2 = PluginLoader.load_plugin(plugin_dir, force_reload=True)
+    # reload should also work (new proxy, no stale state)
+    plugin2 = PluginLoader.load_plugin(plugin_dir)
     assert plugin2 is not None
     assert isinstance(plugin2.tools[0], PluginToolProxy)

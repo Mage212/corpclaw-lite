@@ -9,7 +9,7 @@ from typing import Any
 import openai
 
 from corpclaw_lite.config.settings import ProviderSettings
-from corpclaw_lite.llm.base import LLMResponse, Provider, StreamChunk, ToolCall
+from corpclaw_lite.llm.base import LLMResponse, Provider, StreamChunk, TokenUsage, ToolCall
 from corpclaw_lite.llm.presets import ModelPreset
 from corpclaw_lite.llm.xml_tool_calling import parse_xml_tool_call
 
@@ -227,12 +227,12 @@ class OpenAIProvider(Provider):
             if parse_result.tool_call:
                 tool_calls.append(parse_result.tool_call)
 
-        usage = {}
+        usage = TokenUsage()
         if response.usage:
-            usage = {
-                "input_tokens": response.usage.prompt_tokens or 0,
-                "output_tokens": response.usage.completion_tokens or 0,
-            }
+            usage = TokenUsage(
+                input_tokens=response.usage.prompt_tokens or 0,
+                output_tokens=response.usage.completion_tokens or 0,
+            )
 
         return LLMResponse(
             content=content,
@@ -287,12 +287,12 @@ class OpenAIProvider(Provider):
         choice = response.choices[0]
         content = choice.message.content or ""
 
-        usage = {}
+        usage = TokenUsage()
         if response.usage:
-            usage = {
-                "input_tokens": response.usage.prompt_tokens or 0,
-                "output_tokens": response.usage.completion_tokens or 0,
-            }
+            usage = TokenUsage(
+                input_tokens=response.usage.prompt_tokens or 0,
+                output_tokens=response.usage.completion_tokens or 0,
+            )
         return LLMResponse(content=content, usage=usage)
 
     async def stream(

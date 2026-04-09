@@ -12,4 +12,4 @@ allowed_tools:
   - write_file
   - read_file
   - list_files
-prompt_path: ""
+prompt_path: "config/bootstrap/subagents/document.md"

@@ -15,4 +15,4 @@ allowed_tools:
   - write_file
   - edit_file
   - search_files
-prompt_path: ""
+prompt_path: "config/bootstrap/subagents/filesystem.md"

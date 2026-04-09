@@ -18,6 +18,8 @@ departments:
       - memory_store
       - memory_recall
       - normalize_excel
+      - read_image
+      - dispatch_subagent
     budget:
       max_iterations: 10
       max_tool_calls: 20
@@ -42,6 +44,8 @@ departments:
       - search_files
       - memory_store
       - memory_recall
+      - read_image
+      - dispatch_subagent
     budget:
       max_iterations: 15
       max_tool_calls: 30
@@ -58,6 +62,8 @@ departments:
       - web_fetch
       - normalize_excel
       - send_file
+      - read_image
+      - dispatch_subagent
     budget:
       max_iterations: 10
       max_tool_calls: 20
@@ -75,6 +81,8 @@ departments:
       - memory_recall
       - normalize_excel
       - send_file
+      - read_image
+      - dispatch_subagent
     budget:
       max_iterations: 10
       max_tool_calls: 20
@@ -90,6 +98,7 @@ departments:
       - memory_recall
       - normalize_excel
       - send_file
+      - read_image
     budget:
       max_iterations: 10
       max_tool_calls: 20
@@ -108,6 +117,8 @@ departments:
       - web_fetch
       - normalize_excel
       - send_file
+      - read_image
+      - dispatch_subagent
     budget:
       max_iterations: 15
       max_tool_calls: 30
@@ -123,6 +134,8 @@ departments:
       - memory_store
       - memory_recall
       - web_fetch
+      - read_image
+      - dispatch_subagent
     budget:
       max_iterations: 10
       max_tool_calls: 20

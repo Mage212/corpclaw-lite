@@ -3,12 +3,13 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Any, Protocol, runtime_checkable
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 __all__ = [
     "LLMResponse",
     "Provider",
     "StreamChunk",
+    "TokenUsage",
     "ToolCall",
     "VisionProvider",
 ]
@@ -22,13 +23,20 @@ class ToolCall(BaseModel):
     arguments: dict[str, Any]
 
 
+class TokenUsage(BaseModel):
+    """Token usage statistics from an LLM response."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
 class LLMResponse(BaseModel):
     """Standardized response from an LLM provider."""
 
     content: str
     reasoning: str = ""
     tool_calls: list[ToolCall] = []
-    usage: dict[str, int] = {}
+    usage: TokenUsage = Field(default_factory=TokenUsage)
 
 
 class StreamChunk(BaseModel):
@@ -37,6 +45,7 @@ class StreamChunk(BaseModel):
     content: str = ""
 
 
+@runtime_checkable
 class Provider(Protocol):
     """Protocol for LLM providers."""
 

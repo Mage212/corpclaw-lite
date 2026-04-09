@@ -125,7 +125,7 @@ class PluginHotReloader:
         for added in current_paths - self._known_dirs:
             plugin_name = added.name
             logger.info("PluginHotReloader: plugin '%s' added", plugin_name)
-            self._load_and_register(added, force_reload=False)
+            self._load_and_register(added)
             self._mtimes[added] = current_dirs[added]
 
         # ── Changed plugins ───────────────────────────────────────────────
@@ -134,7 +134,7 @@ class PluginHotReloader:
                 plugin_name = existing.name
                 logger.info("PluginHotReloader: plugin '%s' changed, reloading", plugin_name)
                 self._unregister_plugin(plugin_name)
-                self._load_and_register(existing, force_reload=True)
+                self._load_and_register(existing)
                 self._mtimes[existing] = current_dirs[existing]
 
         self._known_dirs = current_paths
@@ -157,9 +157,9 @@ class PluginHotReloader:
 
         self._plugin_registry.unregister(plugin_name)
 
-    def _load_and_register(self, plugin_dir: Path, *, force_reload: bool) -> None:
+    def _load_and_register(self, plugin_dir: Path) -> None:
         """Load a plugin and register its tools + skill."""
-        plugin = PluginLoader.load_plugin(plugin_dir, force_reload=force_reload)
+        plugin = PluginLoader.load_plugin(plugin_dir)
         if not plugin:
             logger.warning("PluginHotReloader: failed to load plugin from '%s'", plugin_dir)
             return

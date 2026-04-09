@@ -19,7 +19,9 @@ if TYPE_CHECKING:
 
 __all__ = ["process_request"]
 
-logging.basicConfig(level=logging.ERROR)
+
+def _init_logging() -> None:
+    logging.basicConfig(level=logging.ERROR)
 
 
 def _build_container_registry() -> ToolRegistry:
@@ -64,6 +66,7 @@ def get_registry() -> ToolRegistry:
 
 def process_request() -> None:
     """Read from stdin, verify, execute tool, sign response, print to stdout."""
+    _init_logging()
     # sys.stdin.read() hangs indefinitely on Docker Desktop for Mac because of EOF handling issues.
     # Since payload is sent as a single line JSON string, we use readline().
     input_data = sys.stdin.readline().strip()
