@@ -158,3 +158,74 @@ def test_xml_build_repair_prompt() -> None:
 
     result = build_xml_repair_prompt("bad xml")
     assert "bad xml" in result
+
+
+# ── Path Utils ──────────────────────────────────────────────────────────────
+
+
+def test_resolve_container_path_workspace_prefix(tmp_path: Path) -> None:
+    from corpclaw_lite.extensions.tools.builtin._path_utils import resolve_container_path
+
+    user = User(id=1, name="test", department="hr", telegram_id=12345)
+    result = resolve_container_path("/workspace/file.txt", tmp_path, user)
+    assert "user_12345" in str(result)
+    assert "file.txt" in str(result)
+
+
+def test_resolve_container_path_relative(tmp_path: Path) -> None:
+    from corpclaw_lite.extensions.tools.builtin._path_utils import resolve_container_path
+
+    user = User(id=1, name="test", department="hr", telegram_id=12345)
+    result = resolve_container_path("report.xlsx", tmp_path, user)
+    assert "user_12345" in str(result)
+    assert "report.xlsx" in str(result)
+
+
+# ── Runtime Shutdown ────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_install_signal_handlers_success() -> None:
+    import asyncio
+    from unittest.mock import MagicMock
+
+    from corpclaw_lite.runtime.shutdown import install_signal_handlers
+
+    event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    original_add = loop.add_signal_handler
+    calls: list[tuple[int, object]] = []
+    mock_handler = MagicMock(side_effect=lambda sig, cb: calls.append((sig, cb)))
+    loop.add_signal_handler = mock_handler  # type: ignore[assignment]
+
+    try:
+        install_signal_handlers(event)
+        assert len(calls) == 2
+    finally:
+        loop.add_signal_handler = original_add  # type: ignore[assignment]
+
+
+@pytest.mark.asyncio
+async def test_install_signal_handlers_windows_fallback() -> None:
+    import asyncio
+    from unittest.mock import patch
+
+    from corpclaw_lite.runtime.shutdown import install_signal_handlers
+
+    event = asyncio.Event()
+    with patch("corpclaw_lite.runtime.shutdown.asyncio") as mock_asyncio:
+        mock_asyncio.get_running_loop.side_effect = NotImplementedError
+        install_signal_handlers(event)
+
+
+# ── Container Policies — strict capabilities ────────────────────────────────
+
+
+def test_build_docker_args_strict_capabilities() -> None:
+    from corpclaw_lite.config.settings import ContainerSettings
+    from corpclaw_lite.container.policies import build_docker_args
+
+    settings = ContainerSettings(strict_capabilities=True)
+    args = build_docker_args(user_id=99, settings=settings)
+    assert args["cap_drop"] == ["ALL"]
+    assert args["name"] == "corpclaw_agent_99"

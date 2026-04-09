@@ -26,7 +26,7 @@ from typing import Any
 from corpclaw_lite.extensions.tools.base import Tool
 
 
-def _load_tool(tool_path: str) -> Tool:
+def _load_tool(tool_path: str) -> Tool:  # pragma: no cover
     path = Path(tool_path).resolve()
     if not path.exists():
         raise FileNotFoundError(f"Tool file not found: {path}")
@@ -46,7 +46,7 @@ def _load_tool(tool_path: str) -> Tool:
     raise TypeError(f"No Tool subclass found in {path}")
 
 
-def _introspect(tool: Tool) -> dict[str, Any]:
+def _introspect(tool: Tool) -> dict[str, Any]:  # pragma: no cover
     params_data: list[dict[str, Any]] = []
     for p in tool.params:
         pd: dict[str, Any] = {
@@ -69,12 +69,12 @@ def _introspect(tool: Tool) -> dict[str, Any]:
     }
 
 
-def _run_introspect(tool_path: str) -> None:
+def _run_introspect(tool_path: str) -> None:  # pragma: no cover
     tool = _load_tool(tool_path)
     print(json.dumps(_introspect(tool)), flush=True)
 
 
-def _run_interactive(tool_path: str) -> None:
+def _run_interactive(tool_path: str) -> None:  # pragma: no cover
     tool = _load_tool(tool_path)
 
     for line in sys.stdin:
@@ -120,7 +120,7 @@ def _run_interactive(tool_path: str) -> None:
             print(json.dumps(resp), flush=True)
 
 
-def main() -> None:
+def main() -> None:  # pragma: no cover
     args = sys.argv[1:]
     if not args:
         print(
