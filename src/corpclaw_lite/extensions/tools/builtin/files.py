@@ -228,6 +228,8 @@ class SearchFilesTool(Tool):
     ]
     risk_level = RiskLevel.LOW
 
+    max_results: int = 100
+
     async def execute(self, **kwargs: Any) -> str:
         path = kwargs.get("path") or "."
         pattern = kwargs.get("pattern")
@@ -284,7 +286,7 @@ class SearchFilesTool(Tool):
                                 rel_path = file_path.relative_to(resolved)
                                 results.append(f"--- {rel_path.as_posix()} ---")
                                 results.extend(matches)
-                                if len(results) > 100:
+                                if len(results) > self.max_results:
                                     results.append("... search truncated.")
                                     return results
                         except Exception:

@@ -20,7 +20,6 @@ def resolve_container_path(
     path_str: str,
     workspace_base: Path | None,
     user: User | None,
-    fallback_resolver: object | None = None,
 ) -> Path:
     """Translate a (possibly container-relative) path to an absolute host path.
 
@@ -28,7 +27,6 @@ def resolve_container_path(
         path_str: Raw path from tool arguments (may be /workspace/..., relative, or absolute).
         workspace_base: Host-side workspace root (e.g. /path/to/workspaces).
         user: Current user (needed to resolve per-user workspace directory).
-        fallback_resolver: Callable for non-workspace absolute paths.
 
     Returns:
         Resolved absolute Path on the host filesystem.

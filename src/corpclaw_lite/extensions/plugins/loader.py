@@ -1,14 +1,15 @@
-import importlib.util
+from __future__ import annotations
+
 import logging
-import sys
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from corpclaw_lite.extensions.plugins.base import Plugin, PluginManifest
+from corpclaw_lite.extensions.plugins.sandbox_proxy import PluginToolProxy, introspect_tool
 from corpclaw_lite.extensions.skills.loader import SkillLoader
-from corpclaw_lite.extensions.tools.base import Tool
+from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
 
 __all__ = [
     "PluginLoader",
@@ -87,7 +88,7 @@ class PluginLoader:
                     skill_filename,
                 )
 
-        # Load tool if defined
+        # Load tool if defined (subprocess isolation)
         tool_filename = manifest.components.get("tool")
         if tool_filename:
             tool_path = (plugin_dir / tool_filename).resolve()
@@ -99,31 +100,30 @@ class PluginLoader:
                 )
                 return None
             if tool_path.exists():
-                try:
-                    module_name = f"plugin_{manifest.name}_tool"
-
-                    # Clear cached module so hot-reload picks up changed code
-                    if force_reload and module_name in sys.modules:
-                        del sys.modules[module_name]
-
-                    spec = importlib.util.spec_from_file_location(module_name, tool_path)
-
-                    if spec and spec.loader:
-                        module = importlib.util.module_from_spec(spec)
-                        sys.modules[module_name] = module
-                        spec.loader.exec_module(module)
-
-                        # Find any class that inherits from Tool
-                        for attr_name in dir(module):
-                            attr = getattr(module, attr_name)
-                            if (
-                                isinstance(attr, type)
-                                and issubclass(attr, Tool)
-                                and attr is not Tool
-                            ):
-                                plugin_tools.append(attr())
-                except Exception as e:
-                    logger.error("Failed to load tool from plugin %s: %s", manifest.name, e)
+                schema = introspect_tool(tool_path)
+                if schema is not None:
+                    try:
+                        params = [ToolParam(**pd) for pd in schema.get("params", [])]
+                        proxy = PluginToolProxy(
+                            name=schema["name"],
+                            description=schema["description"],
+                            params=params,
+                            risk_level=RiskLevel(schema.get("risk_level", "low")),
+                            tool_path=tool_path,
+                            parallel_safe=schema.get("parallel_safe", True),
+                            terminal=schema.get("terminal", False),
+                        )
+                        plugin_tools.append(proxy)
+                    except Exception as e:
+                        logger.error(
+                            "Failed to create proxy for plugin %s tool: %s", manifest.name, e
+                        )
+                else:
+                    logger.error(
+                        "Failed to introspect tool from plugin %s: %s",
+                        manifest.name,
+                        tool_filename,
+                    )
 
         # Load script if defined
         script_filename = manifest.components.get("script")

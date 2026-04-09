@@ -141,7 +141,12 @@ class PluginHotReloader:
 
     def _unregister_plugin(self, plugin_name: str) -> None:
         """Unregister all tools and skill contributed by this plugin."""
+        from corpclaw_lite.extensions.plugins.sandbox_proxy import PluginToolProxy
+
         for tool_name in self._plugin_tools.pop(plugin_name, []):
+            tool = self._tool_registry.get(tool_name)
+            if isinstance(tool, PluginToolProxy):
+                tool.kill()
             self._tool_registry.unregister(tool_name)
             logger.debug("PluginHotReloader: unregistered tool '%s'", tool_name)
 
@@ -150,7 +155,7 @@ class PluginHotReloader:
             self._skill_registry.unregister(skill_id)
             logger.debug("PluginHotReloader: unregistered skill '%s'", skill_id)
 
-        self._plugin_registry._plugins.pop(plugin_name, None)  # type: ignore[attr-defined]
+        self._plugin_registry.unregister(plugin_name)
 
     def _load_and_register(self, plugin_dir: Path, *, force_reload: bool) -> None:
         """Load a plugin and register its tools + skill."""

@@ -257,6 +257,7 @@ class SkillMatcher:
         self._docs: list[_SkillDoc] = []
         self._idf: dict[str, float] = {}
         self._indexed_ids: frozenset[str] = frozenset()
+        self._content_digest: int = 0
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -349,8 +350,12 @@ class SkillMatcher:
     def _ensure_index(self, skills: list[Skill]) -> None:
         """Rebuild the TF-IDF index if the skill set changed."""
         current_ids = frozenset(s.id for s in skills)
-        if current_ids == self._indexed_ids:
-            return
+        if current_ids == self._indexed_ids and self._docs:
+            current_digest = hash(
+                tuple((s.id, s.description, s.instructions[:300]) for s in skills)
+            )
+            if current_digest == self._content_digest:
+                return
         self._rebuild_index(skills)
 
     def _rebuild_index(self, skills: list[Skill]) -> None:
@@ -383,4 +388,7 @@ class SkillMatcher:
         self._docs = docs
         self._idf = idf
         self._indexed_ids = frozenset(s.id for s in skills)
+        self._content_digest = hash(
+            tuple((s.id, s.description, s.instructions[:300]) for s in skills)
+        )
         logger.debug("SkillMatcher: rebuilt index for %d skills", len(docs))

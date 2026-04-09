@@ -1,7 +1,9 @@
-from pathlib import Path
+from __future__ import annotations
+
 from typing import Any, cast
 
 from corpclaw_lite.config.settings import ContainerSettings
+from corpclaw_lite.paths import PROJECT_ROOT
 from corpclaw_lite.security.network_policy import NetworkPolicy
 
 __all__ = [
@@ -54,7 +56,7 @@ class ContainerPolicies:
         # Apply strict Linux isolation if enabled (breaks Docker Desktop for Mac's runc)
         if settings.strict_capabilities:
             args["cap_drop"] = ["ALL"]
-            seccomp_path = Path(__file__).parent.parent.parent.parent / seccomp_profile_path
+            seccomp_path = PROJECT_ROOT / seccomp_profile_path
             if seccomp_path.exists():
                 args["security_opt"].append(f"seccomp={seccomp_path}")
 

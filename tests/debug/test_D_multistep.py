@@ -185,9 +185,7 @@ async def test_D5_write_and_run_script(
     # Fibonacci sequence: 0 1 1 2 3 5 8
     fib_numbers = ["0", "1", "2", "3", "5", "8"]
     has_fib = sum(1 for n in fib_numbers if n in reply)
-    assert has_fib >= 4, (
-        f"Reply should contain Fibonacci numbers.\nReply: {reply[:400]}"
-    )
+    assert has_fib >= 4, f"Reply should contain Fibonacci numbers.\nReply: {reply[:400]}"
     print(f"\n[D5] {summarise_run(reply, stats)}")
 
 
@@ -213,8 +211,8 @@ async def test_D6_excel_normalize_workflow(
     ws.append(["Имя", "Отдел", "Оценка"])
     ws.append(["Мария", "HR", 9])
     ws.append(["Иван", "IT", 8])
-    ws.append(["Мария", "HR", 9])   # exact duplicate
-    ws.append([None, None, None])   # empty row
+    ws.append(["Мария", "HR", 9])  # exact duplicate
+    ws.append([None, None, None])  # empty row
     ws.append(["Анна", "PR", 7])
     wb.save(str(tmp_workspace / "staff.xlsx"))
 
@@ -228,18 +226,14 @@ async def test_D6_excel_normalize_workflow(
     DebugAssertions.assert_status_ok(stats)
 
     normalized = tmp_workspace / "staff_normalized.xlsx"
-    assert normalized.exists(), (
-        f"staff_normalized.xlsx should be created.\nReply: {reply[:400]}"
-    )
+    assert normalized.exists(), f"staff_normalized.xlsx should be created.\nReply: {reply[:400]}"
 
     # Verify duplicates removed: should have 3 data rows (Maria, Ivan, Anna)
     wb2 = openpyxl.load_workbook(str(normalized))
     ws2 = wb2.active
     assert ws2 is not None
     # Row count: header + 3 unique data rows = 4
-    assert (ws2.max_row or 0) <= 4, (
-        f"Expected ≤ 4 rows after dedup, got {ws2.max_row}"
-    )
+    assert (ws2.max_row or 0) <= 4, f"Expected ≤ 4 rows after dedup, got {ws2.max_row}"
     print(f"\n[D6] {summarise_run(reply, stats)}")
 
 

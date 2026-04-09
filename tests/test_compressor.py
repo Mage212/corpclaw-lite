@@ -68,7 +68,11 @@ class TestShouldCompress:
         # Even with massive content that clearly exceeds the threshold...
         messages = [
             {"role": "user", "content": "x" * 3000},
-            {"role": "assistant", "content": None, "tool_calls": [{"id": "1", "function": {"name": "web_fetch", "arguments": "{}"}}]},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{"id": "1", "function": {"name": "web_fetch", "arguments": "{}"}}],
+            },
             {"role": "tool", "tool_call_id": "1", "name": "web_fetch", "content": "x" * 3000},
         ]
         # ...it must NOT compress because the last message is a pending tool result

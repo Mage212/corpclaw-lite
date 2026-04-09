@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from corpclaw_lite.agent.loop import AgentLoop
+from corpclaw_lite.paths import PROJECT_ROOT
 from corpclaw_lite.users.manager import UserManager
 
 __all__ = [
@@ -42,12 +43,6 @@ if TYPE_CHECKING:
     from corpclaw_lite.llm.base import Provider
 
 logger = logging.getLogger(__name__)
-
-# Project root: corpclaw-lite/ — 4 levels up from this file.
-# Supports CORPCLAW_ROOT env var override for Docker/systemd deployments.
-PROJECT_ROOT = Path(
-    os.environ.get("CORPCLAW_ROOT", "") or Path(__file__).parent.parent.parent.parent
-)
 
 
 @dataclass

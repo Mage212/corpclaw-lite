@@ -58,7 +58,7 @@ class NetworkPolicy:
         #   4. Requires --cap-add NET_ADMIN on the container
         #
         # See docs/network_policy.md for the full setup guide.
-        logger.warning(
+        logger.debug(
             "NetworkPolicy: network_mode='none' blocks ALL traffic (deny-by-default). "
             "The ALLOWED_DOMAINS env var is set but not enforced — "
             "allowlist-based networking requires Docker custom network + iptables. "

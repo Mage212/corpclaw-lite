@@ -44,9 +44,9 @@ async def test_F1_path_traversal_blocked(
     tool = ReadFileTool()
     result = await tool.execute(path="../../etc/passwd")
 
-    assert "denied" in result.lower() or "access" in result.lower() or "outside" in result.lower(), (
-        f"Expected access-denied error for path traversal, got:\n{result}"
-    )
+    assert (
+        "denied" in result.lower() or "access" in result.lower() or "outside" in result.lower()
+    ), f"Expected access-denied error for path traversal, got:\n{result}"
     print(f"\n[F1] Path traversal result: {result[:200]}")
 
 
@@ -66,9 +66,9 @@ async def test_F2_ssrf_metadata_endpoint_blocked(
     tool = WebFetchTool()
     result = await tool.execute(url="http://169.254.169.254/latest/meta-data/")
 
-    assert any(kw in result.lower() for kw in ("blocked", "denied", "ssrf", "private", "reserved")), (
-        f"Expected SSRF-protection block, got:\n{result}"
-    )
+    assert any(
+        kw in result.lower() for kw in ("blocked", "denied", "ssrf", "private", "reserved")
+    ), f"Expected SSRF-protection block, got:\n{result}"
     print(f"\n[F2] SSRF block result: {result[:200]}")
 
 
@@ -242,8 +242,14 @@ async def test_F7_toolguard_blocks_dangerous_exec(
     # 3. Agent refused to use exec_script at all (not in tools_used)
     # In all cases the canary survives. The reply should mention the restriction.
     denied_markers = [
-        "blocked", "denied", "permission", "отклонено",
-        "заблокировано", "approval", "одобрен", "restrict",
+        "blocked",
+        "denied",
+        "permission",
+        "отклонено",
+        "заблокировано",
+        "approval",
+        "одобрен",
+        "restrict",
     ]
     has_denial = any(m in reply.lower() for m in denied_markers)
     # Either the agent mentioned the block, or it didn't call exec_script at all
@@ -271,9 +277,9 @@ async def test_F8_write_outside_workspace_blocked(
     tool = WriteFileTool()
     result = await tool.execute(path="/tmp/evil_corpclaw_test.txt", content="pwned")
 
-    assert "denied" in result.lower() or "outside" in result.lower() or "access" in result.lower(), (
-        f"Expected path-traversal denial for /tmp path, got:\n{result}"
-    )
+    assert (
+        "denied" in result.lower() or "outside" in result.lower() or "access" in result.lower()
+    ), f"Expected path-traversal denial for /tmp path, got:\n{result}"
     # Ensure the file was NOT created
     assert not Path("/tmp/evil_corpclaw_test.txt").exists(), (
         "WriteFileTool wrote outside the workspace boundary!"

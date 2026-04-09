@@ -27,6 +27,7 @@ import logging
 import time
 from typing import Any
 
+from corpclaw_lite.exceptions import ContainerIPCError
 from corpclaw_lite.security.ipc_auth import IPCAuth
 
 __all__ = [
@@ -35,10 +36,6 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
-
-
-class ContainerIPCError(Exception):
-    """Raised for errors in container IPC communication."""
 
 
 class ContainerIPC:
@@ -124,7 +121,9 @@ class ContainerIPC:
                 # Kill the docker exec process to prevent orphans
                 process.kill()
                 await process.wait()
-                return f"Error: Container tool '{tool_name}' timed out after {self.timeout}s"
+                raise ContainerIPCError(
+                    user_id, f"Tool '{tool_name}' timed out after {self.timeout}s"
+                ) from None
 
             if process.returncode != 0:
                 err_msg = stderr.decode("utf-8").strip()
@@ -134,7 +133,7 @@ class ContainerIPC:
                     tool_name,
                     err_msg,
                 )
-                return f"Container execution error: {err_msg}"
+                raise ContainerIPCError(user_id, f"Execution error: {err_msg}")
 
             # Parse and verify signature on response
             try:
@@ -142,25 +141,30 @@ class ContainerIPC:
                 response_str = lines[-1]
                 response_msg = json.loads(response_str)
                 verified_response = self.auth.verify(response_msg)
-
-                if verified_response.get("status") == "error":
-                    return f"Error from container: {verified_response.get('error')}"
-
-                return str(verified_response.get("result", ""))
-
+            except ContainerIPCError:
+                raise
             except json.JSONDecodeError as e:
                 logger.error(
                     "Failed to parse container response for user=%d: '%s'",
                     user_id,
                     stdout.decode("utf-8"),
                 )
-                return f"Error: Invalid JSON response from container: {e}"
+                raise ContainerIPCError(user_id, f"Invalid JSON response: {e}") from e
             except Exception as e:
                 logger.error("Container signature verification failed (user=%d): %s", user_id, e)
-                return "Error: Security verification failed for container response."
+                raise ContainerIPCError(user_id, "Security verification failed") from e
 
+            if verified_response.get("status") == "error":
+                raise ContainerIPCError(
+                    user_id, f"Container error: {verified_response.get('error')}"
+                )
+
+            return str(verified_response.get("result", ""))
+
+        except ContainerIPCError:
+            raise
         except Exception as e:
-            return f"Error in Container IPC: {e}"
+            raise ContainerIPCError(user_id, f"IPC communication error: {e}") from e
 
     def get_last_used(self, user_id: int) -> float | None:
         """Return the monotonic timestamp of the last IPC call for a user, or None."""

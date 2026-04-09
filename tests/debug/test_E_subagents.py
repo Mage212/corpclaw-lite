@@ -61,8 +61,7 @@ async def test_E1_dispatch_to_filesystem_agent(
     DebugAssertions.assert_status_ok(stats)
     # The subagent's result should mention at least one .py file
     assert "module_a.py" in reply or "module_b.py" in reply or ".py" in reply, (
-        f"Expected .py file names in reply from filesystem-agent.\n"
-        f"{summarise_run(reply, stats)}"
+        f"Expected .py file names in reply from filesystem-agent.\n{summarise_run(reply, stats)}"
     )
     print(f"\n[E1] {summarise_run(reply, stats)}")
 
@@ -122,8 +121,7 @@ async def test_E3_dispatch_to_document_agent(
 
     summary_file = tmp_workspace / "summary_e03.md"
     assert summary_file.exists(), (
-        f"document-agent should have created summary_e03.md.\n"
-        f"{summarise_run(reply, stats)}"
+        f"document-agent should have created summary_e03.md.\n{summarise_run(reply, stats)}"
     )
     print(f"\n[E3] {summarise_run(reply, stats)}")
 
@@ -175,9 +173,7 @@ async def test_E5_all_subagents_registered(
 
     expected_ids = {"filesystem-agent", "execution-agent", "document-agent", "research-agent"}
     missing = expected_ids - ids
-    assert not missing, (
-        f"Missing subagent IDs: {missing}. Found: {ids}"
-    )
+    assert not missing, f"Missing subagent IDs: {missing}. Found: {ids}"
     print(f"\n[E5] Registered subagents: {ids}")
 
 

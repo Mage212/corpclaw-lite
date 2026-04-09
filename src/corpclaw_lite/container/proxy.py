@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from corpclaw_lite.exceptions import ContainerIPCError
 from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
 
 __all__ = [
@@ -78,7 +79,7 @@ class IPCToolProxy(Tool):
         user_id: int = int(user.telegram_id) if user and user.telegram_id else 0
 
         if user_id == 0:
-            return "Error: Cannot dispatch to container — user ID unknown."
+            raise ContainerIPCError(0, "Cannot dispatch to container — user ID unknown")
 
         logger.debug("IPCToolProxy: %s → container for user %d", self.name, user_id)
         return await self._ipc.send_tool_call(

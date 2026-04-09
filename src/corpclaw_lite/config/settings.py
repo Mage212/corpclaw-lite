@@ -114,12 +114,10 @@ class SkillsSettings(BaseModel):
 class LoggingSettings(BaseModel):
     """Settings for the logging pipeline."""
 
-    # Level written to corpclaw.log (rotating file — DEBUG by default for diagnostics)
     level: str = "DEBUG"
-    # Level written to the console (less verbose to avoid noise)
     console_level: str = "INFO"
-    # Directory for log files, relative to project root (supports ${VAR:-default})
     log_dir: str = "logs"
+    health_port: int = 8080
 
 
 class Settings(BaseSettings):

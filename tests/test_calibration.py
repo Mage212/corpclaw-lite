@@ -255,18 +255,14 @@ class TestCalibrationScorer:
     def test_must_read_passes(self) -> None:
         scorer = CalibrationScorer()
         scenario = self._make_scenario(tool_calls=["read_file"], must_read="data.csv")
-        trajectory = self._make_trajectory(
-            tool_calls=[("read_file", {"path": "data.csv"})]
-        )
+        trajectory = self._make_trajectory(tool_calls=[("read_file", {"path": "data.csv"})])
         result = scorer.score(scenario, trajectory)
         assert result.passed
 
     def test_must_read_fails(self) -> None:
         scorer = CalibrationScorer()
         scenario = self._make_scenario(tool_calls=["read_file"], must_read="data.csv")
-        trajectory = self._make_trajectory(
-            tool_calls=[("read_file", {"path": "other.txt"})]
-        )
+        trajectory = self._make_trajectory(tool_calls=[("read_file", {"path": "other.txt"})])
         result = scorer.score(scenario, trajectory)
         assert not result.passed
 
@@ -333,12 +329,14 @@ class TestConfigEditor:
         editor = ConfigEditor(tmp_path)
 
         # Apply changes
-        editor.apply({
-            "system_prompt": {"SOUL.md": "New soul content"},
-            "few_shots": [{"user": "test", "assistant": {"content": "ok"}}],
-            "tool_overrides": {"read_file": {"description": "New desc"}},
-            "settings": {"max_steps": 25},
-        })
+        editor.apply(
+            {
+                "system_prompt": {"SOUL.md": "New soul content"},
+                "few_shots": [{"user": "test", "assistant": {"content": "ok"}}],
+                "tool_overrides": {"read_file": {"description": "New desc"}},
+                "settings": {"max_steps": 25},
+            }
+        )
 
         # Verify files exist
         assert (tmp_path / "config" / "calibrated" / "bootstrap" / "SOUL.md").exists()
@@ -416,18 +414,26 @@ class TestToolRegistryOverrides:
         # Without override
         schemas = registry.to_schemas()
         assert schemas[0]["function"]["description"] == "Original description"
-        assert schemas[0]["function"]["parameters"]["properties"]["arg"]["description"] == "Original param"
+        assert (
+            schemas[0]["function"]["parameters"]["properties"]["arg"]["description"]
+            == "Original param"
+        )
 
         # With override
-        registry.load_overrides_dict({
-            "dummy": {
-                "description": "Better description",
-                "params": {"arg": {"description": "Better param desc"}},
+        registry.load_overrides_dict(
+            {
+                "dummy": {
+                    "description": "Better description",
+                    "params": {"arg": {"description": "Better param desc"}},
+                }
             }
-        })
+        )
         schemas = registry.to_schemas()
         assert schemas[0]["function"]["description"] == "Better description"
-        assert schemas[0]["function"]["parameters"]["properties"]["arg"]["description"] == "Better param desc"
+        assert (
+            schemas[0]["function"]["parameters"]["properties"]["arg"]["description"]
+            == "Better param desc"
+        )
 
     def test_load_overrides_from_yaml(self, tmp_path: Path) -> None:
         from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
@@ -448,9 +454,7 @@ class TestToolRegistryOverrides:
 
         # Write YAML override
         override_path = tmp_path / "overrides.yaml"
-        override_path.write_text(
-            yaml.dump({"overrides": {"dummy2": {"description": "YAML desc"}}})
-        )
+        override_path.write_text(yaml.dump({"overrides": {"dummy2": {"description": "YAML desc"}}}))
 
         registry.load_overrides(override_path)
         schemas = registry.to_schemas()

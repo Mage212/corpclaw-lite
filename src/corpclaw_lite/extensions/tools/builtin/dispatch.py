@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any
 
 from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
@@ -59,4 +60,10 @@ class DispatchSubagentTool(Tool):
         if user is None:
             return "Error: User context is required for subagent dispatch."
 
-        return await self._dispatcher.dispatch(spec, user, task)
+        try:
+            return await asyncio.wait_for(
+                self._dispatcher.dispatch(spec, user, task),
+                timeout=120,
+            )
+        except TimeoutError:
+            return "Error: Subagent execution timed out."

@@ -26,7 +26,7 @@ from telegram.ext import (
 )
 
 from corpclaw_lite.channels.base import Channel
-from corpclaw_lite.channels.telegram.formatting import build_response_parts, convert_markdown
+from corpclaw_lite.channels.telegram.formatting import build_response_parts
 from corpclaw_lite.channels.telegram.upload import (
     MAX_FILE_SIZE,
     build_agent_directive,
@@ -192,10 +192,9 @@ class TelegramChannel(Channel):
         parts = build_response_parts(text)
         for part in parts:
             try:
-                formatted = convert_markdown(part)
                 await self._app.bot.send_message(
                     chat_id=user.telegram_id,
-                    text=formatted,
+                    text=part,
                     parse_mode="MarkdownV2",
                     disable_web_page_preview=True,
                 )

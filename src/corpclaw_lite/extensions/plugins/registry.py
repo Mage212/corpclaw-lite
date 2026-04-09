@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import logging
 from pathlib import Path
 
@@ -40,6 +42,10 @@ class PluginRegistry:
 
     def get_plugin(self, name: str) -> Plugin | None:
         return self._plugins.get(name)
+
+    def unregister(self, plugin_name: str) -> None:
+        """Remove a plugin by name (no-op if not found)."""
+        self._plugins.pop(plugin_name, None)
 
     def list_all(self) -> list[Plugin]:
         return list(self._plugins.values())

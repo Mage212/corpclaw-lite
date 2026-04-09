@@ -137,6 +137,11 @@ def sanitize_filename(filename: str) -> str | None:
     return safe
 
 
+def _sanitize_for_prompt(text: str, max_len: int = 500) -> str:
+    """Strip dangerous characters from user-provided text before embedding in prompt."""
+    return text[:max_len].replace("'", "").replace("\n", " ")
+
+
 def build_agent_directive(relative_path: str, caption: str | None) -> str:
     """Build a message for the agent about an uploaded file.
 
@@ -144,26 +149,30 @@ def build_agent_directive(relative_path: str, caption: str | None) -> str:
     instead of asking follow-up questions.
     """
     if is_image(relative_path):
+        safe_path = _sanitize_for_prompt(relative_path)
         if caption:
+            safe_caption = _sanitize_for_prompt(caption)
             return (
                 f"Немедленно проанализируй только что загруженное изображение "
-                f"'{relative_path}' с помощью read_image и сразу верни результат. "
-                f"Используй подпись пользователя как запрос к анализу: {caption}"
+                f"'{safe_path}' с помощью read_image и сразу верни результат. "
+                f"Используй подпись пользователя как запрос к анализу: {safe_caption}"
             )
         return (
             f"Немедленно проанализируй только что загруженное изображение "
-            f"'{relative_path}' с помощью read_image и сразу верни краткий результат. "
+            f"'{safe_path}' с помощью read_image и сразу верни краткий результат. "
             "Не задавай уточняющих вопросов и не выполняй других действий."
         )
 
+    safe_path = _sanitize_for_prompt(relative_path)
     if caption:
+        safe_caption = _sanitize_for_prompt(caption)
         return (
-            f"Пользователь загрузил файл '{relative_path}'. Выполни только явно указанное "
-            f"в подписи действие над этим файлом и не делай ничего сверх этого: {caption}"
+            f"Пользователь загрузил файл '{safe_path}'. Выполни только явно указанное "
+            f"в подписи действие над этим файлом и не делай ничего сверх этого: {safe_caption}"
         )
 
     return (
-        f"Пользователь загрузил файл '{relative_path}'. Сообщи кратко, что файл сохранен, "
+        f"Пользователь загрузил файл '{safe_path}'. Сообщи кратко, что файл сохранен, "
         "и что для дальнейшей обработки нужно явно указать действие. "
         "Не выполняй других действий."
     )

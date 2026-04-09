@@ -163,9 +163,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def cmd_chat(telegram_id: int, *, setup_mode: bool = False) -> None:
     """Launch an interactive CLI chat loop for a registered user."""
-    from corpclaw_lite.agent.factory import PROJECT_ROOT
     from corpclaw_lite.config.loader import load_settings
     from corpclaw_lite.logging.agent_logger import setup_logging
+    from corpclaw_lite.paths import PROJECT_ROOT
 
     _settings = load_settings(PROJECT_ROOT / "config" / "settings.yaml")
     _log = _settings.logging
@@ -402,9 +402,9 @@ def cmd_telegram() -> None:
     token = _require_env("TELEGRAM_BOT_TOKEN")
     _require_env("CORPCLAW_IPC_SECRET")  # fail fast
 
-    from corpclaw_lite.agent.factory import PROJECT_ROOT
     from corpclaw_lite.config.loader import load_settings
     from corpclaw_lite.logging.agent_logger import setup_logging
+    from corpclaw_lite.paths import PROJECT_ROOT
 
     _settings = load_settings(PROJECT_ROOT / "config" / "settings.yaml")
     _log = _settings.logging
@@ -539,9 +539,9 @@ def cmd_calibrate(
     """Run the calibration phase to adapt config for the local model."""
     from pathlib import Path
 
-    from corpclaw_lite.agent.factory import PROJECT_ROOT
     from corpclaw_lite.config.loader import load_settings
     from corpclaw_lite.logging.agent_logger import setup_logging
+    from corpclaw_lite.paths import PROJECT_ROOT
 
     _settings = load_settings(PROJECT_ROOT / "config" / "settings.yaml")
     _log = _settings.logging

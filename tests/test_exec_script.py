@@ -27,7 +27,7 @@ async def test_exec_command_failure(tool: ExecScriptTool) -> None:
 
 @pytest.mark.asyncio
 async def test_exec_timeout(tool: ExecScriptTool) -> None:
-    result = await tool.execute(script="python -c \"import time; time.sleep(10)\"", timeout=1)
+    result = await tool.execute(script='python -c "import time; time.sleep(10)"', timeout=1)
     assert "timed out" in result
 
 

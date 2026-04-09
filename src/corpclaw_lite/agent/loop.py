@@ -16,6 +16,7 @@ from corpclaw_lite.agent.guards import (
     SimpleProgressGuard,
 )
 from corpclaw_lite.config.settings import AgentSettings
+from corpclaw_lite.exceptions import ContainerIPCError, MemoryError
 from corpclaw_lite.extensions.tools.base import TOOL_ERROR_PREFIX
 from corpclaw_lite.extensions.tools.registry import ToolRegistry
 from corpclaw_lite.llm.base import Provider, ToolCall
@@ -156,7 +157,10 @@ class AgentLoop:
         # Load history BEFORE building context so it precedes the current message
         history: list[dict[str, Any]] = []
         if self._memory:
-            history = await self._memory.get_history(mem_key, limit=self._settings.max_history)
+            try:
+                history = await self._memory.get_history(mem_key, limit=self._settings.max_history)
+            except MemoryError:
+                logger.error("[user=%s] Failed to load history", user.id)
 
         # Prepend dynamic user context to the system prompt
         base_prompt = system_prompt or self._default_system_prompt or ""
@@ -164,7 +168,13 @@ class AgentLoop:
         # Load user facts from memory (onboarding + manually stored via memory_store)
         user_facts_block = ""
         if self._memory:
-            facts = await self._memory.recall_facts(mem_key, limit=self._settings.max_facts_recall)
+            facts: list[dict[str, str]] = []
+            try:
+                facts = await self._memory.recall_facts(
+                    mem_key, limit=self._settings.max_facts_recall
+                )
+            except MemoryError:
+                logger.error("[user=%s] Failed to recall facts", user.id)
             if facts:
                 lines = [f"- {f['key']}: {f['value']}" for f in facts]
                 user_facts_block = "\n\n## Known Facts About This User\n" + "\n".join(lines)
@@ -186,7 +196,10 @@ class AgentLoop:
 
         # Save new user message
         if self._memory:
-            await self._memory.add_message(mem_key, "user", message)
+            try:
+                await self._memory.add_message(mem_key, "user", message)
+            except MemoryError:
+                logger.error("[user=%s] Failed to save user message", user.id)
 
         # Get budget from department if permission checker is available
         guard_config = (
@@ -230,7 +243,10 @@ class AgentLoop:
                 except TimeoutError:
                     msg = "I could not get a response from the language model (timed out)."
                     if self._memory:
-                        await self._memory.add_message(mem_key, "assistant", msg)
+                        try:
+                            await self._memory.add_message(mem_key, "assistant", msg)
+                        except MemoryError:
+                            logger.error("[user=%s] Failed to save timeout message", user.id)
                     stats.status = "timeout"
                     stats.duration_ms = (time.monotonic() - t0) * 1000
                     logger.warning(
@@ -263,12 +279,15 @@ class AgentLoop:
                         # show the model hard proof of what was actually called.
                         marker = _format_tool_marker(stats.tools_used)
                         mem_text = f"{marker}{final}" if marker else final
-                        await self._memory.add_message(
-                            mem_key,
-                            "assistant",
-                            mem_text,
-                            reasoning=response.reasoning or None,
-                        )
+                        try:
+                            await self._memory.add_message(
+                                mem_key,
+                                "assistant",
+                                mem_text,
+                                reasoning=response.reasoning or None,
+                            )
+                        except MemoryError:
+                            logger.error("[user=%s] Failed to save final message", user.id)
                         if self._consolidator:
                             await self._consolidator.maybe_consolidate(self._memory, mem_key)
                     stats.duration_ms = (time.monotonic() - t0) * 1000
@@ -334,7 +353,12 @@ class AgentLoop:
                             if self._memory:
                                 marker = _format_tool_marker(stats.tools_used)
                                 mem_text = f"{marker}{result}" if marker else result
-                                await self._memory.add_message(mem_key, "assistant", mem_text)
+                                try:
+                                    await self._memory.add_message(mem_key, "assistant", mem_text)
+                                except MemoryError:
+                                    logger.error(
+                                        "[user=%s] Failed to save terminal tool result", user.id
+                                    )
                                 if self._consolidator:
                                     await self._consolidator.maybe_consolidate(
                                         self._memory, mem_key
@@ -364,7 +388,10 @@ class AgentLoop:
             if self._memory:
                 marker = _format_tool_marker(stats.tools_used)
                 mem_text = f"{marker}{msg}" if marker else msg
-                await self._memory.add_message(mem_key, "assistant", mem_text)
+                try:
+                    await self._memory.add_message(mem_key, "assistant", mem_text)
+                except MemoryError:
+                    logger.error("[user=%s] Failed to save budget exceeded message", user.id)
             stats.status = "budget"
             stats.error = str(e)
             stats.duration_ms = (time.monotonic() - t0) * 1000
@@ -375,7 +402,10 @@ class AgentLoop:
         if self._memory:
             marker = _format_tool_marker(stats.tools_used)
             mem_text = f"{marker}{fallback}" if marker else fallback
-            await self._memory.add_message(mem_key, "assistant", mem_text)
+            try:
+                await self._memory.add_message(mem_key, "assistant", mem_text)
+            except MemoryError:
+                logger.error("[user=%s] Failed to save loop detection message", user.id)
         stats.status = "loop"
         stats.duration_ms = (time.monotonic() - t0) * 1000
         logger.warning("[user=%s] loop detected after %d iterations", user.id, stats.iterations)
@@ -471,6 +501,9 @@ class AgentLoop:
                     f"but no approval channel is configured."
                 )
         except ToolGuardError as e:
+            result = str(e)
+        except ContainerIPCError as e:
+            logger.error("[user=%s] Container IPC error for tool %s: %s", user.id, tc.name, e)
             result = str(e)
         except Exception:
             logger.exception("[user=%s] Unexpected error executing tool %s", user.id, tc.name)

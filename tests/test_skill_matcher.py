@@ -60,7 +60,13 @@ DOC_WRITER_SKILL = _make_skill(
     keywords=["документац", "document", "readme", "api", "гайд", "guide"],
 )
 
-ALL_SKILLS = [EXCEL_SKILL, TRANSLATOR_SKILL, CODE_REVIEWER_SKILL, CONTENT_WRITER_SKILL, DOC_WRITER_SKILL]
+ALL_SKILLS = [
+    EXCEL_SKILL,
+    TRANSLATOR_SKILL,
+    CODE_REVIEWER_SKILL,
+    CONTENT_WRITER_SKILL,
+    DOC_WRITER_SKILL,
+]
 
 
 # ── Tests ─────────────────────────────────────────────────────────────────────

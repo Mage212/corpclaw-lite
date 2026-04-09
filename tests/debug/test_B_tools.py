@@ -277,7 +277,7 @@ async def test_B10_normalize_excel(
     ws.append(["Алиса", "770123456789", 1000.0])
     ws.append(["Боб", "770123456789", 2000.0])
     ws.append(["Алиса", "770123456789", 1000.0])  # duplicate
-    ws.append([None, None, None])               # empty row
+    ws.append([None, None, None])  # empty row
     wb.save(str(tmp_workspace / "data.xlsx"))
 
     reply, stats = await loop.run(
@@ -290,8 +290,7 @@ async def test_B10_normalize_excel(
 
     output = tmp_workspace / "data_normalized.xlsx"
     assert output.exists(), (
-        f"normalize_excel should have created data_normalized.xlsx.\n"
-        f"Reply: {reply[:400]}"
+        f"normalize_excel should have created data_normalized.xlsx.\nReply: {reply[:400]}"
     )
     print(f"\n[B10] {summarise_run(reply, stats)}")
 

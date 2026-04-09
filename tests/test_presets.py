@@ -16,13 +16,12 @@ from __future__ import annotations
 import textwrap
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
 from corpclaw_lite.llm.base import LLMResponse
 from corpclaw_lite.llm.presets import ModelPreset, PresetRegistry, ThinkingConfig
-
 
 # ── PresetRegistry loading ────────────────────────────────────────────────────
 
@@ -110,12 +109,10 @@ def test_inference_params_merge_request_priority() -> None:
     Non-standard params (top_k) are routed to kwargs["extra_body"] so the
     OpenAI SDK doesn't reject them client-side.
     """
-    from corpclaw_lite.llm.openai import OpenAIProvider
     from corpclaw_lite.config.settings import ProviderSettings
+    from corpclaw_lite.llm.openai import OpenAIProvider
 
-    preset = ModelPreset(
-        inference_params={"temperature": 1.0, "top_p": 0.95, "top_k": 64}
-    )
+    preset = ModelPreset(inference_params={"temperature": 1.0, "top_p": 0.95, "top_k": 64})
     provider = OpenAIProvider(
         ProviderSettings(model="test", api_key="key", base_url="http://localhost:1234/v1"),
         preset=preset,
@@ -125,8 +122,8 @@ def test_inference_params_merge_request_priority() -> None:
     kwargs: dict[str, Any] = {"temperature": 0.3}
     provider._apply_preset(None, kwargs)
 
-    assert kwargs["temperature"] == 0.3       # request-level wins
-    assert kwargs["top_p"] == 0.95            # standard param → in kwargs
+    assert kwargs["temperature"] == 0.3  # request-level wins
+    assert kwargs["top_p"] == 0.95  # standard param → in kwargs
     # top_k is non-standard → routed to extra_body, not top-level kwargs
     assert "top_k" not in kwargs
     assert kwargs["extra_body"]["top_k"] == 64
@@ -134,8 +131,8 @@ def test_inference_params_merge_request_priority() -> None:
 
 def test_inference_params_merge_no_preset() -> None:
     """Without preset, kwargs are unchanged."""
-    from corpclaw_lite.llm.openai import OpenAIProvider
     from corpclaw_lite.config.settings import ProviderSettings
+    from corpclaw_lite.llm.openai import OpenAIProvider
 
     provider = OpenAIProvider(
         ProviderSettings(model="test", api_key="key", base_url="http://localhost:1234/v1"),
@@ -151,8 +148,8 @@ def test_inference_params_merge_no_preset() -> None:
 
 def test_system_prompt_injection() -> None:
     """system_prompt_prefix is prepended to existing system prompt."""
-    from corpclaw_lite.llm.openai import OpenAIProvider
     from corpclaw_lite.config.settings import ProviderSettings
+    from corpclaw_lite.llm.openai import OpenAIProvider
 
     preset = ModelPreset(system_prompt_prefix="<|think|>")
     provider = OpenAIProvider(
@@ -165,8 +162,8 @@ def test_system_prompt_injection() -> None:
 
 def test_system_prompt_injection_no_existing() -> None:
     """system_prompt_prefix works when system is None."""
-    from corpclaw_lite.llm.openai import OpenAIProvider
     from corpclaw_lite.config.settings import ProviderSettings
+    from corpclaw_lite.llm.openai import OpenAIProvider
 
     preset = ModelPreset(system_prompt_prefix="<|think|>")
     provider = OpenAIProvider(
@@ -182,8 +179,8 @@ def test_system_prompt_injection_no_existing() -> None:
 
 def test_thinking_budget_caps_max_tokens() -> None:
     """thinking_budget_tokens sets max_tokens = budget + 1024."""
-    from corpclaw_lite.llm.openai import OpenAIProvider
     from corpclaw_lite.config.settings import ProviderSettings
+    from corpclaw_lite.llm.openai import OpenAIProvider
 
     preset = ModelPreset(thinking_budget_tokens=512)
     provider = OpenAIProvider(
@@ -197,8 +194,8 @@ def test_thinking_budget_caps_max_tokens() -> None:
 
 def test_thinking_budget_does_not_override_explicit() -> None:
     """Explicit max_tokens in request is not overridden by thinking budget."""
-    from corpclaw_lite.llm.openai import OpenAIProvider
     from corpclaw_lite.config.settings import ProviderSettings
+    from corpclaw_lite.llm.openai import OpenAIProvider
 
     preset = ModelPreset(thinking_budget_tokens=512)
     provider = OpenAIProvider(
@@ -215,8 +212,8 @@ def test_thinking_budget_does_not_override_explicit() -> None:
 
 def test_parse_reasoning_content_tags() -> None:
     """Gemma4-style: reasoning extracted from content tags."""
-    from corpclaw_lite.llm.openai import OpenAIProvider
     from corpclaw_lite.config.settings import ProviderSettings
+    from corpclaw_lite.llm.openai import OpenAIProvider
 
     preset = ModelPreset(
         thinking=ThinkingConfig(
@@ -240,12 +237,10 @@ def test_parse_reasoning_content_tags() -> None:
 
 def test_parse_reasoning_native_field() -> None:
     """Qwen3-style: reasoning from native reasoning_content field."""
-    from corpclaw_lite.llm.openai import OpenAIProvider
     from corpclaw_lite.config.settings import ProviderSettings
+    from corpclaw_lite.llm.openai import OpenAIProvider
 
-    preset = ModelPreset(
-        thinking=ThinkingConfig(source="native")
-    )
+    preset = ModelPreset(thinking=ThinkingConfig(source="native"))
     provider = OpenAIProvider(
         ProviderSettings(model="test", api_key="key", base_url="http://localhost:1234/v1"),
         preset=preset,
@@ -262,8 +257,8 @@ def test_parse_reasoning_native_field() -> None:
 
 def test_parse_reasoning_no_preset() -> None:
     """Without preset, content is returned as-is, no reasoning."""
-    from corpclaw_lite.llm.openai import OpenAIProvider
     from corpclaw_lite.config.settings import ProviderSettings
+    from corpclaw_lite.llm.openai import OpenAIProvider
 
     provider = OpenAIProvider(
         ProviderSettings(model="test", api_key="key", base_url="http://localhost:1234/v1"),
@@ -280,8 +275,8 @@ def test_parse_reasoning_no_preset() -> None:
 
 def test_parse_reasoning_no_tags_found() -> None:
     """With content-tag preset but no tags in output, returns raw content."""
-    from corpclaw_lite.llm.openai import OpenAIProvider
     from corpclaw_lite.config.settings import ProviderSettings
+    from corpclaw_lite.llm.openai import OpenAIProvider
 
     preset = ModelPreset(
         thinking=ThinkingConfig(
@@ -335,7 +330,9 @@ async def test_reasoning_stored_in_memory(tmp_path: Path) -> None:
     try:
         memory = SQLiteMemory(db_path=db_path.name)
         await memory.add_message(
-            "user1", "assistant", "The answer is 4.",
+            "user1",
+            "assistant",
+            "The answer is 4.",
             reasoning="Step 1: 2+2=4",
         )
 
@@ -362,9 +359,8 @@ async def test_add_message_without_reasoning(tmp_path: Path) -> None:
     """add_message works without reasoning (backward compatible)."""
     import sqlite3
 
-    from corpclaw_lite.memory.sqlite import SQLiteMemory
-
     import corpclaw_lite.memory.sqlite as mem_module
+    from corpclaw_lite.memory.sqlite import SQLiteMemory
 
     original_data_dir = mem_module._DATA_DIR
     mem_module._DATA_DIR = tmp_path

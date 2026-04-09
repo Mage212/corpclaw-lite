@@ -3,14 +3,14 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import sqlite3
 from functools import partial
-from pathlib import Path
 from typing import Any
 
 import anyio
 
+from corpclaw_lite.exceptions import MemoryError
+from corpclaw_lite.paths import DATA_DIR
 from corpclaw_lite.utils.db import db_connect
 
 __all__ = [
@@ -20,9 +20,7 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 # Data directory: absolute path, supports CORPCLAW_DATA_DIR env var override.
-_DATA_DIR = Path(
-    os.environ.get("CORPCLAW_DATA_DIR", "") or Path(__file__).parent.parent.parent.parent / "data"
-)
+_DATA_DIR = DATA_DIR
 
 
 class SQLiteMemory:
@@ -84,7 +82,8 @@ class SQLiteMemory:
                 except sqlite3.OperationalError:
                     pass  # Column already exists
         except Exception as e:
-            logger.error("Failed to initialize SQLite Memory: %s", e)
+            logger.critical("Failed to initialize SQLite Memory: %s", e)
+            raise MemoryError(f"Database initialization failed: {e}") from e
 
     # ── Messages ─────────────────────────────────────────────────────────────
 
@@ -98,7 +97,7 @@ class SQLiteMemory:
                     (str(user_id), role, content_str, reasoning),
                 )
         except Exception as e:
-            logger.error("Failed to insert message into memory for user %s: %s", user_id, e)
+            raise MemoryError(f"Failed to insert message for user {user_id}: {e}") from e
 
     async def add_message(
         self,
@@ -143,8 +142,7 @@ class SQLiteMemory:
                     history.append({"role": role, "content": content_str})
                 return history
         except Exception as e:
-            logger.error("Failed to fetch history for user %s: %s", user_id, e)
-            return []
+            raise MemoryError(f"Failed to fetch history for user {user_id}: {e}") from e
 
     async def get_history(self, user_id: str, limit: int = 20) -> list[dict[str, Any]]:
         """Retrieve recent conversation history for a user."""
@@ -155,7 +153,7 @@ class SQLiteMemory:
             with db_connect(self.db_path) as conn:
                 conn.execute("DELETE FROM messages WHERE user_id = ?", (str(user_id),))
         except Exception as e:
-            logger.error("Failed to clear memory for user %s: %s", user_id, e)
+            raise MemoryError(f"Failed to clear memory for user {user_id}: {e}") from e
 
     async def clear(self, user_id: str) -> None:
         """Clear the history for a user."""
@@ -171,8 +169,7 @@ class SQLiteMemory:
                 row = cursor.fetchone()
                 return int(row[0]) if row else 0
         except Exception as e:
-            logger.error("Failed to count messages for user %s: %s", user_id, e)
-            return 0
+            raise MemoryError(f"Failed to count messages for user {user_id}: {e}") from e
 
     async def count_messages(self, user_id: str) -> int:
         """Return the total number of messages for a user."""
@@ -192,8 +189,7 @@ class SQLiteMemory:
                 )
                 return [row[0] for row in cursor.fetchall()]
         except Exception as e:
-            logger.error("Failed to get oldest message IDs for user %s: %s", user_id, e)
-            return []
+            raise MemoryError(f"Failed to get oldest message IDs for user {user_id}: {e}") from e
 
     async def get_oldest_message_ids(self, user_id: str, count: int) -> list[int]:
         """Return IDs of the N oldest messages for a user."""
@@ -228,7 +224,7 @@ class SQLiteMemory:
                     (str(user_id), "assistant", f"[Conversation summary]: {summary}"),
                 )
         except Exception as e:
-            logger.error("Failed to consolidate messages for user %s: %s", user_id, e)
+            raise MemoryError(f"Failed to consolidate messages for user {user_id}: {e}") from e
 
     async def replace_oldest(self, user_id: str, count: int, summary: str) -> None:
         """Delete the N oldest messages and insert a consolidation summary.
@@ -253,7 +249,7 @@ class SQLiteMemory:
                     (str(user_id), key, value),
                 )
         except Exception as e:
-            logger.error("Failed to store fact for user %s: %s", user_id, e)
+            raise MemoryError(f"Failed to store fact for user {user_id}: {e}") from e
 
     async def store_fact(self, user_id: str, key: str, value: str) -> None:
         """Upsert a key-value fact for a user."""
@@ -286,8 +282,7 @@ class SQLiteMemory:
                     )
                 return [{"key": r["key"], "value": r["value"]} for r in cursor.fetchall()]
         except Exception as e:
-            logger.error("Failed to recall facts for user %s: %s", user_id, e)
-            return []
+            raise MemoryError(f"Failed to recall facts for user {user_id}: {e}") from e
 
     async def recall_facts(
         self, user_id: str, query: str | None = None, limit: int = 10
@@ -302,7 +297,7 @@ class SQLiteMemory:
             with db_connect(self.db_path) as conn:
                 conn.execute("DELETE FROM memory_facts WHERE user_id = ?", (str(user_id),))
         except Exception as e:
-            logger.error("Failed to clear facts for user %s: %s", user_id, e)
+            raise MemoryError(f"Failed to clear facts for user {user_id}: {e}") from e
 
     async def clear_facts(self, user_id: str) -> None:
         """Delete all facts for a user."""

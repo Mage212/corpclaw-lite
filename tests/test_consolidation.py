@@ -145,4 +145,3 @@ async def test_consolidator_skips_on_active_workflow_marker(memory, mock_provide
     result = await consolidator.maybe_consolidate(memory, "u1")
     assert result is False
     mock_provider.chat.assert_not_called()
-

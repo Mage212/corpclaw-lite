@@ -136,11 +136,10 @@ async def test_unregister_plugin_removes_skill(tmp_path: Path) -> None:
     assert skill_registry.get_skill("skill_with_skill") is None
 
 
-def test_force_reload_clears_sys_modules(tmp_path: Path) -> None:
-    """load_plugin(force_reload=True) removes stale module from sys.modules."""
-    import sys
-
+def test_force_reload_with_subprocess_isolation(tmp_path: Path) -> None:
+    """load_plugin loads tool via subprocess introspection (no sys.modules pollution)."""
     from corpclaw_lite.extensions.plugins.loader import PluginLoader
+    from corpclaw_lite.extensions.plugins.sandbox_proxy import PluginToolProxy
 
     plugin_dir = tmp_path / "cached_plugin"
     plugin_dir.mkdir()
@@ -160,13 +159,14 @@ def test_force_reload_clears_sys_modules(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    # Load once to populate sys.modules
-    PluginLoader.load_plugin(plugin_dir)
-    assert "plugin_cached_plugin_tool" in sys.modules
+    # Load — tool.py runs in subprocess, NOT in main process
+    plugin = PluginLoader.load_plugin(plugin_dir)
+    assert plugin is not None
+    assert len(plugin.tools) == 1
+    assert isinstance(plugin.tools[0], PluginToolProxy)
+    assert plugin.tools[0].name == "cached_tool"
 
-    # force_reload should clear it
-    PluginLoader.load_plugin(plugin_dir, force_reload=True)
-    # Module will be re-added after reload, but the key point is it was cleared first
-    # (we can't easily test the intermediate state without mocking, but we verify
-    # the function completes successfully with force_reload=True)
-    assert "plugin_cached_plugin_tool" in sys.modules  # re-added after load
+    # force_reload should also work (new proxy, no stale state)
+    plugin2 = PluginLoader.load_plugin(plugin_dir, force_reload=True)
+    assert plugin2 is not None
+    assert isinstance(plugin2.tools[0], PluginToolProxy)

@@ -13,7 +13,6 @@ Usage:
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +20,7 @@ import yaml
 
 from corpclaw_lite.config.interpolation import interpolate_recursive
 from corpclaw_lite.config.settings import Settings
+from corpclaw_lite.paths import PROJECT_ROOT
 
 __all__ = ["load_settings"]
 
@@ -36,11 +36,7 @@ def load_settings(path: Path | str | None = None) -> Settings:
         Fully populated Settings instance.
     """
     if path is None:
-        # Resolve project root (4 levels up from this file)
-        project_root = (
-            Path(os.environ.get("CORPCLAW_ROOT", "")) or Path(__file__).parent.parent.parent.parent
-        )
-        path = project_root / "config" / "settings.yaml"
+        path = PROJECT_ROOT / "config" / "settings.yaml"
 
     yaml_path = Path(path)
     if not yaml_path.exists():

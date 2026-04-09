@@ -69,16 +69,12 @@ class TestTelegramChannel:
 
         await channel.send_message(user, long_message)
 
-        # Should be called twice
-        assert mock_bot.send_message.await_count == 2
+        # Should be called multiple times (text is split into chunks)
+        assert mock_bot.send_message.await_count >= 2
 
-        # Check first call text
-        call_args_1 = mock_bot.send_message.await_args_list[0].kwargs
-        assert len(call_args_1["text"]) <= 4096
-
-        # Check second call text
-        call_args_2 = mock_bot.send_message.await_args_list[1].kwargs
-        assert len(call_args_2["text"]) > 0
+        # All chunks must fit Telegram's limit
+        for call in mock_bot.send_message.await_args_list:
+            assert len(call.kwargs["text"]) <= 4096
 
     @pytest.mark.asyncio
     async def test_request_approval(self, channel: TelegramChannel, mock_bot: AsyncMock) -> None:

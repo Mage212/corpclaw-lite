@@ -1,10 +1,15 @@
-"""exec_script — shell command execution tool with timeout support."""
+"""exec_script — shell command execution tool with timeout support.
+
+Security relies on ToolGuard YAML rules and container isolation.
+No hardcoded blocklist — it was removed because blocklists are bypassable
+(e.g. ``python3 -c "import shutil; shutil.rmtree('/')"``) and create
+false confidence. ToolGuard + containers are the only effective controls.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import os
-import re
 import signal
 import sys
 from pathlib import Path
@@ -13,7 +18,6 @@ from typing import Any
 from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
 
 __all__ = [
-    "BLOCKED_PATTERNS",
     "DEFAULT_TIMEOUT",
     "ExecScriptTool",
     "MAX_OUTPUT_BYTES",
@@ -23,35 +27,6 @@ __all__ = [
 DEFAULT_TIMEOUT = 30
 MAX_TIMEOUT = 120
 MAX_OUTPUT_BYTES = 50_000
-
-# Defense-in-depth: block destructive patterns regardless of ToolGuard rules.
-# These patterns catch obvious destructive/RCE vectors that must NEVER execute
-# in a sandboxed agent context. ToolGuard YAML rules are the primary control --
-# these are the last-resort hardcoded backstop.
-BLOCKED_PATTERNS: list[re.Pattern[str]] = [
-    # Destructive file operations
-    re.compile(r"rm\s+(-[a-zA-Z]*[rf][a-zA-Z]*\s+)*/\s*$"),  # rm -rf /
-    re.compile(r"rm\s+(-[a-zA-Z]*[rf][a-zA-Z]*\s+)+/\b"),  # rm -rf /path
-    re.compile(r"find\s+/.*-delete"),  # find / -delete
-    re.compile(r"find\s+/.*-exec\s+rm"),  # find / -exec rm
-    re.compile(r"mkfs\."),  # filesystem format
-    re.compile(r"dd\s+.*of=/dev/"),  # dd to device
-    re.compile(r">\s*/dev/sd[a-z]"),  # overwrite disk
-    re.compile(r"chmod\s+777\s+/\s*$"),  # chmod 777 /
-    # Fork bomb
-    re.compile(r":\(\)\{.*\|.*&\s*\};:"),
-    # RCE via download-and-execute
-    re.compile(r"curl\s+.*\|\s*(ba)?sh", re.IGNORECASE),  # curl | bash
-    re.compile(r"wget\s+.*\|\s*(ba)?sh", re.IGNORECASE),  # wget | bash
-    re.compile(r"curl\s+.*-o\s*-\s*\|\s*(ba)?sh", re.IGNORECASE),  # curl -o- | bash
-    # Obfuscated payload delivery
-    re.compile(r"base64\s+(--decode|-d).*\|"),  # base64 decode | pipe
-    re.compile(r"\|\s*base64\s+(--decode|-d)"),  # ... | base64 -d | ...
-    # Privilege escalation
-    re.compile(r"\bsudo\s+"),  # sudo anything
-    # Eval with explicit string literal (eval of variable is allowed for scripting)
-    re.compile(r"""\beval\s+['"`]"""),  # eval '...' or eval "..."
-]
 
 
 class ExecScriptTool(Tool):
@@ -81,10 +56,6 @@ class ExecScriptTool(Tool):
         timeout_val = max(1, min(timeout_val, MAX_TIMEOUT))
 
         workspace = Path.cwd().resolve()
-
-        for pat in BLOCKED_PATTERNS:
-            if pat.search(script):
-                return "Error: command blocked by built-in safety filter."
 
         try:
             proc_kwargs: dict[str, Any] = {

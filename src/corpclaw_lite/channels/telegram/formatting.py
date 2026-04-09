@@ -178,13 +178,18 @@ def split_message(text: str, max_length: int = SPLIT_MAX_LENGTH) -> list[str]:
 def build_response_parts(text: str) -> list[str]:
     """Build paginated response messages for Telegram.
 
-    Splits the text into chunks fitting Telegram's size boundaries and appends
-    pagination indicators [1/N] if the text requires multiple messages.
+    Converts to MarkdownV2 FIRST, then splits — ensuring each chunk
+    fits within Telegram's 4096-char limit even after MarkdownV2 expansion.
+    Appends pagination indicators [1/N] if multiple messages are needed.
     """
     text = text.strip()
-    text = convert_markdown_tables(text)
+    converted = convert_markdown_tables(text)
+    try:
+        markdownified = _markdownify(converted)
+    except Exception:
+        markdownified = converted
 
-    text_chunks = split_message(text, max_length=SPLIT_MAX_LENGTH)
+    text_chunks = split_message(markdownified, max_length=SPLIT_MAX_LENGTH)
     total = len(text_chunks)
 
     if total == 1:

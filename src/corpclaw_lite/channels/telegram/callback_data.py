@@ -6,7 +6,6 @@ __all__ = [
     "CB_DELETE_EXEC",
     "CB_DELETE_FILE",
     "CB_DELETE_NOOP",
-    "CB_DELETE_OPEN",
     "CB_DELETE_PAGE",
     "CB_DELETE_REFRESH",
     "CB_DELETE_ROOT",
@@ -16,7 +15,6 @@ __all__ = [
 """Callback data prefixes for Telegram inline workflows."""
 
 # Delete file manager flow
-CB_DELETE_OPEN = "del:open"
 CB_DELETE_PAGE = "del:page:"
 CB_DELETE_DIR = "del:dir:"
 CB_DELETE_FILE = "del:file:"

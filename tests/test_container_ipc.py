@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from corpclaw_lite.container.ipc import ContainerIPC
+from corpclaw_lite.exceptions import ContainerIPCError
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -90,10 +91,13 @@ async def test_send_tool_call_error_status(ipc, auth) -> None:
     stdout = _make_signed_response(auth, response_payload)
     proc = _mock_process(stdout=stdout, returncode=0)
 
-    with patch("asyncio.create_subprocess_exec", return_value=proc):
-        result = await ipc.send_tool_call(user_id=1, tool_name="write_file", args={})
+    with (
+        patch("asyncio.create_subprocess_exec", return_value=proc),
+        pytest.raises(ContainerIPCError) as exc_info,
+    ):
+        await ipc.send_tool_call(user_id=1, tool_name="write_file", args={})
 
-    assert "permission denied" in result
+    assert "permission denied" in str(exc_info.value)
 
 
 # ── Test 5: nonzero exit code ─────────────────────────────────────────────────
@@ -103,11 +107,13 @@ async def test_send_tool_call_error_status(ipc, auth) -> None:
 async def test_send_tool_call_nonzero_exit(ipc) -> None:
     proc = _mock_process(stdout=b"", stderr=b"No such container", returncode=1)
 
-    with patch("asyncio.create_subprocess_exec", return_value=proc):
-        result = await ipc.send_tool_call(user_id=1, tool_name="exec_script", args={})
+    with (
+        patch("asyncio.create_subprocess_exec", return_value=proc),
+        pytest.raises(ContainerIPCError) as exc_info,
+    ):
+        await ipc.send_tool_call(user_id=1, tool_name="exec_script", args={})
 
-    assert "Container execution error" in result
-    assert "No such container" in result
+    assert "No such container" in str(exc_info.value)
 
 
 # ── Test 6: invalid JSON response ────────────────────────────────────────────
@@ -117,10 +123,13 @@ async def test_send_tool_call_nonzero_exit(ipc) -> None:
 async def test_send_tool_call_invalid_json(ipc) -> None:
     proc = _mock_process(stdout=b"not valid json {{{", returncode=0)
 
-    with patch("asyncio.create_subprocess_exec", return_value=proc):
-        result = await ipc.send_tool_call(user_id=1, tool_name="read_file", args={})
+    with (
+        patch("asyncio.create_subprocess_exec", return_value=proc),
+        pytest.raises(ContainerIPCError) as exc_info,
+    ):
+        await ipc.send_tool_call(user_id=1, tool_name="read_file", args={})
 
-    assert "Invalid JSON response" in result
+    assert "Invalid JSON" in str(exc_info.value)
 
 
 # ── Test 7: verify raises (bad signature) ─────────────────────────────────────
@@ -139,10 +148,13 @@ async def test_send_tool_call_verify_fails(ipc) -> None:
     ).encode("utf-8")
     proc = _mock_process(stdout=bad_response, returncode=0)
 
-    with patch("asyncio.create_subprocess_exec", return_value=proc):
-        result = await ipc.send_tool_call(user_id=1, tool_name="read_file", args={})
+    with (
+        patch("asyncio.create_subprocess_exec", return_value=proc),
+        pytest.raises(ContainerIPCError) as exc_info,
+    ):
+        await ipc.send_tool_call(user_id=1, tool_name="read_file", args={})
 
-    assert "Security verification failed" in result
+    assert "Security verification failed" in str(exc_info.value)
 
 
 # ── Test 8: timeout ───────────────────────────────────────────────────────────
@@ -152,14 +164,16 @@ async def test_send_tool_call_verify_fails(ipc) -> None:
 async def test_send_tool_call_timeout(ipc) -> None:
     proc = AsyncMock()
     proc.communicate = AsyncMock(side_effect=TimeoutError())
-    # kill() is sync on asyncio.subprocess.Process, wait() is async
     proc.kill = lambda: None
     proc.wait = AsyncMock(return_value=0)
 
-    with patch("asyncio.create_subprocess_exec", return_value=proc):
-        result = await ipc.send_tool_call(user_id=1, tool_name="slow_tool", args={})
+    with (
+        patch("asyncio.create_subprocess_exec", return_value=proc),
+        pytest.raises(ContainerIPCError) as exc_info,
+    ):
+        await ipc.send_tool_call(user_id=1, tool_name="slow_tool", args={})
 
-    assert "timed out" in result
+    assert "timed out" in str(exc_info.value)
 
 
 # ── Test 9: generic OSError ───────────────────────────────────────────────────
@@ -167,14 +181,16 @@ async def test_send_tool_call_timeout(ipc) -> None:
 
 @pytest.mark.asyncio
 async def test_send_tool_call_generic_error(ipc) -> None:
-    with patch(
-        "asyncio.create_subprocess_exec",
-        side_effect=OSError("docker not found"),
+    with (
+        patch(
+            "asyncio.create_subprocess_exec",
+            side_effect=OSError("docker not found"),
+        ),
+        pytest.raises(ContainerIPCError) as exc_info,
     ):
-        result = await ipc.send_tool_call(user_id=1, tool_name="read_file", args={})
+        await ipc.send_tool_call(user_id=1, tool_name="read_file", args={})
 
-    assert "Error in Container IPC" in result
-    assert "docker not found" in result
+    assert "docker not found" in str(exc_info.value)
 
 
 # ── Test 10: get_last_used ────────────────────────────────────────────────────
@@ -216,9 +232,10 @@ async def test_last_used_updates_on_call(ipc, auth) -> None:
     # Small delay to ensure monotonic moves forward
     await asyncio.sleep(0.01)
 
+    stdout2 = _make_signed_response(auth, response_payload)
     with patch(
         "asyncio.create_subprocess_exec",
-        return_value=_mock_process(stdout=stdout, returncode=0),
+        return_value=_mock_process(stdout=stdout2, returncode=0),
     ):
         await ipc.send_tool_call(user_id=7, tool_name="t2", args={})
         ts2 = ipc.get_last_used(7)

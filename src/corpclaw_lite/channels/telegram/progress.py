@@ -59,6 +59,7 @@ class StatusMessageSession:
         delete_on_finish: bool = True,
         max_updates_per_request: int = 8,
         initial_text: str = "⏳ В обработке...",
+        thinking_timeout: float = 2.0,
     ) -> None:
         self._bot = bot
         self._source_message = source_message
@@ -67,6 +68,7 @@ class StatusMessageSession:
         self._typing_heartbeat_seconds = max(1.0, typing_heartbeat_seconds)
         self._delete_on_finish = delete_on_finish
         self._max_updates_per_request = max(0, max_updates_per_request)
+        self._thinking_timeout = thinking_timeout
         self._current_text = initial_text
         self._desired_text = initial_text
         self._started_at = time.monotonic()
@@ -144,7 +146,7 @@ class StatusMessageSession:
     def _apply_timed_default_status(self, now: float) -> None:
         if self._desired_text != "⏳ В обработке...":
             return
-        if now - self._started_at >= 2.0:
+        if now - self._started_at >= self._thinking_timeout:
             self._desired_text = "🤔 Думаю..."
 
     async def _maybe_edit_status(self, now: float) -> None:

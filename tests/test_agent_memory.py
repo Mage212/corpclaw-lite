@@ -113,7 +113,9 @@ async def test_tool_marker_saved_in_memory(tmp_path):
     provider.chat.side_effect = [
         LLMResponse(
             content="",
-            tool_calls=[ToolCall(id="tc1", name="normalize_excel", arguments={"path": "test.xlsx"})],
+            tool_calls=[
+                ToolCall(id="tc1", name="normalize_excel", arguments={"path": "test.xlsx"})
+            ],
         ),
         LLMResponse(content="File normalized successfully."),
     ]
@@ -137,4 +139,3 @@ async def test_tool_marker_saved_in_memory(tmp_path):
     assistant_msg = [m for m in hist if m["role"] == "assistant"][-1]
     assert "[Called tools: normalize_excel]" in assistant_msg["content"]
     assert "File normalized successfully." in assistant_msg["content"]
-

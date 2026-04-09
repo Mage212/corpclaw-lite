@@ -15,8 +15,7 @@ class DebugAssertions:
         """Assert that all specified tools appear in stats.tools_used."""
         for tool_name in tool_names:
             assert tool_name in stats.tools_used, (
-                f"Expected tool '{tool_name}' to be used, "
-                f"but tools_used = {stats.tools_used}"
+                f"Expected tool '{tool_name}' to be used, but tools_used = {stats.tools_used}"
             )
 
     @staticmethod
@@ -56,8 +55,7 @@ class DebugAssertions:
         """Assert that all fragments appear somewhere in the reply."""
         for fragment in fragments:
             assert fragment in reply, (
-                f"Expected reply to contain {fragment!r}.\n"
-                f"Reply (first 600 chars):\n{reply[:600]}"
+                f"Expected reply to contain {fragment!r}.\nReply (first 600 chars):\n{reply[:600]}"
             )
 
     @staticmethod
@@ -65,8 +63,7 @@ class DebugAssertions:
         """Assert that none of the fragments appear in the reply."""
         for fragment in fragments:
             assert fragment not in reply, (
-                f"Reply should NOT contain {fragment!r}.\n"
-                f"Reply (first 600 chars):\n{reply[:600]}"
+                f"Reply should NOT contain {fragment!r}.\nReply (first 600 chars):\n{reply[:600]}"
             )
 
     @staticmethod
@@ -107,9 +104,7 @@ class DebugAssertions:
         """Assert that a file does NOT contain a specific substring."""
         assert path.exists(), f"File '{path}' does not exist."
         content = path.read_text(encoding="utf-8")
-        assert substring not in content, (
-            f"File '{path}' should NOT contain {substring!r} but does."
-        )
+        assert substring not in content, f"File '{path}' should NOT contain {substring!r} but does."
 
 
 def summarise_run(reply: str, stats: RunStats) -> str:

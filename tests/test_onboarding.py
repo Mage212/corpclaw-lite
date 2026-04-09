@@ -12,7 +12,6 @@ from corpclaw_lite.onboarding.finalizer import FINALIZATION_PROMPT, OnboardingFi
 from corpclaw_lite.onboarding.questions import ONBOARDING_QUESTIONS
 from corpclaw_lite.onboarding.storage import OnboardingState, OnboardingStorage
 
-
 # ── Storage tests ────────────────────────────────────────────────────────────
 
 
@@ -130,9 +129,7 @@ async def test_is_in_progress_new(engine: OnboardingEngine) -> None:
 
 
 @pytest.mark.asyncio()
-async def test_is_in_progress_started(
-    engine: OnboardingEngine, storage: OnboardingStorage
-) -> None:
+async def test_is_in_progress_started(engine: OnboardingEngine, storage: OnboardingStorage) -> None:
     state = OnboardingState(user_id=1, current_step=2)
     await storage.save_state(state)
     assert await engine.is_in_progress(1) is True
@@ -146,9 +143,7 @@ async def test_start_returns_first_question(engine: OnboardingEngine) -> None:
 
 
 @pytest.mark.asyncio()
-async def test_full_flow(
-    engine: OnboardingEngine, mock_finalizer: OnboardingFinalizer
-) -> None:
+async def test_full_flow(engine: OnboardingEngine, mock_finalizer: OnboardingFinalizer) -> None:
     """Walk through all questions and verify finalize is called."""
     q = await engine.start(1, "default")
     answers = ["Вадим", "коротко", "русский", "продакт", "Excel", "нет"]
@@ -170,9 +165,7 @@ async def test_full_flow(
 
 
 @pytest.mark.asyncio()
-async def test_reset_restarts(
-    engine: OnboardingEngine, storage: OnboardingStorage
-) -> None:
+async def test_reset_restarts(engine: OnboardingEngine, storage: OnboardingStorage) -> None:
     state = OnboardingState(user_id=1, completed=True)
     await storage.save_state(state)
     assert await engine.needs_onboarding(1) is False

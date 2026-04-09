@@ -88,8 +88,7 @@ async def test_A3_russian_response(
     # Verify there is at least some Cyrillic content (agent should respond in Russian)
     has_cyrillic = any("\u0400" <= ch <= "\u04ff" for ch in reply)
     assert has_cyrillic, (
-        f"Expected Cyrillic characters in reply (agent should use Russian).\n"
-        f"Reply: {reply[:300]}"
+        f"Expected Cyrillic characters in reply (agent should use Russian).\nReply: {reply[:300]}"
     )
     print(f"\n[A3] {summarise_run(reply, stats)}")
 
@@ -138,8 +137,7 @@ async def test_A5_no_tools_for_knowledge(
     # For a pure knowledge question the agent SHOULD NOT use tools
     # (no file to read, no script to run)
     assert stats.tools_used == [], (
-        f"Expected no tool calls for a knowledge question, "
-        f"got tools_used={stats.tools_used}"
+        f"Expected no tool calls for a knowledge question, got tools_used={stats.tools_used}"
     )
     DebugAssertions.assert_reply_contains(reply, "Толстой")
     print(f"\n[A5] {summarise_run(reply, stats)}")

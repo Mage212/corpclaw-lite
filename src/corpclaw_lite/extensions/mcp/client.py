@@ -57,6 +57,7 @@ class MCPClient:
         self._total_timeout = total_timeout
         self._process: asyncio.subprocess.Process | None = None
         self._request_id = 0
+        self._request_lock = asyncio.Lock()
 
     async def connect(self, command: list[str], env: dict[str, str] | None = None) -> None:
         """Launch the MCP server subprocess and perform the initialization handshake.
@@ -157,10 +158,11 @@ class MCPClient:
     async def _send_request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """Send a JSON-RPC request and return the result dict."""
         try:
-            return await asyncio.wait_for(
-                self._send_request_inner(method, params),
-                timeout=self._total_timeout,
-            )
+            async with self._request_lock:
+                return await asyncio.wait_for(
+                    self._send_request_inner(method, params),
+                    timeout=self._total_timeout,
+                )
         except TimeoutError as e:
             raise MCPClientError(
                 f"MCP request '{method}' exceeded total timeout of {self._total_timeout}s"

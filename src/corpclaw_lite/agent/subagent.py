@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING
 
@@ -85,10 +86,17 @@ class SubagentDispatcher:
             permission_checker=self._permission_checker,
         )
 
+        timeout_seconds = self._settings.max_wall_time_ms / 1000 * 2
+
         try:
-            # Pass system_prompt as dedicated system message, task as user message
-            result, _ = await loop.run(user, task_context, system_prompt=system_prompt)
+            result, _ = await asyncio.wait_for(
+                loop.run(user, task_context, system_prompt=system_prompt),
+                timeout=timeout_seconds,
+            )
             return result
+        except TimeoutError:
+            logger.error("Subagent %s timed out after %.0fs", spec.id, timeout_seconds)
+            return f"Subagent error: execution timed out after {int(timeout_seconds)}s"
         except Exception as e:
             logger.error("Subagent %s failed: %s", spec.id, e)
             return f"Subagent error: {e}"
