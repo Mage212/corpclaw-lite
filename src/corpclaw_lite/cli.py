@@ -195,13 +195,11 @@ def cmd_chat(telegram_id: int, *, setup_mode: bool = False) -> None:
 
         install_signal_handlers(shutdown)
 
-        (
-            agent_loop,
-            _,
-            tool_registry,
-            mcp_manager,
-            _container_manager,
-        ) = build_agent_stack()
+        stack = build_agent_stack()
+        agent_loop = stack.loop
+        tool_registry = stack.tool_registry
+        mcp_manager = stack.mcp_manager
+        _container_manager = stack.container_manager
         bootstrap = BootstrapLoader(Path("config/bootstrap"))
         system_prompt = bootstrap.get_system_prompt() or None
 
@@ -225,7 +223,7 @@ def cmd_chat(telegram_id: int, *, setup_mode: bool = False) -> None:
             return
         print(f"[INFO] Вошёл как: {user.name} (department={user.department})")
         if _container_manager and user.telegram_id is not None:
-            _container_manager.ensure_running(user.telegram_id)
+            await _container_manager.ensure_running_async(user.telegram_id)
 
         # ── Onboarding ─────────────────────────────────────────────────────────────
         from corpclaw_lite.onboarding.engine import OnboardingEngine
@@ -297,6 +295,7 @@ def cmd_chat(telegram_id: int, *, setup_mode: bool = False) -> None:
         await channel.start()
         print("CorpClaw Lite – CLI chat (Ctrl+C to quit)")
         loop = asyncio.get_running_loop()
+        _activity_logger = None
         try:
             while not shutdown.is_set():
                 # Race input() against the shutdown event so Ctrl+C exits immediately.
@@ -350,11 +349,12 @@ def cmd_chat(telegram_id: int, *, setup_mode: bool = False) -> None:
                     )
 
                     # ── Structured activity log ────────────────────────────────────────
-                    from corpclaw_lite.logging.agent_logger import AgentLogger
+                    if _activity_logger is None:
+                        from corpclaw_lite.logging.agent_logger import AgentLogger
 
-                    _log = _settings.logging
-                    agent_activity_logger = AgentLogger(log_dir=PROJECT_ROOT / _log.log_dir)
-                    agent_activity_logger.log_request(
+                        _log = _settings.logging
+                        _activity_logger = AgentLogger(log_dir=PROJECT_ROOT / _log.log_dir)
+                    _activity_logger.log_request(
                         user_id=str(telegram_id),
                         department=user.department,
                         message_preview=msg[:100],
@@ -377,7 +377,7 @@ def cmd_chat(telegram_id: int, *, setup_mode: bool = False) -> None:
                     logger.warning("MCP disconnect failed: %s", e)
             if _container_manager is not None and user.telegram_id is not None:
                 try:
-                    _container_manager.stop(user.telegram_id)
+                    await _container_manager.stop_async(user.telegram_id)
                 except Exception as e:
                     logger.warning("Container stop failed: %s", e)
             logger.info("CLI chat shut down cleanly for user %d.", telegram_id)
@@ -388,6 +388,9 @@ def cmd_chat(telegram_id: int, *, setup_mode: bool = False) -> None:
         _input_executor.shutdown(wait=False)
         # Safety net: if a blocking input() thread is still alive,
         # force-exit so we never leave ghost processes.
+        # os._exit() is necessary (not sys.exit) because sys.exit raises
+        # SystemExit which is caught by asyncio, leaving the daemon thread
+        # alive indefinitely. os._exit terminates the process immediately.
         for t in threading.enumerate():
             if t.name.startswith("cli-input") and t.is_alive():
                 logger.debug("Force-exiting: blocking input thread still alive.")

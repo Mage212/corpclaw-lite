@@ -140,11 +140,7 @@ class SQLiteMemory:
                 for r in reversed(rows):
                     role = r["role"]
                     content_str = r["content"]
-                    try:
-                        content: Any = json.loads(content_str)
-                    except json.JSONDecodeError:
-                        content = content_str
-                    history.append({"role": role, "content": content})
+                    history.append({"role": role, "content": content_str})
                 return history
         except Exception as e:
             logger.error("Failed to fetch history for user %s: %s", user_id, e)

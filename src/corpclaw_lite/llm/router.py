@@ -172,7 +172,7 @@ class LLMRouter:
         system: str | None = None,
     ) -> AsyncIterator[StreamChunk]:
         """Stream using the default provider."""
-        async for chunk in await self.default.stream(messages=messages, tools=tools, system=system):  # type: ignore[misc]
+        async for chunk in self.default.stream(messages=messages, tools=tools, system=system):
             yield chunk
 
     # ── VisionProvider protocol implementation (delegates to vision task) ─────

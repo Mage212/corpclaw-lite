@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Any
 
 from corpclaw_lite.agent.vision import VisionProcessor
 from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
+from corpclaw_lite.extensions.tools.builtin._path_utils import resolve_container_path
 from corpclaw_lite.extensions.tools.builtin.files import (
     IMAGE_EXTENSIONS,
     resolve_and_validate_path,
@@ -61,41 +62,9 @@ class ReadImageTool(Tool):
         from pathlib import Path
 
         try:
-            resolved: Path
-
-            # Docker container mounts the user workspace as /workspace.
-            # File tools (list_files, read_file) run inside the container and
-            # return /workspace/... paths. ReadImageTool is a HOST tool, so we
-            # must translate container paths to the equivalent host path.
-            _CONTAINER_WS = "/workspace"
             path_str = path.strip()
-            if (
-                self._workspace_base is not None
-                and user is not None
-                and user.telegram_id is not None
-                and (
-                    path_str == _CONTAINER_WS
-                    or path_str.startswith(_CONTAINER_WS + "/")
-                    or path_str.startswith(_CONTAINER_WS + "\\")
-                )
-            ):
-                # Strip /workspace prefix and resolve against host workspace
-                relative = path_str[len(_CONTAINER_WS) :].lstrip("/\\")
-                user_workspace = Path(self._workspace_base) / f"user_{user.telegram_id}"
-                resolved = (user_workspace / relative).resolve()
-
-            elif (
-                not Path(path_str).is_absolute()
-                and self._workspace_base is not None
-                and user is not None
-                and user.telegram_id is not None
-            ):
-                # Relative path → resolve against user workspace
-                user_workspace = Path(self._workspace_base) / f"user_{user.telegram_id}"
-                resolved = (user_workspace / path_str).resolve()
-
-            else:
-                # Absolute non-container path or CLI mode
+            resolved = resolve_container_path(path_str, self._workspace_base, user)
+            if resolved == Path(path_str).resolve() and Path(path_str).is_absolute():
                 resolved = resolve_and_validate_path(path_str)
 
             if not resolved.exists() or not resolved.is_file():

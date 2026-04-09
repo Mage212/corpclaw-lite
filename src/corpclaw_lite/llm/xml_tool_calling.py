@@ -166,7 +166,12 @@ def parse_xml_tool_call(
 
 
 def build_xml_fallback_system(tool_names: list[str]) -> str:
-    """Build a compact system instruction block for XML fallback mode."""
+    """Build a compact system instruction block for XML fallback mode.
+
+    Part of the public API (exported via __all__) — used by callers that need
+    to inject XML tool-calling instructions into the system prompt when the
+    model does not natively support function calling.
+    """
     available = ", ".join(name for name in tool_names if name) or "none"
     return (
         "If you need a tool, respond with exactly one XML block:\n"
@@ -177,7 +182,11 @@ def build_xml_fallback_system(tool_names: list[str]) -> str:
 
 
 def build_xml_repair_prompt(error_message: str) -> str:
-    """Build a retry instruction asking the model to repair malformed XML."""
+    """Build a retry instruction asking the model to repair malformed XML.
+
+    Part of the public API (exported via __all__) — used alongside
+    build_xml_fallback_system() for retry flows.
+    """
     return (
         "Your previous tool-call output was invalid. "
         f"Error: {error_message} "

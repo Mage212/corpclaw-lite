@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -13,6 +14,8 @@ __all__ = [
 
 if TYPE_CHECKING:
     from corpclaw_lite.users.models import User
+
+logger = logging.getLogger(__name__)
 
 
 class ToolRegistry:
@@ -93,8 +96,9 @@ class ToolRegistry:
 
         try:
             return await tool.execute(**arguments, user=user)
-        except Exception as e:
-            return f"Error executing '{name}': {e}"
+        except Exception:
+            logger.exception("Tool '%s' execution failed", name)
+            return f"Error executing '{name}': see logs for details"
 
     def to_schemas(self) -> list[dict[str, Any]]:
         """Convert registered tools to OpenAI function calling schemas.

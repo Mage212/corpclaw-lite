@@ -52,11 +52,22 @@ _COOLDOWN_SECONDS = 60
 class MemoryConsolidator:
     """Periodically compresses old conversation history via LLM summarization."""
 
+    _MAX_TRACKED_USERS = 5000
+
     def __init__(self, provider: Provider, threshold: int = 30):
         self._provider = provider
         self._threshold = threshold
         # Per-user cooldown: {user_id: last_consolidation_time}
         self._last_consolidated: dict[str, float] = {}
+
+    def _prune_tracked(self) -> None:
+        if len(self._last_consolidated) > self._MAX_TRACKED_USERS:
+            sorted_keys = sorted(
+                self._last_consolidated.keys(), key=lambda k: self._last_consolidated[k]
+            )
+            to_remove = sorted_keys[: len(sorted_keys) - self._MAX_TRACKED_USERS // 2]
+            for k in to_remove:
+                del self._last_consolidated[k]
 
     async def maybe_consolidate(self, memory: SQLiteMemory, user_id: str) -> bool:
         """Check message count and consolidate if above threshold.
@@ -115,6 +126,7 @@ class MemoryConsolidator:
             summary = await self._summarize(old_messages)
             await memory.replace_oldest(user_id, count=split, summary=summary)
             self._last_consolidated[user_id] = time.monotonic()
+            self._prune_tracked()
             logger.info(
                 "Consolidated %d messages into summary for user %s",
                 split,
@@ -146,4 +158,3 @@ class MemoryConsolidator:
             content: str = str(content_raw) if content_raw is not None else ""
             lines.append(f"{role}: {content}")
         return "\n".join(lines)
-

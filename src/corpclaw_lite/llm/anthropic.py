@@ -8,6 +8,7 @@ import anthropic
 
 from corpclaw_lite.config.settings import ProviderSettings
 from corpclaw_lite.llm.base import LLMResponse, Provider, StreamChunk, ToolCall
+from corpclaw_lite.llm.presets import ModelPreset
 
 __all__ = [
     "AnthropicProvider",
@@ -17,9 +18,25 @@ __all__ = [
 class AnthropicProvider(Provider):
     """LLM Provider passing through to Anthropic Claude models."""
 
-    def __init__(self, settings: ProviderSettings, preset: Any | None = None):
+    _ANTHROPIC_STANDARD_PARAMS = frozenset(
+        {
+            "model",
+            "messages",
+            "max_tokens",
+            "system",
+            "tools",
+            "temperature",
+            "top_p",
+            "top_k",
+            "stop_sequences",
+            "stream",
+            "metadata",
+        }
+    )
+
+    def __init__(self, settings: ProviderSettings, preset: ModelPreset | None = None):
         self._model = settings.model
-        self._preset = preset  # ModelPreset | None
+        self._preset = preset
         if not settings.api_key:
             raise ValueError("Anthropic requires an API key in settings")
 
@@ -56,7 +73,8 @@ class AnthropicProvider(Provider):
         # Merge preset inference params (request-level > preset > defaults)
         if self._preset:
             for k, v in self._preset.inference_params.items():
-                kwargs.setdefault(k, v)
+                if k in self._ANTHROPIC_STANDARD_PARAMS:
+                    kwargs.setdefault(k, v)
         if system:
             kwargs["system"] = system
 

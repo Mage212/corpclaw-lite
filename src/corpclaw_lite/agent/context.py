@@ -80,7 +80,7 @@ class ContextBuilder:
         if len(self.messages) <= protect_tail + 2:
             return 0
 
-        placeholder = "[Old tool output cleared to save context space]"
+        from corpclaw_lite.agent.compressor import PLACEHOLDER
 
         tool_result_indices = [
             i for i, msg in enumerate(self.messages) if msg.get("role") == "tool"
@@ -99,7 +99,7 @@ class ContextBuilder:
                 continue
             content = self.messages[idx].get("content", "")
             if isinstance(content, str) and len(content) > min_length:
-                self.messages[idx]["content"] = placeholder
+                self.messages[idx]["content"] = PLACEHOLDER
                 pruned += 1
 
         return pruned
@@ -140,7 +140,7 @@ class ContextBuilder:
             if user_msg:
                 builder.add_user_message(user_msg)
             if isinstance(assistant_raw, dict) and "content" in assistant_raw:
-                builder.add_assistant_message(str(cast(Any, assistant_raw["content"])))
+                builder.add_assistant_message(str(cast(str, assistant_raw["content"])))
             elif isinstance(assistant_raw, dict) and "tool_calls" in assistant_raw:
                 # Simplified: show tool call as assistant text for pattern matching
                 raw_calls = cast(list[dict[str, Any]], assistant_raw["tool_calls"])

@@ -33,7 +33,7 @@ class VisionProcessor:
     def __init__(self, provider: Provider) -> None:
         self._provider = provider
 
-    async def describe(self, path: Path, prompt: str, user: User | None = None) -> str:
+    async def describe(self, path: Path, prompt: str, _user: User | None = None) -> str:
         """Read an image and get a description/analysis from the vision model."""
         aio_path = anyio.Path(path)
         if not await aio_path.exists() or not await aio_path.is_file():

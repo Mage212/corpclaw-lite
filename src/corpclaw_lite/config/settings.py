@@ -84,6 +84,8 @@ class AgentSettings(BaseModel):
     consolidation_enabled: bool = True
     approval_mode: Literal["manual", "smart", "off"] = "manual"
     compression: CompressionSettings = CompressionSettings()
+    llm_timeout_seconds: int = 120
+    max_facts_recall: int = 20
 
 
 class TelegramSettings(BaseModel):

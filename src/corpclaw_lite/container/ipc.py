@@ -48,10 +48,19 @@ class ContainerIPC:
     to resolve the container name (corpclaw_agent_{user_id}).
     """
 
+    _MAX_LAST_USED = 10_000
+
     def __init__(self, auth: IPCAuth, timeout_seconds: float = 30.0) -> None:
         self.auth = auth
         self.timeout = timeout_seconds
         self._last_used: dict[int, float] = {}
+
+    def _prune_last_used(self) -> None:
+        if len(self._last_used) > self._MAX_LAST_USED:
+            sorted_keys = sorted(self._last_used.keys(), key=lambda k: self._last_used[k])
+            to_remove = sorted_keys[: len(sorted_keys) - self._MAX_LAST_USED // 2]
+            for k in to_remove:
+                del self._last_used[k]
 
     @classmethod
     def from_env(cls, timeout_seconds: float = 30.0) -> ContainerIPC:
@@ -84,6 +93,7 @@ class ContainerIPC:
         """
         name = self.container_name(user_id)
         self._last_used[user_id] = time.monotonic()
+        self._prune_last_used()
         payload = {"type": "tool_call", "tool": tool_name, "args": args}
         signed_message = self.auth.sign(payload)
         input_data = (json.dumps(signed_message) + "\n").encode("utf-8")
@@ -128,7 +138,8 @@ class ContainerIPC:
 
             # Parse and verify signature on response
             try:
-                response_str = stdout.decode("utf-8").strip()
+                lines = stdout.decode("utf-8").strip().split("\n")
+                response_str = lines[-1]
                 response_msg = json.loads(response_str)
                 verified_response = self.auth.verify(response_msg)
 

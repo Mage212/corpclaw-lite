@@ -35,7 +35,11 @@ class ToolGuardError(Exception):
 
 
 class ApprovalRequest(Exception):
-    """Raised when an action requires explicit user approval via a channel."""
+    """Raised when an action requires explicit user approval via a channel.
+
+    Extends Exception so callers can distinguish it from ToolGuardError (hard block)
+    in the except chain: ApprovalRequest → ask user, ToolGuardError → reject outright.
+    """
 
     def __init__(self, action: str, details: str):
         self.action = action
@@ -52,6 +56,13 @@ class GuardRule:
         self.severity: str = data.get("severity", RuleSeverity.INFO)
         self.tool: str = data.get("tool", "*")
 
+        valid_severities = {s.value for s in RuleSeverity}
+        if self.severity not in valid_severities:
+            logger.warning(
+                "Rule '%s': invalid severity '%s', defaulting to INFO", self.id, self.severity
+            )
+            self.severity = RuleSeverity.INFO
+
         # Conditions (at least one must match if present)
         self.match_param: str | None = data.get("match_param")
         self.match_pattern: str | None = data.get("match_pattern")
@@ -67,7 +78,7 @@ class GuardRule:
 
         if self.match_param and self._regex:
             val = arguments.get(self.match_param)
-            if isinstance(val, str) and self._regex.search(val):
+            if val is not None and self._regex.search(str(val)):
                 return True
 
         # If there are no specific matchers but the tool matched

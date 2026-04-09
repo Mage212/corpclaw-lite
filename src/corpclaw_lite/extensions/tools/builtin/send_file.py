@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
+from corpclaw_lite.extensions.tools.builtin._path_utils import resolve_container_path
 from corpclaw_lite.extensions.tools.builtin.files import resolve_and_validate_path
 
 __all__ = [
@@ -59,36 +60,9 @@ class SendFileTool(Tool):
             return "Error: User context is required for send_file."
 
         try:
-            resolved: Path
             path_str = path.strip()
-
-            # Docker container mounts user workspace as /workspace.
-            # Agent tools (list_files, etc.) return /workspace/... paths.
-            # SendFileTool is a HOST tool — translate container paths.
-            _CONTAINER_WS = "/workspace"
-            if (
-                self._workspace_base is not None
-                and user.telegram_id is not None
-                and (
-                    path_str == _CONTAINER_WS
-                    or path_str.startswith(_CONTAINER_WS + "/")
-                    or path_str.startswith(_CONTAINER_WS + "\\")
-                )
-            ):
-                relative = path_str[len(_CONTAINER_WS) :].lstrip("/\\")
-                user_workspace = Path(self._workspace_base) / f"user_{user.telegram_id}"
-                resolved = (user_workspace / relative).resolve()
-
-            elif (
-                not Path(path_str).is_absolute()
-                and self._workspace_base is not None
-                and user.telegram_id is not None
-            ):
-                # Relative path → resolve against user workspace
-                user_workspace = Path(self._workspace_base) / f"user_{user.telegram_id}"
-                resolved = (user_workspace / path_str).resolve()
-
-            else:
+            resolved = resolve_container_path(path_str, self._workspace_base, user)
+            if resolved == Path(path_str).resolve() and Path(path_str).is_absolute():
                 resolved = resolve_and_validate_path(path_str)
 
         except PermissionError as e:

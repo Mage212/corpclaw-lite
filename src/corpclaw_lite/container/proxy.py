@@ -56,13 +56,16 @@ class IPCToolProxy(Tool):
     @classmethod
     def from_tool(cls, tool: Tool, ipc: ContainerIPC) -> IPCToolProxy:
         """Create a proxy from an existing Tool instance, copying its metadata."""
-        return cls(
+        proxy = cls(
             name=tool.name,
             description=tool.description,
             params=tool.params,
             risk_level=tool.risk_level,
             ipc=ipc,
         )
+        proxy.parallel_safe = tool.parallel_safe
+        proxy.terminal = tool.terminal
+        return proxy
 
     async def execute(self, **kwargs: Any) -> str:
         """Delegate execution to the user's container via IPC.

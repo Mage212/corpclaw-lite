@@ -16,6 +16,7 @@ from corpclaw_lite.agent.guards import (
     SimpleProgressGuard,
 )
 from corpclaw_lite.config.settings import AgentSettings
+from corpclaw_lite.extensions.tools.base import TOOL_ERROR_PREFIX
 from corpclaw_lite.extensions.tools.registry import ToolRegistry
 from corpclaw_lite.llm.base import Provider, ToolCall
 from corpclaw_lite.logging import health
@@ -163,7 +164,7 @@ class AgentLoop:
         # Load user facts from memory (onboarding + manually stored via memory_store)
         user_facts_block = ""
         if self._memory:
-            facts = await self._memory.recall_facts(mem_key, limit=20)
+            facts = await self._memory.recall_facts(mem_key, limit=self._settings.max_facts_recall)
             if facts:
                 lines = [f"- {f['key']}: {f['value']}" for f in facts]
                 user_facts_block = "\n\n## Known Facts About This User\n" + "\n".join(lines)
@@ -224,12 +225,12 @@ class AgentLoop:
                             tools=tools_schema,
                             system=context.system_prompt or None,
                         ),
-                        timeout=120,
+                        timeout=self._settings.llm_timeout_seconds,
                     )
                 except TimeoutError:
                     msg = "I could not get a response from the language model (timed out)."
                     if self._memory:
-                        await self._memory.add_message(str(user.id), "assistant", msg)
+                        await self._memory.add_message(mem_key, "assistant", msg)
                     stats.status = "timeout"
                     stats.duration_ms = (time.monotonic() - t0) * 1000
                     logger.warning(
@@ -328,7 +329,7 @@ class AgentLoop:
                             tool_obj is not None
                             and tool_obj.terminal
                             and len(response.tool_calls) == 1
-                            and not result.startswith("Error")
+                            and not result.startswith(TOOL_ERROR_PREFIX)
                         ):
                             if self._memory:
                                 marker = _format_tool_marker(stats.tools_used)
@@ -471,8 +472,9 @@ class AgentLoop:
                 )
         except ToolGuardError as e:
             result = str(e)
-        except Exception as e:
-            result = f"Error executing tool {tc.name}: {e}"
+        except Exception:
+            logger.exception("[user=%s] Unexpected error executing tool %s", user.id, tc.name)
+            result = f"Error executing tool {tc.name}: see logs for details"
 
         logger.debug(
             "[user=%s] tool_result | tool=%s | result=%r",

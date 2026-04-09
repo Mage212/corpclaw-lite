@@ -7,10 +7,13 @@ from typing import Any
 from pydantic import BaseModel
 
 __all__ = [
+    "TOOL_ERROR_PREFIX",
     "RiskLevel",
     "Tool",
     "ToolParam",
 ]
+
+TOOL_ERROR_PREFIX = "Error"
 
 
 class RiskLevel(StrEnum):

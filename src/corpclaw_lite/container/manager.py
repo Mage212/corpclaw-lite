@@ -14,7 +14,6 @@ Security:
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 from pathlib import Path
@@ -70,9 +69,6 @@ class ContainerManager:
         self._workspace_base = workspace_base or Path(self.settings.workspace_base)
         self._client = docker.from_env() if docker else None  # type: ignore[union-attr]
         self._ipc = ipc
-
-        # A simple state map for idle tracking
-        self._active_containers: dict[int, asyncio.Task[Any]] = {}
 
     @staticmethod
     def is_docker_available() -> bool:
@@ -158,6 +154,18 @@ class ContainerManager:
     def stop(self, user_id: int) -> None:
         """Stop and remove a user's container immediately."""
         self.stop_by_name(f"corpclaw_agent_{user_id}")
+
+    async def ensure_running_async(self, user_id: int) -> str:
+        """Async wrapper for ensure_running — runs in a thread to avoid blocking the event loop."""
+        import anyio
+
+        return await anyio.to_thread.run_sync(lambda: self.ensure_running(user_id))  # type: ignore[reportAttributeAccessIssue]
+
+    async def stop_async(self, user_id: int) -> None:
+        """Async wrapper for stop — runs in a thread to avoid blocking the event loop."""
+        import anyio
+
+        await anyio.to_thread.run_sync(lambda: self.stop(user_id))  # type: ignore[reportAttributeAccessIssue]
 
     def stop_by_name(self, name: str) -> None:
         """Stop and remove a container by its Docker name."""

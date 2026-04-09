@@ -17,14 +17,14 @@ class CredentialScrubber(logging.Filter):
     Pattern matches common keys: `sk-...`, `ghp_...`, Bearer tokens, AWS, Slack, URL creds.
     """
 
-    PATTERNS: list[re.Pattern[str]] = [
+    PATTERNS: tuple[re.Pattern[str], ...] = (
         re.compile(r"sk-[a-zA-Z0-9]{20,}"),  # OpenAI / Anthropic
         re.compile(r"ghp_[a-zA-Z0-9]{36}"),  # GitHub PAT
         re.compile(r"Bearer\s+[a-zA-Z0-9\-\._~+/]+=*"),  # Generic Bearer
         re.compile(r"AKIA[A-Z0-9]{16}"),  # AWS Access Key ID
         re.compile(r"xox[bprs]-[a-zA-Z0-9\-]+"),  # Slack tokens
         re.compile(r"://[^:\s]+:[^@\s]+@"),  # URL embedded credentials
-    ]
+    )
 
     MASK = "***REDACTED***"
 

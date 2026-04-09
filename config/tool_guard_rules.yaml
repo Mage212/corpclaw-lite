@@ -61,3 +61,55 @@ rules:
     match_param: "value"
     match_pattern: "(sk-[a-zA-Z0-9]{20,}|ghp_[a-zA-Z0-9]{20,})"
     require_approval: true
+
+  # ── exec_script extended rules ──────────────────────────────────────
+
+  - id: DANGEROUS_SHUTIL_RMTREE
+    description: "Attempting to destroy directory tree via Python"
+    tool: "exec_script"
+    severity: CRITICAL
+    match_param: "script"
+    match_pattern: "shutil\\.rmtree"
+    require_approval: false
+
+  - id: DANGEROUS_PIPE_TO_SHELL
+    description: "Pipe to shell execution pattern"
+    tool: "exec_script"
+    severity: HIGH
+    match_param: "script"
+    match_pattern: "(curl\\s.*\\|\\s*(ba)?sh|wget\\s.*\\|\\s*(ba)?sh)"
+    require_approval: true
+
+  - id: CHMOD_777
+    description: "Setting overly permissive file permissions"
+    tool: "exec_script"
+    severity: MEDIUM
+    match_param: "script"
+    match_pattern: "chmod\\s+(.*\\s)?777"
+    require_approval: true
+
+  - id: DANGEROUS_DD
+    description: "Raw disk/device write via dd"
+    tool: "exec_script"
+    severity: CRITICAL
+    match_param: "script"
+    match_pattern: "dd\\s+.*of=/dev/"
+    require_approval: false
+
+  # ── web_fetch SSRF protection ──────────────────────────────────────
+
+  - id: WEB_FETCH_PRIVATE_IP
+    description: "Fetching internal/private network addresses"
+    tool: "web_fetch"
+    severity: HIGH
+    match_param: "url"
+    match_pattern: "(127\\.|10\\.|172\\.(1[6-9]|2[0-9]|3[01])\\.|192\\.168\\.|localhost|0\\.0\\.0\\.0)"
+    require_approval: true
+
+  - id: WEB_FETCH_SENSITIVE_PATHS
+    description: "Fetching sensitive local paths"
+    tool: "web_fetch"
+    severity: MEDIUM
+    match_param: "url"
+    match_pattern: "(file://|metadata\\.google\\.internal)"
+    require_approval: true

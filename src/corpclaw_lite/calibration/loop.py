@@ -92,7 +92,9 @@ class CalibrationLoop:
 
         # Build agent stack with current config
         settings = load_settings(self._project_root / "config" / "settings.yaml")
-        agent_loop, _, registry, _, _ = build_agent_stack(settings)
+        _cal_stack = build_agent_stack(settings)
+        agent_loop = _cal_stack.loop
+        registry = _cal_stack.tool_registry
 
         # Create a calibration user
         from corpclaw_lite.users.models import User
@@ -210,7 +212,9 @@ class CalibrationLoop:
 
             # Rebuild stack with new config
             new_settings = load_settings(self._project_root / "config" / "settings.yaml")
-            new_loop, _, new_registry, _, _ = build_agent_stack(new_settings)
+            _new_stack = build_agent_stack(new_settings)
+            new_loop = _new_stack.loop
+            new_registry = _new_stack.tool_registry
 
             # Reload bootstrap with calibrated overrides
             new_bootstrap = BootstrapLoader(self._project_root / "config" / "bootstrap")

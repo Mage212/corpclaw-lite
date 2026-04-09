@@ -6,6 +6,8 @@ import re
 import time
 from dataclasses import dataclass, field
 
+from corpclaw_lite.extensions.tools.base import TOOL_ERROR_PREFIX
+
 
 class BudgetExceededError(Exception):
     """Raised when budget limits are exceeded."""
@@ -60,7 +62,7 @@ class SimpleProgressGuard:
         if not self.config.enabled:
             return False
 
-        if not result.startswith("Error"):
+        if not result.startswith(TOOL_ERROR_PREFIX):
             # Reset on success
             self.state.last_tool_error_signature = None
             self.state.same_error_count = 0

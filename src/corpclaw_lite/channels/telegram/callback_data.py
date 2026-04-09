@@ -1,5 +1,4 @@
 __all__ = [
-    "CB_APPROVE",
     "CB_DELETE_BACK",
     "CB_DELETE_CANCEL",
     "CB_DELETE_CONFIRM",
@@ -12,7 +11,6 @@ __all__ = [
     "CB_DELETE_REFRESH",
     "CB_DELETE_ROOT",
     "CB_DELETE_UP",
-    "CB_DENY",
 ]
 
 """Callback data prefixes for Telegram inline workflows."""
@@ -30,7 +28,3 @@ CB_DELETE_CONFIRM = "del:confirm"
 CB_DELETE_CANCEL = "del:cancel"
 CB_DELETE_EXEC = "del:exec"
 CB_DELETE_NOOP = "del:noop"
-
-# Approval flow (used by ToolGuard)
-CB_APPROVE = "appr:yes:"
-CB_DENY = "appr:no:"

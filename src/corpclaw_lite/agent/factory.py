@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -29,6 +30,7 @@ from corpclaw_lite.users.manager import UserManager
 
 __all__ = [
     "PROJECT_ROOT",
+    "AgentStack",
     "build_agent_stack",
 ]
 
@@ -46,6 +48,17 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(
     os.environ.get("CORPCLAW_ROOT", "") or Path(__file__).parent.parent.parent.parent
 )
+
+
+@dataclass
+class AgentStack:
+    """Assembled agent pipeline — all components ready to serve requests."""
+
+    loop: AgentLoop
+    user_manager: UserManager
+    tool_registry: ToolRegistry
+    mcp_manager: MCPManager | None
+    container_manager: ContainerManager | None
 
 
 def _build_provider_from_env() -> Provider:
@@ -99,12 +112,8 @@ def _build_router() -> Provider:
     return _build_provider_from_env()
 
 
-def _register_sandboxed_tools(
-    registry: ToolRegistry,
-    ipc: Any,
-) -> None:
-    """Register file/script tools as IPCToolProxy (execute inside container)."""
-    from corpclaw_lite.container.proxy import IPCToolProxy
+def _sandboxed_tool_classes() -> list[Any]:
+    """Return the list of tool classes that need container isolation."""
     from corpclaw_lite.extensions.tools.builtin.excel import NormalizeExcelTool
     from corpclaw_lite.extensions.tools.builtin.exec_script import ExecScriptTool
     from corpclaw_lite.extensions.tools.builtin.files import (
@@ -115,7 +124,7 @@ def _register_sandboxed_tools(
         WriteFileTool,
     )
 
-    sandboxed = [
+    return [
         ReadFileTool(),
         WriteFileTool(),
         EditFileTool(),
@@ -124,39 +133,30 @@ def _register_sandboxed_tools(
         ExecScriptTool(),
         NormalizeExcelTool(),
     ]
-    for tool in sandboxed:
+
+
+def _register_sandboxed_tools(
+    registry: ToolRegistry,
+    ipc: Any,
+) -> None:
+    """Register file/script tools as IPCToolProxy (execute inside container)."""
+    from corpclaw_lite.container.proxy import IPCToolProxy
+
+    for tool in _sandboxed_tool_classes():
         registry.register(IPCToolProxy.from_tool(tool, ipc))
         logger.debug("Registered sandboxed IPCToolProxy: %s", tool.name)
 
 
 def _register_local_tools(registry: ToolRegistry) -> None:
     """Register file/script tools to run directly on the host (dev/test mode)."""
-    from corpclaw_lite.extensions.tools.builtin.excel import NormalizeExcelTool
-    from corpclaw_lite.extensions.tools.builtin.exec_script import ExecScriptTool
-    from corpclaw_lite.extensions.tools.builtin.files import (
-        EditFileTool,
-        ListFilesTool,
-        ReadFileTool,
-        SearchFilesTool,
-        WriteFileTool,
-    )
-
-    for tool in [
-        ReadFileTool(),
-        WriteFileTool(),
-        EditFileTool(),
-        ListFilesTool(),
-        SearchFilesTool(),
-        ExecScriptTool(),
-        NormalizeExcelTool(),
-    ]:
+    for tool in _sandboxed_tool_classes():
         registry.register(tool)
         logger.debug("Registered local tool (no container): %s", tool.name)
 
 
 def build_agent_stack(
     settings: Settings | None = None,
-) -> tuple[AgentLoop, UserManager, ToolRegistry, MCPManager | None, ContainerManager | None]:
+) -> AgentStack:
     """Build and return the complete agent stack from config + env.
 
     Container isolation:
@@ -168,8 +168,7 @@ def build_agent_stack(
         - Falls back to env vars if no named providers configured
 
     Returns:
-        (AgentLoop, UserManager, ToolRegistry, MCPManager | None, ContainerManager | None)
-        ready to serve requests.
+        AgentStack with all components ready to serve requests.
         MCPManager is not yet connected — callers must ``await mcp_manager.connect_all(registry)``
         since build_agent_stack() is synchronous.
 
@@ -364,4 +363,10 @@ def build_agent_stack(
     )
     user_manager = UserManager()
 
-    return loop, user_manager, registry, mcp_manager, container_manager
+    return AgentStack(
+        loop=loop,
+        user_manager=user_manager,
+        tool_registry=registry,
+        mcp_manager=mcp_manager,
+        container_manager=container_manager,
+    )

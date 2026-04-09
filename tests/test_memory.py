@@ -57,4 +57,4 @@ async def test_dict_storage(memory):
     history = await memory.get_history(user_id)
     assert len(history) == 1
     assert history[0]["role"] == "tool"
-    assert history[0]["content"] == tool_call
+    assert history[0]["content"] == '{"name": "test_tool", "kwargs": {"a": 1}}'

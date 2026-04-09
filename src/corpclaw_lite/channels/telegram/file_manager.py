@@ -12,6 +12,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
 
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import ContextTypes
+from telegram.helpers import escape_markdown
+
 from corpclaw_lite.channels.telegram.callback_data import (
     CB_DELETE_BACK,
     CB_DELETE_CANCEL,
@@ -25,9 +29,6 @@ from corpclaw_lite.channels.telegram.callback_data import (
     CB_DELETE_ROOT,
     CB_DELETE_UP,
 )
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import ContextTypes
-from telegram.helpers import escape_markdown
 
 __all__ = [
     "DELETE_PAGE_SIZE",

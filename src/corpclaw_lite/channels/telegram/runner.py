@@ -46,7 +46,12 @@ async def run_telegram_bot(token: str) -> None:
     )
     agent_activity_logger = AgentLogger(log_dir=PROJECT_ROOT / log_cfg.log_dir)
 
-    agent_loop, user_manager, tool_registry, mcp_manager, container_manager = build_agent_stack()
+    stack = build_agent_stack()
+    agent_loop = stack.loop
+    user_manager = stack.user_manager
+    tool_registry = stack.tool_registry
+    mcp_manager = stack.mcp_manager
+    container_manager = stack.container_manager
     from corpclaw_lite.agent.vision import VisionProcessor
     from corpclaw_lite.container.manager import ContainerManagerError
 
@@ -187,7 +192,7 @@ async def run_telegram_bot(token: str) -> None:
         # Hard block: agent will NOT run without a healthy container.
         if container_manager is not None:
             try:
-                container_manager.ensure_running(tid)
+                await container_manager.ensure_running_async(tid)
             except ContainerManagerError as e:
                 logger.error("Container failed for user %d: %s", tid, e)
                 await channel.send_message(

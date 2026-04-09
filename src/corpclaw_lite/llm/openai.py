@@ -10,6 +10,7 @@ import openai
 
 from corpclaw_lite.config.settings import ProviderSettings
 from corpclaw_lite.llm.base import LLMResponse, Provider, StreamChunk, ToolCall
+from corpclaw_lite.llm.presets import ModelPreset
 from corpclaw_lite.llm.xml_tool_calling import parse_xml_tool_call
 
 __all__ = [
@@ -25,10 +26,10 @@ class OpenAIProvider(Provider):
     def __init__(
         self,
         settings: ProviderSettings,
-        preset: Any | None = None,
+        preset: ModelPreset | None = None,
     ):
         self._model = settings.model
-        self._preset = preset  # ModelPreset | None (lazy import to avoid circular)
+        self._preset = preset
         api_key = settings.api_key or "dummy"  # local models may not need a real key
         if settings.base_url:
             self._client = openai.AsyncOpenAI(api_key=api_key, base_url=settings.base_url)

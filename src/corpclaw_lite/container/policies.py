@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Any, cast
 
 from corpclaw_lite.config.settings import ContainerSettings
@@ -53,7 +54,9 @@ class ContainerPolicies:
         # Apply strict Linux isolation if enabled (breaks Docker Desktop for Mac's runc)
         if settings.strict_capabilities:
             args["cap_drop"] = ["ALL"]
-            args["security_opt"].append("seccomp=unconfined")  # Or valid JSON policy
+            seccomp_path = Path(__file__).parent.parent.parent.parent / seccomp_profile_path
+            if seccomp_path.exists():
+                args["security_opt"].append(f"seccomp={seccomp_path}")
 
         # Pass IPC secret into container so agent_worker can verify requests
         import os

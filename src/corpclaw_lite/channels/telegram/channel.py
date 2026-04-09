@@ -14,6 +14,16 @@ from pathlib import Path
 from typing import Any
 
 import anyio
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
+from telegram.constants import ParseMode
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 from corpclaw_lite.channels.base import Channel
 from corpclaw_lite.channels.telegram.formatting import build_response_parts, convert_markdown
@@ -26,16 +36,6 @@ from corpclaw_lite.channels.telegram.upload import (
 from corpclaw_lite.extensions.tools.registry import ToolRegistry
 from corpclaw_lite.memory.sqlite import SQLiteMemory
 from corpclaw_lite.users.models import User
-from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
-from telegram.constants import ParseMode
-from telegram.ext import (
-    Application,
-    CallbackQueryHandler,
-    CommandHandler,
-    ContextTypes,
-    MessageHandler,
-    filters,
-)
 
 __all__ = [
     "TelegramChannel",

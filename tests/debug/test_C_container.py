@@ -63,7 +63,8 @@ def agent_stack_with_container(
     loop = None
     container_mgr = None
     try:
-        loop, _user_mgr, registry, _mcp, container_mgr = build_agent_stack()
+        stack = build_agent_stack()
+        loop, registry, container_mgr = stack.loop, stack.tool_registry, stack.container_manager
         yield loop, registry, container_mgr, workspace
     except RuntimeError as e:
         pytest.skip(f"Cannot build containerised stack: {e}")
@@ -85,7 +86,9 @@ def agent_stack_with_container(
 
 @pytest.fixture(scope="module")
 def c_user() -> User:
-    return User(id=_DEBUG_USER_ID, name="ContainerDebugUser", department="debug", telegram_id=_DEBUG_USER_ID)
+    return User(
+        id=_DEBUG_USER_ID, name="ContainerDebugUser", department="debug", telegram_id=_DEBUG_USER_ID
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -164,9 +167,7 @@ async def test_C3_ipc_write_file_creates_workspace_file(
 
     # File must exist in the host workspace — ask the manager for the real path
     expected = container_mgr.get_user_workspace(c_user.id) / "ipc_test.txt"
-    assert expected.exists(), (
-        f"File not found at host path {expected}.\nIPC result: {result}"
-    )
+    assert expected.exists(), f"File not found at host path {expected}.\nIPC result: {result}"
     assert "IPC_WRITE_C03" in expected.read_text(encoding="utf-8")
     print(f"\n[C3] IPC write result: {result}")
 
@@ -223,9 +224,7 @@ async def test_C5_prune_removes_idle_container(
     finally:
         container_mgr.settings.idle_timeout_seconds = original_timeout
 
-    assert removed >= 1, (
-        f"Expected at least 1 container pruned with timeout=0, got {removed}"
-    )
+    assert removed >= 1, f"Expected at least 1 container pruned with timeout=0, got {removed}"
     print(f"\n[C5] Pruned {removed} container(s)")
 
 
@@ -257,7 +256,7 @@ async def test_C6_ipc_bad_hmac_rejected(
         args={"path": "test.txt"},
     )
 
-    assert any(kw in result.lower() for kw in ("security", "verification", "invalid", "error", "hmac")), (
-        f"Expected HMAC verification failure, got:\n{result}"
-    )
+    assert any(
+        kw in result.lower() for kw in ("security", "verification", "invalid", "error", "hmac")
+    ), f"Expected HMAC verification failure, got:\n{result}"
     print(f"\n[C6] Bad HMAC result: {result[:200]}")

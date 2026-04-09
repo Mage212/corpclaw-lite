@@ -77,9 +77,8 @@ def agent_stack_no_container() -> tuple[AgentLoop, ToolRegistry]:
     os.environ.setdefault("CORPCLAW_IPC_SECRET", "debug-test-secret")
 
     try:
-        loop, _user_mgr, registry, _mcp, _container_mgr = build_agent_stack(
-            settings=patched_settings
-        )
+        stack = build_agent_stack(settings=patched_settings)
+        loop, registry = stack.loop, stack.tool_registry
     except RuntimeError as e:
         pytest.skip(f"Could not build agent stack: {e}")
 
