@@ -155,7 +155,6 @@ class AnthropicProvider(Provider):
             "messages": messages,
             "max_tokens": 4096,
         }
-        self._apply_preset(None, kwargs)
         system = self._apply_preset(system, kwargs)
         if system:
             kwargs["system"] = system
