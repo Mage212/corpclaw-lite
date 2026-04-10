@@ -1,9 +1,43 @@
 # Code Review: CorpClaw Lite — После Phase 7
 
 **Дата:** 23 марта 2026
+**Обновлено:** 10 апреля 2026
 **Ревьюер:** Claude Opus 4.6 (4 параллельных ревью-агента + ручная верификация)
 **Коммит:** 8d4a54c (Phase 7 complete)
-**Статус:** 139 тестов, 80% coverage, 0 pyright errors, 0 ruff errors
+**Статус кода:** 596 тестов, 0 pyright errors, 0 ruff errors
+
+## Сводная таблица статусов (обновлено 2026-04-10)
+
+| # | Finding | Severity | Статус |
+|---|---------|----------|--------|
+| 1 | Двойной assistant message | CRITICAL | ✅ Исправлено |
+| 2 | SSRF DNS rebinding | CRITICAL | ✅ Исправлено |
+| 3 | Environment merge TypeError | CRITICAL | ✅ Исправлено |
+| 4 | Plugin path traversal (skill/tool) | CRITICAL | ⚠️ Частично (script component без проверки) |
+| 5 | IPC nonce replay (container side) | HIGH | 🔵 By design (one-shot worker) |
+| 6 | IPC future timestamps | HIGH | ✅ Исправлено |
+| 7 | `_tools` private access | HIGH | ✅ Исправлено |
+| 8 | Sync I/O в async (3 места) | HIGH | ✅ Исправлено |
+| 9 | HTML injection Telegram | HIGH | ✅ Исправлено |
+| 10 | SQLite WAL mode | HIGH | ✅ Исправлено |
+| 11 | Loop detection break scope | HIGH | ✅ Исправлено |
+| 12 | ToolGuard rules coverage | HIGH | ⚠️ Частично (send_file, normalize_excel без PATH_TRAVERSAL) |
+| 13 | exec_script regex bypass | MEDIUM | ⚠️ Частично (улучшено, но regex-подход ограничен) |
+| 14 | `path=None` default bypass | MEDIUM | ✅ Исправлено |
+| 15 | Content-Length crash | MEDIUM | ✅ Исправлено |
+| 16 | Нет LLM timeout | MEDIUM | ✅ Исправлено |
+| 17 | MCP total timeout | MEDIUM | ✅ Исправлено |
+| 18 | `completion_tokens` None | MEDIUM | ✅ Исправлено |
+| 19 | History loses tool-calls | MEDIUM | 🔵 By design |
+| 20 | HotReload blocking I/O | MEDIUM | ⚠️ Частично (anyio.Path, но loader sync) |
+| 21 | Deleted skills not removed | MEDIUM | ✅ Исправлено |
+| 22 | Mutable `Path.cwd()` | LOW | 🔵 Не исправлено (теоретический риск) |
+| 23 | f-string logging | LOW | ✅ Исправлено |
+| 24 | Health module-level state | LOW | 🔵 Приемлемо (reset_stats для тестов) |
+| 25 | VectorMemory stubs | LOW | ✅ Файл удалён |
+| 26 | PluginManifest type validation | LOW | 🔵 Не исправлено |
+
+**Итого:** 17 исправлено, 3 частично, 4 not fixed (2 by design, 2 low), 1 файл удалён, 1 новый finding (script path traversal).
 
 ---
 

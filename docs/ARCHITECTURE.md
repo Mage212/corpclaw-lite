@@ -1,7 +1,7 @@
 # CorpClaw Lite — Архитектура проекта
 
-> Версия документа: 2026-03-27  
-> Версия проекта: Phase 5 (Polishing) — 67 модулей, ~8K LOC, 301 тест
+> Версия документа: 2026-04-10
+> Версия проекта: Phase 7 (Production-Ready) — ~93 модуля, ~12.7K LOC, 596 тестов
 
 ---
 
@@ -26,26 +26,31 @@
 ```
 corpclaw-lite/
 ├── src/corpclaw_lite/
-│   ├── agent/              # Ядро агента (loop, context, guards, compressor)
+│   ├── agent/              # Ядро агента (loop, context, guards, compressor, factory)
+│   ├── calibration/        # Авто-калибровка под локальную модель
+│   ├── onboarding/         # Гибридный онбординг пользователей
 │   ├── llm/                # LLM провайдеры (OpenAI, Anthropic, XML fallback)
 │   ├── extensions/
-│   │   ├── tools/          # Инструменты + registry
-│   │   ├── skills/         # Markdown-скиллы
-│   │   ├── plugins/        # Плагины с manifest.yaml
-│   │   ├── subagents/      # Специализированные субагенты
-│   │   └── mcp/            # Model Context Protocol интеграция
-│   ├── channels/           # CLI и Telegram каналы
+│   │   ├── tools/          # Инструменты + registry (13 builtin)
+│   │   ├── skills/         # Markdown-скиллы + TF-IDF matcher + hot-reload
+│   │   ├── plugins/        # Плагины с manifest.yaml + sandbox + hot-reload
+│   │   ├── subagents/      # Специализированные субагенты (4 builtin)
+│   │   └── mcp/            # Model Context Protocol интеграция + hot-reload
+│   ├── channels/           # CLI и Telegram каналы (10 Telegram-модулей)
 │   ├── security/           # ToolGuard, NetworkPolicy, CredentialScrubber, IPCAuth
-│   ├── container/          # Docker-изоляция
+│   ├── container/          # Docker-изоляция + IPC-прокси + agent worker
 │   ├── memory/             # SQLite + консолидация
 │   ├── departments/        # RBAC по департаментам
 │   ├── users/              # Пользователи + whitelist
-│   ├── config/             # Settings, bootstrap prompts
-│   └── logging/            # Структурированное логирование
-├── config/                 # YAML-конфигурации
+│   ├── config/             # Settings, bootstrap prompts, interpolation
+│   ├── runtime/            # Graceful shutdown
+│   ├── utils/              # DB helpers
+│   └── logging/            # Структурированное логирование + health endpoint
+├── config/                 # YAML-конфигурации + bootstrap prompts
 ├── skills/                 # Markdown-скиллы
 ├── plugins/                # Директория плагинов
-└── tests/                  # Тесты
+├── docker/                 # Dockerfile, Dockerfile.agent, seccomp
+└── tests/                  # Тесты (596 тестов, ~68 файлов)
 ```
 
 ---
@@ -641,32 +646,122 @@ marketing:
 
 ---
 
+## 10. Calibration Phase
+
+### Назначение
+
+Одноразовый (или периодический) этап, при котором облачная модель анализирует, как локальная модель справляется с типовыми сценариями, и автоматически правит конфигурации. После калибровки система работает **только на локальной модели**.
+
+### Ключевые модули (`calibration/`, 1,270 строк)
+
+| Класс | Назначение |
+|-------|------------|
+| `CalibrationLoop` | Оркестратор калибровочного цикла |
+| `ScenarioRunner` | Запуск сценариев из `config/calibration_scenarios.yaml` (14 сценариев) |
+| `CalibrationScorer` | Оценка: tool accuracy, response quality |
+| `ConfigEditor` | Правка Edit Surfaces (YAML/Markdown) |
+| `TrajectoryRecorder` | Запись траекторий для анализа |
+| `CalibrationAnalyzer` | Анализ результатов и рекомендации |
+
+### Edit Surfaces
+
+Калибратор правит **только** YAML/Markdown конфигурации, не Python-код:
+
+| Слой | Что калибруется | Файлы |
+|------|----------------|-------|
+| 1 | System Prompt | `config/bootstrap/*.md` |
+| 2 | Tool Descriptions | YAML-override через `ToolRegistry` |
+| 3 | Skill Instructions | `skills/*.md` |
+| 4 | Few-shot Examples | Генерация «вопрос → tool_call» |
+
+**CLI:** `uv run corpclaw-lite calibrate [options]`
+
+---
+
+## 11. User Onboarding
+
+### Назначение
+
+Гибридный онбординг: детерминистический движок вопросов + LLM-финализация профиля.
+
+### Ключевые модули (`onboarding/`, 614 строк)
+
+| Класс | Назначение |
+|-------|------------|
+| `OnboardingEngine` | Конечный автомат: вопросы → ответы → финализация |
+| `OnboardingFinalizer` | LLM-вызов для формирования персонализированного профиля |
+| `OnboardingQuestions` | Каталог вопросов (роль, задачи, стиль общения) |
+| `OnboardingStorage` | SQLite хранилище ответов и состояния |
+
+### Запуск
+
+- CLI: `uv run corpclaw-lite chat --setup`
+- Telegram: команда `/setup`
+
+### Результат
+
+Департамент + персонализированный system prompt → сохраняется в user profile.
+
+---
+
+## 12. Hot Reload & Watchers
+
+### Назначение
+
+Автоматическая перезагрузка расширений без перезапуска приложения.
+
+### Три watcher'а
+
+| Watcher | Что отслеживает | Файл |
+|---------|----------------|------|
+| `SkillHotReloader` | `skills/*.md` | `extensions/skills/watcher.py` |
+| `PluginWatcher` | `plugins/*/manifest.yaml` | `extensions/plugins/watcher.py` |
+| `MCPWatcher` | `config/mcp_servers.yaml` | `extensions/mcp/watcher.py` |
+
+### Принцип работы
+
+- Polling-based (не inotify/watchdog) — максимальная совместимость
+- Запускаются как фоновые задачи в event loop
+- Корректно останавливаются через `GracefulShutdown` (SIGINT/SIGTERM)
+- Обнаруживают создание, изменение и удаление файлов
+
+---
+
 ## Ключевые метрики
 
 | Компонент | LOC | Файлов |
 |-----------|-----|--------|
-| Agent Core | 1136 | 7 |
-| LLM Providers | 482 | 4 |
-| Extensions | 1964 | 23 |
-| Security | 446 | 4 |
-| Channels | 2078 | 12 |
-| Container | 426 | 4 |
-| Memory | 350 | 2 |
-| Config + RBAC | 548 | 6 |
-| Logging | 136 | 3 |
-| **Исходники** | **~7975** | **67** |
-| **Тесты** | **~4895** | **43** |
+| Agent Core | ~1750 | 9 |
+| Calibration | ~1270 | 8 |
+| Onboarding | ~614 | 5 |
+| LLM Providers | ~1114 | 6 |
+| Extensions | ~2200 | 25 |
+| Security | ~500 | 4 |
+| Channels | ~2100 | 12 |
+| Container | ~700 | 5 |
+| Memory | ~500 | 2 |
+| Config + RBAC | ~430 | 4 |
+| Departments | ~130 | 2 |
+| Users | ~290 | 2 |
+| Runtime | ~50 | 1 |
+| Logging | ~175 | 2 |
+| **Исходники** | **~12,700** | **~93** |
+| **Тесты** | **~12,000** | **~68** |
 
 ---
 
-## Новые фичи (Hermes Integration)
+## Реализованные фичи
 
 | Фича | Файлы | Назначение |
 |------|-------|------------|
-| Context Compression | `compressor.py`, `loop.py`, `settings.py` | Управление контекстом для локальных LLM |
-| Smart Approvals | `tool_guard.py` | LLM-based оценка рисков |
+| Context Compression | `compressor.py`, `loop.py`, `settings.py` | 3-уровневое сжатие контекста для локальных LLM |
+| Smart Approvals | `tool_guard.py` | LLM-based оценка рисков (manual/smart/off) |
 | Parallel Tool Execution | `base.py`, `loop.py` | Параллельное выполнение независимых инструментов |
-| Tool Output Pruning | `context.py` | Дешёвая компрессия старых результатов |
+| Tool Output Pruning | `compressor.py` | Дешёвая компрессия старых результатов |
+| Calibration Phase | `calibration/` (7 файлов) | Авто-калибровка под конкретную локальную модель |
+| User Onboarding | `onboarding/` (4 файла) | Гибридный онбординг с LLM-финализацией |
+| Hot Reload | `watcher.py` × 3 | Автоперезагрузка skills/plugins/MCP |
+| Graceful Shutdown | `runtime/shutdown.py` | SIGINT/SIGTERM без зомби-процессов |
 
 ---
 
@@ -675,9 +770,19 @@ marketing:
 ```bash
 # CLI режим
 uv run corpclaw-lite chat
+uv run corpclaw-lite chat --setup            # Онбординг
 
 # Telegram бот
 uv run corpclaw-lite telegram
+
+# Калибровка
+uv run corpclaw-lite calibrate [options]
+
+# Управление пользователями
+uv run corpclaw-lite user-list
+uv run corpclaw-lite user-create -t <tg_id> -d <department>
+uv run corpclaw-lite user-allow -t <tg_id> -d <department>
+uv run corpclaw-lite user-deny -t <tg_id>
 
 # Тесты
 uv run pytest tests/ -v

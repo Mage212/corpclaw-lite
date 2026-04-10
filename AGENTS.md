@@ -37,7 +37,7 @@
 - `../src/corpclaw/agent/guards.py` — `SimpleBudgetGuard` и `SimpleProgressGuard` — переносить как есть
 - `../src/corpclaw/container/` — рабочая Docker-изоляция — адаптировать, упростив state machine
 - `../src/corpclaw/memory/sqlite.py` — рабочий SQLite бэкенд памяти — переносить как есть
-- `../src/corpclaw/channels/telegram/` — рабочий Telegram-канал — адаптировать под новый Channel Protocol
+- `../src/corpclaw/channels/telegram*.py` — рабочие Telegram-модули (плоские файлы, не поддиректория) — адаптировать под новый Channel Protocol
 
 ---
 
@@ -61,6 +61,7 @@ uv add <package>
 uv run ruff check src/ --fix
 uv run ruff format src/
 ```
+Ruff rules: `E, F, I, UP, B, C4, SIM, G, A, PERF` (line-length: 100)
 
 **Проверка типов (pyright, не mypy):**
 ```bash
@@ -82,13 +83,17 @@ uv run ruff check src/ --fix && uv run ruff format src/ && uv run pyright src/ &
 
 ---
 
-## CLI команды (после реализации)
+## CLI команды
 
 ```bash
 uv run corpclaw-lite chat                       # Интерактивный CLI чат
+uv run corpclaw-lite chat --setup               # Запуск онбординга
 uv run corpclaw-lite telegram                   # Запуск Telegram-бота
 uv run corpclaw-lite user-list                  # Список пользователей
 uv run corpclaw-lite user-create -t <telegram_id> -d <department>
+uv run corpclaw-lite user-allow -t <telegram_id> -d <department>  # Добавить в whitelist
+uv run corpclaw-lite user-deny -t <telegram_id>                   # Удалить из whitelist
+uv run corpclaw-lite user-revoke -t <telegram_id>                 # Заблокировать сессию
 uv run corpclaw-lite containers                 # Активные Docker-контейнеры
 uv run corpclaw-lite prune                      # Удаление idle-контейнеров
 uv run corpclaw-lite skill list                 # Список загруженных скилов
@@ -96,6 +101,7 @@ uv run corpclaw-lite plugin list                # Список плагинов
 uv run corpclaw-lite generate skill <name>      # Создание шаблона скила
 uv run corpclaw-lite generate plugin <name>     # Создание шаблона плагина
 uv run corpclaw-lite generate subagent <name>   # Создание шаблона субагента
+uv run corpclaw-lite calibrate [options]        # Авто-калибровка под модель
 ```
 
 ---
@@ -181,6 +187,58 @@ presets:
 
 **НЕЛЬЗЯ** хардкодить логику thinking/reasoning в провайдерах — всё через пресеты.
 
+### 8. Calibration Phase — авто-калибровка под локальную модель
+
+Одноразовый (или периодический) этап, при котором облачная модель анализирует, как локальная модель справляется с типовыми сценариями, и автоматически правит конфигурации.
+
+Ключевые модули (`src/corpclaw_lite/calibration/`, 1,270 строк):
+- `CalibrationLoop` — оркестратор калибровочного цикла
+- `ScenarioRunner` — запуск сценариев из `config/calibration_scenarios.yaml` (14 сценариев)
+- `CalibrationScorer` — оценка результатов (tool accuracy, response quality)
+- `ConfigEditor` — правка Edit Surfaces: system prompt, tool descriptions, few-shots, settings
+- `TrajectoryRecorder` — запись траекторий для анализа
+
+**Edit Surfaces** — калибратор правит **только** YAML/Markdown конфигурации, не Python-код:
+1. System Prompt (`config/bootstrap/*.md`)
+2. Tool Descriptions (YAML-override через `ToolRegistry`)
+3. Skill Instructions (`skills/*.md`)
+4. Few-shot Examples (генерация примеров «вопрос → tool_call»)
+
+**CLI:** `uv run corpclaw-lite calibrate [options]`
+
+### 9. User Onboarding — гибридный онбординг
+
+Детерминистический движок вопросов + LLM-финализация профиля.
+
+Ключевые модули (`src/corpclaw_lite/onboarding/`, 614 строк):
+- `OnboardingEngine` — конечный автомат состояний: вопросы → ответы → финализация
+- `OnboardingFinalizer` — LLM-вызов для формирования персонализированного профиля
+- `OnboardingQuestions` — каталог вопросов (роль, задачи, стиль общения)
+- `OnboardingStorage` — SQLite-хранилище ответов и состояния
+
+**Запуск:** `uv run corpclaw-lite chat --setup` или `/setup` в Telegram.
+**Результат:** департамент + персонализированный system prompt → сохраняется в user profile.
+
+### 10. Context Compression — 3-уровневое сжатие
+
+Сжатие контекста внутри одной сессии (паттерн Hermes). Критично для локальных LLM (8K-32K контекст).
+
+Три уровня в `agent/compressor.py` (276 строк):
+1. **Prune tool results** — замена старых tool outputs (>200 chars) на placeholder
+2. **Sanitize orphaned tool pairs** — очистка потерянных tool_call/result
+3. **LLM summarization** — сжатие первого полу history в структурированный summary
+
+Конфигурация через `settings.yaml` → `compression.enabled`, `threshold_ratio`, `max_context_tokens`.
+
+### 11. Hot Reload — автоматическая перезагрузка расширений
+
+Три watcher'а (polling-based, не inotify/watchdog):
+- `SkillHotReloader` — polls `skills/*.md`, регистрирует/удаляет скилы при изменении
+- `PluginWatcher` — polls `plugins/*/manifest.yaml`
+- `MCPWatcher` — polls `config/mcp_servers.yaml`
+
+Все watcher'ы запускаются как фоновые задачи в event loop и корректно останавливаются через `GracefulShutdown`.
+
 ---
 
 ## Структура проекта
@@ -188,32 +246,72 @@ presets:
 ```
 corpclaw-lite/
 ├── src/corpclaw_lite/
+│   ├── __init__.py, cli.py, exceptions.py, paths.py, templates.py
+│   │
 │   ├── agent/          # loop.py, context.py, guards.py, vision.py, subagent.py
-│   ├── llm/            # base.py, anthropic.py, openai.py, xml_tool_calling.py, router.py, presets.py
+│   │                    # factory.py — сборка стека агента (AgentStack)
+│   │                    # compressor.py — 3-уровневое сжатие контекста
+│   │                    # prompt.py — сборка промптов со скилами
+│   │                    # constants.py
+│   │
+│   ├── calibration/    # loop.py, runner.py, scorer.py, analyzer.py, editor.py
+│   │                    # scenarios.py, trajectory.py — авто-калибровка под модель
+│   │
+│   ├── onboarding/     # engine.py, finalizer.py, questions.py, storage.py
+│   │                    # гибридный онбординг: детерминистический + LLM-финализация
+│   │
+│   ├── llm/            # base.py, anthropic.py, openai.py, xml_tool_calling.py
+│   │                    # router.py, presets.py
+│   │
 │   ├── extensions/
-│   │   ├── tools/      # base.py, registry.py, guard.py, builtin/
-│   │   ├── skills/     # base.py, loader.py, registry.py
-│   │   ├── plugins/    # base.py, loader.py, registry.py
-│   │   ├── subagents/  # base.py, registry.py, builtin/
-│   │   └── mcp/        # client.py, manager.py, adapter.py
-│   ├── channels/       # base.py, registry.py, cli.py, telegram/
-│   ├── security/       # tool_guard.py, network_policy.py, credential_scrubber.py, ipc_auth.py
+│   │   ├── bootstrap.py # единая инициализация всех расширений
+│   │   ├── tools/       # base.py, registry.py, builtin/ (files, excel, exec_script,
+│   │   │                 #   image, web, memory, dispatch, send_file, _path_utils)
+│   │   ├── skills/      # base.py, loader.py, registry.py, matcher.py, watcher.py
+│   │   │                 #   matcher.py — TF-IDF семантический выбор скилов
+│   │   │                 #   watcher.py — hot-reload .md файлов
+│   │   ├── plugins/     # base.py, loader.py, registry.py, sandbox_proxy.py,
+│   │   │                 #   sandbox_worker.py, watcher.py
+│   │   ├── subagents/   # base.py, registry.py, builtin/
+│   │   └── mcp/         # client.py, manager.py, adapter.py, watcher.py
+│   │
+│   ├── channels/       # base.py, cli.py, telegram/
+│   │   │                 #   telegram/: channel.py, runner.py, orchestrator.py,
+│   │   │                 #     formatting.py, upload.py, rate_limit.py, progress.py,
+│   │   │                 #     callback_data.py, file_manager.py, admin_notifier.py
+│   │
+│   ├── security/       # tool_guard.py, network_policy.py
+│   │                    #   credential_scrubber.py, ipc_auth.py
+│   │
 │   ├── container/      # manager.py, ipc.py, policies.py
+│   │                    #   proxy.py — IPC-прокси для контейнера
+│   │                    #   agent_worker.py — worker внутри контейнера
+│   │
 │   ├── departments/    # manager.py, permissions.py
-│   ├── memory/         # sqlite.py, manager.py, consolidation.py, vector/
+│   ├── memory/         # sqlite.py, consolidation.py
 │   ├── users/          # models.py, manager.py
-│   ├── config/         # settings.py, loader.py
-│   └── logging/        # agent_logger.py, scrubber.py, rotation.py
+│   ├── config/         # settings.py, loader.py, bootstrap.py, interpolation.py
+│   ├── runtime/        # shutdown.py — graceful shutdown (SIGINT/SIGTERM)
+│   ├── utils/          # db.py
+│   └── logging/        # agent_logger.py, health.py (/health endpoint)
+│
 ├── config/
-│   ├── settings.yaml
-│   ├── model_presets.yaml     # Model presets: inference params, thinking config
-│   ├── departments.yaml
-│   ├── tool_guard_rules.yaml    # ToolGuard правила (CoPaw pattern)
-│   ├── network_policy.yaml      # Network allowlist (NemoClaw pattern)
-│   └── bootstrap/               # Модульные промпты (SOUL.md, COMPANY.md ...)
+│   ├── settings.yaml                      # Основной конфиг
+│   ├── model_presets.yaml                  # Model presets: inference params, thinking config
+│   ├── departments.yaml                    # 9 департаментов с RBAC
+│   ├── tool_guard_rules.yaml               # ToolGuard правила (CoPaw pattern)
+│   ├── network_policy.yaml                 # Network allowlist (NemoClaw pattern)
+│   ├── calibration_scenarios.yaml          # 14 сценариев калибровки
+│   ├── mcp_servers.yaml                    # MCP-серверы (шаблон)
+│   ├── subagents/                          # YAML субагентов (document, execution, filesystem, research)
+│   └── bootstrap/                          # Модульные промпты (SOUL.md, COMPANY.md, BEHAVIOR.md)
+│       ├── departments/                    # Промпты по департаментам (10 файлов)
+│       └── subagents/                      # Промпты субагентов (4 файла)
+│
 ├── skills/             # Markdown-скилы
 ├── plugins/            # Папки плагинов с manifest.yaml
-├── plans/              # Планы разработки (не игнорируются gitignore)
+├── plans/              # Планы разработки (archive/ — завершённые)
+├── docker/             # Dockerfile, Dockerfile.agent, seccomp_default.json
 └── tests/
 ```
 
@@ -300,13 +398,13 @@ class PermissionDeniedError(Exception):
 | Модуль v1 | Действие |
 |-----------|----------|
 | `llm/xml_tool_calling.py` | ✅ Скопирован в новый проект — использовать без изменений |
-| `agent/executor/prompt_loop_executor.py` | 🔄 Адаптировать — это основа нового `agent/loop.py`, убрать extensibility зависимости |
+| `agent/executor/prompt_loop_executor.py` | ✅ Адаптировано в `agent/loop.py` (509 строк), убраны extensibility зависимости |
 | `agent/guards.py` | ✅ `SimpleBudgetGuard` + `SimpleProgressGuard` — переносить как есть |
-| `container/manager.py` | 🔄 Адаптировать — убрать state machine, добавить NetworkPolicy |
-| `container/ipc.py` | 🔄 Адаптировать — сделать HMAC обязательным с nonce |
+| `container/manager.py` | ✅ Адаптировано — убрана state machine, добавлена NetworkPolicy |
+| `container/ipc.py` | ✅ Адаптировано — HMAC обязателен с nonce |
 | `memory/sqlite.py` | ✅ Переносить как есть |
-| `channels/telegram/` | 🔄 Адаптировать под новый Channel Protocol |
-| `llm/anthropic.py`, `llm/openai.py` | 🔄 Адаптировать под новый Provider Protocol |
+| `channels/telegram*.py` | ✅ Адаптировано под новый Channel Protocol (telegram/ с 10 файлами) |
+| `llm/anthropic.py`, `llm/openai.py` | ✅ Адаптировано под новый Provider Protocol |
 | `agent/orchestration/` | ❌ НЕ переносить — весь LLM-based planning |
 | `extensibility/` | ❌ НЕ переносить — весь extensibility framework |
 | `plugins/manager.py` | ❌ НЕ переносить — заменить простым manifest loader |

@@ -1,8 +1,22 @@
 # Интеграция решений Hermes Agent в CorpClaw Lite
 
-**Дата:** 24 марта 2026  
-**Основа:** [`hermes-agent-analysis.md`](./hermes_agent_analysis.md)  
+**Дата:** 24 марта 2026
+**Обновлено:** 10 апреля 2026
+**Основа:** [`hermes-agent-analysis.md`](./hermes-agent-analysis.md)
 **Порядок:** Приоритет → Сложность → Точки интеграции → Конкретный план
+
+## Статус реализации
+
+| # | Фича | Статус | Файлы реализации |
+|---|-------|--------|-----------------|
+| 1 | Context Compression | ✅ Реализовано | `agent/compressor.py` (276 строк), `config/settings.py` (`CompressionSettings`) |
+| 2 | Smart Approvals | ✅ Реализовано | `security/tool_guard.py` (263 строки), `config/settings.py` (`approval_mode`) |
+| 3 | Tool Output Pruning | ✅ Реализовано | Встроено в `agent/compressor.py` (уровень 1) |
+| 4 | Frozen Memory Snapshots | 🟡 Частично | History загружается один раз; полное Anthropic caching отложено |
+| 5 | Parallel Tool Execution | ✅ Реализовано | `agent/loop.py` (`asyncio.gather`), `extensions/tools/base.py` (`parallel_safe`) |
+| 6 | Media Caching | ❌ Не реализовано | — |
+| 7 | Sanitize Tool Pairs | ✅ Реализовано | Встроено в `agent/compressor.py` (уровень 2) |
+| 8 | Background Review | ❌ Не реализовано | — |
 
 ---
 

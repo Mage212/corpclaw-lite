@@ -1,5 +1,7 @@
 # Calibration Phase — Адаптация окружения под локальную модель
 
+> **Статус: РЕАЛИЗОВАНО** (2026-04-10). Код в `src/corpclaw_lite/calibration/` (1,270 строк), 14 сценариев в `config/calibration_scenarios.yaml`, CLI-команда `corpclaw-lite calibrate`.
+
 ## Summary
 
 Одноразовый (или периодический) этап калибровки, при котором мощная облачная модель
