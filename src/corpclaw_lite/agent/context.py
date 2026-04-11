@@ -33,6 +33,9 @@ class ContextBuilder:
         When the LLM returns both text *and* tool_calls, pass the text as
         ``content`` so that a single assistant message is emitted (required
         by the OpenAI API format).
+
+        ``content`` must be a string — ``None`` breaks Qwen3.5's Jinja chat
+        template (string concatenation with None raises a rendering error).
         """
         calls = [
             {
@@ -48,7 +51,7 @@ class ContextBuilder:
         self.messages.append(
             {
                 "role": "assistant",
-                "content": content,
+                "content": content if content is not None else "",
                 "tool_calls": calls,
             }
         )
@@ -116,10 +119,12 @@ class ContextBuilder:
         History (if provided) is inserted before the current message so the LLM
         sees: [system, ...few_shots..., ...history..., current_user_message].
 
-        System messages from history (execution records, consolidation summaries)
-        are **merged into the system prompt** rather than inserted mid-conversation.
-        Many LLM chat templates (Ollama/Qwen) only accept system messages at
-        position 0 — placing them elsewhere causes "Channel Error".
+        Chat template compatibility (Qwen3.5, Ollama, LM Studio):
+          - System messages are merged into the system prompt (not mid-conversation).
+          - Leading assistant messages (e.g. consolidation summaries) are also
+            merged into the system prompt — Qwen3.5 requires the first non-system
+            message to be from the user role.
+          - Tool-role messages from history are dropped (orphaned without tool_calls).
 
         Args:
             user: Current user.
@@ -135,18 +140,29 @@ class ContextBuilder:
             f"Use the available tools to help the user. If a tool returns an error, try to fix it."
         )
 
-        # Extract system messages from history and merge into system prompt
+        # Phase 1: extract system messages from history → merge into system prompt.
         # (prevents mid-conversation system messages that break chat templates).
         history_system_parts: list[str] = []
-        filtered_history: list[dict[str, Any]] = []
+        non_system_history: list[dict[str, Any]] = []
         for item in history or []:
             if item["role"] == "system":
                 history_system_parts.append(str(item["content"]))
             else:
-                filtered_history.append(item)
+                non_system_history.append(item)
 
         if history_system_parts:
             system += "\n\n---\nExecution history:\n" + "\n".join(history_system_parts)
+
+        # Phase 2: strip leading assistant messages from history → merge into
+        # system prompt.  Qwen3.5 Jinja template requires the first non-system
+        # message to be role=user; a leading assistant (e.g. consolidation
+        # summary) breaks the template with "No user query found in messages."
+        leading_assistant_parts: list[str] = []
+        while non_system_history and non_system_history[0]["role"] == "assistant":
+            leading_assistant_parts.append(str(non_system_history.pop(0)["content"]))
+
+        if leading_assistant_parts:
+            system += "\n\n---\nPrevious context:\n" + "\n".join(leading_assistant_parts)
 
         builder = cls(system_prompt=system)
 
@@ -166,13 +182,15 @@ class ContextBuilder:
                 )
                 builder.add_assistant_message(f"[Tool call: {calls_desc}]")
 
-        for item in filtered_history:
+        # Phase 3: add remaining history (user + assistant only, guaranteed to
+        # start with user after phase 2).
+        for item in non_system_history:
             role = item["role"]
             content_str = str(item["content"])
             if role == "user":
                 builder.add_user_message(content_str)
             elif role == "assistant":
                 builder.add_assistant_message(content_str)
-            # Skip "system" (merged above) and "tool" (orphaned) roles
+            # Skip "system" (merged in phase 1) and "tool" (orphaned) roles
         builder.add_user_message(message)
         return builder

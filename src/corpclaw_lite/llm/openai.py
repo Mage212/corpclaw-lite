@@ -186,11 +186,25 @@ class OpenAIProvider(Provider):
         if system:
             final_messages.append({"role": "system", "content": system})
         final_messages.extend(messages)
+
+        # Defensive: ensure no None content in any message (breaks Jinja templates)
+        for msg in final_messages:
+            if msg.get("content") is None:
+                msg["content"] = ""
+
         kwargs["messages"] = final_messages
 
         if tools:
             # OpenAI format usually accepts tools directly
             kwargs["tools"] = tools
+
+        logger.debug(
+            "[%s] Sending %d messages, roles=%s, tools=%d",
+            self._model,
+            len(final_messages),
+            [m["role"] for m in final_messages],
+            len(tools) if tools else 0,
+        )
 
         response = await self._client.chat.completions.create(**kwargs)
         choice = response.choices[0]
