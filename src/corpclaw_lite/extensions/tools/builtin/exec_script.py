@@ -86,6 +86,10 @@ class ExecScriptTool(Tool):
                 await proc.wait()
                 return f"Error: Command timed out after {timeout_val}s"
 
+            # Streams are read, but the process may not have fully exited yet
+            # (race condition on Windows). Wait for the actual exit code.
+            await proc.wait()
+
             output_parts: list[str] = []
             if stdout:
                 output_parts.append(stdout)

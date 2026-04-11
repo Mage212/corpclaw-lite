@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from corpclaw_lite.extensions.tools.builtin.exec_script import ExecScriptTool
@@ -47,6 +49,6 @@ async def test_exec_stderr_capture(tool: ExecScriptTool) -> None:
 
 @pytest.mark.asyncio
 async def test_exec_huge_output_truncated(tool: ExecScriptTool) -> None:
-    result = await tool.execute(script="python3 -c \"print('x' * 100000)\"")
+    result = await tool.execute(script=f"{sys.executable} -c \"print('x' * 100000)\"")
     assert "Exit code: 0" in result
     assert "truncated" in result or len(result) < 100100
