@@ -300,6 +300,12 @@ class NormalizeExcelTool(Tool):
             headers.append(header)
             col_types[col] = _detect_column_type(header)
 
+        # Trim trailing empty headers caused by max_column including
+        # formatted-but-empty columns (borders, number format, etc.)
+        while headers and not headers[-1].strip():
+            headers.pop()
+        total_cols = len(headers)
+
         data_rows: list[list[Any]] = []
         values_fixed = 0
         empty_removed = 0
