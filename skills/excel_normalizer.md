@@ -1,6 +1,6 @@
 ---
 id: excel_normalizer
-description: Normalize and clean Excel/CSV files — fix headers, types, duplicates
+description: Normalize Excel files — fix INN, dates, numbers, remove invisible chars
 version: "1.0.0"
 allowed_for:
   - marketing
@@ -12,11 +12,8 @@ allowed_for:
 keywords:
   - excel
   - xlsx
-  - csv
   - таблиц
   - нормализ
-  - дубликат
-  - очист
   - данны
   - столбец
   - колонк
@@ -24,34 +21,55 @@ keywords:
   - формат
   - normalize
   - clean
-  - header
   - spreadsheet
+  - инн
+  - дата
 ---
 
 # Excel Normalizer Skill
 
 ## Context
 
-Use this skill when users need to clean or normalize tabular data from Excel (.xlsx) or CSV files.
-Common tasks: fixing column names, removing duplicates, standardizing date formats,
-filling missing values, converting number formats.
+Use this skill when users need to normalize or clean Excel (.xlsx) files to prevent
+data corruption when files are processed by external applications.
+
+The tool fixes common Excel problems: INN displayed in scientific notation,
+dates in datetime format instead of DD.MM.YYYY, floating-point rounding errors,
+invisible Unicode characters, and missing leading zeros.
+
+## What the tool does
+
+1. **Removes invisible characters** — zero-width spaces, BOM, NBSP, soft hyphens, etc.
+2. **Strict cell type enforcement:**
+   - **INN columns** (header contains "инн"): converted to text, scientific notation
+     eliminated, leading zeros restored
+   - **Date columns** (header contains "дата"): datetime → DD.MM.YYYY text, serial
+     dates → DD.MM.YYYY text
+   - **Numeric columns** (header contains "инвентарь" or "сумма"): floats rounded to
+     2 decimal places
+   - **Text columns**: floats like 123.0 converted to "123"
+3. **Creates new formatted workbook** — Calibri 11pt bold headers, thin borders,
+   auto-fitted column widths, freeze panes, proper cell number formats
+4. **Removes completely empty rows**
+5. **Preserves original headers** — no renaming, no snake_case
+
+## When to use
+
+- User says Excel shows exponents like 1.23E+10
+- INN displays incorrectly (leading zeros lost)
+- Numbers have extra digits (19.247999999)
+- Dates are in datetime format instead of DD.MM.YYYY
+- File needs to be standardized before uploading to another system
 
 ## Instructions
 
-1. Use `read_file` to read the file if it's CSV, or ask the user to export to CSV first.
-2. Identify the issues: inconsistent headers, mixed types, blank rows, duplicate rows.
-3. Describe what transformations you will apply before making changes.
-4. Apply transformations and write the cleaned file using `write_file`.
-5. Report: how many rows processed, how many duplicates removed, what was changed.
+1. Use `normalize_excel` tool with `path` parameter.
+2. Optionally specify `output_path` for custom output location.
+3. Report the result: what was fixed, how many rows processed.
 
-## Rules
+## Example
 
-- Never delete data without informing the user first.
-- Preserve original column order unless asked to change it.
-- For date normalization, use ISO 8601 format (YYYY-MM-DD) by default.
-- If a column has >50% missing values, flag it to the user instead of silently dropping.
-
-## Examples
-
-**Input:** "Нормализуй этот CSV: у него разные форматы дат и дубликаты в колонке email."
-**Output:** (read file → report issues → write cleaned file → summary of changes)
+```
+User: "Нормализуй файл report.xlsx"
+Tool call: normalize_excel(path="report.xlsx")
+```

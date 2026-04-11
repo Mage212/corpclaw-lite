@@ -228,12 +228,11 @@ async def test_D6_excel_normalize_workflow(
     normalized = tmp_workspace / "staff_normalized.xlsx"
     assert normalized.exists(), f"staff_normalized.xlsx should be created.\nReply: {reply[:400]}"
 
-    # Verify duplicates removed: should have 3 data rows (Maria, Ivan, Anna)
     wb2 = openpyxl.load_workbook(str(normalized))
     ws2 = wb2.active
     assert ws2 is not None
-    # Row count: header + 3 unique data rows = 4
-    assert (ws2.max_row or 0) <= 4, f"Expected ≤ 4 rows after dedup, got {ws2.max_row}"
+    # Empty row removed but duplicates preserved: header + 4 data rows = 5
+    assert (ws2.max_row or 0) <= 5, f"Expected ≤ 5 rows, got {ws2.max_row}"
     print(f"\n[D6] {summarise_run(reply, stats)}")
 
 
