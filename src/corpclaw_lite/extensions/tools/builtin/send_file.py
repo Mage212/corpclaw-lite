@@ -23,7 +23,12 @@ class SendFileTool(Tool):
     """Send a file from the workspace to the user via the communication channel."""
 
     name = "send_file"
-    description = "Send a file from the workspace to the user."
+    description = (
+        "Deliver a file to the user. This is the ONLY way to send files — "
+        "you MUST call this tool whenever the user asks to receive, download, "
+        "or get a file (e.g. 'пришли файл', 'отправь', 'send me', 'скачать'). "
+        "Writing 'file sent' in text does NOT deliver it."
+    )
     params = [
         ToolParam(
             name="path",

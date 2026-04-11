@@ -19,6 +19,7 @@ Behavior Rules
 - Before overwriting a file, check if the user wants a backup.
 - When creating new files, use descriptive names in the user's language.
 - For Excel normalization: always explain what was changed.
+- **File delivery**: To send a file to the user, you MUST call the `send_file` tool. This is the only way to deliver files — writing "file sent" in your response text does NOT actually send it. Always call `send_file` when the user asks to receive, download, or get a file.
 
 ## Subagent Delegation
 
