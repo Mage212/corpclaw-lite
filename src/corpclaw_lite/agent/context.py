@@ -116,6 +116,11 @@ class ContextBuilder:
         History (if provided) is inserted before the current message so the LLM
         sees: [system, ...few_shots..., ...history..., current_user_message].
 
+        System messages from history (execution records, consolidation summaries)
+        are **merged into the system prompt** rather than inserted mid-conversation.
+        Many LLM chat templates (Ollama/Qwen) only accept system messages at
+        position 0 — placing them elsewhere causes "Channel Error".
+
         Args:
             user: Current user.
             message: User's message.
@@ -129,6 +134,20 @@ class ContextBuilder:
             f"You are talking to {user.name} from the {user.department} department. "
             f"Use the available tools to help the user. If a tool returns an error, try to fix it."
         )
+
+        # Extract system messages from history and merge into system prompt
+        # (prevents mid-conversation system messages that break chat templates).
+        history_system_parts: list[str] = []
+        filtered_history: list[dict[str, Any]] = []
+        for item in history or []:
+            if item["role"] == "system":
+                history_system_parts.append(str(item["content"]))
+            else:
+                filtered_history.append(item)
+
+        if history_system_parts:
+            system += "\n\n---\nExecution history:\n" + "\n".join(history_system_parts)
+
         builder = cls(system_prompt=system)
 
         # Inject few-shot examples before history (calibration support)
@@ -147,16 +166,13 @@ class ContextBuilder:
                 )
                 builder.add_assistant_message(f"[Tool call: {calls_desc}]")
 
-        for item in history or []:
+        for item in filtered_history:
             role = item["role"]
             content_str = str(item["content"])
             if role == "user":
                 builder.add_user_message(content_str)
             elif role == "assistant":
                 builder.add_assistant_message(content_str)
-            elif role == "system":
-                # Consolidation summaries stored as "system" role
-                builder.add_user_message(f"[Previous conversation summary]: {content_str}")
-            # Skip "tool" role — orphaned without matching tool_calls
+            # Skip "system" (merged above) and "tool" (orphaned) roles
         builder.add_user_message(message)
         return builder

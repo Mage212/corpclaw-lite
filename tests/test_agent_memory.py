@@ -76,15 +76,16 @@ async def test_agent_loop_with_memory(tmp_path, mock_provider, mock_registry, te
 
     # Check that new messages were appended to memory
     hist = await mem.get_history(str(test_user.id))
-    assert len(hist) == 4
+    # 2 history + user msg + assistant msg + system execution record = 5
+    assert len(hist) == 5
 
-    # newest message is last in SQLite get_history order
-    assert hist[-1]["role"] == "assistant"
-    # When no tools are used, the marker is "[Called tools: none]"
-    assert "[Called tools: none]" in hist[-1]["content"]
-    assert "I remember now." in hist[-1]["content"]
-    assert hist[-2]["role"] == "user"
-    assert hist[-2]["content"] == "Can you remind me again?"
+    # Last two: assistant response + system execution record
+    assert hist[-2]["role"] == "assistant"
+    assert "I remember now." in hist[-2]["content"]
+    assert hist[-1]["role"] == "system"
+    assert "Tools called in this turn: none" in hist[-1]["content"]
+    assert hist[-3]["role"] == "user"
+    assert hist[-3]["content"] == "Can you remind me again?"
 
 
 @pytest.mark.asyncio
@@ -137,8 +138,12 @@ async def test_tool_marker_saved_in_memory(tmp_path):
     assert result == "File normalized successfully."
     assert stats.tools_used == ["normalize_excel"]
 
-    # Check that the saved assistant message contains the tool marker
+    # Check that the saved assistant message has clean content (marker in reasoning)
     hist = await mem.get_history(str(user.id))
     assistant_msg = [m for m in hist if m["role"] == "assistant"][-1]
-    assert "[Called tools: normalize_excel]" in assistant_msg["content"]
     assert "File normalized successfully." in assistant_msg["content"]
+
+    # Execution record is saved as system message
+    system_msgs = [m for m in hist if m["role"] == "system"]
+    assert len(system_msgs) == 1
+    assert "normalize_excel" in system_msgs[0]["content"]

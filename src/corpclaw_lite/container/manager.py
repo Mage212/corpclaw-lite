@@ -66,7 +66,7 @@ class ContainerManager:
         self.settings = settings or ContainerSettings()
         self.network_policy = network_policy
         # Per-user workspace root — each user gets workspace_base/user_{id}/
-        self._workspace_base = workspace_base or Path(self.settings.workspace_base)
+        self._workspace_base = (workspace_base or Path(self.settings.workspace_base)).resolve()
         self._client = docker.from_env() if docker else None  # type: ignore[union-attr]
         self._ipc = ipc
 

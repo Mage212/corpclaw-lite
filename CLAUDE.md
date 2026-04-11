@@ -355,6 +355,10 @@ if TYPE_CHECKING:
 - Приватные методы: с `_` (`_build_context`, `_check_permissions`)
 - Протоколы: без суффикса Protocol (`Provider`, `Channel`, `Tool`)
 
+### Коммиты
+- Сообщение коммита на английском, краткое и содержательное
+- Всегда добавлять трейлер: `Co-Authored-By: GLM-5.1`
+
 ### Async
 - Весь проект async-first
 - `anyio` для async файловых операций

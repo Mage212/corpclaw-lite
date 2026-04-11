@@ -163,11 +163,14 @@ class TelegramBotOrchestrator:
         if isinstance(_rit, _RIT):
             self._vision_processor = _rit.processor
 
+        # Resolve workspace_base once — all consumers get absolute path
+        resolved_ws = tg_settings.workspace_base.resolve()
+
         # Build channel
         self._channel = TelegramChannel(
             token=self._token,
             message_handler=self.handle_message,
-            workspace_base=tg_settings.workspace_base,
+            workspace_base=resolved_ws,
             tool_registry=tool_registry,
             memory=agent_loop.memory,
             onboarding_engine=self._onboarding_engine,
@@ -177,9 +180,7 @@ class TelegramBotOrchestrator:
         # SendFile tool
         from corpclaw_lite.extensions.tools.builtin.send_file import SendFileTool
 
-        tool_registry.register(
-            SendFileTool(self.send_file_callback, workspace_base=tg_settings.workspace_base)
-        )
+        tool_registry.register(SendFileTool(self.send_file_callback, workspace_base=resolved_ws))
 
         # Health endpoint
         try:

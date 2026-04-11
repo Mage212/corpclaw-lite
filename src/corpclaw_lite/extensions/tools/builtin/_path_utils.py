@@ -17,7 +17,8 @@ _CONTAINER_WS = "/workspace"
 
 
 def _validate_boundary(resolved: Path, workspace: Path, original: str) -> None:
-    if resolved != workspace and workspace not in resolved.parents:
+    ws_resolved = workspace.resolve()
+    if resolved != ws_resolved and ws_resolved not in resolved.parents:
         raise PermissionError(f"Path escapes user workspace: {original}")
 
 
@@ -49,7 +50,7 @@ def resolve_container_path(
         )
     ):
         relative = path_str[len(_CONTAINER_WS) :].lstrip("/\\")
-        user_workspace = Path(workspace_base) / f"user_{user.telegram_id}"
+        user_workspace = (Path(workspace_base) / f"user_{user.telegram_id}").resolve()
         result = (user_workspace / relative).resolve()
         _validate_boundary(result, user_workspace, path_str)
         return result
@@ -60,7 +61,7 @@ def resolve_container_path(
         and user is not None
         and user.telegram_id is not None
     ):
-        user_workspace = Path(workspace_base) / f"user_{user.telegram_id}"
+        user_workspace = (Path(workspace_base) / f"user_{user.telegram_id}").resolve()
         result = (user_workspace / path_str).resolve()
         _validate_boundary(result, user_workspace, path_str)
         return result

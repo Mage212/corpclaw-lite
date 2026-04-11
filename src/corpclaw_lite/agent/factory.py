@@ -315,7 +315,7 @@ def build_agent_stack(
                 f"Failed to initialise ContainerIPC: {e}. Is CORPCLAW_IPC_SECRET set in .env?"
             ) from e
 
-        workspace_base = PROJECT_ROOT / container_cfg.workspace_base
+        workspace_base = (PROJECT_ROOT / container_cfg.workspace_base).resolve()
         container_manager = ContainerManager(
             settings=container_cfg,
             network_policy=network_policy,

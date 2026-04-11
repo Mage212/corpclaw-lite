@@ -89,7 +89,7 @@ class SkillHotReloader:
             if prev_mtime is None or mtime > prev_mtime:
                 skill = SkillLoader.load_from_file(path)
                 if skill:
-                    self._registry.register(skill)
+                    self._registry.register(skill, allow_replace=True)
                     logger.info(
                         "HotReload: skill '%s' %s",
                         skill.id,

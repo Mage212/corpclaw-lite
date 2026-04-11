@@ -46,25 +46,16 @@ _LOG_TRUNCATE = 400
 
 
 def _format_tool_marker(tools_used: list[str]) -> str:
-    """Build a compact marker showing which tools were actually called.
-
-    Always emitted so the model has hard evidence in subsequent turns:
-    - ``[Called tools: none]`` — means the previous turn produced NO real
-      tool invocations.  The model can detect its own hallucinations:
-      if it claimed to send a file but the marker says ``none``, the
-      action never happened.
-    - ``[Called tools: normalize_excel, send_file]`` — proof the tools ran.
-    """
+    """Compact marker for the reasoning column (audit only, not shown to model)."""
     if not tools_used:
-        return "[Called tools: none]\n"
-    # Deduplicate while preserving order
+        return "[Called tools: none]"
     seen: set[str] = set()
     unique: list[str] = []
     for t in tools_used:
         if t not in seen:
             seen.add(t)
             unique.append(t)
-    return f"[Called tools: {', '.join(unique)}]\n"
+    return f"[Called tools: {', '.join(unique)}]"
 
 
 @dataclass
@@ -268,14 +259,7 @@ class AgentLoop:
                     # Agent provided text directly — save and return
                     final = response.content if response.content else "Agent provided no response."
                     if self._memory:
-                        marker = _format_tool_marker(stats.tools_used)
-                        mem_text = f"{marker}{final}" if marker else final
-                        await self._save_memory(
-                            mem_key,
-                            "assistant",
-                            mem_text,
-                            reasoning=response.reasoning or None,
-                        )
+                        await self._save_turn(mem_key, final, stats.tools_used, response.reasoning)
                         if self._consolidator:
                             await self._consolidator.maybe_consolidate(self._memory, mem_key)
                     stats.duration_ms = (time.monotonic() - t0) * 1000
@@ -339,9 +323,7 @@ class AgentLoop:
                             and not result.startswith(TOOL_ERROR_PREFIX)
                         ):
                             if self._memory:
-                                marker = _format_tool_marker(stats.tools_used)
-                                mem_text = f"{marker}{result}" if marker else result
-                                await self._save_memory(mem_key, "assistant", mem_text)
+                                await self._save_turn(mem_key, result, stats.tools_used)
                                 if self._consolidator:
                                     await self._consolidator.maybe_consolidate(
                                         self._memory, mem_key
@@ -369,9 +351,7 @@ class AgentLoop:
             health.increment("errors")
             msg = f"I reached my resource limit and had to stop: {e}"
             if self._memory:
-                marker = _format_tool_marker(stats.tools_used)
-                mem_text = f"{marker}{msg}" if marker else msg
-                await self._save_memory(mem_key, "assistant", mem_text)
+                await self._save_turn(mem_key, msg, stats.tools_used)
             stats.status = "budget"
             stats.error = str(e)
             stats.duration_ms = (time.monotonic() - t0) * 1000
@@ -380,9 +360,7 @@ class AgentLoop:
 
         fallback = "I detected a loop and stopped to avoid repeating the same actions."
         if self._memory:
-            marker = _format_tool_marker(stats.tools_used)
-            mem_text = f"{marker}{fallback}" if marker else fallback
-            await self._save_memory(mem_key, "assistant", mem_text)
+            await self._save_turn(mem_key, fallback, stats.tools_used)
         stats.status = "loop"
         stats.duration_ms = (time.monotonic() - t0) * 1000
         logger.warning("[user=%s] loop detected after %d iterations", user.id, stats.iterations)
@@ -396,6 +374,41 @@ class AgentLoop:
             await self._memory.add_message(mem_key, role, content, **kwargs)
         except StorageError:
             logger.error("[user=%s] Failed to save %s message", mem_key, role)
+
+    async def _save_turn(
+        self,
+        mem_key: str,
+        content: str,
+        tools_used: list[str],
+        response_reasoning: str | None = None,
+    ) -> None:
+        """Save assistant response + factual execution record as system message.
+
+        The execution record is saved as a ``system`` role message right after
+        the assistant message.  On next run it appears in the message list as a
+        system message, giving the model hard evidence of what was *actually*
+        executed — so it can detect its own false claims.
+        """
+        # 1. Save assistant text (reasoning column for audit)
+        reasoning_marker = _format_tool_marker(tools_used)
+        reasoning_parts: list[str] = []
+        if response_reasoning:
+            reasoning_parts.append(response_reasoning)
+        reasoning_parts.append(reasoning_marker)
+        await self._save_memory(mem_key, "assistant", content, reasoning="\n".join(reasoning_parts))
+
+        # 2. Save factual execution record (visible to model as system message)
+        if tools_used:
+            seen: set[str] = set()
+            unique: list[str] = []
+            for t in tools_used:
+                if t not in seen:
+                    seen.add(t)
+                    unique.append(t)
+            record = f"Tools called in this turn: {', '.join(unique)}"
+        else:
+            record = "Tools called in this turn: none"
+        await self._save_memory(mem_key, "system", record)
 
     def _can_parallelize(self, tool_calls: list[ToolCall]) -> bool:
         """Check if all tools in batch can be safely executed in parallel.

@@ -141,6 +141,15 @@ departments:
       max_tool_calls: 20
       max_time_ms: 60000
 
+  admin:
+    description: "System administrators — full access"
+    allowed_tools:
+      - "*"
+    budget:
+      max_iterations: 25
+      max_tool_calls: 60
+      max_time_ms: 180000
+
   development:
     description: "Software development team"
     allowed_tools:

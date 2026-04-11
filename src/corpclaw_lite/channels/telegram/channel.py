@@ -80,7 +80,7 @@ class TelegramChannel(Channel):
         self._app: Application | None = None  # type: ignore
         self._on_message = message_handler
         self._image_handler = image_handler
-        self._workspace_base = workspace_base or Path("workspaces")
+        self._workspace_base = (workspace_base or Path("workspaces")).resolve()
         self._tool_registry = tool_registry
         self._memory = memory
         self._onboarding_engine = onboarding_engine
@@ -445,10 +445,10 @@ class TelegramChannel(Channel):
         temp_user = User(
             id=0, name=f"user_{telegram_id}", telegram_id=telegram_id, department="default"
         )
-        workspace = self.get_user_workspace(temp_user)
+        workspace = self.get_user_workspace(temp_user).resolve()
         target_path = (workspace / safe_name).resolve()
 
-        if not target_path.is_relative_to(workspace.resolve()):
+        if not target_path.is_relative_to(workspace):
             await update.message.reply_text("⚠️ Недопустимый путь файла.")
             return
 
