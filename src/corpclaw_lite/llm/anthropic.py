@@ -72,7 +72,7 @@ class AnthropicProvider(Provider):
 
         if self._preset.thinking_budget_tokens:
             budget = self._preset.thinking_budget_tokens
-            kwargs["max_tokens"] = budget + 1024
+            kwargs.setdefault("max_tokens", budget + 1024)
 
         if self._preset.system_prompt_prefix:
             prefix = self._preset.system_prompt_prefix
@@ -90,9 +90,9 @@ class AnthropicProvider(Provider):
         kwargs: dict[str, Any] = {
             "model": self._model,
             "messages": messages,
-            "max_tokens": 4096,
         }
         system = self._apply_preset(system, kwargs)
+        kwargs.setdefault("max_tokens", 4096)
         if system:
             kwargs["system"] = system
 
@@ -153,9 +153,9 @@ class AnthropicProvider(Provider):
         kwargs: dict[str, Any] = {
             "model": self._model,
             "messages": messages,
-            "max_tokens": 4096,
         }
         system = self._apply_preset(system, kwargs)
+        kwargs.setdefault("max_tokens", 4096)
         if system:
             kwargs["system"] = system
 
@@ -189,7 +189,6 @@ class AnthropicProvider(Provider):
             "messages": messages,
             "max_tokens": 4096,
         }
-        system = self._apply_preset(system, kwargs)
         if system:
             kwargs["system"] = system
 

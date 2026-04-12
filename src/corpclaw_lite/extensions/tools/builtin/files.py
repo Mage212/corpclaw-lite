@@ -26,6 +26,9 @@ __all__ = [
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 
+# Skip files larger than 1 MB in search to prevent memory spikes
+_MAX_FILE_SEARCH_BYTES = 1_048_576
+
 
 def resolve_and_validate_path(path_str: str) -> Path:
     """Resolve path to absolute and ensure it exists within allowed workspace boundaries.
@@ -279,11 +282,13 @@ class SearchFilesTool(Tool):
                             continue
 
                         try:
-                            content = file_path.read_text(encoding="utf-8", errors="ignore")
+                            if file_path.stat().st_size > _MAX_FILE_SEARCH_BYTES:
+                                continue
                             matches: list[str] = []
-                            for i, line in enumerate(content.splitlines(), start=1):
-                                if regex.search(line):
-                                    matches.append(f"{i}: {line.strip()[:100]}")
+                            with open(file_path, encoding="utf-8", errors="ignore") as fh:
+                                for i, line in enumerate(fh, start=1):
+                                    if regex.search(line):
+                                        matches.append(f"{i}: {line.strip()[:100]}")
 
                             if matches:
                                 rel_path = file_path.relative_to(resolved)

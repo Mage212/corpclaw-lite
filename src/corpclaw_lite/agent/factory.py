@@ -160,7 +160,7 @@ def _build_security_stack(
     settings: Settings, provider: Provider
 ) -> tuple[ToolGuard, PermissionChecker]:
     """Build ToolGuard + PermissionChecker from config."""
-    from corpclaw_lite.agent.loop import AgentSettings
+    from corpclaw_lite.config.settings import AgentSettings
     from corpclaw_lite.departments.manager import DepartmentManager
     from corpclaw_lite.departments.permissions import PermissionChecker
     from corpclaw_lite.security.tool_guard import ToolGuard

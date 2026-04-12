@@ -267,3 +267,52 @@ async def test_dispatch_subagent_tool_dispatches() -> None:
 
     assert result == "subagent result"
     dispatcher.dispatch.assert_called_once_with(spec, user, "do the work")
+
+
+# ── Department filtering tests ───────────────────────────────────────────────
+
+
+def test_subagent_registry_department_filtering() -> None:
+    """P1-6: get_allowed_subagents filters by user department."""
+    from corpclaw_lite.extensions.subagents.registry import SubagentRegistry
+
+    registry = SubagentRegistry()
+    registry.register(
+        SubagentSpec(
+            id="marketing_agent",
+            name="Marketing",
+            description="Marketing tasks",
+            allowed_departments=["marketing"],
+        )
+    )
+    registry.register(
+        SubagentSpec(
+            id="global_agent",
+            name="Global",
+            description="Available to all",
+            allowed_departments=["*"],
+        )
+    )
+    registry.register(
+        SubagentSpec(
+            id="dev_agent",
+            name="Dev",
+            description="Dev only",
+            allowed_departments=["dev", "engineering"],
+        )
+    )
+
+    marketing_user = User(id=1, name="M", department="marketing")
+    dev_user = User(id=2, name="D", department="dev")
+    hr_user = User(id=3, name="H", department="hr")
+
+    marketing_agents = registry.get_allowed_subagents(marketing_user)
+    dev_agents = registry.get_allowed_subagents(dev_user)
+    hr_agents = registry.get_allowed_subagents(hr_user)
+
+    # Marketing user sees marketing_agent + global_agent
+    assert {s.id for s in marketing_agents} == {"marketing_agent", "global_agent"}
+    # Dev user sees dev_agent + global_agent
+    assert {s.id for s in dev_agents} == {"dev_agent", "global_agent"}
+    # HR user only sees global_agent (wildcard)
+    assert {s.id for s in hr_agents} == {"global_agent"}

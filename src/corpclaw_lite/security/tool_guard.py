@@ -116,9 +116,10 @@ class ToolGuard:
                 data = cast(dict[str, Any], yaml.safe_load(f) or {})
 
             rules_data = cast(list[dict[str, Any]], data.get("rules", []))
-            for r in rules_data:
-                self._rules.append(GuardRule(r))
+            new_rules = [GuardRule(r) for r in rules_data]
 
+            # Atomic replace — only if ALL rules parsed successfully
+            self._rules = new_rules
             logger.info("Loaded %d ToolGuard rules", len(self._rules))
         except Exception as e:
             logger.error("Failed to load ToolGuard rules from %s: %s", file_path, e)

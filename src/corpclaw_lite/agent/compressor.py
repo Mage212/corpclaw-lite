@@ -249,28 +249,35 @@ Summary:"""
                 return i
         return 0
 
-    def _estimate_tokens(self, messages: list[dict[str, Any]]) -> int:
-        """Rough token estimate using utf-8 byte count / 4 heuristic.
+    @staticmethod
+    def _bytes_to_tokens(text: str) -> int:
+        """Estimate token count for a string.
 
-        Rationale:
-        - ASCII (English): 1 char = 1 byte → len_bytes/4 ≈ tokens (accurate)
-        - Cyrillic (Russian): 1 char = 2 bytes, 1–3 tokens in BPE → len_bytes/4 is a safer estimate
-          than len/4 which would severely underestimate and cause unexpected context limit hits.
+        - Mostly ASCII (English): len_bytes / 4 ≈ tokens (accurate for BPE)
+        - Non-ASCII heavy (Cyrillic/CJK): len_bytes / 2 (conservative — prevents
+          underestimation that causes unexpected context limit hits)
         """
+        encoded = text.encode("utf-8")
+        # ratio > 1.3 means significant non-ASCII content
+        divisor = 2 if len(encoded) > len(text) * 1.3 else 4
+        return len(encoded) // max(divisor, 1)
+
+    def _estimate_tokens(self, messages: list[dict[str, Any]]) -> int:
+        """Rough token estimate using utf-8 byte count heuristic."""
         total = 0
         for msg in messages:
             content = msg.get("content")
             if isinstance(content, str):
-                total += len(content.encode("utf-8")) // 4
+                total += self._bytes_to_tokens(content)
             elif content is not None:
-                total += len(str(content).encode("utf-8")) // 4
+                total += self._bytes_to_tokens(str(content))
 
             if msg.get("tool_calls"):
                 for tc in msg["tool_calls"]:
                     args = tc.get("function", {}).get("arguments", "")
                     if isinstance(args, str):
-                        total += len(args.encode("utf-8")) // 4
+                        total += self._bytes_to_tokens(args)
                     elif args:
-                        total += len(str(args).encode("utf-8")) // 4
+                        total += self._bytes_to_tokens(str(args))
 
         return total

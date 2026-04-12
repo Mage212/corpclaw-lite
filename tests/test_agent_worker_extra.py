@@ -13,7 +13,7 @@ def mock_env():
 
     os.environ["CORPCLAW_IPC_SECRET"] = "test-secret"
     yield
-    del os.environ["CORPCLAW_IPC_SECRET"]
+    os.environ.pop("CORPCLAW_IPC_SECRET", None)
 
 
 def test_process_request_empty_input():
@@ -96,3 +96,64 @@ def test_process_request_auth_failure():
         resp_payload = mock_sign.call_args[0][0]
         assert resp_payload["status"] == "error"
         assert resp_payload["error"] == "Auth failed"
+
+
+def test_process_request_tool_timeout():
+    """P1-4: Tool execution that exceeds _TOOL_TIMEOUT returns a timeout error."""
+    import asyncio
+
+    req = '{"payload": "test"}'
+
+    mock_tool = MagicMock()
+
+    async def slow_execute(**kwargs):
+        await asyncio.sleep(60)
+        return "should not reach"
+
+    mock_tool.execute = slow_execute
+
+    mock_registry = MagicMock()
+    mock_registry.get.return_value = mock_tool
+
+    with (
+        patch("sys.stdin.readline", return_value=req),
+        patch("builtins.print"),
+        patch("corpclaw_lite.security.ipc_auth.IPCAuth.verify") as mock_verify,
+        patch("corpclaw_lite.security.ipc_auth.IPCAuth.sign") as mock_sign,
+        patch(
+            "corpclaw_lite.container.agent_worker.get_registry",
+            return_value=mock_registry,
+        ),
+        # Use a very short timeout for the test
+        patch("corpclaw_lite.container.agent_worker._TOOL_TIMEOUT", 0.01),
+    ):
+        mock_verify.return_value = {"type": "tool_call", "tool": "slow_tool", "args": {}}
+        mock_sign.return_value = {"signed": "timeout_resp"}
+
+        process_request()
+
+        mock_sign.assert_called_once()
+        resp_payload = mock_sign.call_args[0][0]
+        assert resp_payload["status"] == "error"
+
+
+def test_process_request_clears_ipc_secret():
+    """P0-1: IPC secret is removed from environment after IPCAuth initialization."""
+    import os
+
+    os.environ["CORPCLAW_IPC_SECRET"] = "test-secret"
+    req = '{"payload": "test"}'
+
+    with (
+        patch("sys.stdin.readline", return_value=req),
+        patch("builtins.print"),
+        patch("corpclaw_lite.security.ipc_auth.IPCAuth.verify") as mock_verify,
+        patch("corpclaw_lite.security.ipc_auth.IPCAuth.sign") as mock_sign,
+    ):
+        mock_verify.return_value = {"type": "tool_call", "tool": "t", "args": {}}
+        mock_sign.return_value = {"signed": "r"}
+
+        process_request()
+
+        # The env var should have been popped during process_request
+        assert "CORPCLAW_IPC_SECRET" not in os.environ

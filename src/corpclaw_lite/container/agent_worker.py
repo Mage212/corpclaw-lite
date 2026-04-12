@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sys
 from typing import TYPE_CHECKING
 
@@ -18,6 +19,9 @@ if TYPE_CHECKING:
     from corpclaw_lite.extensions.tools.registry import ToolRegistry
 
 __all__ = ["process_request"]
+
+# Leave 5s buffer for IPC timeout (30s default)
+_TOOL_TIMEOUT = 25.0
 
 
 def _init_logging() -> None:
@@ -84,6 +88,9 @@ def process_request() -> None:
 
         # Verify — in the container env, CORPCLAW_IPC_SECRET is injected
         auth = IPCAuth()
+        # Clear secret from process environment to reduce exposure window.
+        # IPCAuth.__init__ already stored the secret internally.
+        os.environ.pop("CORPCLAW_IPC_SECRET", None)
         payload = auth.verify(req)
 
         if payload.get("type") != "tool_call":
@@ -103,7 +110,10 @@ def process_request() -> None:
             available = list(registry.items().keys())
             raise ValueError(f"Unknown tool: {tool_name}. Available: {available}")
 
-        result = asyncio.run(tool.execute(**args))
+        async def _run_with_timeout() -> str:
+            return await asyncio.wait_for(tool.execute(**args), timeout=_TOOL_TIMEOUT)
+
+        result = asyncio.run(_run_with_timeout())
         response_payload = {"status": "success", "result": result}
 
     except Exception as e:

@@ -102,19 +102,15 @@ class MemoryConsolidator:
             )
             return False
 
-        # Load full history to inspect tail for active-workflow signals
+        # Content guard: scan last 6 messages for tool-related markers.
+        # Quick tail check avoids loading full history when workflow is active.
         try:
-            history = await memory.get_history(user_id, limit=count)
+            tail = await memory.get_history(user_id, limit=6)
         except StorageError:
-            logger.error("Consolidation skipped — failed to load history for user %s", user_id)
+            logger.error("Consolidation skipped — failed to load tail for user %s", user_id)
             return False
 
-        # Content guard: scan last 6 messages for tool-related markers.
-        # Since SQLiteMemory.get_history() stores only role+content (no tool_calls),
-        # we detect active workflows by looking for formatted tool markers that
-        # the ContextCompressor / ContextBuilder inject into content strings.
-        tail_window = history[-6:] if len(history) >= 6 else history
-        for msg in tail_window:
+        for msg in tail:
             content = str(msg.get("content", ""))
             for marker in _ACTIVE_WORKFLOW_MARKERS:
                 if marker in content:
@@ -124,6 +120,13 @@ class MemoryConsolidator:
                         marker,
                     )
                     return False
+
+        # Load full history for splitting
+        try:
+            history = await memory.get_history(user_id, limit=count)
+        except StorageError:
+            logger.error("Consolidation skipped — failed to load history for user %s", user_id)
+            return False
 
         split = count // 2
         old_messages = history[:split]

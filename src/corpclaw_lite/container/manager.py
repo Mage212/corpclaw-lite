@@ -19,6 +19,8 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import anyio
+
 from corpclaw_lite.config.settings import ContainerSettings
 from corpclaw_lite.container.policies import build_docker_args
 from corpclaw_lite.security.network_policy import NetworkPolicy
@@ -157,14 +159,10 @@ class ContainerManager:
 
     async def ensure_running_async(self, user_id: int) -> str:
         """Async wrapper for ensure_running — runs in a thread to avoid blocking the event loop."""
-        import anyio
-
         return await anyio.to_thread.run_sync(lambda: self.ensure_running(user_id))  # type: ignore[reportAttributeAccessIssue]
 
     async def stop_async(self, user_id: int) -> None:
         """Async wrapper for stop — runs in a thread to avoid blocking the event loop."""
-        import anyio
-
         await anyio.to_thread.run_sync(lambda: self.stop(user_id))  # type: ignore[reportAttributeAccessIssue]
 
     def stop_by_name(self, name: str) -> None:
@@ -182,8 +180,8 @@ class ContainerManager:
             if not _is_not_found:
                 logger.error("Failed to stop container %s: %s", name, e)
 
-    async def list_active(self) -> list[str]:
-        """Return names of all active corpclaw agent containers."""
+    def _list_active_sync(self) -> list[str]:
+        """Synchronous implementation — runs in thread via list_active()."""
         if not self._client:
             return []
         try:
@@ -192,14 +190,12 @@ class ContainerManager:
         except Exception:
             return []
 
-    async def prune_idle(self) -> int:
-        """Prune containers that have been idle past settings.idle_timeout_seconds.
+    async def list_active(self) -> list[str]:
+        """Return names of all active corpclaw agent containers."""
+        return await anyio.to_thread.run_sync(self._list_active_sync)  # type: ignore[reportAttributeAccessIssue]
 
-        Idle time is determined by the last IPC call timestamp (if available),
-        falling back to the container's StartedAt time from Docker.
-
-        Returns the number of containers removed.
-        """
+    def _prune_idle_sync(self) -> int:
+        """Synchronous implementation — runs in thread via prune_idle()."""
         if not self._client:
             return 0
 
@@ -236,6 +232,16 @@ class ContainerManager:
                 logger.debug("Error pruning container %s: %s", container.name, exc)
 
         return removed
+
+    async def prune_idle(self) -> int:
+        """Prune containers that have been idle past settings.idle_timeout_seconds.
+
+        Idle time is determined by the last IPC call timestamp (if available),
+        falling back to the container's StartedAt time from Docker.
+
+        Returns the number of containers removed.
+        """
+        return await anyio.to_thread.run_sync(self._prune_idle_sync)  # type: ignore[reportAttributeAccessIssue]
 
     def _get_idle_seconds(self, container: Any) -> float:
         """Return seconds since the container was last used.

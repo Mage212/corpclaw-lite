@@ -476,11 +476,11 @@ async def test_parallel_loop_all_results_added(
     loop = AgentLoop(AgentConfig(provider, empty_registry, settings))
     result, stats = await loop.run(test_user, "run parallel")
 
-    # Loop was detected → fallback message
-    assert "loop" in result.lower() or "stuck" in result.lower() or "stopped" in result.lower()
+    # First loop detection gives LLM another chance; LLM responds with text → "ok"
+    assert "stopped" in result.lower()
     # All 3 tools were actually executed
     assert call_count == 3
-    assert stats.status == "loop"
+    assert stats.status == "ok"
 
     # The context sent to the first LLM call had the user message
     assert any(m.get("role") == "user" for m in captured_contexts[0])
@@ -603,3 +603,63 @@ async def test_parallel_tool_one_approved_one_denied(
     assert len(stats.tools_used) == 2, (
         f"Expected 2 tool entries (1 approved, 1 denied), got {len(stats.tools_used)}"
     )
+
+
+@pytest.mark.asyncio
+async def test_loop_detection_gives_second_chance(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """First loop detection injects a warning and continues; second breaks.
+
+    P0-6: Previously loop detection immediately broke on the first occurrence,
+    meaning the LLM never saw the warning. Now the LLM gets one more turn.
+    """
+
+    class FailTool:
+        name = "fail_tool"
+        description = ""
+        params: list[Any] = []
+        terminal = False
+
+        async def execute(self, **kwargs: Any) -> str:
+            return "Error: same error every time"
+
+    empty_registry._tools["fail_tool"] = FailTool()  # type: ignore
+
+    call_count = 0
+    saw_warning: list[bool] = []
+
+    class TrackingProvider(MockProvider):
+        async def chat(  # type: ignore[override]
+            self,
+            messages: list[dict[str, Any]],
+            tools: Any = None,
+            system: Any = None,
+        ) -> LLMResponse:
+            nonlocal call_count
+            # Check if any message contains the loop warning
+            has_warning = any("System Guard" in str(m.get("content", "")) for m in messages)
+            saw_warning.append(has_warning)
+            return await super().chat(messages, tools, system)
+
+    # Enough responses: 3 errors to trigger first detection, warning injected,
+    # then LLM gets another chance (responds with tool call again),
+    # 3 more errors trigger second detection → hard stop
+    provider = TrackingProvider(
+        responses=[
+            LLMResponse(
+                content="",
+                tool_calls=[ToolCall(id=str(i), name="fail_tool", arguments={})],
+            )
+            for i in range(10)
+        ]
+    )
+    settings = AgentSettings(max_steps=20, max_tool_calls=100)
+    loop = AgentLoop(AgentConfig(provider, empty_registry, settings))
+    result, stats = await loop.run(test_user, "do it")
+
+    assert stats.status == "loop"
+    # The LLM saw the warning at least once before the hard stop
+    assert any(saw_warning), "LLM should have seen the System Guard warning"
+    # More than 3 iterations (first detection doesn't stop immediately)
+    assert stats.iterations > 3

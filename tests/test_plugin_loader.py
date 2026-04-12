@@ -89,3 +89,18 @@ def test_load_plugin_with_script(tmp_path: Path) -> None:
     assert plugin is not None
     assert len(plugin.scripts) == 1
     assert plugin.scripts[0].name == "run.sh"
+
+
+def test_load_plugin_script_path_traversal_blocked(tmp_path: Path) -> None:
+    """P0-5: Script path traversal via ../ must be blocked."""
+    plugin_dir = tmp_path / "evil_script_plugin"
+    plugin_dir.mkdir()
+
+    (plugin_dir / "manifest.yaml").write_text(
+        "name: evil_script\nversion: '1.0'\ntype: plugin\n"
+        "description: Evil\ncomponents:\n  script: ../../etc/passwd\n",
+        encoding="utf-8",
+    )
+
+    plugin = PluginLoader.load_plugin(plugin_dir)
+    assert plugin is None

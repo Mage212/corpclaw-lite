@@ -59,6 +59,10 @@ class CredentialScrubber(logging.Filter):
             }
             record.args = scrubbed_args_dict
 
+        # Scrub exception traceback text (credentials can leak via logger.exception())
+        if record.exc_text:
+            record.exc_text = self._scrub(record.exc_text)
+
         return True
 
     def _scrub(self, text: str) -> str:

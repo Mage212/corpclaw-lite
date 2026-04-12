@@ -257,3 +257,24 @@ class TestEstimateTokens:
         ]
         estimate = compressor._estimate_tokens(messages)
         assert estimate > 0
+
+    def test_cyrillic_token_estimation(
+        self, provider: MockProvider, settings: CompressionSettings
+    ) -> None:
+        """P1-3: Cyrillic text should produce higher token estimate than naive len/4.
+
+        Cyrillic characters are 2 bytes in UTF-8, so the estimator should use
+        a divisor of 2 instead of 4, roughly doubling the token estimate.
+        """
+        compressor = ContextCompressor(provider, settings)
+        cyrillic_text = "Привет мир, это тестовое сообщение для проверки оценки токенов"
+        latin_text = "a" * len(cyrillic_text)
+
+        cyrillic_msgs = [{"role": "user", "content": cyrillic_text}]
+        latin_msgs = [{"role": "user", "content": latin_text}]
+
+        cyrillic_estimate = compressor._estimate_tokens(cyrillic_msgs)
+        latin_estimate = compressor._estimate_tokens(latin_msgs)
+
+        # Cyrillic estimate should be significantly higher than latin of same char count
+        assert cyrillic_estimate > latin_estimate

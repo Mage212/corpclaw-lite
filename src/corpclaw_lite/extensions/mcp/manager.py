@@ -18,6 +18,7 @@ Config file format (config/mcp_servers.yaml)::
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from pathlib import Path
 from typing import Any, cast
@@ -153,4 +154,6 @@ class MCPManager:
             return len(registered)
         except Exception as e:
             logger.error("MCP: failed to connect to server '%s': %s", name, e)
+            with contextlib.suppress(Exception):
+                await client.disconnect()
             return 0

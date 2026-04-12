@@ -25,4 +25,5 @@ class SubagentSpec:
     description: str
     capabilities: list[str] = field(default_factory=lambda: [])
     allowed_tools: list[str] = field(default_factory=lambda: ["*"])
+    allowed_departments: list[str] = field(default_factory=lambda: ["*"])
     prompt_path: str = ""

@@ -43,6 +43,7 @@ class SubagentRegistry:
                     description=data.get("description", "No description"),
                     capabilities=data.get("capabilities", []),
                     allowed_tools=data.get("allowed_tools", ["*"]),
+                    allowed_departments=data.get("allowed_departments", ["*"]),
                     prompt_path=data.get("prompt_path", ""),
                 )
                 self.register(spec)
@@ -75,4 +76,8 @@ class SubagentRegistry:
 
     def get_allowed_subagents(self, user: User) -> list[SubagentSpec]:
         """Return subagents the user's department can dispatch."""
-        return list(self._subagents.values())
+        return [
+            spec
+            for spec in self._subagents.values()
+            if "*" in spec.allowed_departments or user.department in spec.allowed_departments
+        ]

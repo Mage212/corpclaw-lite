@@ -125,7 +125,15 @@ class PluginLoader:
         # Load script if defined
         script_filename = manifest.components.get("script")
         if script_filename:
-            script_path = plugin_dir / script_filename
+            script_path = (plugin_dir / script_filename).resolve()
+            if not script_path.is_relative_to(plugin_dir.resolve()):
+                logger.error(
+                    "Plugin %s: script path '%s' escapes plugin directory"
+                    " (path traversal blocked).",
+                    manifest.name,
+                    script_filename,
+                )
+                return None
             if script_path.exists():
                 plugin_scripts.append(script_path)
 

@@ -131,6 +131,7 @@ class AgentLoop:
             (reply, stats) — the agent's final answer and execution metrics.
         """
         stats = RunStats()
+        loop_warning_count = 0
         t0 = time.monotonic()
 
         logger.debug(
@@ -298,7 +299,10 @@ class AgentLoop:
                             )
                             loop_detected = True
                     if loop_detected:
-                        break
+                        loop_warning_count += 1
+                        if loop_warning_count >= 2:
+                            break
+                        continue
                 else:
                     should_stop = False
                     for tc in response.tool_calls:
@@ -341,7 +345,9 @@ class AgentLoop:
                                 "System Guard: You seem to be stuck in a loop repeating the same"
                                 " error. Please change your strategy or stop using this tool."
                             )
-                            should_stop = True
+                            loop_warning_count += 1
+                            if loop_warning_count >= 2:
+                                should_stop = True
                             break
 
                     if should_stop:
