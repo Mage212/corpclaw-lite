@@ -99,7 +99,7 @@ def test_process_request_auth_failure():
 
 
 def test_process_request_tool_timeout():
-    """P1-4: Tool execution that exceeds _TOOL_TIMEOUT returns a timeout error."""
+    """P1-4: Tool execution that exceeds tool_timeout returns a timeout error."""
     import asyncio
 
     req = '{"payload": "test"}'
@@ -124,10 +124,14 @@ def test_process_request_tool_timeout():
             "corpclaw_lite.container.agent_worker.get_registry",
             return_value=mock_registry,
         ),
-        # Use a very short timeout for the test
-        patch("corpclaw_lite.container.agent_worker._TOOL_TIMEOUT", 0.01),
     ):
-        mock_verify.return_value = {"type": "tool_call", "tool": "slow_tool", "args": {}}
+        # tool_timeout=0.01 sent in payload — tool sleeps 60s, must timeout
+        mock_verify.return_value = {
+            "type": "tool_call",
+            "tool": "slow_tool",
+            "args": {},
+            "tool_timeout": 0.01,
+        }
         mock_sign.return_value = {"signed": "timeout_resp"}
 
         process_request()
@@ -135,6 +139,9 @@ def test_process_request_tool_timeout():
         mock_sign.assert_called_once()
         resp_payload = mock_sign.call_args[0][0]
         assert resp_payload["status"] == "error"
+        # asyncio.TimeoutError has no message text — just verify it's an error,
+        # not the slow_execute return value
+        assert resp_payload.get("result") is None
 
 
 def test_process_request_clears_ipc_secret():
@@ -157,3 +164,83 @@ def test_process_request_clears_ipc_secret():
 
         # The env var should have been popped during process_request
         assert "CORPCLAW_IPC_SECRET" not in os.environ
+
+
+def test_process_request_uses_tool_timeout_from_payload():
+    """Tool timeout is read from IPC payload, not hardcoded."""
+    import asyncio
+
+    req = '{"payload": "test"}'
+
+    mock_tool = MagicMock()
+
+    async def slow_execute(**kwargs):
+        await asyncio.sleep(5)
+        return "should not reach"
+
+    mock_tool.execute = slow_execute
+
+    mock_registry = MagicMock()
+    mock_registry.get.return_value = mock_tool
+
+    with (
+        patch("sys.stdin.readline", return_value=req),
+        patch("builtins.print"),
+        patch("corpclaw_lite.security.ipc_auth.IPCAuth.verify") as mock_verify,
+        patch("corpclaw_lite.security.ipc_auth.IPCAuth.sign") as mock_sign,
+        patch(
+            "corpclaw_lite.container.agent_worker.get_registry",
+            return_value=mock_registry,
+        ),
+    ):
+        # Very short timeout via payload — must trigger TimeoutError
+        mock_verify.return_value = {
+            "type": "tool_call",
+            "tool": "slow_tool",
+            "args": {},
+            "tool_timeout": 0.05,
+        }
+        mock_sign.return_value = {"signed": "timeout_resp"}
+
+        process_request()
+
+        resp_payload = mock_sign.call_args[0][0]
+        assert resp_payload["status"] == "error"
+
+
+def test_process_request_fallback_timeout_when_payload_missing():
+    """When payload has no tool_timeout, the default fallback is used."""
+    mock_tool = MagicMock()
+
+    async def instant_execute(**kwargs):
+        return "ok"
+
+    mock_tool.execute = instant_execute
+
+    mock_registry = MagicMock()
+    mock_registry.get.return_value = mock_tool
+
+    req = '{"payload": "test"}'
+    with (
+        patch("sys.stdin.readline", return_value=req),
+        patch("builtins.print"),
+        patch("corpclaw_lite.security.ipc_auth.IPCAuth.verify") as mock_verify,
+        patch("corpclaw_lite.security.ipc_auth.IPCAuth.sign") as mock_sign,
+        patch(
+            "corpclaw_lite.container.agent_worker.get_registry",
+            return_value=mock_registry,
+        ),
+    ):
+        # No tool_timeout in payload — should use _DEFAULT_TOOL_TIMEOUT
+        mock_verify.return_value = {
+            "type": "tool_call",
+            "tool": "fast_tool",
+            "args": {},
+        }
+        mock_sign.return_value = {"signed": "ok_resp"}
+
+        process_request()
+
+        resp_payload = mock_sign.call_args[0][0]
+        assert resp_payload["status"] == "success"
+        assert resp_payload["result"] == "ok"

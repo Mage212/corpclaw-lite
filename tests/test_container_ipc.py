@@ -243,3 +243,45 @@ async def test_last_used_updates_on_call(ipc, auth) -> None:
     assert ts1 is not None
     assert ts2 is not None
     assert ts2 > ts1
+
+
+# ── Test 12: tool_timeout derivation ──────────────────────────────────────────
+
+
+def test_tool_timeout_derived_from_ipc_timeout(auth) -> None:
+    """tool_timeout = ipc_timeout - 5s overhead."""
+    ipc_30 = ContainerIPC(auth=auth, timeout_seconds=30.0)
+    assert ipc_30.tool_timeout == 25.0
+
+    ipc_120 = ContainerIPC(auth=auth, timeout_seconds=120.0)
+    assert ipc_120.tool_timeout == 115.0
+
+
+@pytest.mark.asyncio
+async def test_tool_timeout_propagated_in_payload(ipc, auth) -> None:
+    """send_tool_call must include tool_timeout in the IPC payload."""
+    response_payload = {"status": "success", "result": "ok"}
+    stdout = _make_signed_response(auth, response_payload)
+    proc = _mock_process(stdout=stdout, returncode=0)
+
+    sent_input: bytes = b""
+
+    async def _capture_communicate(input: bytes) -> tuple[bytes, bytes]:
+        nonlocal sent_input
+        sent_input = input
+        return (stdout, b"")
+
+    proc.communicate = _capture_communicate
+
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        ipc_with_time = ContainerIPC(auth=auth, timeout_seconds=30.0)
+        result = await ipc_with_time.send_tool_call(
+            user_id=1, tool_name="read_file", args={"path": "/a"}
+        )
+
+    assert result == "ok"
+
+    # Decode the signed payload sent to the container
+    signed_msg = json.loads(sent_input.decode("utf-8"))
+    inner = auth.verify(signed_msg)
+    assert inner["tool_timeout"] == 25.0  # 30.0 - 5.0

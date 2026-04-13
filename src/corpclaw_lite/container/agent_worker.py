@@ -20,8 +20,10 @@ if TYPE_CHECKING:
 
 __all__ = ["process_request"]
 
-# Leave 5s buffer for IPC timeout (30s default)
-_TOOL_TIMEOUT = 25.0
+# Fallback when the IPC payload does not include tool_timeout.
+# Should not happen in normal operation (ContainerIPC always sends it),
+# but acts as a safety net for ad-hoc calls or older host versions.
+_DEFAULT_TOOL_TIMEOUT = 25.0
 
 
 def _init_logging() -> None:
@@ -98,6 +100,7 @@ def process_request() -> None:
 
         tool_name = payload.get("tool")
         args = payload.get("args", {})
+        tool_timeout = float(payload.get("tool_timeout", _DEFAULT_TOOL_TIMEOUT))
 
         if not isinstance(tool_name, str):
             raise ValueError("Missing or invalid 'tool' field")
@@ -111,7 +114,7 @@ def process_request() -> None:
             raise ValueError(f"Unknown tool: {tool_name}. Available: {available}")
 
         async def _run_with_timeout() -> str:
-            return await asyncio.wait_for(tool.execute(**args), timeout=_TOOL_TIMEOUT)
+            return await asyncio.wait_for(tool.execute(**args), timeout=tool_timeout)
 
         result = asyncio.run(_run_with_timeout())
         response_payload = {"status": "success", "result": result}

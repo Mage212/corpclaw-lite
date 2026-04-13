@@ -60,6 +60,8 @@ class ContainerSettings(BaseModel):
     idle_timeout_seconds: int = 600
     max_per_user: int = 1
     strict_capabilities: bool = False  # Set to True on Linux prod for full seccomp / cap_drop
+    # Timeout for the outer docker exec call (host-side IPC envelope)
+    ipc_timeout_seconds: float = 120.0
 
 
 class CompressionSettings(BaseModel):

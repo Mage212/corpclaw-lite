@@ -14,7 +14,6 @@ Cases covered:
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any
 
@@ -63,6 +62,7 @@ def _all_tools_with_path_param() -> list[Tool]:
     registry = ToolRegistry()
 
     # Import and register builtin tools that don't need special deps
+    from corpclaw_lite.extensions.tools.builtin.excel import NormalizeExcelTool
     from corpclaw_lite.extensions.tools.builtin.files import (
         EditFileTool,
         ListFilesTool,
@@ -70,9 +70,15 @@ def _all_tools_with_path_param() -> list[Tool]:
         SearchFilesTool,
         WriteFileTool,
     )
-    from corpclaw_lite.extensions.tools.builtin.excel import NormalizeExcelTool
 
-    for cls in [ReadFileTool, WriteFileTool, EditFileTool, ListFilesTool, SearchFilesTool, NormalizeExcelTool]:
+    for cls in [
+        ReadFileTool,
+        WriteFileTool,
+        EditFileTool,
+        ListFilesTool,
+        SearchFilesTool,
+        NormalizeExcelTool,
+    ]:
         registry.register(cls())
 
     return [t for t in registry.list_all() if any(p.name == "path" for p in t.params)]
@@ -163,9 +169,7 @@ class TestResolveContainerPath:
         ws_base = tmp_path / "workspaces"
         _make_workspace(tmp_path)
 
-        resolved = resolve_container_path(
-            "/workspace/Тест_файл.txt", ws_base, _TEST_USER
-        )
+        resolved = resolve_container_path("/workspace/Тест_файл.txt", ws_base, _TEST_USER)
         assert resolved.exists()
 
     def test_container_path_traversal_blocked(self, tmp_path: Path) -> None:
@@ -198,8 +202,6 @@ class TestResolveAndValidatePath:
         monkeypatch.chdir(tmp_path)
         (tmp_path / "test.txt").write_text("ok", encoding="utf-8")
 
-        from corpclaw_lite.extensions.tools.builtin.files import resolve_and_validate_path
-
         resolved = resolve_and_validate_path("test.txt")
         assert resolved.exists()
 
@@ -207,23 +209,17 @@ class TestResolveAndValidatePath:
         monkeypatch.chdir(tmp_path)
         (tmp_path / "Тест.txt").write_text("ok", encoding="utf-8")
 
-        from corpclaw_lite.extensions.tools.builtin.files import resolve_and_validate_path
-
         resolved = resolve_and_validate_path("Тест.txt")
         assert resolved.exists()
 
     def test_traversal_blocked(self, tmp_path: Path, monkeypatch: Any) -> None:
         monkeypatch.chdir(tmp_path)
 
-        from corpclaw_lite.extensions.tools.builtin.files import resolve_and_validate_path
-
         with pytest.raises(PermissionError):
             resolve_and_validate_path("../../etc/passwd")
 
     def test_absolute_outside_cwd_blocked(self, tmp_path: Path, monkeypatch: Any) -> None:
         monkeypatch.chdir(tmp_path)
-
-        from corpclaw_lite.extensions.tools.builtin.files import resolve_and_validate_path
 
         with pytest.raises(PermissionError):
             resolve_and_validate_path("/etc/shadow")
@@ -266,7 +262,7 @@ class TestToolPathSafety:
 
         monkeypatch.chdir(workspace)
         result = await tool.execute(path="test.txt", user=_TEST_USER, **_min_extra_kwargs(tool))
-        assert not result.startswith("Error: Access denied"), f"Permission denied for valid path"
+        assert not result.startswith("Error: Access denied"), "Permission denied for valid path"
         assert "escapes" not in result.lower() and "outside" not in result.lower()
 
     @pytest.mark.parametrize("tool", _TOOLS, ids=_TOOL_IDS)
@@ -291,9 +287,7 @@ class TestToolPathSafety:
 
     @pytest.mark.parametrize("tool", _TOOLS, ids=_TOOL_IDS)
     @pytest.mark.asyncio
-    async def test_traversal_blocked(
-        self, tool: Tool, workspace: Path, monkeypatch: Any
-    ) -> None:
+    async def test_traversal_blocked(self, tool: Tool, workspace: Path, monkeypatch: Any) -> None:
         """Path traversal (../../etc/passwd) must be blocked."""
         if tool.name in _SKIP_EXECUTE:
             pytest.skip(f"{tool.name} requires special runtime deps")
@@ -303,9 +297,8 @@ class TestToolPathSafety:
             path="../../etc/passwd", user=_TEST_USER, **_min_extra_kwargs(tool)
         )
         # Must be blocked — either PermissionError caught or explicit error returned
-        assert (
-            "Error" in result
-            and ("Access denied" in result or "escapes" in result or "outside" in result)
+        assert "Error" in result and (
+            "Access denied" in result or "escapes" in result or "outside" in result
         ), f"Tool {tool.name} did NOT block path traversal! Result: {result}"
 
     @pytest.mark.parametrize("tool", _TOOLS, ids=_TOOL_IDS)
@@ -326,4 +319,6 @@ class TestToolPathSafety:
         result = await tool.execute(
             path="nonexistent_file_abc123.txt", user=_TEST_USER, **_min_extra_kwargs(tool)
         )
-        assert "Error" in result or "not found" in result.lower() or "does not exist" in result.lower()
+        assert (
+            "Error" in result or "not found" in result.lower() or "does not exist" in result.lower()
+        )

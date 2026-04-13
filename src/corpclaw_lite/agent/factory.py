@@ -309,7 +309,9 @@ def build_agent_stack(
             network_policy.load_file(network_policy_cfg)
 
         try:
-            container_ipc = ContainerIPC(auth=IPCAuth(), timeout_seconds=120.0)
+            container_ipc = ContainerIPC(
+                auth=IPCAuth(), timeout_seconds=container_cfg.ipc_timeout_seconds
+            )
         except Exception as e:
             raise RuntimeError(
                 f"Failed to initialise ContainerIPC: {e}. Is CORPCLAW_IPC_SECRET set in .env?"

@@ -43,13 +43,22 @@ class ContainerIPC:
 
     One instance is shared across all users. The user_id is passed per-call
     to resolve the container name (corpclaw_agent_{user_id}).
+
+    Timeout architecture:
+        ipc_timeout  — outer limit for the entire docker exec call (host-side)
+        tool_timeout — inner limit for tool execution (container-side), sent in
+                       the IPC payload so agent_worker.py respects it. Derived as
+                       ipc_timeout - 5s to leave overhead for process startup,
+                       IPC framing, and signature verification.
     """
 
     _MAX_LAST_USED = 10_000
+    _IPC_OVERHEAD_SECONDS = 5.0
 
     def __init__(self, auth: IPCAuth, timeout_seconds: float = 30.0) -> None:
         self.auth = auth
         self.timeout = timeout_seconds
+        self.tool_timeout = timeout_seconds - self._IPC_OVERHEAD_SECONDS
         self._last_used: dict[int, float] = {}
 
     def _prune_last_used(self) -> None:
@@ -91,7 +100,12 @@ class ContainerIPC:
         name = self.container_name(user_id)
         self._last_used[user_id] = time.monotonic()
         self._prune_last_used()
-        payload = {"type": "tool_call", "tool": tool_name, "args": args}
+        payload = {
+            "type": "tool_call",
+            "tool": tool_name,
+            "args": args,
+            "tool_timeout": self.tool_timeout,
+        }
         signed_message = self.auth.sign(payload)
         input_data = (json.dumps(signed_message) + "\n").encode("utf-8")
 
