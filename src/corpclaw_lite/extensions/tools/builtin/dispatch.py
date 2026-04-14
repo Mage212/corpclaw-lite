@@ -52,13 +52,20 @@ class DispatchSubagentTool(Tool):
         if not isinstance(subagent_id, str) or not isinstance(task, str):
             return "Error: 'subagent_id' and 'task' are required string parameters."
 
-        spec = self._subagent_registry.get_spec(subagent_id)
-        if not spec:
-            available = [s.id for s in self._subagent_registry.list_all()]
-            return f"Error: Subagent '{subagent_id}' not found. Available: {available}"
-
         if user is None:
             return "Error: User context is required for subagent dispatch."
+
+        spec = self._subagent_registry.get_spec(subagent_id)
+        if not spec:
+            available = [s.id for s in self._subagent_registry.get_allowed_subagents(user)]
+            return f"Error: Subagent '{subagent_id}' not found. Available: {available}"
+
+        # Department-level permission check on the subagent spec
+        if "*" not in spec.allowed_departments and user.department not in spec.allowed_departments:
+            return (
+                f"Error: Permission denied. Your department ({user.department}) "
+                f"cannot use subagent '{subagent_id}'."
+            )
 
         try:
             return await asyncio.wait_for(

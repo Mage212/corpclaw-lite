@@ -124,8 +124,14 @@ class AgentLoop:
         on_tool_start: Callable[[str], None] | None = None,
         tools_enabled: bool = True,
         trajectory_recorder: TrajectoryRecorder | None = None,
+        few_shots: list[dict[str, Any]] | None = None,
     ) -> tuple[str, RunStats]:
         """Run the ReAct loop until a final answer is given or limits are reached.
+
+        Args:
+            few_shots: Calibrated few-shot examples injected before history.
+                Loaded from ``config/calibrated/few_shots.yaml`` by AgentStack
+                and passed through here into ContextBuilder.
 
         Returns:
             (reply, stats) — the agent's final answer and execution metrics.
@@ -185,6 +191,7 @@ class AgentLoop:
             message,
             history=history,
             system_prompt_override=dynamic_prompt,
+            few_shots=few_shots,
         )
 
         if self._memory:
@@ -202,7 +209,11 @@ class AgentLoop:
         )
         budget = SimpleBudgetGuard(guard_config)
         progress = SimpleProgressGuard()
-        tools_schema = self._registry.to_schemas() if tools_enabled else None
+        tools_schema = (
+            self._registry.to_schemas_for_user(self._permission_checker, user)
+            if tools_enabled
+            else None
+        )
         health.increment("requests")
 
         try:

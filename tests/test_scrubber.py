@@ -1,6 +1,6 @@
 import logging
 
-from corpclaw_lite.security.credential_scrubber import CredentialScrubber
+from corpclaw_lite.security.credential_scrubber import CredentialScrubber, scrub_text
 
 
 def test_credential_scrubber():
@@ -32,6 +32,27 @@ def test_credential_scrubber():
     )
     scrubber.filter(record_args)
     assert record_args.args[0] == "***REDACTED***"
+
+
+def test_scrub_text_removes_openai_key():
+    """scrub_text() must redact credentials from arbitrary strings (e.g. tool results)."""
+    text = "Here is your key: sk-12345678901234567890abc and some other content."
+    result = scrub_text(text)
+    assert "sk-" not in result
+    assert "***REDACTED***" in result
+    assert "other content" in result  # non-sensitive parts preserved
+
+
+def test_scrub_text_removes_github_pat():
+    raw = "token=ghp_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8"
+    result = scrub_text(raw)
+    assert "ghp_" not in result
+    assert "***REDACTED***" in result
+
+
+def test_scrub_text_clean_string_unchanged():
+    clean = "The result is 42, no secrets here."
+    assert scrub_text(clean) == clean
 
 
 def test_credential_scrubber_exc_text():

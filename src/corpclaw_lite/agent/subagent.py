@@ -62,22 +62,43 @@ class SubagentDispatcher:
             if "*" in spec.allowed_tools or tool_name in spec.allowed_tools:
                 isolated_registry.register(tool)
 
-        # Load system prompt from prompt_path if provided, else fall back to description
+        # Load system prompt: calibrated override > prompt_path > description fallback
         system_prompt = f"You are a specialized subagent: {spec.name}.\n{spec.description}\n"
         if spec.prompt_path:
             from pathlib import Path
 
+            from corpclaw_lite.paths import PROJECT_ROOT
+
             prompt_file = Path(spec.prompt_path)
-            aio_prompt = anyio.Path(prompt_file)
-            if await aio_prompt.exists() and await aio_prompt.is_file():
-                system_prompt = await aio_prompt.read_text(encoding="utf-8")
-                logger.debug("Loaded prompt for subagent %s from %s", spec.id, prompt_file)
-            else:
-                logger.warning(
-                    "Subagent %s prompt_path '%s' not found, using description fallback",
+
+            # Check for calibrated override first
+            calibrated_prompt = (
+                PROJECT_ROOT
+                / "config"
+                / "calibrated"
+                / "bootstrap"
+                / "subagents"
+                / prompt_file.name
+            )
+            aio_calibrated = anyio.Path(calibrated_prompt)
+            if await aio_calibrated.exists() and await aio_calibrated.is_file():
+                system_prompt = await aio_calibrated.read_text(encoding="utf-8")
+                logger.debug(
+                    "Subagent %s: using calibrated prompt from %s",
                     spec.id,
-                    spec.prompt_path,
+                    calibrated_prompt,
                 )
+            else:
+                aio_prompt = anyio.Path(prompt_file)
+                if await aio_prompt.exists() and await aio_prompt.is_file():
+                    system_prompt = await aio_prompt.read_text(encoding="utf-8")
+                    logger.debug("Loaded prompt for subagent %s from %s", spec.id, prompt_file)
+                else:
+                    logger.warning(
+                        "Subagent %s prompt_path '%s' not found, using description fallback",
+                        spec.id,
+                        spec.prompt_path,
+                    )
 
         # Setup isolated loop — pass security guards through from parent
         loop = AgentLoop(

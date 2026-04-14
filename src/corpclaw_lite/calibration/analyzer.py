@@ -37,6 +37,12 @@ Your job: propose configuration changes so the local model passes more scenarios
 3. **FEW-SHOT EXAMPLES** — add example user→tool_call pairs so the model learns
    the pattern by example. This is the most powerful lever for small models.
 4. **AGENT SETTINGS** — adjust numeric parameters (max_steps, max_history, etc.)
+5. **SKILL INSTRUCTIONS** — rewrite skill markdown instructions to be clearer and
+   more actionable for a small model. Return as {{"skill_id": "full markdown content"}}.
+6. **SUBAGENT PROMPTS** — rewrite subagent system prompts for clarity.
+   Return as {{"filename.md": "full new system prompt"}}.
+7. **DEPARTMENT PROMPTS** — rewrite department-specific instructions.
+   Return as {{"department_name": "full new markdown content"}}.
 
 ## Current Configuration
 
@@ -48,6 +54,12 @@ Your job: propose configuration changes so the local model passes more scenarios
 
 ### Current Few-Shot Examples
 {current_few_shots}
+
+### Current Skill Instructions
+{current_skills}
+
+### Current Subagent Prompts
+{current_subagent_prompts}
 
 ## Failed Scenarios
 {failures_json}
@@ -94,6 +106,15 @@ Return a JSON object:
     "settings": {{
       "max_steps": 20,
       "max_history": 10
+    }},
+    "skills": {{
+      "skill_id": "full new markdown instructions"
+    }},
+    "subagent_prompts": {{
+      "document.md": "full new system prompt content"
+    }},
+    "department_prompts": {{
+      "marketing": "full new department instructions"
     }}
   }}
 }}
@@ -116,6 +137,8 @@ class CalibrationAnalyzer:
         current_system_prompt: str,
         current_tool_schemas: list[dict[str, Any]],
         current_few_shots: list[dict[str, Any]] | None = None,
+        current_skills: dict[str, str] | None = None,
+        current_subagent_prompts: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Ask cloud model to propose configuration changes.
 
@@ -126,6 +149,8 @@ class CalibrationAnalyzer:
             current_system_prompt: Current system prompt text.
             current_tool_schemas: Current tool JSON schemas.
             current_few_shots: Currently configured few-shot examples.
+            current_skills: Dict of skill_id → instruction text for context.
+            current_subagent_prompts: Dict of filename → prompt text for context.
 
         Returns:
             Dictionary with 'reasoning' and 'changes' keys.
@@ -138,6 +163,10 @@ class CalibrationAnalyzer:
             system_prompt=current_system_prompt,
             tool_schemas=json.dumps(current_tool_schemas, indent=2, ensure_ascii=False),
             current_few_shots=json.dumps(current_few_shots or [], indent=2, ensure_ascii=False),
+            current_skills=json.dumps(current_skills or {}, indent=2, ensure_ascii=False),
+            current_subagent_prompts=json.dumps(
+                current_subagent_prompts or {}, indent=2, ensure_ascii=False
+            ),
             failures_json=json.dumps([r.to_dict() for r in failed], indent=2, ensure_ascii=False),
             passed_json=json.dumps([r.to_dict() for r in passed], indent=2, ensure_ascii=False),
         )
@@ -158,7 +187,6 @@ class CalibrationAnalyzer:
         # Strip markdown code fence if present
         if content.startswith("```"):
             lines = content.split("\n")
-            # Remove first line (```json) and last line (```)
             lines = [line for line in lines if not line.strip().startswith("```")]
             content = "\n".join(lines)
 

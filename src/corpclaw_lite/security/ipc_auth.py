@@ -25,6 +25,7 @@ class IPCAuthError(Exception):
 
 
 MAX_NONCES = 100_000
+_MIN_SECRET_LENGTH = 16
 
 
 class IPCAuth:
@@ -34,6 +35,12 @@ class IPCAuth:
         _raw = secret or os.environ.get("CORPCLAW_IPC_SECRET")
         if not _raw:
             raise IPCAuthError("CORPCLAW_IPC_SECRET is required to secure IPC channels")
+        if len(_raw) < _MIN_SECRET_LENGTH:
+            raise IPCAuthError(
+                f"CORPCLAW_IPC_SECRET must be at least {_MIN_SECRET_LENGTH} characters "
+                f'(got {len(_raw)}). Generate one with: python -c "import secrets; '
+                f'print(secrets.token_hex(32))"'
+            )
         self._secret: str | bytes = _raw
 
         self.nonce_ttl = nonce_ttl_seconds

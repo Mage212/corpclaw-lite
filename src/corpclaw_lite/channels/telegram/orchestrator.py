@@ -68,6 +68,7 @@ class TelegramBotOrchestrator:
         self._reloader: SkillHotReloader | None = None
         self._mcp_reloader: Any = None
         self._plugin_reloader: PluginHotReloader | None = None
+        self._subagent_reloader: Any = None
         self._cleanup_task: asyncio.Task[None] | None = None
         self._shutdown_event = asyncio.Event()
         self._agent_activity_logger: AgentLogger | None = None
@@ -219,6 +220,17 @@ class TelegramBotOrchestrator:
         self._plugin_reloader.start()
         logger.info("Plugin hot-reloader started watching %s", plugins_dir)
 
+        if stack.subagent_registry is not None:
+            from corpclaw_lite.extensions.subagents.watcher import SubagentHotReloader
+
+            subagents_dir = PROJECT_ROOT / "config" / "subagents"
+            if subagents_dir.exists():
+                self._subagent_reloader = SubagentHotReloader(
+                    subagents_dir, stack.subagent_registry
+                )
+                self._subagent_reloader.start()
+                logger.info("Subagent hot-reloader started watching %s", subagents_dir)
+
         # Start
         logger.info("Starting Telegram bot...")
         install_signal_handlers(self._shutdown_event)
@@ -264,6 +276,11 @@ class TelegramBotOrchestrator:
                 self._plugin_reloader.stop()
             except Exception as e:
                 logger.warning("PluginHotReloader stop failed: %s", e)
+        if self._subagent_reloader is not None:
+            try:
+                self._subagent_reloader.stop()
+            except Exception as e:
+                logger.warning("SubagentHotReloader stop failed: %s", e)
         if self._channel is not None:
             try:
                 await self._channel.stop()
@@ -426,6 +443,7 @@ class TelegramBotOrchestrator:
                     status_session.mark_tool_start if status_session is not None else None
                 ),
                 tools_enabled=(mode == "execute"),
+                few_shots=stack.few_shots,
             )
         except Exception as e:
             logger.error("AgentLoop error for user %d: %s", tid, e)

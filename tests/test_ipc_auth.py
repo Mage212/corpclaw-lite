@@ -4,9 +4,12 @@ import pytest
 
 from corpclaw_lite.security.ipc_auth import IPCAuth, IPCAuthError
 
+# Must meet the _MIN_SECRET_LENGTH=16 requirement
+_TEST_SECRET = "test_secret_long_enough_for_tests"
+
 
 def test_ipc_auth_verify_success():
-    auth = IPCAuth(secret="test_secret", nonce_ttl_seconds=10)
+    auth = IPCAuth(secret=_TEST_SECRET, nonce_ttl_seconds=10)
     payload = {"command": "do_something", "args": {"x": 1}}
 
     signed = auth.sign(payload)
@@ -20,7 +23,7 @@ def test_ipc_auth_verify_success():
 
 
 def test_ipc_auth_detects_tampering():
-    auth = IPCAuth(secret="test_secret", nonce_ttl_seconds=10)
+    auth = IPCAuth(secret=_TEST_SECRET, nonce_ttl_seconds=10)
     payload = {"command": "do_something"}
     signed = auth.sign(payload)
 
@@ -32,7 +35,7 @@ def test_ipc_auth_detects_tampering():
 
 
 def test_ipc_auth_detects_replay():
-    auth = IPCAuth(secret="test_secret", nonce_ttl_seconds=10)
+    auth = IPCAuth(secret=_TEST_SECRET, nonce_ttl_seconds=10)
     payload = {"command": "test"}
     signed = auth.sign(payload)
 
@@ -43,7 +46,7 @@ def test_ipc_auth_detects_replay():
 
 
 def test_ipc_auth_ttl_expiration():
-    auth = IPCAuth(secret="test_secret", nonce_ttl_seconds=0)  # Expires immediately
+    auth = IPCAuth(secret=_TEST_SECRET, nonce_ttl_seconds=0)  # Expires immediately
     payload = {"command": "test"}
     signed = auth.sign(payload)
 
@@ -56,7 +59,7 @@ def test_ipc_auth_ttl_expiration():
 
 def test_ipc_auth_rejects_future_timestamp() -> None:
     """A message with a timestamp far in the future must be rejected."""
-    auth = IPCAuth(secret="test_secret", nonce_ttl_seconds=10)
+    auth = IPCAuth(secret=_TEST_SECRET, nonce_ttl_seconds=10)
     payload = {"command": "test"}
     signed = auth.sign(payload)
 
@@ -71,10 +74,18 @@ def test_ipc_auth_rejects_future_timestamp() -> None:
 
     payload_str = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     msg = f"{signed['nonce']}:{signed['timestamp']}:{payload_str}"
-    signed["signature"] = hmac.new(b"test_secret", msg.encode(), hashlib.sha256).hexdigest()
+    signed["signature"] = hmac.new(
+        _TEST_SECRET.encode(), msg.encode(), hashlib.sha256
+    ).hexdigest()
 
     with pytest.raises(IPCAuthError, match="future|range|expired"):
         auth.verify(signed)
+
+
+def test_ipc_auth_rejects_short_secret() -> None:
+    """Secrets shorter than _MIN_SECRET_LENGTH must raise IPCAuthError."""
+    with pytest.raises(IPCAuthError, match="at least"):
+        IPCAuth(secret="tooshort")
 
 
 def test_ipc_auth_missing_secret_raises_ipc_auth_error(monkeypatch: pytest.MonkeyPatch) -> None:

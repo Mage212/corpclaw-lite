@@ -61,6 +61,8 @@ class AgentStack:
     tool_registry: ToolRegistry
     mcp_manager: MCPManager | None
     container_manager: ContainerManager | None
+    few_shots: list[dict[str, Any]] | None = None
+    subagent_registry: SubagentRegistry | None = None
 
 
 def _build_provider_from_env() -> Provider:
@@ -339,7 +341,7 @@ def build_agent_stack(
         )
 
     guard, permission_checker = _build_security_stack(full_settings, provider)
-    _build_extensions_stack(
+    subagent_registry = _build_extensions_stack(
         agent_settings, provider, registry, guard, permission_checker, workspace_base=workspace_base
     )
     memory, consolidator, compressor = _build_memory_stack(agent_settings, provider, registry)
@@ -353,6 +355,20 @@ def build_agent_stack(
         logger.info("MCPManager ready (config=%s) — callers must await connect_all()", mcp_config)
 
     system_prompt = _build_system_prompt()
+
+    # Load calibrated few-shots (if any) for injection into every run()
+    few_shots: list[dict[str, Any]] | None = None
+    calibrated_few_shots_path = PROJECT_ROOT / "config" / "calibrated" / "few_shots.yaml"
+    if calibrated_few_shots_path.exists():
+        import yaml as _yaml
+
+        _raw_data: dict[str, Any] = (
+            _yaml.safe_load(calibrated_few_shots_path.read_text(encoding="utf-8")) or {}
+        )
+        _examples: list[dict[str, Any]] = list(_raw_data.get("examples", []))
+        if _examples:
+            few_shots = _examples
+            logger.info("Loaded %d calibrated few-shot examples", len(_examples))
 
     loop = AgentLoop(
         AgentConfig(
@@ -375,4 +391,6 @@ def build_agent_stack(
         tool_registry=registry,
         mcp_manager=mcp_manager,
         container_manager=container_manager,
+        few_shots=few_shots,
+        subagent_registry=subagent_registry,
     )

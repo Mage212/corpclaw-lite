@@ -113,3 +113,29 @@ rules:
     match_param: "url"
     match_pattern: "(file://|metadata\\.google\\.internal)"
     require_approval: true
+
+  # ── Absolute path protection (defense-in-depth; code-level validation is primary) ──
+
+  - id: ABS_PATH_READ
+    description: "Absolute path to sensitive system directory in read_file"
+    tool: "read_file"
+    severity: HIGH
+    match_param: "path"
+    match_pattern: "^/(etc|proc|sys|dev|root|home|var/log|boot)"
+    require_approval: true
+
+  - id: ABS_PATH_WRITE
+    description: "Absolute path to sensitive system directory in write_file"
+    tool: "write_file"
+    severity: CRITICAL
+    match_param: "path"
+    match_pattern: "^/(etc|proc|sys|dev|root|home|var/log|boot)"
+    require_approval: false
+
+  - id: ABS_PATH_EDIT
+    description: "Absolute path to sensitive system directory in edit_file"
+    tool: "edit_file"
+    severity: CRITICAL
+    match_param: "path"
+    match_pattern: "^/(etc|proc|sys|dev|root|home|var/log|boot)"
+    require_approval: false

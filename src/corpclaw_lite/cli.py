@@ -346,6 +346,7 @@ def cmd_chat(telegram_id: int, *, setup_mode: bool = False) -> None:
                         msg,
                         system_prompt=system_prompt,
                         approval_callback=approval_cb,
+                        few_shots=stack.few_shots,
                     )
 
                     # ── Structured activity log ────────────────────────────────────────

@@ -6,6 +6,7 @@ import logging
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from corpclaw_lite.calibration.analyzer import CalibrationAnalyzer
 from corpclaw_lite.calibration.editor import ConfigEditor
@@ -99,11 +100,14 @@ class CalibrationLoop:
         # Create a calibration user
         from corpclaw_lite.users.models import User
 
+        # Use "engineering" department so the calibration user has access to ALL tools
+        # (allowed_tools: ["*"]). With "default", to_schemas_for_user() would hide
+        # write_file, edit_file, exec_script — breaking scenarios that test those tools.
         cal_user = User(
             id=0,
             telegram_id=0,
             name="Calibration Runner",
-            department="default",
+            department="engineering",
         )
 
         # Get system prompt
@@ -190,7 +194,10 @@ class CalibrationLoop:
 
             print(f"\n── Iteration {iteration}/{self._max_iterations} ({len(failed)} failures) ──")
 
-            # Analyse failures
+            # Analyse failures — collect all current config surfaces for context
+            current_skills = self._load_current_skills()
+            current_subagent_prompts = self._load_current_subagent_prompts()
+
             try:
                 proposed = await analyzer.analyze(
                     model_id=self._get_model_id(settings),
@@ -199,6 +206,8 @@ class CalibrationLoop:
                     current_system_prompt=system_prompt,
                     current_tool_schemas=registry.to_schemas(),
                     current_few_shots=editor.load_few_shots(),
+                    current_skills=current_skills,
+                    current_subagent_prompts=current_subagent_prompts,
                 )
             except Exception as e:
                 print(f"  ⚠️  Cloud analysis failed: {e}")
@@ -225,8 +234,17 @@ class CalibrationLoop:
             if overrides:
                 new_registry.load_overrides_dict(overrides)
 
-            # Re-run
-            new_runner = CalibrationRunner(new_loop, cal_user, new_system_prompt, workspace)
+            # Load calibrated few-shots to inject during re-evaluation
+            calibrated_few_shots = editor.load_few_shots() or None
+
+            # Re-run with updated config (including few-shots)
+            new_runner = CalibrationRunner(
+                new_loop,
+                cal_user,
+                new_system_prompt,
+                workspace,
+                few_shots=calibrated_few_shots,
+            )
             new_results = await new_runner.run_all(scenarios)
             new_score = scorer.score_all(new_results)
 
@@ -286,6 +304,66 @@ class CalibrationLoop:
             iterations_run=iteration,
             improvements=improvements,
         )
+
+    def _load_current_skills(self) -> dict[str, str]:
+        """Load current skill instructions for all skills in the skills/ directory.
+
+        Returns {skill_id: instructions_text}. Calibrated overrides are already
+        applied by SkillLoader, so this captures what the model actually sees.
+        """
+        skills_dir = self._project_root / "skills"
+        if not skills_dir.exists():
+            return {}
+
+        from corpclaw_lite.extensions.skills.loader import SkillLoader
+
+        result: dict[str, str] = {}
+        for md_file in skills_dir.glob("*.md"):
+            skill = SkillLoader.load_from_file(md_file)
+            if skill:
+                result[skill.id] = skill.instructions
+        return result
+
+    def _load_current_subagent_prompts(self) -> dict[str, str]:
+        """Load current system prompts for all subagents in config/subagents/.
+
+        Returns {filename: prompt_text}. Checks calibrated overrides first,
+        matching the same priority as SubagentDispatcher.
+        """
+        subagents_dir = self._project_root / "config" / "subagents"
+        if not subagents_dir.exists():
+            return {}
+
+        import yaml
+
+        result: dict[str, str] = {}
+        for yaml_file in subagents_dir.glob("*.yaml"):
+            try:
+                data: dict[str, Any] = yaml.safe_load(yaml_file.read_text(encoding="utf-8")) or {}
+                prompt_path_str = str(data.get("prompt_path", ""))
+                if not prompt_path_str:
+                    continue
+
+                # Anchor to project_root, same as how the rest of the app resolves paths
+                prompt_file = self._project_root / prompt_path_str
+                filename = Path(prompt_path_str).name
+
+                # Calibrated override takes priority (mirrors SubagentDispatcher logic)
+                calibrated = (
+                    self._project_root
+                    / "config"
+                    / "calibrated"
+                    / "bootstrap"
+                    / "subagents"
+                    / filename
+                )
+                if calibrated.exists():
+                    result[filename] = calibrated.read_text(encoding="utf-8")
+                elif prompt_file.exists():
+                    result[filename] = prompt_file.read_text(encoding="utf-8")
+            except Exception:
+                pass
+        return result
 
     @staticmethod
     def _get_model_id(settings: Settings) -> str:

@@ -39,7 +39,7 @@ class ConfigEditor:
 
         Args:
             changes: Dictionary with optional keys: system_prompt, tool_overrides,
-                     few_shots, settings, skills.
+                     few_shots, settings, skills, subagent_prompts, department_prompts.
         """
         self._backup_current()
         self._calibrated_dir.mkdir(parents=True, exist_ok=True)
@@ -87,6 +87,40 @@ class ConfigEditor:
                 "[calibration] Updated settings override: %s",
                 list(typed_settings.keys()),
             )
+
+        # 5. Skill instruction overrides
+        raw_sk: Any = changes.get("skills")
+        if raw_sk is not None and isinstance(raw_sk, dict):
+            skills_dir = self._calibrated_dir / "skills"
+            skills_dir.mkdir(parents=True, exist_ok=True)
+            sk_items = cast(dict[str, str], raw_sk)
+            for skill_id, instructions in sk_items.items():
+                target = skills_dir / f"{skill_id}.md"
+                target.write_text(instructions, encoding="utf-8")
+                logger.info("[calibration] Updated skill instructions: %s", skill_id)
+
+        # 6. Subagent prompt overrides
+        raw_sa: Any = changes.get("subagent_prompts")
+        if raw_sa is not None and isinstance(raw_sa, dict):
+            sa_dir = self._calibrated_dir / "bootstrap" / "subagents"
+            sa_dir.mkdir(parents=True, exist_ok=True)
+            sa_items = cast(dict[str, str], raw_sa)
+            for filename, content in sa_items.items():
+                target = sa_dir / filename
+                target.write_text(content, encoding="utf-8")
+                logger.info("[calibration] Updated subagent prompt: %s", filename)
+
+        # 7. Department prompt overrides
+        raw_dp: Any = changes.get("department_prompts")
+        if raw_dp is not None and isinstance(raw_dp, dict):
+            dp_dir = self._calibrated_dir / "bootstrap" / "departments"
+            dp_dir.mkdir(parents=True, exist_ok=True)
+            dp_items = cast(dict[str, str], raw_dp)
+            for dept_name, content in dp_items.items():
+                filename = dept_name if dept_name.endswith(".md") else f"{dept_name}.md"
+                target = dp_dir / filename
+                target.write_text(content, encoding="utf-8")
+                logger.info("[calibration] Updated department prompt: %s", filename)
 
     def rollback(self) -> None:
         """Restore previous calibration state from backup."""
@@ -172,6 +206,16 @@ class ConfigEditor:
         data: dict[str, Any] = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         overrides: dict[str, Any] = data.get("overrides", {})
         return overrides
+
+    def load_skill_override(self, skill_id: str) -> str | None:
+        """Load calibrated instruction override for a specific skill.
+
+        Returns the override content, or None if no override exists.
+        """
+        path = self._calibrated_dir / "skills" / f"{skill_id}.md"
+        if path.exists():
+            return path.read_text(encoding="utf-8")
+        return None
 
     def _backup_current(self) -> None:
         """Backup current calibrated state before applying new changes."""

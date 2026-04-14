@@ -61,6 +61,17 @@ class SkillLoader:
             # Fallback to filename without extension
             skill_id = path.stem
 
+        # Apply calibrated instruction override if present
+        try:
+            from corpclaw_lite.paths import PROJECT_ROOT
+
+            calibrated_path = PROJECT_ROOT / "config" / "calibrated" / "skills" / f"{skill_id}.md"
+            if calibrated_path.exists():
+                instructions = calibrated_path.read_text(encoding="utf-8").strip()
+                logger.debug("Skill '%s': using calibrated instructions", skill_id)
+        except Exception:
+            pass  # Fall back to original instructions on any error
+
         return Skill(
             id=skill_id,
             description=metadata.get("description", "No description provided."),

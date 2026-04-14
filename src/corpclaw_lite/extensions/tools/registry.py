@@ -89,64 +89,89 @@ class ToolRegistry:
         (e.g. DispatchSubagentTool, ReadImageTool) can receive it without the
         LLM having to supply it explicitly.  Tools that do not need it simply
         absorb it via ``**kwargs``.
+
+        Results are scrubbed for credentials before being returned so that
+        API keys or tokens inside read files never reach the LLM context or
+        user-facing responses.
         """
         tool = self.get(name)
         if not tool:
             return f"Error: Tool '{name}' not found."
 
         try:
-            return await tool.execute(**arguments, user=user)
+            result = await tool.execute(**arguments, user=user)
         except Exception:
             logger.exception("Tool '%s' execution failed", name)
             return f"Error executing '{name}': see logs for details"
 
+        from corpclaw_lite.security.credential_scrubber import scrub_text
+
+        return scrub_text(result)
+
+    def _build_schema(self, tool: Tool) -> dict[str, Any]:
+        """Build a single OpenAI function-calling schema for a tool.
+
+        Applies calibration description overrides if present.
+        """
+        override = self._description_overrides.get(tool.name)
+        tool_description = (
+            override["description"] if override and "description" in override else tool.description
+        )
+        param_overrides: dict[str, Any] = override.get("params", {}) if override else {}
+
+        properties: dict[str, Any] = {}
+        required: list[str] = []
+
+        for param in tool.params:
+            p_override = param_overrides.get(param.name, {})
+            param_desc = p_override.get("description", param.description)
+
+            param_def: dict[str, Any] = {
+                "type": param.type,
+                "description": param_desc,
+            }
+            if param.enum:
+                param_def["enum"] = param.enum
+
+            properties[param.name] = param_def
+            if param.required:
+                required.append(param.name)
+
+        return {
+            "type": "function",
+            "function": {
+                "name": tool.name,
+                "description": tool_description,
+                "parameters": {
+                    "type": "object",
+                    "properties": properties,
+                    "required": required,
+                },
+            },
+        }
+
     def to_schemas(self) -> list[dict[str, Any]]:
-        """Convert registered tools to OpenAI function calling schemas.
+        """Convert all registered tools to OpenAI function calling schemas.
 
         If calibration overrides are loaded, they take priority for descriptions.
         """
-        schemas: list[dict[str, Any]] = []
-        for tool in self._tools.values():
-            # Check for calibrated overrides
-            override = self._description_overrides.get(tool.name)
-            tool_description = (
-                override["description"]
-                if override and "description" in override
-                else tool.description
-            )
-            param_overrides: dict[str, Any] = override.get("params", {}) if override else {}
+        return [self._build_schema(tool) for tool in self._tools.values()]
 
-            properties: dict[str, Any] = {}
-            required: list[str] = []
+    def to_schemas_for_user(
+        self,
+        permission_checker: Any,
+        user: Any,
+    ) -> list[dict[str, Any]]:
+        """Like to_schemas(), but excludes tools the user cannot use.
 
-            for param in tool.params:
-                # Use overridden param description if available
-                p_override = param_overrides.get(param.name, {})
-                param_desc = p_override.get("description", param.description)
+        Falls back to the full schema list if either argument is None.
+        This prevents the LLM from wasting tokens on tools it cannot invoke.
+        """
+        if permission_checker is None or user is None:
+            return self.to_schemas()
 
-                param_def: dict[str, Any] = {
-                    "type": param.type,
-                    "description": param_desc,
-                }
-                if param.enum:
-                    param_def["enum"] = param.enum
-
-                properties[param.name] = param_def
-                if param.required:
-                    required.append(param.name)
-
-            schema = {
-                "type": "function",
-                "function": {
-                    "name": tool.name,
-                    "description": tool_description,
-                    "parameters": {
-                        "type": "object",
-                        "properties": properties,
-                        "required": required,
-                    },
-                },
-            }
-            schemas.append(schema)
-
-        return schemas
+        return [
+            self._build_schema(tool)
+            for tool in self._tools.values()
+            if permission_checker.can_use_tool(user, tool.name)
+        ]

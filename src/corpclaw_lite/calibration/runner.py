@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from corpclaw_lite.calibration.scenarios import CalibrationScenario
 from corpclaw_lite.calibration.scorer import CalibrationScorer, ScenarioResult
@@ -37,12 +37,14 @@ class CalibrationRunner:
         user: User,
         system_prompt: str | None,
         workspace_dir: Path,
+        few_shots: list[dict[str, Any]] | None = None,
     ) -> None:
         self._agent_loop = agent_loop
         self._user = user
         self._system_prompt = system_prompt
         self._workspace_dir = workspace_dir
         self._scorer = CalibrationScorer()
+        self._few_shots = few_shots
 
     async def run_all(
         self,
@@ -79,6 +81,7 @@ class CalibrationRunner:
                     message=scenario.user_message,
                     system_prompt=self._system_prompt,
                     trajectory_recorder=recorder,
+                    few_shots=self._few_shots,
                 )
 
                 # Build trajectory from recorder

@@ -11,7 +11,7 @@ from corpclaw_lite.container.agent_worker import process_request
 def mock_env():
     import os
 
-    os.environ["CORPCLAW_IPC_SECRET"] = "test-secret"
+    os.environ["CORPCLAW_IPC_SECRET"] = "test-secret-at-least-16-chars"
     yield
     os.environ.pop("CORPCLAW_IPC_SECRET", None)
 
@@ -148,7 +148,7 @@ def test_process_request_clears_ipc_secret():
     """P0-1: IPC secret is removed from environment after IPCAuth initialization."""
     import os
 
-    os.environ["CORPCLAW_IPC_SECRET"] = "test-secret"
+    os.environ["CORPCLAW_IPC_SECRET"] = "test-secret-at-least-16-chars"
     req = '{"payload": "test"}'
 
     with (

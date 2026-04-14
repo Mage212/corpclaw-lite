@@ -91,9 +91,17 @@ class BootstrapLoader:
     def get_department_prompt(self, department: str) -> str | None:
         """Load department-specific instructions if available.
 
-        Looks for ``config/bootstrap/departments/<department>.md``.
+        Checks for a calibrated override first, then falls back to the
+        original file at ``config/bootstrap/departments/<department>.md``.
         Returns cached content, or None if no file exists.
         """
+        calibrated = (
+            self._dir.parent / "calibrated" / "bootstrap" / "departments" / f"{department}.md"
+        )
+        if calibrated.exists():
+            content = self._load_cached(calibrated)
+            return content.strip() if content.strip() else None
+
         path = self._dir / "departments" / f"{department}.md"
         if path.exists():
             content = self._load_cached(path)

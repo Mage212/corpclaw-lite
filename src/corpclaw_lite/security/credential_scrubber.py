@@ -6,9 +6,26 @@ import re
 
 __all__ = [
     "CredentialScrubber",
+    "scrub_text",
 ]
 
 logger = logging.getLogger(__name__)
+
+
+def scrub_text(text: str) -> str:
+    """Scrub known credential patterns from arbitrary text.
+
+    Used to sanitise tool results before they enter the LLM context,
+    user responses, or memory storage — paths not covered by the
+    logging.Filter-based CredentialScrubber.
+    """
+    result = text
+    for pattern in CredentialScrubber.PATTERNS:
+        result = pattern.sub(CredentialScrubber.MASK, result)
+    ipc_secret = os.environ.get("CORPCLAW_IPC_SECRET")
+    if ipc_secret and len(ipc_secret) > 8:
+        result = result.replace(ipc_secret, CredentialScrubber.MASK)
+    return result
 
 
 class CredentialScrubber(logging.Filter):
