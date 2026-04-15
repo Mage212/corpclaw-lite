@@ -14,6 +14,7 @@ Security:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from pathlib import Path
@@ -71,6 +72,7 @@ class ContainerManager:
         self._workspace_base = (workspace_base or Path(self.settings.workspace_base)).resolve()
         self._client = docker.from_env() if docker else None  # type: ignore[union-attr]
         self._ipc = ipc
+        self._user_locks: dict[int, asyncio.Lock] = {}
 
     @staticmethod
     def is_docker_available() -> bool:
@@ -102,6 +104,20 @@ class ContainerManager:
             return True
         except Exception:
             return False
+
+    _MAX_USER_LOCKS = 10_000
+
+    def _get_lock(self, user_id: int) -> asyncio.Lock:
+        """Return a per-user asyncio.Lock, pruning stale entries if the pool is too large."""
+        lock = self._user_locks.get(user_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._user_locks[user_id] = lock
+        if len(self._user_locks) > self._MAX_USER_LOCKS:
+            stale = [k for k, v in self._user_locks.items() if not v.locked()]
+            for k in stale[: len(stale) // 2]:
+                del self._user_locks[k]
+        return lock
 
     def ensure_running(self, user_id: int) -> str:
         """Ensure a container is running for a given user.
@@ -158,8 +174,13 @@ class ContainerManager:
         self.stop_by_name(f"corpclaw_agent_{user_id}")
 
     async def ensure_running_async(self, user_id: int) -> str:
-        """Async wrapper for ensure_running — runs in a thread to avoid blocking the event loop."""
-        return await anyio.to_thread.run_sync(lambda: self.ensure_running(user_id))  # type: ignore[reportAttributeAccessIssue]
+        """Async wrapper for ensure_running — runs in a thread to avoid blocking the event loop.
+
+        Serialized per user_id to prevent concurrent container creation races.
+        """
+        lock = self._get_lock(user_id)
+        async with lock:
+            return await anyio.to_thread.run_sync(lambda: self.ensure_running(user_id))  # type: ignore[reportAttributeAccessIssue]
 
     async def stop_async(self, user_id: int) -> None:
         """Async wrapper for stop — runs in a thread to avoid blocking the event loop."""

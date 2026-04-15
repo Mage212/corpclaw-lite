@@ -23,7 +23,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_SUBAGENT_TIMEOUT_MULTIPLIER = 2
+# Subagent timeout derives from max_wall_time_ms so it scales automatically
+# with the model/hardware speed configured in settings.yaml.
 
 
 class SubagentDispatcher:
@@ -111,7 +112,7 @@ class SubagentDispatcher:
             )
         )
 
-        timeout_seconds = self._settings.max_wall_time_ms / 1000 * _SUBAGENT_TIMEOUT_MULTIPLIER
+        timeout_seconds = self._settings.max_wall_time_ms / 1000
 
         try:
             result, _ = await asyncio.wait_for(
