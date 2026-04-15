@@ -8,10 +8,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import anyio
-
 from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
 from corpclaw_lite.extensions.tools.builtin.files import resolve_and_validate_path
+from corpclaw_lite.utils.async_helpers import run_in_thread
 
 __all__ = ["PdfReaderTool"]
 
@@ -130,4 +129,4 @@ class PdfReaderTool(Tool):
         if resolved.suffix.lower() != ".pdf":
             return f"Error: Not a PDF file: {path_str}"
 
-        return await anyio.to_thread.run_sync(_extract_text, resolved, pages, max_chars)
+        return await run_in_thread(_extract_text, resolved, pages, max_chars)

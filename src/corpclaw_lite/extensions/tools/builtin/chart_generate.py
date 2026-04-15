@@ -1,3 +1,4 @@
+# pyright: reportUnknownMemberType=warning
 """chart_generate — generate charts from tabular data files.
 
 Uses matplotlib with Agg backend (headless) to render charts as PNG.
@@ -9,7 +10,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import anyio
 import matplotlib
 
 matplotlib.use("Agg")
@@ -23,6 +23,7 @@ from corpclaw_lite.extensions.tools.builtin.table_query import (  # noqa: E402
     load_xlsx_as_dicts,
     reencode_csv_to_utf8,
 )
+from corpclaw_lite.utils.async_helpers import run_in_thread  # noqa: E402
 
 __all__ = ["ChartGenerateTool"]
 
@@ -239,6 +240,6 @@ class ChartGenerateTool(Tool):
             except PermissionError:
                 output_path = Path(output_str)
 
-        return await anyio.to_thread.run_sync(
+        return await run_in_thread(
             _generate_chart, resolved, chart_type, x_column, y_column, title, output_path
         )

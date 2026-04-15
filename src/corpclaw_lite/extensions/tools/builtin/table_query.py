@@ -11,10 +11,9 @@ import csv
 from pathlib import Path
 from typing import Any
 
-import anyio
-
 from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
 from corpclaw_lite.extensions.tools.builtin.files import resolve_and_validate_path
+from corpclaw_lite.utils.async_helpers import run_in_thread
 
 __all__ = [
     "TableQueryTool",
@@ -259,4 +258,4 @@ class TableQueryTool(Tool):
             except PermissionError as e:
                 return f"Error: {e}"
 
-        return await anyio.to_thread.run_sync(_run_query, resolved, query, output_path)
+        return await run_in_thread(_run_query, resolved, query, output_path)

@@ -13,14 +13,12 @@ from __future__ import annotations
 
 import math
 from datetime import datetime, timedelta
-from functools import partial
 from pathlib import Path
 from typing import Any
 
-import anyio
-
 from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
 from corpclaw_lite.extensions.tools.builtin.files import resolve_and_validate_path
+from corpclaw_lite.utils.async_helpers import run_in_thread
 
 __all__ = [
     "NormalizeExcelTool",
@@ -273,9 +271,7 @@ class NormalizeExcelTool(Tool):
         do_empty = kwargs.get("remove_empty_rows", True)
 
         try:
-            return await anyio.to_thread.run_sync(
-                partial(self._process_file, resolved, output_path, do_empty)
-            )
+            return await run_in_thread(self._process_file, resolved, output_path, do_empty)
         except Exception as e:
             return f"Error: {e}"
 

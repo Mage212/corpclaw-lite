@@ -11,11 +11,10 @@ import json
 from pathlib import Path
 from typing import Any
 
-import anyio
-
 from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
 from corpclaw_lite.extensions.tools.builtin.files import resolve_and_validate_path
 from corpclaw_lite.extensions.tools.builtin.table_query import detect_csv_encoding
+from corpclaw_lite.utils.async_helpers import run_in_thread
 
 __all__ = ["ConvertFormatTool"]
 
@@ -30,13 +29,13 @@ def _load_csv(path: Path) -> list[dict[str, str]]:
     encoding = detect_csv_encoding(path)
     with open(path, newline="", encoding=encoding) as f:
         reader = csv.DictReader(f)
-        return list(reader)
+        return list(reader)  # pyright: ignore[reportUnknownVariableType]
 
 
 def _load_json(path: Path) -> list[dict[str, Any]]:
-    data = json.loads(path.read_text(encoding="utf-8"))
+    data: Any = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(data, list):
-        return data
+        return data  # pyright: ignore[reportUnknownVariableType]
     if isinstance(data, dict):
         # Single object → wrap in list.
         return [data]
@@ -81,12 +80,12 @@ def _load_markdown(path: Path) -> list[dict[str, str]]:
 
     headers = _split_row(table_lines[0])
     # Skip separator row (contains only -, :, |).
-    data_lines = []
+    data_lines: list[dict[str, str]] = []
     for line in table_lines[1:]:
         cells = _split_row(line)
         if all(set(c) <= {"-", ":"} for c in cells):
             continue  # separator row
-        data_lines.append(dict(zip(headers, cells, strict=False)))
+        data_lines.append(dict(zip(headers, cells, strict=False)))  # pyright: ignore[reportUnknownMemberType]
     return data_lines
 
 
@@ -251,6 +250,4 @@ class ConvertFormatTool(Tool):
                 # Allow creating new files — just use as-is if parent exists.
                 output_path = Path(output_str)
 
-        return await anyio.to_thread.run_sync(
-            _do_convert, resolved_input, output_format, output_path
-        )
+        return await run_in_thread(_do_convert, resolved_input, output_format, output_path)

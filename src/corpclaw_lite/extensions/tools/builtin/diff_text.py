@@ -11,10 +11,9 @@ from __future__ import annotations
 import difflib
 from typing import Any
 
-import anyio
-
 from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
 from corpclaw_lite.extensions.tools.builtin.files import resolve_and_validate_path
+from corpclaw_lite.utils.async_helpers import run_in_thread
 
 __all__ = ["DiffTextTool"]
 
@@ -129,8 +128,6 @@ class DiffTextTool(Tool):
         try:
             source_text = _read_if_path(source_raw)
             target_text = _read_if_path(target_raw)
-            return await anyio.to_thread.run_sync(
-                _compute_diff, source_text, target_text, mode, context_lines
-            )
+            return await run_in_thread(_compute_diff, source_text, target_text, mode, context_lines)
         except Exception as e:
             return f"Error: {e}"
