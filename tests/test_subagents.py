@@ -1,6 +1,6 @@
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -316,3 +316,106 @@ def test_subagent_registry_department_filtering() -> None:
     assert {s.id for s in dev_agents} == {"dev_agent", "global_agent"}
     # HR user only sees global_agent (wildcard)
     assert {s.id for s in hr_agents} == {"global_agent"}
+
+
+# ── Skill injection in subagents ─────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_subagent_receives_matched_skills() -> None:
+    """When skill_matcher and skill_registry are provided, matched skills are injected."""
+    registry = ToolRegistry()
+    registry.register(DummyToolA())
+
+    # Create mock skill matcher that returns a skill
+    from corpclaw_lite.extensions.skills.base import Skill
+
+    matched_skill = Skill(
+        id="test_skill",
+        description="Test skill for subagent",
+        allowed_for=["*"],
+        instructions="Do the test thing carefully.",
+    )
+
+    mock_matcher = MagicMock()
+    mock_matcher.match.return_value = [matched_skill]
+
+    mock_skill_registry = MagicMock()
+    mock_skill_registry.get_allowed_skills.return_value = [matched_skill]
+
+    dispatcher = SubagentDispatcher(
+        provider=DummyProvider(),  # type: ignore
+        main_registry=registry,
+        settings=AgentSettings(),
+        skill_matcher=mock_matcher,
+        skill_registry=mock_skill_registry,
+    )
+
+    spec = SubagentSpec(
+        id="skill_agent",
+        name="Skill Agent",
+        description="Agent with skills",
+        allowed_tools=["*"],
+    )
+    user = User(id=1, name="User", department="dev")
+
+    captured_system: list[str] = []
+
+    async def _capture_run(
+        u: object, msg: str, system_prompt: str | None = None
+    ) -> tuple[str, RunStats]:
+        captured_system.append(system_prompt or "")
+        return "done", RunStats()
+
+    with patch("corpclaw_lite.agent.subagent.AgentLoop") as MockLoop:
+        mock_loop_instance = MockLoop.return_value
+        mock_loop_instance.run = AsyncMock(side_effect=_capture_run)
+
+        await dispatcher.dispatch(spec, user, "Do something with test skill")
+
+    assert captured_system
+    # Skill block should be present in system prompt
+    assert "## Available Skills" in captured_system[0]
+    assert "test_skill" in captured_system[0]
+    assert "Do the test thing carefully." in captured_system[0]
+
+
+@pytest.mark.asyncio
+async def test_subagent_no_skills_when_matcher_none() -> None:
+    """Without skill_matcher, no skills are injected into subagent prompt."""
+    registry = ToolRegistry()
+    registry.register(DummyToolA())
+
+    dispatcher = SubagentDispatcher(
+        provider=DummyProvider(),  # type: ignore
+        main_registry=registry,
+        settings=AgentSettings(),
+        skill_matcher=None,
+        skill_registry=None,
+    )
+
+    spec = SubagentSpec(
+        id="noskill_agent",
+        name="NoSkill Agent",
+        description="Agent without skills",
+        allowed_tools=["*"],
+    )
+    user = User(id=1, name="User", department="dev")
+
+    captured_system: list[str] = []
+
+    async def _capture_run(
+        u: object, msg: str, system_prompt: str | None = None
+    ) -> tuple[str, RunStats]:
+        captured_system.append(system_prompt or "")
+        return "done", RunStats()
+
+    with patch("corpclaw_lite.agent.subagent.AgentLoop") as MockLoop:
+        mock_loop_instance = MockLoop.return_value
+        mock_loop_instance.run = AsyncMock(side_effect=_capture_run)
+
+        await dispatcher.dispatch(spec, user, "Do something")
+
+    assert captured_system
+    # No skill block should be present
+    assert "## Available Skills" not in captured_system[0]

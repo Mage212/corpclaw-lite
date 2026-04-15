@@ -42,6 +42,9 @@ if TYPE_CHECKING:
     from corpclaw_lite.container.manager import ContainerManager
     from corpclaw_lite.departments.permissions import PermissionChecker
     from corpclaw_lite.extensions.mcp.manager import MCPManager
+    from corpclaw_lite.extensions.plugins.registry import PluginRegistry
+    from corpclaw_lite.extensions.skills.matcher import SkillMatcher
+    from corpclaw_lite.extensions.skills.registry import SkillRegistry
     from corpclaw_lite.extensions.subagents.registry import SubagentRegistry
     from corpclaw_lite.extensions.tools.registry import ToolRegistry
     from corpclaw_lite.llm.base import Provider
@@ -63,6 +66,9 @@ class AgentStack:
     container_manager: ContainerManager | None
     few_shots: list[dict[str, Any]] | None = None
     subagent_registry: SubagentRegistry | None = None
+    skill_registry: SkillRegistry | None = None
+    plugin_registry: PluginRegistry | None = None
+    skill_matcher: SkillMatcher | None = None
 
 
 def _build_provider_from_env() -> Provider:
@@ -190,6 +196,8 @@ def _build_extensions_stack(
     guard: ToolGuard,
     permission_checker: PermissionChecker,
     workspace_base: Path | None = None,
+    skill_matcher: SkillMatcher | None = None,
+    skill_registry: SkillRegistry | None = None,
 ) -> SubagentRegistry:
     """Register subagents, MCP, host-side tools."""
     from corpclaw_lite.agent.subagent import SubagentDispatcher
@@ -211,6 +219,8 @@ def _build_extensions_stack(
             settings=agent_settings,
             tool_guard=guard,
             permission_checker=permission_checker,
+            skill_matcher=skill_matcher,
+            skill_registry=skill_registry,
         )
         registry.register(DispatchSubagentTool(dispatcher, subagent_registry))
         logger.info(
@@ -341,8 +351,24 @@ def build_agent_stack(
         )
 
     guard, permission_checker = _build_security_stack(full_settings, provider)
+
+    # Load extensions (skills, plugins, skill matcher) BEFORE building extensions stack
+    # so that SubagentDispatcher gets access to SkillMatcher for skill injection.
+    from corpclaw_lite.extensions.bootstrap import load_extensions
+
+    skill_registry, plugin_registry, skill_matcher = load_extensions(
+        PROJECT_ROOT, registry, full_settings.skills
+    )
+
     subagent_registry = _build_extensions_stack(
-        agent_settings, provider, registry, guard, permission_checker, workspace_base=workspace_base
+        agent_settings,
+        provider,
+        registry,
+        guard,
+        permission_checker,
+        workspace_base=workspace_base,
+        skill_matcher=skill_matcher,
+        skill_registry=skill_registry,
     )
     memory, consolidator, compressor = _build_memory_stack(agent_settings, provider, registry)
 
@@ -393,4 +419,7 @@ def build_agent_stack(
         container_manager=container_manager,
         few_shots=few_shots,
         subagent_registry=subagent_registry,
+        skill_registry=skill_registry,
+        plugin_registry=plugin_registry,
+        skill_matcher=skill_matcher,
     )

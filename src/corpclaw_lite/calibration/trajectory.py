@@ -41,6 +41,7 @@ class Trajectory:
     tools_used: list[str] = field(default_factory=lambda: list[str]())
     duration_ms: float = 0.0
     status: str = "ok"
+    skills_selected: list[str] = field(default_factory=lambda: list[str]())
 
     def tool_calls_sequence(self) -> list[str]:
         """Return ordered list of tool names called."""
@@ -59,6 +60,7 @@ class Trajectory:
             "tools_used": self.tools_used,
             "duration_ms": self.duration_ms,
             "status": self.status,
+            "skills_selected": self.skills_selected,
             "steps": [
                 {
                     "step_type": s.step_type,
@@ -93,6 +95,7 @@ class TrajectoryRecorder:
         self._scenario_id = scenario_id
         self._steps: list[TrajectoryStep] = []
         self._start_ms = time.monotonic() * 1000
+        self._skills_selected: list[str] = []
 
     def record_tool_call(self, tool_name: str, tool_args: dict[str, Any]) -> None:
         """Record a tool invocation."""
@@ -104,6 +107,10 @@ class TrajectoryRecorder:
                 timestamp_ms=time.monotonic() * 1000 - self._start_ms,
             )
         )
+
+    def record_skills(self, skills: list[str]) -> None:
+        """Record which skills were selected for this scenario."""
+        self._skills_selected = skills
 
     def record_tool_result(self, tool_name: str, result: str) -> None:
         """Record a tool execution result."""
@@ -140,4 +147,5 @@ class TrajectoryRecorder:
             tools_used=tools_used or [],
             duration_ms=duration_ms,
             status=status,
+            skills_selected=self._skills_selected,
         )

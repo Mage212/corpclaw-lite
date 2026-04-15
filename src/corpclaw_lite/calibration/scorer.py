@@ -62,6 +62,8 @@ class CalibrationScorer:
     - must_read: specific file must appear in read_file arguments
     - contains: substring must appear in final answer (case-insensitive)
     - has_content: final answer must be non-empty
+    - skills_selected: verify that the correct skills were matched by TF-IDF/keyword
+    - expected_subagent: verify that dispatch_subagent was called with the right subagent_id
     """
 
     def score(
@@ -141,6 +143,45 @@ class CalibrationScorer:
                 passed=False,
                 failure_reason=f"Agent finished with error status: {trajectory.status}",
             )
+
+        # Check 6: Were the correct skills selected by TF-IDF/keyword matcher?
+        if expected.skills_selected:
+            actual_skills = trajectory.skills_selected
+            if set(expected.skills_selected) != set(actual_skills):
+                return ScenarioResult(
+                    scenario=scenario,
+                    trajectory=trajectory,
+                    passed=False,
+                    failure_reason=(
+                        f"Expected skills {expected.skills_selected}, got {actual_skills}"
+                    ),
+                )
+
+        # Check 7: Was the correct subagent dispatched?
+        if expected.expected_subagent:
+            dispatch_calls = [
+                s
+                for s in trajectory.steps
+                if s.step_type == "tool_call" and s.tool_name == "dispatch_subagent" and s.tool_args
+            ]
+            found = any(
+                s.tool_args.get("subagent_id") == expected.expected_subagent  # type: ignore[union-attr]
+                for s in dispatch_calls
+            )
+            if not found:
+                actual_ids = [
+                    str(s.tool_args.get("subagent_id", "?"))  # type: ignore[union-attr]
+                    for s in dispatch_calls
+                ]
+                return ScenarioResult(
+                    scenario=scenario,
+                    trajectory=trajectory,
+                    passed=False,
+                    failure_reason=(
+                        f"Expected dispatch to '{expected.expected_subagent}', "
+                        f"actual dispatch targets: {actual_ids}"
+                    ),
+                )
 
         return ScenarioResult(
             scenario=scenario,

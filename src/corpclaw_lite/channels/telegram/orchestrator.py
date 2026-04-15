@@ -19,7 +19,6 @@ from corpclaw_lite.channels.telegram.progress import StatusMessageSession
 from corpclaw_lite.channels.telegram.rate_limit import RateLimiter
 from corpclaw_lite.config.bootstrap import BootstrapLoader
 from corpclaw_lite.container.manager import ContainerManagerError
-from corpclaw_lite.extensions.bootstrap import load_extensions
 from corpclaw_lite.extensions.plugins.watcher import PluginHotReloader
 from corpclaw_lite.extensions.skills.watcher import SkillHotReloader
 from corpclaw_lite.logging.agent_logger import AgentLogger, setup_logging
@@ -34,9 +33,6 @@ if TYPE_CHECKING:
     from corpclaw_lite.agent.factory import AgentStack
     from corpclaw_lite.agent.vision import VisionProcessor
     from corpclaw_lite.config.settings import Settings
-    from corpclaw_lite.extensions.plugins.registry import PluginRegistry
-    from corpclaw_lite.extensions.skills.matcher import SkillMatcher
-    from corpclaw_lite.extensions.skills.registry import SkillRegistry
 
 __all__ = [
     "TelegramBotOrchestrator",
@@ -54,9 +50,6 @@ class TelegramBotOrchestrator:
 
         self._stack: AgentStack | None = None
         self._channel: TelegramChannel | None = None
-        self._skill_registry: SkillRegistry | None = None
-        self._plugin_registry: PluginRegistry | None = None
-        self._skill_matcher: SkillMatcher | None = None
         self._onboarding_engine: OnboardingEngine | None = None
         self._rate_limiter: RateLimiter | None = None
         self._admin_notifier: AdminNotifier | None = None
@@ -75,9 +68,7 @@ class TelegramBotOrchestrator:
 
     def _require_started(
         self,
-    ) -> tuple[
-        AgentStack, TelegramChannel, RateLimiter, SkillRegistry, PluginRegistry, BootstrapLoader
-    ]:
+    ) -> tuple[AgentStack, TelegramChannel, RateLimiter, BootstrapLoader]:
         """Return all required components, raising RuntimeError if any is missing."""
         if self._stack is None:
             raise RuntimeError("AgentStack not initialized — call start() first")
@@ -85,18 +76,12 @@ class TelegramBotOrchestrator:
             raise RuntimeError("TelegramChannel not initialized")
         if self._rate_limiter is None:
             raise RuntimeError("RateLimiter not initialized")
-        if self._skill_registry is None:
-            raise RuntimeError("SkillRegistry not initialized")
-        if self._plugin_registry is None:
-            raise RuntimeError("PluginRegistry not initialized")
         if self._bootstrap is None:
             raise RuntimeError("BootstrapLoader not initialized")
         return (
             self._stack,
             self._channel,
             self._rate_limiter,
-            self._skill_registry,
-            self._plugin_registry,
             self._bootstrap,
         )
 
@@ -130,15 +115,9 @@ class TelegramBotOrchestrator:
             except Exception as e:
                 logger.error("MCP: failed to connect — %s (continuing without MCP tools)", e)
 
-        # Skills + Plugins + SkillMatcher
-        skill_registry, plugin_registry, skill_matcher = load_extensions(
-            PROJECT_ROOT,
-            tool_registry,
-            self._settings.skills,
-        )
-        self._skill_registry = skill_registry
-        self._plugin_registry = plugin_registry
-        self._skill_matcher = skill_matcher
+        # Skills + Plugins + SkillMatcher — loaded inside build_agent_stack()
+        skill_registry = stack.skill_registry
+        plugin_registry = stack.plugin_registry
 
         # Seed whitelist
         if tg_settings.whitelist:
@@ -202,9 +181,10 @@ class TelegramBotOrchestrator:
         skills_dir = PROJECT_ROOT / "skills"
         plugins_dir = PROJECT_ROOT / "plugins"
 
-        self._reloader = SkillHotReloader(skills_dir, skill_registry)
-        self._reloader.start()
-        logger.info("Skill hot-reloader started watching %s", skills_dir)
+        if skill_registry is not None:
+            self._reloader = SkillHotReloader(skills_dir, skill_registry)
+            self._reloader.start()
+            logger.info("Skill hot-reloader started watching %s", skills_dir)
 
         if mcp_manager is not None:
             from corpclaw_lite.extensions.mcp.watcher import MCPHotReloader
@@ -214,11 +194,12 @@ class TelegramBotOrchestrator:
             self._mcp_reloader.start()
             logger.info("MCP hot-reloader started watching %s", mcp_cfg_path)
 
-        self._plugin_reloader = PluginHotReloader(
-            plugins_dir, plugin_registry, tool_registry, skill_registry
-        )
-        self._plugin_reloader.start()
-        logger.info("Plugin hot-reloader started watching %s", plugins_dir)
+        if plugin_registry is not None and skill_registry is not None:
+            self._plugin_reloader = PluginHotReloader(
+                plugins_dir, plugin_registry, tool_registry, skill_registry
+            )
+            self._plugin_reloader.start()
+            logger.info("Plugin hot-reloader started watching %s", plugins_dir)
 
         if stack.subagent_registry is not None:
             from corpclaw_lite.extensions.subagents.watcher import SubagentHotReloader
@@ -306,9 +287,7 @@ class TelegramBotOrchestrator:
 
     async def handle_message(self, telegram_id: str, message: str, mode: str = "execute") -> None:
         """Main message handler — replaces nested _handle_and_reply."""
-        stack, channel, rate_limiter, skill_registry, plugin_registry, bootstrap = (
-            self._require_started()
-        )
+        stack, channel, rate_limiter, bootstrap = self._require_started()
 
         tid = int(telegram_id)
         user_manager = stack.user_manager
@@ -416,15 +395,21 @@ class TelegramBotOrchestrator:
             system_prompt: str | None = "\n\n".join(parts_list) if parts_list else None
 
             # Inject only relevant skill instructions into system prompt
-            allowed_skills = skill_registry.get_allowed_skills(user)
-            plugin_skills = [
-                p.skill for p in plugin_registry.get_allowed_plugins(user) if p.skill is not None
-            ]
+            skill_registry = stack.skill_registry
+            plugin_registry = stack.plugin_registry
+            allowed_skills = (
+                skill_registry.get_allowed_skills(user) if skill_registry is not None else []
+            )
+            plugin_skills = (
+                [p.skill for p in plugin_registry.get_allowed_plugins(user) if p.skill is not None]
+                if plugin_registry is not None
+                else []
+            )
             from corpclaw_lite.agent.prompt import build_skill_block
 
             all_candidate_skills = allowed_skills + plugin_skills
-            if self._skill_matcher is not None:
-                matched_skills = self._skill_matcher.match(message, all_candidate_skills)
+            if stack.skill_matcher is not None:
+                matched_skills = stack.skill_matcher.match(message, all_candidate_skills)
             else:
                 matched_skills = all_candidate_skills
             skill_block = build_skill_block(matched_skills, [])

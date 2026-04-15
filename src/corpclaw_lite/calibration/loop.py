@@ -121,7 +121,14 @@ class CalibrationLoop:
         workspace.mkdir(exist_ok=True)
 
         # Baseline run
-        runner = CalibrationRunner(agent_loop, cal_user, system_prompt, workspace)
+        runner = CalibrationRunner(
+            agent_loop,
+            cal_user,
+            system_prompt,
+            workspace,
+            skill_matcher=_cal_stack.skill_matcher,
+            skill_registry=_cal_stack.skill_registry,
+        )
         print(f"\nRunning baseline ({len(scenarios)} scenarios)...")
         baseline_results = await runner.run_all(scenarios)
         baseline_score = scorer.score_all(baseline_results)
@@ -244,6 +251,8 @@ class CalibrationLoop:
                 new_system_prompt,
                 workspace,
                 few_shots=calibrated_few_shots,
+                skill_matcher=_new_stack.skill_matcher,
+                skill_registry=_new_stack.skill_registry,
             )
             new_results = await new_runner.run_all(scenarios)
             new_score = scorer.score_all(new_results)

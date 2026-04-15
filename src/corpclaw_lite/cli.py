@@ -200,16 +200,11 @@ def cmd_chat(telegram_id: int, *, setup_mode: bool = False) -> None:
         tool_registry = stack.tool_registry
         mcp_manager = stack.mcp_manager
         _container_manager = stack.container_manager
+        skill_registry = stack.skill_registry
+        plugin_registry = stack.plugin_registry
+        skill_matcher = stack.skill_matcher
         bootstrap = BootstrapLoader(Path("config/bootstrap"))
         system_prompt = bootstrap.get_system_prompt() or None
-
-        from corpclaw_lite.extensions.bootstrap import load_extensions
-
-        skill_registry, plugin_registry, skill_matcher = load_extensions(
-            PROJECT_ROOT,
-            tool_registry,
-            _settings.skills,
-        )
 
         # Load user from DB — same flow as Telegram bot
         standalone_manager = UserManager()
@@ -322,12 +317,20 @@ def cmd_chat(telegram_id: int, *, setup_mode: bool = False) -> None:
 
                 if msg.strip():
                     # Per-message skill matching (same as Telegram runner)
-                    allowed_skills = skill_registry.get_allowed_skills(user)
-                    plugin_skills = [
-                        p.skill
-                        for p in plugin_registry.get_allowed_plugins(user)
-                        if p.skill is not None
-                    ]
+                    allowed_skills = (
+                        skill_registry.get_allowed_skills(user)
+                        if skill_registry is not None
+                        else []
+                    )
+                    plugin_skills = (
+                        [
+                            p.skill
+                            for p in plugin_registry.get_allowed_plugins(user)
+                            if p.skill is not None
+                        ]
+                        if plugin_registry is not None
+                        else []
+                    )
                     all_candidate_skills = allowed_skills + plugin_skills
                     if skill_matcher is not None:
                         matched_skills = skill_matcher.match(msg, all_candidate_skills)

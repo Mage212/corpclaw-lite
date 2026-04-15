@@ -24,6 +24,8 @@ class ScenarioExpectation:
     must_read: str | None = None
     contains: str | None = None
     has_content: bool = True
+    skills_selected: list[str] = field(default_factory=lambda: list[str]())
+    expected_subagent: str | None = None
 
 
 @dataclass
@@ -59,6 +61,8 @@ def _parse_expectation(raw: dict[str, Any]) -> ScenarioExpectation:
         must_read=raw.get("must_read"),
         contains=raw.get("contains"),
         has_content=raw.get("has_content", True),
+        skills_selected=raw.get("skills_selected", []),
+        expected_subagent=raw.get("expected_subagent"),
     )
 
 

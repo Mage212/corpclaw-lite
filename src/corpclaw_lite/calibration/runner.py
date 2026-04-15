@@ -17,6 +17,8 @@ __all__ = [
 
 if TYPE_CHECKING:
     from corpclaw_lite.agent.loop import AgentLoop
+    from corpclaw_lite.extensions.skills.matcher import SkillMatcher
+    from corpclaw_lite.extensions.skills.registry import SkillRegistry
     from corpclaw_lite.users.models import User
 
 logger = logging.getLogger(__name__)
@@ -38,6 +40,8 @@ class CalibrationRunner:
         system_prompt: str | None,
         workspace_dir: Path,
         few_shots: list[dict[str, Any]] | None = None,
+        skill_matcher: SkillMatcher | None = None,
+        skill_registry: SkillRegistry | None = None,
     ) -> None:
         self._agent_loop = agent_loop
         self._user = user
@@ -45,6 +49,8 @@ class CalibrationRunner:
         self._workspace_dir = workspace_dir
         self._scorer = CalibrationScorer()
         self._few_shots = few_shots
+        self._skill_matcher = skill_matcher
+        self._skill_registry = skill_registry
 
     async def run_all(
         self,
@@ -76,6 +82,13 @@ class CalibrationRunner:
             try:
                 # Run through AgentLoop with TrajectoryRecorder
                 recorder = TrajectoryRecorder(scenario.id)
+
+                # Record skill selection for skill_selection category scenarios
+                if self._skill_matcher is not None and self._skill_registry is not None:
+                    allowed_skills = self._skill_registry.get_allowed_skills(self._user)
+                    matched = self._skill_matcher.match(scenario.user_message, allowed_skills)
+                    recorder.record_skills([s.id for s in matched])
+
                 answer, stats = await self._agent_loop.run(
                     user=self._user,
                     message=scenario.user_message,

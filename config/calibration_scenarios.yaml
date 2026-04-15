@@ -139,3 +139,63 @@ scenarios:
     expected:
       tool_calls: ["exec_script"]
       contains: "4"
+
+  # ── Subagent Dispatch ──────────────────────────────────────────
+  - id: dispatch_filesystem_agent
+    category: subagent_dispatch
+    user_message: "Найди все файлы в текущей директории и покажи их содержимое"
+    expected:
+      tool_calls: ["dispatch_subagent"]
+      expected_subagent: "filesystem-agent"
+      has_content: true
+
+  - id: dispatch_research_agent
+    category: subagent_dispatch
+    user_message: "Найди информацию о Python в интернете"
+    expected:
+      tool_calls: ["dispatch_subagent"]
+      expected_subagent: "research-agent"
+      has_content: true
+
+  # ── Web Fetch ──────────────────────────────────────────────────
+  - id: web_fetch_basic
+    category: tool_use
+    user_message: "Загрузи содержимое страницы https://example.com"
+    expected:
+      tool_calls: ["web_fetch"]
+      has_content: true
+
+  # ── Memory ─────────────────────────────────────────────────────
+  - id: memory_store_and_recall
+    category: multi_step
+    user_message: "Запомни что мой любимый цвет синий, а потом вспомни какой у меня любимый цвет"
+    expected:
+      tool_calls: ["memory_store", "memory_recall"]
+      contains: "синий"
+
+  # ── Send File ──────────────────────────────────────────────────
+  - id: send_file_basic
+    category: tool_use
+    setup:
+      files:
+        - path: "report.txt"
+          content: "Report content for testing"
+    user_message: "Отправь мне файл report.txt"
+    expected:
+      tool_calls: ["send_file"]
+      has_content: true
+
+  # ── Skill Selection ────────────────────────────────────────────
+  - id: skill_excel_selected
+    category: skill_selection
+    user_message: "Нормализуй таблицу в файле data.xlsx"
+    expected:
+      tool_calls: []
+      skills_selected: ["excel_normalizer"]
+
+  - id: skill_translator_selected
+    category: skill_selection
+    user_message: "Переведи текст на английский язык: Привет, как дела?"
+    expected:
+      tool_calls: []
+      skills_selected: ["translator"]

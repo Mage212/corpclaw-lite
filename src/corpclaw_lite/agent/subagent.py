@@ -18,6 +18,8 @@ __all__ = [
 
 if TYPE_CHECKING:
     from corpclaw_lite.departments.permissions import PermissionChecker
+    from corpclaw_lite.extensions.skills.matcher import SkillMatcher
+    from corpclaw_lite.extensions.skills.registry import SkillRegistry
     from corpclaw_lite.llm.base import Provider
     from corpclaw_lite.security.tool_guard import ToolGuard
 
@@ -37,12 +39,16 @@ class SubagentDispatcher:
         settings: AgentSettings,
         tool_guard: ToolGuard | None = None,
         permission_checker: PermissionChecker | None = None,
+        skill_matcher: SkillMatcher | None = None,
+        skill_registry: SkillRegistry | None = None,
     ) -> None:
         self._provider = provider
         self._main_registry = main_registry
         self._settings = settings
         self._tool_guard = tool_guard
         self._permission_checker = permission_checker
+        self._skill_matcher = skill_matcher
+        self._skill_registry = skill_registry
 
     async def dispatch(self, spec: SubagentSpec, user: User, task_context: str) -> str:
         """Run the subagent on a specific task."""
@@ -100,6 +106,17 @@ class SubagentDispatcher:
                         spec.id,
                         spec.prompt_path,
                     )
+
+        # Inject matched skills into subagent prompt (same logic as main agent)
+        if self._skill_matcher is not None and self._skill_registry is not None:
+            allowed_skills = self._skill_registry.get_allowed_skills(user)
+            matched = self._skill_matcher.match(task_context, allowed_skills)
+            from corpclaw_lite.agent.prompt import build_skill_block
+
+            skill_block = build_skill_block(matched, [])
+            if skill_block:
+                system_prompt += skill_block
+                logger.debug("Subagent %s: injected %d skills for task", spec.id, len(matched))
 
         # Setup isolated loop — pass security guards through from parent
         loop = AgentLoop(
