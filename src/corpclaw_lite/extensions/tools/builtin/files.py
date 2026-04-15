@@ -184,7 +184,19 @@ class ListFilesTool(Tool):
     """Tool to list files in a directory with size and modification date."""
 
     name = "list_files"
-    description = "List all files and subdirectories in a specific directory."
+    description = (
+        "List all files and subdirectories in a specific directory. "
+        "Format output as plain lists — NEVER use tables or group by file type. "
+        "Always wrap file/directory names in backticks (``). "
+        "Group into two sections: files first, then directories. "
+        "Example format:\n"
+        "В директории найдено N файлов и M директорий:\n\n"
+        "**Файлы:**\n"
+        "- `filename.ext` — 4.9 KB\n"
+        "- `other.txt` — 128 B\n\n"
+        "**Директории:**\n"
+        "- `folder_name`"
+    )
     params = [
         ToolParam(name="path", type="string", description="Path to the directory (empty for root)"),
     ]
