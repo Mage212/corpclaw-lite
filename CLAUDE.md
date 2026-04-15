@@ -304,3 +304,9 @@ All start as background asyncio tasks, stop via `GracefulShutdown` (SIGINT/SIGTE
 - IPC HMAC+nonce is mandatory, fail-fast without `CORPCLAW_IPC_SECRET` (min 16 chars)
 - Context building must handle Qwen3.5 quirks (user-first, no mid-conversation system messages)
 - Calibration edits ONLY YAML/Markdown "Edit Surfaces", never Python code
+
+## AXME Code (MANDATORY at session start)
+
+Call `axme_context` with project path at the start of every session. This loads oracle, decisions, safety rules, memories, test plan, and active plans. Do NOT skip — without context you will miss critical project rules.
+
+During work: error pattern or successful approach discovered → `axme_save_memory`. Architectural decision → `axme_save_decision`. New safety constraint → `axme_update_safety`. Save immediately, do not defer.
