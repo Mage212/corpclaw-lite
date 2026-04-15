@@ -139,3 +139,95 @@ rules:
     match_param: "path"
     match_pattern: "^/(etc|proc|sys|dev|root|home|var/log|boot)"
     require_approval: false
+
+  # ── New data tools: path traversal + absolute path protection ────────
+
+  - id: PATH_TRAVERSAL_TABLE_QUERY
+    description: "Path traversal detected in table_query"
+    tool: "table_query"
+    severity: HIGH
+    match_param: "path"
+    match_pattern: "\\.\\./"
+    require_approval: true
+
+  - id: ABS_PATH_TABLE_QUERY
+    description: "Absolute path to sensitive directory in table_query"
+    tool: "table_query"
+    severity: HIGH
+    match_param: "path"
+    match_pattern: "^/(etc|proc|sys|dev|root|home|var/log|boot)"
+    require_approval: true
+
+  - id: PATH_TRAVERSAL_CHART_GENERATE
+    description: "Path traversal detected in chart_generate"
+    tool: "chart_generate"
+    severity: HIGH
+    match_param: "data_path"
+    match_pattern: "\\.\\./"
+    require_approval: true
+
+  - id: ABS_PATH_CHART_GENERATE
+    description: "Absolute path to sensitive directory in chart_generate"
+    tool: "chart_generate"
+    severity: HIGH
+    match_param: "data_path"
+    match_pattern: "^/(etc|proc|sys|dev|root|home|var/log|boot)"
+    require_approval: true
+
+  - id: PATH_TRAVERSAL_PDF_READER
+    description: "Path traversal detected in pdf_reader"
+    tool: "pdf_reader"
+    severity: HIGH
+    match_param: "path"
+    match_pattern: "\\.\\./"
+    require_approval: true
+
+  - id: ABS_PATH_PDF_READER
+    description: "Absolute path to sensitive directory in pdf_reader"
+    tool: "pdf_reader"
+    severity: HIGH
+    match_param: "path"
+    match_pattern: "^/(etc|proc|sys|dev|root|home|var/log|boot)"
+    require_approval: true
+
+  - id: PATH_TRAVERSAL_CONVERT_FORMAT
+    description: "Path traversal detected in convert_format"
+    tool: "convert_format"
+    severity: HIGH
+    match_param: "input_path"
+    match_pattern: "\\.\\./"
+    require_approval: true
+
+  - id: ABS_PATH_CONVERT_FORMAT
+    description: "Absolute path to sensitive directory in convert_format"
+    tool: "convert_format"
+    severity: HIGH
+    match_param: "input_path"
+    match_pattern: "^/(etc|proc|sys|dev|root|home|var/log|boot)"
+    require_approval: true
+
+  - id: PATH_TRAVERSAL_DIFF_TEXT_SOURCE
+    description: "Path traversal detected in diff_text source"
+    tool: "diff_text"
+    severity: HIGH
+    match_param: "source"
+    match_pattern: "\\.\\./"
+    require_approval: true
+
+  - id: PATH_TRAVERSAL_DIFF_TEXT_TARGET
+    description: "Path traversal detected in diff_text target"
+    tool: "diff_text"
+    severity: HIGH
+    match_param: "target"
+    match_pattern: "\\.\\./"
+    require_approval: true
+
+  # ── table_query: SQL DDL defense-in-depth ─────────────────────────────
+
+  - id: SQL_DDL_TABLE_QUERY
+    description: "DDL statement detected in table_query — data modification attempted"
+    tool: "table_query"
+    severity: MEDIUM
+    match_param: "query"
+    match_pattern: "(?i)(DROP|ALTER|TRUNCATE|DELETE|INSERT|UPDATE)\\s"
+    require_approval: true

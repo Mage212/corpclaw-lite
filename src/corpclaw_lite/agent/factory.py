@@ -124,6 +124,9 @@ def _build_router() -> Provider:
 
 def _sandboxed_tool_classes() -> list[Any]:
     """Return the list of tool classes that need container isolation."""
+    from corpclaw_lite.extensions.tools.builtin.chart_generate import ChartGenerateTool
+    from corpclaw_lite.extensions.tools.builtin.convert_format import ConvertFormatTool
+    from corpclaw_lite.extensions.tools.builtin.diff_text import DiffTextTool
     from corpclaw_lite.extensions.tools.builtin.excel import NormalizeExcelTool
     from corpclaw_lite.extensions.tools.builtin.exec_script import ExecScriptTool
     from corpclaw_lite.extensions.tools.builtin.files import (
@@ -133,6 +136,8 @@ def _sandboxed_tool_classes() -> list[Any]:
         SearchFilesTool,
         WriteFileTool,
     )
+    from corpclaw_lite.extensions.tools.builtin.pdf_reader import PdfReaderTool
+    from corpclaw_lite.extensions.tools.builtin.table_query import TableQueryTool
 
     return [
         ReadFileTool(),
@@ -142,6 +147,11 @@ def _sandboxed_tool_classes() -> list[Any]:
         SearchFilesTool(),
         ExecScriptTool(),
         NormalizeExcelTool(),
+        DiffTextTool(),
+        ConvertFormatTool(),
+        TableQueryTool(),
+        ChartGenerateTool(),
+        PdfReaderTool(),
     ]
 
 

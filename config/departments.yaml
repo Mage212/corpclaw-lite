@@ -7,6 +7,8 @@
 # Built-in tool names:
 #   read_file, write_file, edit_file, list_files, search_files,
 #   memory_store, memory_recall, web_fetch, read_image, exec_script (disabled by default)
+#   normalize_excel, send_file, dispatch_subagent,
+#   diff_text, convert_format, table_query, chart_generate, pdf_reader
 
 departments:
   default:
@@ -20,6 +22,8 @@ departments:
       - normalize_excel
       - read_image
       - dispatch_subagent
+      - diff_text
+      - pdf_reader
     budget:
       max_iterations: 10
       max_tool_calls: 20
@@ -46,6 +50,8 @@ departments:
       - memory_recall
       - read_image
       - dispatch_subagent
+      - diff_text
+      - pdf_reader
     budget:
       max_iterations: 15
       max_tool_calls: 30
@@ -64,6 +70,10 @@ departments:
       - send_file
       - read_image
       - dispatch_subagent
+      - convert_format
+      - table_query
+      - chart_generate
+      - pdf_reader
     budget:
       max_iterations: 10
       max_tool_calls: 20
@@ -83,6 +93,10 @@ departments:
       - send_file
       - read_image
       - dispatch_subagent
+      - convert_format
+      - table_query
+      - chart_generate
+      - pdf_reader
     budget:
       max_iterations: 10
       max_tool_calls: 20
@@ -99,6 +113,9 @@ departments:
       - normalize_excel
       - send_file
       - read_image
+      - convert_format
+      - table_query
+      - pdf_reader
     budget:
       max_iterations: 10
       max_tool_calls: 20
@@ -119,6 +136,11 @@ departments:
       - send_file
       - read_image
       - dispatch_subagent
+      - diff_text
+      - convert_format
+      - table_query
+      - chart_generate
+      - pdf_reader
     budget:
       max_iterations: 15
       max_tool_calls: 30
@@ -136,6 +158,8 @@ departments:
       - web_fetch
       - read_image
       - dispatch_subagent
+      - diff_text
+      - pdf_reader
     budget:
       max_iterations: 10
       max_tool_calls: 20

@@ -16,6 +16,11 @@ def test_build_container_registry_has_expected_tools() -> None:
         "search_files",
         "exec_script",
         "normalize_excel",
+        "diff_text",
+        "convert_format",
+        "table_query",
+        "chart_generate",
+        "pdf_reader",
     }
     actual = {t.name for t in registry.list_all()}
     assert actual == expected

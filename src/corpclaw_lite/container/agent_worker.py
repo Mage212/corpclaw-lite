@@ -36,6 +36,9 @@ def _build_container_registry() -> ToolRegistry:
     Lazy-loading tools here to speed up python startup in the container.
     """
     try:
+        from corpclaw_lite.extensions.tools.builtin.chart_generate import ChartGenerateTool
+        from corpclaw_lite.extensions.tools.builtin.convert_format import ConvertFormatTool
+        from corpclaw_lite.extensions.tools.builtin.diff_text import DiffTextTool
         from corpclaw_lite.extensions.tools.builtin.excel import NormalizeExcelTool
         from corpclaw_lite.extensions.tools.builtin.exec_script import ExecScriptTool
         from corpclaw_lite.extensions.tools.builtin.files import (
@@ -45,6 +48,8 @@ def _build_container_registry() -> ToolRegistry:
             SearchFilesTool,
             WriteFileTool,
         )
+        from corpclaw_lite.extensions.tools.builtin.pdf_reader import PdfReaderTool
+        from corpclaw_lite.extensions.tools.builtin.table_query import TableQueryTool
         from corpclaw_lite.extensions.tools.registry import ToolRegistry
     except ImportError as e:
         print(f"Container tool import failed: {e}", file=sys.stderr)
@@ -59,6 +64,11 @@ def _build_container_registry() -> ToolRegistry:
         SearchFilesTool(),
         ExecScriptTool(),
         NormalizeExcelTool(),
+        DiffTextTool(),
+        ConvertFormatTool(),
+        TableQueryTool(),
+        ChartGenerateTool(),
+        PdfReaderTool(),
     ]:
         registry.register(tool)
     return registry
