@@ -1,7 +1,7 @@
 # CorpClaw Lite — Архитектура проекта
 
-> Версия документа: 2026-04-10
-> Версия проекта: Phase 7 (Production-Ready) — ~93 модуля, ~12.7K LOC, 596 тестов
+> Версия документа: 2026-04-15
+> Версия проекта: Phase 7 (Production-Ready) — ~119 модулей, ~15.4K LOC, 657 тестов
 
 ---
 
@@ -14,7 +14,7 @@
 | Принцип | Описание |
 |---------|----------|
 | **Simple ReAct Loop** | Классический цикл без LLM-планировщиков |
-| **Local LLM First** | Оптимизация для Qwen, Mistral, Llama (8K-32K контекст) |
+| **Local LLM First** | Оптимизация для Qwen, Mistral, Llama (8K-64K контекст) |
 | **Security by Design** | Безопасность встроена в ядро, не добавлена поверх |
 | **Manifest-based Extensions** | Skills, plugins, subagents через YAML-манифесты |
 | **Fail-Fast** | Ошибка при отсутствии критичных секретов |
@@ -26,31 +26,31 @@
 ```
 corpclaw-lite/
 ├── src/corpclaw_lite/
-│   ├── agent/              # Ядро агента (loop, context, guards, compressor, factory)
+│   ├── agent/              # Ядро агента (loop, context, guards, compressor, factory, subagent, vision)
 │   ├── calibration/        # Авто-калибровка под локальную модель
 │   ├── onboarding/         # Гибридный онбординг пользователей
-│   ├── llm/                # LLM провайдеры (OpenAI, Anthropic, XML fallback)
+│   ├── llm/                # LLM провайдеры (OpenAI, Anthropic, XML fallback, presets, router)
 │   ├── extensions/
-│   │   ├── tools/          # Инструменты + registry (13 builtin)
-│   │   ├── skills/         # Markdown-скиллы + TF-IDF matcher + hot-reload
-│   │   ├── plugins/        # Плагины с manifest.yaml + sandbox + hot-reload
+│   │   ├── tools/          # Инструменты + registry (13 builtin) + YAML overrides
+│   │   ├── skills/         # Markdown-скиллы + TF-IDF matcher + hot-reload (5s)
+│   │   ├── plugins/        # Плагины с manifest.yaml + sandbox worker + hot-reload (10s)
 │   │   ├── subagents/      # Специализированные субагенты (4 builtin)
-│   │   └── mcp/            # Model Context Protocol интеграция + hot-reload
-│   ├── channels/           # CLI и Telegram каналы (10 Telegram-модулей)
-│   ├── security/           # ToolGuard, NetworkPolicy, CredentialScrubber, IPCAuth
+│   │   └── mcp/            # Model Context Protocol интеграция + hot-reload (10s)
+│   ├── channels/           # CLI и Telegram каналы (12 Telegram-модулей)
+│   ├── security/           # ToolGuard (YAML + Smart), NetworkPolicy, CredentialScrubber, IPCAuth
 │   ├── container/          # Docker-изоляция + IPC-прокси + agent worker
 │   ├── memory/             # SQLite + консолидация
-│   ├── departments/        # RBAC по департаментам
-│   ├── users/              # Пользователи + whitelist
-│   ├── config/             # Settings, bootstrap prompts, interpolation
-│   ├── runtime/            # Graceful shutdown
+│   ├── departments/        # RBAC по департаментам (10 департаментов)
+│   ├── users/              # Пользователи + whitelist + session revocation
+│   ├── config/             # Settings, bootstrap prompts, interpolation, loader
+│   ├── runtime/            # Graceful shutdown (SIGINT/SIGTERM)
 │   ├── utils/              # DB helpers
 │   └── logging/            # Структурированное логирование + health endpoint
 ├── config/                 # YAML-конфигурации + bootstrap prompts
-├── skills/                 # Markdown-скиллы
+├── skills/                 # 5 Markdown-скиллов (code_reviewer, content_writer, doc_writer, translator, excel_normalizer)
 ├── plugins/                # Директория плагинов
-├── docker/                 # Dockerfile, Dockerfile.agent, seccomp
-└── tests/                  # Тесты (596 тестов, ~68 файлов)
+├── docker/                 # Dockerfile, Dockerfile.agent, seccomp_default.json
+└── tests/                  # Тесты (657 тестов, 68 файлов)
 ```
 
 ---
@@ -69,91 +69,107 @@ tool_calls? → Execute → Add Results → Repeat
 no tool_calls? → Response → Save to Memory
 ```
 
+**AgentConfig** (dataclass) — группирует все зависимости AgentLoop:
+- `provider: Provider` — LLM провайдер/router
+- `registry: ToolRegistry` — доступные инструменты
+- `settings: AgentSettings` — конфигурация (max_steps=15, max_tool_calls=30, max_wall_time_ms=120000)
+- `permission_checker`, `tool_guard`, `memory`, `consolidator`, `compressor`, `approval_callback`
+
+**RunStats** (dataclass) — метрики выполнения:
+- `iterations`, `tools_used`, `duration_ms`
+- `status`: "ok" | "budget" | "loop" | "timeout" | "error"
+
 **Защиты:**
 - `SimpleBudgetGuard` — лимиты итераций, tool calls, времени
-- `SimpleProgressGuard` — детекция зацикливания по повторяющимся ошибкам
+- `SimpleProgressGuard` — детекция зацикливания (3 повтора одной ошибки → warning, 2 warnings → break)
 
-**Интеграции:**
-- Compression (опционально) — ContextCompressor
-- Consolidation (опционально) — MemoryConsolidator
-- Parallel Tool Execution — для независимых инструментов
+**Параллельное выполнение инструментов:**
+```python
+# Условия: >1 tool call + все parallel_safe=True
+results = await asyncio.gather(*[execute_one(tc) for tc in tool_calls])
+```
+
+**Terminal tools:** `terminal=True` → single tool call bypasses LLM re-paraphrase (read_image, dispatch_subagent).
+
+**Терминация цикла:**
+- Нормальный ответ (no tool calls)
+- Budget exceeded
+- Loop detected (2x warning)
+- Timeout (LLM call)
+- Terminal tool success
 
 ### Agent Factory (`agent/factory.py`)
 
-Единая точка сборки всего стека:
-- `build_agent_stack()` → `(AgentLoop, UserManager, ToolRegistry)`
-- Автовыбор провайдера: `ANTHROPIC_API_KEY` → Anthropic, иначе → OpenAI (Ollama)
-- Регистрация всех builtin tools, ToolGuard, PermissionChecker, Memory, Subagents
-- Используется CLI (`cli.py`) и Telegram (`runner.py`)
+`build_agent_stack()` → `AgentStack` — единая точка сборки:
+
+1. **LLM Provider**: Из settings.yaml + model_presets.yaml, fallback к env vars (`ANTHROPIC_API_KEY`, `OPENAI_BASE_URL`)
+2. **Tools**: Container mode → `IPCToolProxy` (7 filesystem tools); Dev mode → прямая регистрация
+3. **Security**: ToolGuard + PermissionChecker
+4. **Extensions**: subagents, host-side tools, skills, plugins
+5. **Memory**: SQLiteMemory + MemoryConsolidator + ContextCompressor
+6. **System Prompt**: BootstrapLoader из `config/bootstrap/*.md` + calibrated overrides
+7. **Few-shots**: Из `config/calibrated/few_shots.yaml`
+
+**AgentStack** содержит: `loop`, `user_manager`, `tool_registry`, `mcp_manager`, `container_manager`, `few_shots`, `subagent_registry`, `skill_registry`, `plugin_registry`, `skill_matcher`.
 
 ### Context Builder (`agent/context.py`)
 
-Формирует сообщения для LLM:
-- System prompt + история + текущее сообщение
-- Эвристическая оценка токенов (`len/4`)
-- Pruning старых tool results
+`ContextBuilder.build_initial()` — 4 фазы сборки, критичные для Qwen3.5:
 
-### Context Compression (`agent/compressor.py`) — NEW
+| Фаза | Действие | Зачем |
+|------|----------|-------|
+| 1 | Extract system messages из history → merge в system_prompt | Qwen3.5 ломается на mid-conversation system messages |
+| 2 | Strip leading assistant messages → merge в system_prompt | Qwen3.5 требует user-first |
+| 3 | Inject few-shots (calibration) | Примеры "вопрос → tool_call" |
+| 4 | Add history (user/assistant only) + current message | Drop orphaned tool messages |
 
-**Проблема:** Локальные LLM имеют ограниченный контекст (8K-32K токенов).
+### Context Compression (`agent/compressor.py`)
+
+**Проблема:** Локальные LLM имеют ограниченный контекст (8K-64K токенов).
 
 **Решение:** Трёхуровневая компрессия (паттерн Hermes Agent):
 
 | Уровень | Метод | Стоимость | Когда применяется |
 |---------|-------|-----------|-------------------|
-| 1 | `prune_old_tool_results()` | Бесплатно | Всегда при >10 сообщений |
+| 1 | `prune_old_tool_results()` | Бесплатно | Всегда при >15 сообщениях |
 | 2 | `_sanitize_tool_pairs()` | Бесплатно | После любой компрессии |
-| 3 | `_generate_summary()` | LLM-вызов | При превышении threshold |
+| 3 | `_generate_summary()` | LLM-вызов | При превышении threshold (80% от max_context_tokens) |
 
-**Алгоритм:**
+**Алгоритм Level 3:**
 1. Защита head (первые 2 сообщения: system + user)
-2. Защита tail по токен-бюджету (`protect_tail_tokens`)
-3. LLM-суммаризация middle со structured prompt
-4. Исправление orphaned tool_call/result пар
+2. Защита tail по токен-бюджету (`protect_tail_tokens=3000`)
+3. LLM-суммаризация middle со structured prompt (Goal, Progress, Key Decisions, Files, Next Steps)
+4. Замена middle на `[Context Summary]` + summary
+
+**Токен-оценка:** UTF-8 bytes / 4 (ASCII), / 2 (non-ASCII).
 
 **Конфигурация (`CompressionSettings`):**
 ```yaml
 compression:
   enabled: true
-  max_context_tokens: 8000
-  threshold_ratio: 0.5
+  max_context_tokens: 64000
+  threshold_ratio: 0.8
   protect_tail_tokens: 3000
   summary_ratio: 0.20
+  prune_min_messages: 15
 ```
-
-### Parallel Tool Execution — NEW
-
-Параллельное выполнение независимых инструментов:
-
-```python
-# Условия параллелизации:
-# 1. >1 tool call
-# 2. Все инструменты имеют parallel_safe=True
-
-results = await asyncio.gather(*[execute_one(tc) for tc in tool_calls])
-```
-
-ToolGuard проверки выполняются **внутри** `_execute_single_tool()` для каждого вызова,
-поэтому параллельное исполнение безопасно даже с активным ToolGuard.
-
-**Атрибут `parallel_safe`** в Tool:
-- `True` (default) — можно выполнять параллельно
-- `False` — только последовательно
 
 ### Subagent Dispatcher (`agent/subagent.py`)
 
 Делегирование задач специализированным субагентам:
-- Изолированный контекст (чистая история)
-- Ограниченный набор инструментов
-- Специализированный system prompt
+- Создаёт **изолированный AgentLoop** с filtered ToolRegistry
+- Provider resolution: `router.for_subagent(spec.id)` → конкретный провайдер
+- System prompt: calibrated override > prompt_path > description fallback
+- Skill injection: `build_skill_block()` — те же скилы, что у основного агента
+- Timeout: `max_wall_time_ms / 1000` секунд
 - **Снижает нагрузку на контекст основного агента на 60-80%**
 
 ### Vision Processor (`agent/vision.py`)
 
 Отдельный LLM-вызов для изображений:
-- Кодирование в base64
-- Текстовое описание (не изображение в контексте)
-- Fallback для text-only провайдеров
+- Provider resolution: `router.for_task("vision")` → vision-специфичная модель
+- base64-encoding → `VisionProvider.chat_with_image()` или text-only fallback
+- Terminal tool: результат возвращается напрямую без LLM re-paraphrase
 
 ---
 
@@ -162,13 +178,14 @@ ToolGuard проверки выполняются **внутри** `_execute_sin
 ### Protocol Architecture (`llm/base.py`)
 
 **Structural typing** через `typing.Protocol`:
-- `Provider` — основной протокол (`chat`, `stream`)
-- `VisionProvider` — опциональный (`chat_with_image`)
+- `Provider` — основной протокол (`chat()`, `stream()`)
+- `VisionProvider` — опциональный (`chat_with_image()`)
 
 **Унифицированные модели:**
 - `ToolCall(id, name, arguments)`
-- `LLMResponse(content, tool_calls, usage)`
+- `LLMResponse(content, reasoning, tool_calls, usage)`
 - `StreamChunk(content)`
+- `TokenUsage(input_tokens, output_tokens)`
 
 ### OpenAI Provider (`llm/openai.py`)
 
@@ -178,8 +195,14 @@ ToolGuard проверки выполняются **внутри** `_execute_sin
 |----------|----------|
 | SDK | `openai.AsyncOpenAI` |
 | Base URL | Поддерживается (Ollama, vLLM, LM Studio) |
-| Tool Calling | Native + XML Fallback |
+| Tool Calling | Native + XML Fallback + Repair Loop |
 | Vision | `image_url` data URI |
+| Presets | Inference params + thinking config через PresetRegistry |
+
+**Двухуровневый парсинг:**
+1. Native: `message.tool_calls` из SDK
+2. XML Fallback: `parse_xml_tool_call(content)` при пустом native
+3. Repair Loop: retry при malformed JSON внутри `<arguments>`
 
 ### Anthropic Provider (`llm/anthropic.py`)
 
@@ -195,16 +218,8 @@ ToolGuard проверки выполняются **внутри** `_execute_sin
 **Решение:** Парсинг tool calls из XML-разметки:
 
 ```xml
-<tool_call>
-<name>tool_name</name>
-<arguments>{"key": "value"}</arguments>
-</tool_call>
+<invoke><name>tool_name</name><arguments>{"key": "value"}</arguments></invoke>
 ```
-
-**Двухуровневый парсинг (openai.py):**
-1. **Native:** Парсинг `message.tool_calls` из OpenAI/Anthropic SDK
-2. **XML Fallback:** Если native пуст, но ответ содержит текст — `parse_xml_tool_call(content)`
-3. **Repair Loop:** При ошибке JSON внутри `<arguments>` — автоматический retry с промптом для LLM
 
 **Парсер:**
 - Regex-based extraction
@@ -212,22 +227,41 @@ ToolGuard проверки выполняются **внутри** `_execute_sin
 - Проверка имени инструмента в allowed set
 - Возврат статуса: `valid`, `malformed_xml`, `invalid_json`, etc.
 
-### Provider Routing (`llm/routing.py`)
+### Provider Routing (`llm/router.py`)
 
 YAML-based маршрутизация:
 
 ```yaml
 llm:
-  default: "local"
+  default: "default"
   named:
-    local: {type: openai, model: qwen2.5:14b, base_url: "http://localhost:11434/v1"}
-    cloud: {type: anthropic, model: claude-3-5-sonnet}
+    default: {type: openai, model: qwen3.5-4b, base_url: "http://localhost:11434/v1"}
+    vision: {type: openai, model: qwen3.5-4b, base_url: "http://localhost:11434/v1"}
+    cloud: {type: anthropic, model: claude-sonnet-4-20250514}
   routing:
     - task_kind: vision
-      provider: cloud
+      provider: vision
+    - task_kind: consolidate
+      provider: default
     - subagent_id: code_review
       provider: cloud
 ```
+
+`LLMRouter` методы: `for_task(task_kind)`, `for_subagent(subagent_id)`.
+
+### Model Presets (`llm/presets.py`)
+
+**ThinkingConfig**: `open_tag`, `close_tag`, `budget_tokens`, `source` ("content" для парсинга тегов, "native" для `reasoning_content`).
+
+**Доступные пресеты:**
+
+| Preset | Модель | Thinking | Params |
+|--------|--------|----------|--------|
+| `qwen3.5-thinking` | Qwen 3.5 | native reasoning_content | temp=0.7, top_p=0.95, top_k=20 |
+| `gemma4-thinking` | Gemma 4 | `<\|think\|>` tags | defaults |
+| `gemma4-fast` | Gemma 4 | none | defaults |
+
+**Приоритет:** `request-level > preset > provider defaults`
 
 ---
 
@@ -250,7 +284,7 @@ llm:
     ▼           ▼           ▼                   ▼
 ┌───────┐  ┌──────────┐  ┌────────┐      ┌──────────┐
 │Builtin│  │  Plugin  │  │  MCP   │      │  .md     │
-│ Tools │  │  Tools   │  │Adapter │      │  Skills  │
+│ Tools │  │ Sandbox  │  │Adapter │      │  Skills  │
 └───────┘  └──────────┘  └────────┘      └──────────┘
 ```
 
@@ -263,34 +297,35 @@ class Tool(ABC):
     description: str
     params: list[ToolParam]
     risk_level: RiskLevel     # LOW/MEDIUM/HIGH/CRITICAL
-    parallel_safe: bool = True  # NEW
-    
+    parallel_safe: bool = True
+    terminal: bool = False    # Skip LLM re-paraphrase
+
     @abstractmethod
     async def execute(self, **kwargs) -> str
 ```
 
 **Registry:**
-- `register()`, `get()`, `list_all()`
-- `execute(name, args, user)` — автоматическая инъекция user
-- `to_schemas()` — конвертация в OpenAI function schemas
+- `register()`, `get()`, `unregister()`, `list_all()`
+- `execute(name, args, user)` — credential scrubbing автоматически
+- `load_overrides(path)` — YAML description overrides (калибровка)
+- `to_schemas()` / `to_schemas_for_user()` — OpenAI function schemas
 
 **Builtin Tools:**
 
 | Tool | Risk | Назначение |
 |------|------|------------|
-| `read_file` | LOW | Чтение файлов |
-| `write_file` | MEDIUM | Запись файлов |
-| `edit_file` | MEDIUM | Поиск-замена |
-| `list_files` | LOW | Листинг директорий |
-| `search_files` | LOW | Regex-поиск |
-| `exec_script` | HIGH | Shell-команды |
-| `web_fetch` | MEDIUM | HTTP-запросы |
-| `read_image` | LOW | Vision-анализ |
-| `memory_store` | LOW | Сохранение фактов |
-| `memory_recall` | LOW | Извлечение фактов |
-| `normalize_excel` | MEDIUM | Нормализация Excel |
-| `send_file` | MEDIUM | Отправка файла (channel-specific) |
-| `dispatch_subagent` | LOW | Делегирование субагенту |
+| `read_file` | LOW | Чтение файлов (path traversal protection) |
+| `write_file` | MEDIUM | Запись файлов (auto-create parent dirs) |
+| `edit_file` | MEDIUM | Поиск-замена (exact match, max_replacements) |
+| `list_files` | LOW | Листинг директорий с метаданными |
+| `search_files` | LOW | Regex-поиск (skip .git/node_modules) |
+| `exec_script` | HIGH | Shell-команды (timeout 30s/120s max, 50KB truncation) |
+| `web_fetch` | MEDIUM | HTTP-запросы (SSRF protection, 1MB limit) |
+| `read_image` | LOW | Vision-анализ (terminal=True, separate LLM call) |
+| `memory_store` / `memory_recall` | LOW | Per-user SQLite факты |
+| `normalize_excel` | MEDIUM | Нормализация Excel (INN, dates, invisible chars) |
+| `send_file` | MEDIUM | Отправка файла (20MB limit) |
+| `dispatch_subagent` | LOW | Делегирование субагенту (terminal=True) |
 
 ### Skills (`extensions/skills/`)
 
@@ -302,41 +337,82 @@ id: my_skill
 description: Описание
 allowed_for: ["marketing", "sales"]
 version: "1.0.0"
+keywords: ["excel", "нормализ"]
+always: false
 ---
 # Инструкции для агента
-...
 ```
 
-**Features:**
-- Hot reload через polling watcher
-- Фильтрация по департаментам
-- Только данные, без кода
+**TF-IDF Matcher (`skills/matcher.py`):**
+- Bilingual stop-words (120+ RU + EN)
+- Cosine similarity между query и skill TF-IDF vectors
+- Keyword boost: prefix match ("нормализ" → "нормализуй")
+- `top_k=3`, `tfidf_threshold=0.08`, `keyword_boost=0.5`
+- Skills с `always=True` — безусловная инъекция
+
+**Hot Reload (`skills/watcher.py`):**
+- Polling 5 секунд
+- Track mtime per file
+- Detect: new, modified, deleted
+
+**Загруженные скилы (5):**
+
+| Skill | Департаменты |
+|-------|-------------|
+| `code_reviewer` | it, admin, default |
+| `content_writer` | marketing, hr, admin, default |
+| `doc_writer` | it, product, admin, default |
+| `translator` | * (все) |
+| `excel_normalizer` | marketing, finance, hr, analytics, admin, default |
 
 ### Plugins (`extensions/plugins/`)
 
-Комплексные расширения:
+Комплексные расширения с subprocess sandbox:
 
 ```
 plugins/
 └── my_plugin/
     ├── manifest.yaml      # Обязательно
     ├── skill.md           # Опционально
-    ├── tool.py            # Опционально
+    ├── tool.py            # Опционально (subprocess isolation)
     └── scripts/           # Опционально
+```
+
+**Sandbox Architecture:**
+```
+PluginToolProxy (host)
+  ←→ JSON-RPC over stdin/stdout
+  ←→ sandbox_worker.py (subprocess)
+```
+
+- Lazy subprocess spawning (on first execute)
+- asyncio.Lock для serialization
+- 30s timeout per execution
+- Introspection: `--introspect` → tool schema as JSON
+- Cleanup on hot-reload
+
+**manifest.yaml:**
+```yaml
+name: my_plugin
+version: "1.0.0"
+type: plugin
+description: "Does something"
+allowed_departments: ["*"]
+components:
+  skill: skill.md
+  tool: tool.py
 ```
 
 ### Subagents (`extensions/subagents/`)
 
-Специализированные агенты:
+4 builtin субагента:
 
-```yaml
-# filesystem.yaml
-id: filesystem-agent
-name: "Filesystem Agent"
-description: "Expert for filesystem operations"
-allowed_tools: [read_file, list_files, search_files]
-prompt_path: "config/bootstrap/subagents/filesystem.md"
-```
+| ID | Tools | Prompt |
+|----|-------|--------|
+| `filesystem-agent` | read_file, list_files, search_files | `config/bootstrap/subagents/filesystem.md` |
+| `document-agent` | read_file, write_file, edit_file, normalize_excel, list_files | `config/bootstrap/subagents/document.md` |
+| `execution-agent` | exec_script, write_file, read_file | `config/bootstrap/subagents/execution.md` |
+| `research-agent` | web_fetch, read_file, search_files, memory_store, memory_recall | `config/bootstrap/subagents/research.md` |
 
 ### MCP Integration (`extensions/mcp/`)
 
@@ -349,6 +425,12 @@ servers:
     command: ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/workspace"]
 ```
 
+**Компоненты:**
+- `MCPClient` — stdio JSON-RPC, initialize → list_tools → call_tool
+- `MCPManager` — загрузка конфига, env interpolation, connect/disconnect/reconnect
+- `MCPToolAdapter` — адаптация MCP tool → внутренний Tool (risk_level=MEDIUM)
+- `MCPWatcher` — hot-reload (10s polling), diff old vs new servers
+
 ---
 
 ## 4. Security Layer
@@ -360,23 +442,23 @@ User Message
      │
      ▼
 ┌─────────────────┐
-│  Channel Auth   │  ← Telegram: проверка user_id
+│  Channel Auth   │  ← Telegram: whitelist + session check
 └────────┬────────┘
          │
          ▼
 ┌─────────────────┐
-│ PermissionCheck │  ← Департамент → доступ к tool
+│ PermissionCheck │  ← Департамент → доступ к tool/skill/plugin/subagent/mcp
 └────────┬────────┘
          │
          ▼
 ┌─────────────────┐
-│    ToolGuard    │  ← YAML rules + Smart Approvals
+│    ToolGuard    │  ← 20+ YAML rules + Smart Approvals (LLM-based)
 └────────┬────────┘
          │
          ▼
 ┌─────────────────┐
 │   Container     │  ← NetworkPolicy (deny-by-default)
-│  + IPC Auth     │  ← HMAC + Nonce
+│  + IPC Auth     │  ← HMAC-SHA256 + Nonce (300s TTL)
 └────────┬────────┘
          │
          ▼
@@ -386,58 +468,55 @@ User Message
          │
          ▼
 ┌─────────────────┐
-│ CredentialScrub │  ← Маскирование в логах
+│ CredentialScrub │  ← Маскирование в результатах и логах
 └─────────────────┘
 ```
 
 ### ToolGuard (`security/tool_guard.py`)
 
-YAML-правила (паттерн CoPaw):
+**Правила:** 20+ YAML правил с regex patterns на tool arguments.
 
 | Severity | Действие |
 |----------|----------|
-| CRITICAL | Блокировка |
+| CRITICAL | Авто-блокировка |
 | HIGH + approval | Запрос подтверждения |
-| MEDIUM/INFO | Только логирование |
+| MEDIUM + approval | Запрос подтверждения |
+| INFO | Только логирование |
 
-**Smart Approvals (NEW):**
-При `approval_mode="smart"` и наличии Provider:
-- LLM оценивает реальный риск
+**Категории правил:**
+- DANGEROUS_RM, DANGEROUS_SHUTIL_RMTREE — rm -rf, shutil.rmtree
+- PATH_TRAVERSAL — `../` в путях
+- SECRET_DETECTION — API keys в параметрах
+- DANGEROUS_PIPE_TO_SHELL — curl|sh patterns
+- ABS_PATH_PROTECTION — /etc, /proc, /sys
+- WEB_FETCH_PRIVATE_IP, WEB_FETCH_SENSITIVE_PATHS — SSRF protection
+- CHMOD_777, DANGEROUS_DD — permissions, disk ops
+
+**Smart Approvals:** при `approval_mode="smart"` и наличии Provider:
+- LLM оценивает реальный риск команды
 - `APPROVE` — авто-одобрение
 - `DENY` — блокировка
-- `ESCALATE` — запрос человеку
-
-**Примеры правил:**
-```yaml
-- id: DANGEROUS_RM
-  tool: exec_script
-  severity: CRITICAL
-  pattern: "rm\\s+-rf|rm\\s+/"
-
-- id: PATH_TRAVERSAL_READ
-  tool: read_file
-  severity: HIGH
-  pattern: "\\.\\./"
-  require_approval: true
-```
+- `ESCALATE` — запрос человеку через channel
 
 ### NetworkPolicy (`security/network_policy.py`)
 
 Deny-by-default + allowlist (паттерн NemoClaw):
 
 ```yaml
-# config/network_policy.yaml
 allowlist:
   - "api.anthropic.com"
   - "localhost:11434"
+  - "api.github.com"
 ```
 
 ### CredentialScrubber (`security/credential_scrubber.py`)
 
-Маскирование секретов в логах:
-- `sk-*` — API ключи
+Маскирование секретов в логах и результатах:
+- `sk-*` — OpenAI/Anthropic API ключи
 - `ghp_*` — GitHub PAT
 - `Bearer *` — токены
+- `CORPCLAW_IPC_SECRET` — динамически из env
+- Работает как `logging.Filter` + функция `scrub_text()` для tool results
 
 ### IPCAuth (`security/ipc_auth.py`)
 
@@ -445,9 +524,10 @@ HMAC-SHA256 аутентификация для IPC:
 
 | Защита | Механизм |
 |--------|----------|
-| Replay | UUID nonce + кэш с TTL |
+| Replay | UUID nonce + кэш с TTL (300s) |
 | Tampering | HMAC подпись |
 | Timing attack | `compare_digest()` |
+| Secret | `CORPCLAW_IPC_SECRET` (min 16 chars) |
 
 **Fail-fast:** Обязательный `CORPCLAW_IPC_SECRET`
 
@@ -479,27 +559,20 @@ Production-ready интеграция:
 
 | Компонент | Назначение |
 |-----------|------------|
-| `channel.py` | Основной класс (483 LOC) |
+| `channel.py` | Основной класс (483 LOC), deduplication, inline keyboard approval |
 | `runner.py` | Entry point |
-| `formatting.py` | Markdown → MarkdownV2 |
-| `progress.py` | Индикатор выполнения |
-| `upload.py` | Безопасная загрузка файлов |
-| `file_manager.py` | Интерактивное удаление |
-| `rate_limit.py` | Sliding window limiter |
-| `admin_notifier.py` | Уведомления администратору |
+| `orchestrator.py` | Полный lifecycle: access control, rate limiting, hot-reloaders, onboarding |
+| `formatting.py` | Markdown → MarkdownV2, таблицы → card format |
+| `upload.py` | Безопасная загрузка файлов (extension whitelist, path validation) |
+| `progress.py` | StatusMessageSession — throttled updates, typing heartbeat |
+| `file_manager.py` | DeleteBrowserHandler — интерактивное удаление, pagination, confirmation |
+| `rate_limit.py` | Sliding window limiter (10 msg/min) |
+| `admin_notifier.py` | Broadcast сообщений администраторам |
 | `callback_data.py` | Роутинг callback-данных |
 
-**Команды бота:**
-- `/start`, `/help`, `/new`
-- `/delete` — менеджер файлов
-- `/chat` — режим диалога
-- `/execute` — режим с инструментами
+**Режимы:** `/chat` (чистый диалог), `/execute` (с инструментами)
 
-**Безопасности:**
-- Whitelist пользователей
-- Rate limiting (10 msg/min)
-- Защищённые пути (`.git`, `src/`, `.env`)
-- Валидация файлов (extensions, size)
+**Команды бота:** `/start`, `/help`, `/new`, `/delete`, `/chat`, `/execute`
 
 ---
 
@@ -509,6 +582,8 @@ Production-ready интеграция:
 
 Один контейнер на пользователя: `corpclaw_agent_{user_id}`
 
+**Docker image:** `corpclaw-agent-base:latest` (python:3.12-slim, non-root uid 1001)
+
 **Применяемые политики:**
 
 | Политика | Значение |
@@ -517,11 +592,16 @@ Production-ready интеграция:
 | `nano_cpus` | 0.5 × 10⁹ |
 | `pids_limit` | 100 |
 | `cap_drop` | ALL |
-| `security_opt` | seccomp |
+| `security_opt` | seccomp (100+ allowed syscalls) |
+| `network_mode` | none (deny-by-default) |
+| `read_only` | True (except /workspace, /tmp) |
+| `workspace` | bind-mount host workspace_base |
+
+**Dev mode:** `container.enabled=false` → инструменты выполняются на хосте.
 
 ### IPC Protocol (`container/ipc.py`)
 
-Transport: `docker exec` + stdio
+Transport: stateless `docker exec` + stdio
 
 ```
 Host → sign(payload) → JSON → Container
@@ -529,12 +609,16 @@ Container → verify() → execute → sign() → Host
 Host → verify(response) → result
 ```
 
+**Dual timeout:** IPC timeout (host-side) + tool timeout (container-side).
+
 ### Agent Worker (`container/agent_worker.py`)
 
 Воркер внутри контейнера:
-- Ограниченный набор инструментов
-- IPCAuth верификация
-- Изолированное выполнение
+- Читает signed IPC request из stdin
+- Verifies HMAC signature
+- Выполняет tool через container-specific ToolRegistry
+- Clears CORPCLAW_IPC_SECRET из env после верификации
+- Signs response и пишет в stdout
 
 ---
 
@@ -543,20 +627,22 @@ Host → verify(response) → result
 ### SQLite Backend (`memory/sqlite.py`)
 
 **Таблицы:**
-- `messages` — история диалогов
-- `memory_facts` — ключ-значение факты
+- `messages` — история диалогов (user, assistant, tool, reasoning)
+- `memory_facts` — key-value факты (per-user)
 
 **Features:**
+- Async API с thread pool delegation
 - WAL-режим для конкурентности
-- UPSERT для фактов
-- Автоматическая десериализация JSON
+- Автоматическая schema migration
+- JSON десериализация
 
 ### Memory Consolidation (`memory/consolidation.py`)
 
 LLM-based сжатие истории:
-- Триггер при превышении threshold
-- Первая половина → compact summary
-- 3-5 bullet points
+- Триггер при превышении threshold (50 сообщений по умолчанию)
+- Первая половина → compact summary (3-5 bullet points)
+- Cooldown (предотвращает повторную консолидацию)
+- Safety guardrails: не консолидирует active workflows
 
 ---
 
@@ -568,7 +654,7 @@ Pydantic-модели с поддержкой env vars:
 
 ```yaml
 llm:
-  default: "local"
+  default: "default"
   named: {...}
   routing: [...]
 
@@ -577,30 +663,56 @@ agent:
   max_tool_calls: 30
   max_wall_time_ms: 120000
   max_history: 20
-  consolidation_threshold: 30
   approval_mode: "manual"  # "manual" | "smart" | "off"
   compression:
     enabled: true
-    max_context_tokens: 8000
+    max_context_tokens: 64000
+    threshold_ratio: 0.8
 
 container:
+  enabled: true
   max_memory: "512m"
   cpus: 0.5
   idle_timeout_seconds: 600
+
+skills:
+  selection_mode: "semantic"
+  top_k: 3
+  tfidf_threshold: 0.08
+  keyword_boost: 0.5
 ```
+
+### Settings Loader (`config/loader.py`)
+
+- Environment variable interpolation: `${VAR:-default}`
+- Calibrated overrides: `config/calibrated/settings_override.yaml`
+- Empty string cleaning для optional fields
+
+### Bootstrap Prompts (`config/bootstrap.py`)
+
+`BootstrapLoader` — модульные системные промпты:
+- `get_system_prompt()` — SOUL.md + COMPANY.md + BEHAVIOR.md
+- `get_department_prompt(dept)` — department-specific prompt
+- `get_user_prompt(telegram_id)` — personalized prompt
+- Hot-reload через mtime caching
+- Calibrated override: `config/calibrated/bootstrap/*.md`
 
 ### Departments (`departments/`)
 
-```yaml
-# config/departments.yaml
-marketing:
-  name: "Marketing Department"
-  allowed_tools: ["*"]
-  allowed_skills: ["content-writing", "seo"]
-  budget:
-    max_iterations: 30
-    max_tool_calls: 100
-```
+10 департаментов с RBAC:
+
+| Департамент | Tools | Budget (iter/tools/time) |
+|-------------|-------|--------------------------|
+| default | read, list, search, memory, normalize_excel, read_image, dispatch | 10/20/60s |
+| engineering | * (all) | 20/50/120s |
+| development | * (all) | 20/50/120s |
+| it | file ops + memory + read_image + dispatch | 15/30/90s |
+| marketing | content + web_fetch + normalize_excel + send_file | 10/20/60s |
+| finance | data + normalize_excel + send_file | 10/20/60s |
+| hr | docs + normalize_excel + send_file + read_image | 10/20/60s |
+| analytics | data + web_fetch + normalize_excel | 15/30/90s |
+| product | research + web_fetch + read_image + dispatch | 10/20/60s |
+| admin | * (all) | 25/60/180s |
 
 ### PermissionChecker (`departments/permissions.py`)
 
@@ -610,11 +722,12 @@ marketing:
 - `can_use_plugin(user, plugin_name)`
 - `can_dispatch_subagent(user, subagent_id)`
 - `can_use_mcp(user, server_name)`
-- `get_budget(user)`
+- `get_budget(user)` → `SimpleBudgetGuardConfig`
+- Wildcard support: `*` = all
 
 ---
 
-## 9. Logging
+## 9. Logging & Health
 
 ### Dual Logging
 
@@ -641,7 +754,7 @@ marketing:
 
 ### Health Endpoint
 
-`GET /health` на порту 8080:
+`GET /health` на порту 8080 (aiohttp):
 - Uptime, requests, tool_calls, errors
 
 ---
@@ -650,14 +763,14 @@ marketing:
 
 ### Назначение
 
-Одноразовый (или периодический) этап, при котором облачная модель анализирует, как локальная модель справляется с типовыми сценариями, и автоматически правит конфигурации. После калибровки система работает **только на локальной модели**.
+Одноразовый (или периодический) этап: облачная модель анализирует, как локальная модель справляется с типовыми сценариями, и автоматически правит конфигурации. После калибровки — **только локальная модель**.
 
-### Ключевые модули (`calibration/`, 1,270 строк)
+### Ключевые модули (`calibration/`, 1,498 LOC)
 
 | Класс | Назначение |
 |-------|------------|
 | `CalibrationLoop` | Оркестратор калибровочного цикла |
-| `ScenarioRunner` | Запуск сценариев из `config/calibration_scenarios.yaml` (14 сценариев) |
+| `ScenarioRunner` | Запуск сценариев из YAML (20+ сценариев) |
 | `CalibrationScorer` | Оценка: tool accuracy, response quality |
 | `ConfigEditor` | Правка Edit Surfaces (YAML/Markdown) |
 | `TrajectoryRecorder` | Запись траекторий для анализа |
@@ -672,7 +785,18 @@ marketing:
 | 1 | System Prompt | `config/bootstrap/*.md` |
 | 2 | Tool Descriptions | YAML-override через `ToolRegistry` |
 | 3 | Skill Instructions | `skills/*.md` |
-| 4 | Few-shot Examples | Генерация «вопрос → tool_call» |
+| 4 | Few-shot Examples | `config/calibrated/few_shots.yaml` |
+
+### Сценарии калибровки (20+)
+
+| Категория | Примеры |
+|-----------|---------|
+| `tool_use` | read_file, write_file, list_files, search_files, edit_file |
+| `no_tool` | math, greeting, factual, translation |
+| `multi_step` | list_then_read, read_and_edit |
+| `error_recovery` | handling missing files |
+| `subagent_dispatch` | delegation testing |
+| `skill_selection` | semantic skill injection verification |
 
 **CLI:** `uv run corpclaw-lite calibrate [options]`
 
@@ -684,7 +808,7 @@ marketing:
 
 Гибридный онбординг: детерминистический движок вопросов + LLM-финализация профиля.
 
-### Ключевые модули (`onboarding/`, 614 строк)
+### Ключевые модули (`onboarding/`, 614 LOC)
 
 | Класс | Назначение |
 |-------|------------|
@@ -706,24 +830,21 @@ marketing:
 
 ## 12. Hot Reload & Watchers
 
-### Назначение
-
-Автоматическая перезагрузка расширений без перезапуска приложения.
-
 ### Три watcher'а
 
-| Watcher | Что отслеживает | Файл |
-|---------|----------------|------|
-| `SkillHotReloader` | `skills/*.md` | `extensions/skills/watcher.py` |
-| `PluginWatcher` | `plugins/*/manifest.yaml` | `extensions/plugins/watcher.py` |
-| `MCPWatcher` | `config/mcp_servers.yaml` | `extensions/mcp/watcher.py` |
+| Watcher | Что отслеживает | Интервал | Файл |
+|---------|----------------|----------|------|
+| `SkillHotReloader` | `skills/*.md` | 5s | `extensions/skills/watcher.py` |
+| `PluginWatcher` | `plugins/*/manifest.yaml` | 10s | `extensions/plugins/watcher.py` |
+| `MCPWatcher` | `config/mcp_servers.yaml` | 10s | `extensions/mcp/watcher.py` |
 
 ### Принцип работы
 
 - Polling-based (не inotify/watchdog) — максимальная совместимость
 - Запускаются как фоновые задачи в event loop
-- Корректно останавливаются через `GracefulShutdown` (SIGINT/SIGTERM)
-- Обнаруживают создание, изменение и удаление файлов
+- Корректно останавливаются через `GracefulShutdown`
+- Detect: создание, изменение, удаление
+- Plugin watcher: unregister old tools (kills subprocesses) → reload → re-register
 
 ---
 
@@ -731,37 +852,24 @@ marketing:
 
 | Компонент | LOC | Файлов |
 |-----------|-----|--------|
-| Agent Core | ~1750 | 9 |
-| Calibration | ~1270 | 8 |
+| Agent Core | ~1,888 | 10 |
+| Calibration | ~1,498 | 8 |
 | Onboarding | ~614 | 5 |
-| LLM Providers | ~1114 | 6 |
-| Extensions | ~2200 | 25 |
-| Security | ~500 | 4 |
-| Channels | ~2100 | 12 |
-| Container | ~700 | 5 |
-| Memory | ~500 | 2 |
-| Config + RBAC | ~430 | 4 |
-| Departments | ~130 | 2 |
-| Users | ~290 | 2 |
-| Runtime | ~50 | 1 |
-| Logging | ~175 | 2 |
-| **Исходники** | **~12,700** | **~93** |
-| **Тесты** | **~12,000** | **~68** |
-
----
-
-## Реализованные фичи
-
-| Фича | Файлы | Назначение |
-|------|-------|------------|
-| Context Compression | `compressor.py`, `loop.py`, `settings.py` | 3-уровневое сжатие контекста для локальных LLM |
-| Smart Approvals | `tool_guard.py` | LLM-based оценка рисков (manual/smart/off) |
-| Parallel Tool Execution | `base.py`, `loop.py` | Параллельное выполнение независимых инструментов |
-| Tool Output Pruning | `compressor.py` | Дешёвая компрессия старых результатов |
-| Calibration Phase | `calibration/` (7 файлов) | Авто-калибровка под конкретную локальную модель |
-| User Onboarding | `onboarding/` (4 файла) | Гибридный онбординг с LLM-финализацией |
-| Hot Reload | `watcher.py` × 3 | Автоперезагрузка skills/plugins/MCP |
-| Graceful Shutdown | `runtime/shutdown.py` | SIGINT/SIGTERM без зомби-процессов |
+| LLM Providers | ~1,126 | 7 |
+| Extensions | ~3,991 | 38 |
+| Security | ~528 | 5 |
+| Channels | ~2,546 | 14 |
+| Container | ~807 | 6 |
+| Memory | ~501 | 3 |
+| Config + RBAC | ~511 | 5 |
+| Departments | ~130 | 3 |
+| Users | ~287 | 3 |
+| Runtime | ~47 | 2 |
+| Logging | ~178 | 3 |
+| Root (cli, etc.) | ~802 | 4 |
+| **Исходники** | **~15,354** | **~119** |
+| **Тесты** | **~11,197** | **~68** |
+| **Тест-функций** | **657** | |
 
 ---
 
@@ -783,6 +891,18 @@ uv run corpclaw-lite user-list
 uv run corpclaw-lite user-create -t <tg_id> -d <department>
 uv run corpclaw-lite user-allow -t <tg_id> -d <department>
 uv run corpclaw-lite user-deny -t <tg_id>
+uv run corpclaw-lite user-revoke -t <tg_id>
+
+# Расширения
+uv run corpclaw-lite skill list
+uv run corpclaw-lite plugin list
+uv run corpclaw-lite generate skill <name>
+uv run corpclaw-lite generate plugin <name>
+uv run corpclaw-lite generate subagent <name>
+
+# Docker
+uv run corpclaw-lite containers
+uv run corpclaw-lite prune
 
 # Тесты
 uv run pytest tests/ -v
