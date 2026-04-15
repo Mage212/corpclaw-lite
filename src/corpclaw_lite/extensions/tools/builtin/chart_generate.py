@@ -18,8 +18,10 @@ import matplotlib.pyplot as plt  # noqa: E402
 from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam  # noqa: E402
 from corpclaw_lite.extensions.tools.builtin.files import resolve_and_validate_path  # noqa: E402
 from corpclaw_lite.extensions.tools.builtin.table_query import (  # noqa: E402
+    detect_csv_encoding,
     init_duckdb_with_xlsx,
     load_xlsx_as_dicts,
+    reencode_csv_to_utf8,
 )
 
 __all__ = ["ChartGenerateTool"]
@@ -38,7 +40,18 @@ def _load_columns(path: Path) -> tuple[list[str], list[tuple[Any, ...]]]:
         p = str(path).replace("'", "''")
 
         if ext == ".csv":
-            conn.execute(f"CREATE TABLE data AS SELECT * FROM read_csv_auto('{p}')")
+            enc = detect_csv_encoding(path)
+            if enc in ("utf-8", "utf-8-sig"):
+                conn.execute(
+                    f"CREATE TABLE data AS SELECT * FROM read_csv_auto('{p}', encoding='utf-8')"
+                )
+            else:
+                utf8_path = reencode_csv_to_utf8(path, enc)
+                try:
+                    up = str(utf8_path).replace("'", "''")
+                    conn.execute(f"CREATE TABLE data AS SELECT * FROM read_csv_auto('{up}')")
+                finally:
+                    utf8_path.unlink(missing_ok=True)
         elif ext in (".json", ".jsonl", ".ndjson"):
             conn.execute(f"CREATE TABLE data AS SELECT * FROM read_json_auto('{p}')")
         elif ext == ".xlsx":

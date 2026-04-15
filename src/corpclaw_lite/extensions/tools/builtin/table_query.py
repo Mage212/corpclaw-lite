@@ -16,10 +16,54 @@ import anyio
 from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
 from corpclaw_lite.extensions.tools.builtin.files import resolve_and_validate_path
 
-__all__ = ["TableQueryTool", "load_xlsx_as_dicts", "init_duckdb_with_xlsx"]
+__all__ = [
+    "TableQueryTool",
+    "load_xlsx_as_dicts",
+    "init_duckdb_with_xlsx",
+    "detect_csv_encoding",
+    "reencode_csv_to_utf8",
+]
 
 _MAX_RESULT_ROWS = 10_000
 _MAX_RESULT_CHARS = 50_000
+
+
+def detect_csv_encoding(path: Path) -> str:
+    """Detect CSV file encoding.
+
+    Priority: BOM → UTF-8 try → Windows-1251 fallback.
+    Returns Python encoding names (e.g. ``utf-8-sig`` for BOM).
+    Use :func:`duckdb_encoding` to convert for DuckDB.
+    """
+    raw = path.read_bytes()[:64]
+    if raw[:3] == b"\xef\xbb\xbf":
+        return "utf-8-sig"
+    try:
+        path.read_text(encoding="utf-8")
+        return "utf-8"
+    except UnicodeDecodeError:
+        return "cp1251"
+
+
+def reencode_csv_to_utf8(path: Path, encoding: str) -> Path:
+    """Re-encode a non-UTF-8 CSV to a temporary UTF-8 file for DuckDB.
+
+    DuckDB's ICU encoding support is incomplete (no windows-1251, etc.),
+    so we re-encode via Python before loading.
+    """
+    import tempfile
+
+    raw = path.read_bytes()
+    text = raw.decode(encoding)
+    # Strip BOM if present — DuckDB handles it but let's be safe.
+    if text.startswith("\ufeff"):
+        text = text[1:]
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".csv", prefix="cc_utf8_", encoding="utf-8", delete=False
+    ) as tmp_file:
+        tmp_file.write(text)
+        return Path(tmp_file.name)
 
 
 def load_xlsx_as_dicts(path: Path) -> list[dict[str, Any]]:
@@ -108,7 +152,20 @@ def _run_query(
         p = str(path).replace("'", "''")
 
         if ext == ".csv":
-            conn.execute(f"CREATE TABLE data AS SELECT * FROM read_csv_auto('{p}')")
+            enc = detect_csv_encoding(path)
+            if enc in ("utf-8", "utf-8-sig"):
+                # DuckDB handles UTF-8 and BOM natively.
+                conn.execute(
+                    f"CREATE TABLE data AS SELECT * FROM read_csv_auto('{p}', encoding='utf-8')"
+                )
+            else:
+                # Non-UTF-8 (e.g. cp1251): re-encode via Python, then load.
+                utf8_path = reencode_csv_to_utf8(path, enc)
+                try:
+                    up = str(utf8_path).replace("'", "''")
+                    conn.execute(f"CREATE TABLE data AS SELECT * FROM read_csv_auto('{up}')")
+                finally:
+                    utf8_path.unlink(missing_ok=True)
         elif ext in (".json", ".jsonl", ".ndjson"):
             conn.execute(f"CREATE TABLE data AS SELECT * FROM read_json_auto('{p}')")
         elif ext == ".xlsx":

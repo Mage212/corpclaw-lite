@@ -157,3 +157,72 @@ class TestConvertFormatTool:
     async def test_missing_params(self, tool: ConvertFormatTool) -> None:
         result = await tool.execute()
         assert "Error" in result
+
+    # --- Cyrillic / encoding tests ---
+
+    @pytest.mark.asyncio
+    async def test_csv_cp1251_to_json(
+        self, tool: ConvertFormatTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Windows-1251 CSV (default Russian Excel export) must be read correctly."""
+        monkeypatch.chdir(tmp_path)
+        cp1251_content = "имя,город\nАлексей,Москва\nМария,Санкт-Петербург\n"
+        (tmp_path / "ru.csv").write_bytes(cp1251_content.encode("cp1251"))
+
+        result = await tool.execute(input_path="ru.csv", output_format="json")
+        assert "Converted" in result
+        data = json.loads((tmp_path / "ru.json").read_text(encoding="utf-8"))
+        assert data[0]["имя"] == "Алексей"
+        assert data[1]["город"] == "Санкт-Петербург"
+
+    @pytest.mark.asyncio
+    async def test_csv_utf8_bom_to_json(
+        self, tool: ConvertFormatTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """UTF-8 BOM CSV ('CSV UTF-8' option in Excel) must be read correctly."""
+        monkeypatch.chdir(tmp_path)
+        bom_content = "имя,возраст\nДмитрий,35\nЕлена,28\n"
+        (tmp_path / "bom.csv").write_bytes(b"\xef\xbb\xbf" + bom_content.encode("utf-8"))
+
+        result = await tool.execute(input_path="bom.csv", output_format="json")
+        assert "Converted" in result
+        data = json.loads((tmp_path / "bom.json").read_text(encoding="utf-8"))
+        assert data[0]["имя"] == "Дмитрий"
+        assert data[1]["возраст"] == "28"
+
+    @pytest.mark.asyncio
+    async def test_csv_write_has_bom(
+        self, tool: ConvertFormatTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Written CSV must include BOM so Excel opens Cyrillic correctly."""
+        monkeypatch.chdir(tmp_path)
+        _create_json(
+            tmp_path / "data.json",
+            [{"товар": "Хлеб", "цена": 50}, {"товар": "Молоко", "цена": 80}],
+        )
+
+        result = await tool.execute(input_path="data.json", output_format="csv")
+        assert "Converted" in result
+        raw = (tmp_path / "data.csv").read_bytes()
+        assert raw[:3] == b"\xef\xbb\xbf", "CSV must start with UTF-8 BOM"
+        content = raw.decode("utf-8-sig")
+        assert "Хлеб" in content
+        assert "Молоко" in content
+
+    @pytest.mark.asyncio
+    async def test_xlsx_cyrillic_roundtrip(
+        self, tool: ConvertFormatTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """XLSX with Cyrillic → CSV → back to XLSX preserves data."""
+        monkeypatch.chdir(tmp_path)
+        _create_xlsx(
+            tmp_path / "orig.xlsx",
+            ["ФИО", "Отдел"],
+            [["Иванов Иван", "Бухгалтерия"], ["Петрова Анна", "IT"]],
+        )
+
+        result = await tool.execute(input_path="orig.xlsx", output_format="csv")
+        assert "Converted" in result
+        csv_content = (tmp_path / "orig.csv").read_text(encoding="utf-8-sig")
+        assert "Иванов" in csv_content
+        assert "Бухгалтерия" in csv_content

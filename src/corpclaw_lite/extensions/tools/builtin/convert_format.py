@@ -15,6 +15,7 @@ import anyio
 
 from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
 from corpclaw_lite.extensions.tools.builtin.files import resolve_and_validate_path
+from corpclaw_lite.extensions.tools.builtin.table_query import detect_csv_encoding
 
 __all__ = ["ConvertFormatTool"]
 
@@ -26,7 +27,8 @@ _SUPPORTED_OUTPUT = {"csv", "xlsx", "json", "markdown"}
 
 
 def _load_csv(path: Path) -> list[dict[str, str]]:
-    with open(path, newline="", encoding="utf-8") as f:
+    encoding = detect_csv_encoding(path)
+    with open(path, newline="", encoding=encoding) as f:
         reader = csv.DictReader(f)
         return list(reader)
 
@@ -93,10 +95,11 @@ def _load_markdown(path: Path) -> list[dict[str, str]]:
 
 def _write_csv(data: list[dict[str, Any]], path: Path) -> None:
     if not data:
-        path.write_text("", encoding="utf-8")
+        path.write_text("", encoding="utf-8-sig")
         return
     fieldnames = list(data[0].keys())
-    with open(path, "w", newline="", encoding="utf-8") as f:
+    # utf-8-sig writes BOM so Excel correctly recognises Cyrillic.
+    with open(path, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for row in data:

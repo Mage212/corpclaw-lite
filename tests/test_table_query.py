@@ -165,3 +165,47 @@ class TestTableQueryTool:
     async def test_missing_params(self, tool: TableQueryTool) -> None:
         result = await tool.execute()
         assert "Error" in result
+
+    # --- Cyrillic / encoding tests ---
+
+    @pytest.mark.asyncio
+    async def test_cp1251_csv_query(
+        self, tool: TableQueryTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Windows-1251 CSV must be readable by DuckDB."""
+        monkeypatch.chdir(tmp_path)
+        content = "имя,зарплата\nАлексей,100000\nМария,120000\n"
+        (tmp_path / "salaries.csv").write_bytes(content.encode("cp1251"))
+
+        result = await tool.execute(path="salaries.csv", query="SELECT * FROM data")
+        assert "Алексей" in result
+        assert "Мария" in result
+
+    @pytest.mark.asyncio
+    async def test_cp1251_csv_aggregation(
+        self, tool: TableQueryTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Aggregation on Windows-1251 CSV with Cyrillic column names."""
+        monkeypatch.chdir(tmp_path)
+        content = "отдел,сотрудник,оклад\nБухгалтерия,Иванов,80000\nIT,Сидоров,120000\nБухгалтерия,Петрова,90000\n"
+        (tmp_path / "depts.csv").write_bytes(content.encode("cp1251"))
+
+        result = await tool.execute(
+            path="depts.csv",
+            query='SELECT отдел, SUM(оклад) as итого FROM data GROUP BY отдел ORDER BY отдел',
+        )
+        assert "Бухгалтерия" in result
+        assert "170000" in result  # 80000 + 90000
+
+    @pytest.mark.asyncio
+    async def test_utf8_bom_csv_query(
+        self, tool: TableQueryTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """UTF-8 BOM CSV must be readable by DuckDB."""
+        monkeypatch.chdir(tmp_path)
+        content = "товар,количество\nМолоко,10\nХлеб,25\n"
+        (tmp_path / "goods.csv").write_bytes(b"\xef\xbb\xbf" + content.encode("utf-8"))
+
+        result = await tool.execute(path="goods.csv", query="SELECT * FROM data")
+        assert "Молоко" in result
+        assert "Хлеб" in result
