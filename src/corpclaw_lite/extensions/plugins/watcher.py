@@ -119,7 +119,7 @@ class PluginHotReloader:
         for removed in self._known_dirs - current_paths:
             plugin_name = removed.name
             logger.info("PluginHotReloader: plugin '%s' removed", plugin_name)
-            self._unregister_plugin(plugin_name)
+            await self._unregister_plugin(plugin_name)
 
         # ── New plugins ───────────────────────────────────────────────────
         for added in current_paths - self._known_dirs:
@@ -133,20 +133,20 @@ class PluginHotReloader:
             if current_dirs[existing] > self._mtimes.get(existing, 0.0):
                 plugin_name = existing.name
                 logger.info("PluginHotReloader: plugin '%s' changed, reloading", plugin_name)
-                self._unregister_plugin(plugin_name)
+                await self._unregister_plugin(plugin_name)
                 self._load_and_register(existing)
                 self._mtimes[existing] = current_dirs[existing]
 
         self._known_dirs = current_paths
 
-    def _unregister_plugin(self, plugin_name: str) -> None:
+    async def _unregister_plugin(self, plugin_name: str) -> None:
         """Unregister all tools and skill contributed by this plugin."""
         from corpclaw_lite.extensions.plugins.sandbox_proxy import PluginToolProxy
 
         for tool_name in self._plugin_tools.pop(plugin_name, []):
             tool = self._tool_registry.get(tool_name)
             if isinstance(tool, PluginToolProxy):
-                tool.kill()
+                await tool.kill()
             self._tool_registry.unregister(tool_name)
             logger.debug("PluginHotReloader: unregistered tool '%s'", tool_name)
 

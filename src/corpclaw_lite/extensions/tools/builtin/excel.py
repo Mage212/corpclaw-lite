@@ -13,7 +13,11 @@ from __future__ import annotations
 
 import math
 from datetime import datetime, timedelta
+from functools import partial
+from pathlib import Path
 from typing import Any
+
+import anyio
 
 from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
 from corpclaw_lite.extensions.tools.builtin.files import resolve_and_validate_path
@@ -268,6 +272,15 @@ class NormalizeExcelTool(Tool):
 
         do_empty = kwargs.get("remove_empty_rows", True)
 
+        try:
+            return await anyio.to_thread.run_sync(
+                partial(self._process_file, resolved, output_path, do_empty)
+            )
+        except Exception as e:
+            return f"Error: {e}"
+
+    def _process_file(self, resolved: Path, output_path: Path, do_empty: bool) -> str:
+        """Synchronous Excel processing — runs in thread pool via anyio."""
         try:
             import openpyxl
         except ImportError:

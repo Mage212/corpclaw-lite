@@ -115,22 +115,20 @@ def test_container_not_available_no_docker():
     assert manager.is_available() is False
 
 
-def test_environment_merge_with_network_policy():
-    """build_docker_args must merge environment dicts without crashing."""
+def test_docker_args_with_network_policy():
+    """build_docker_args must apply deny-all network_mode from NetworkPolicy."""
     from corpclaw_lite.container.policies import build_docker_args
     from corpclaw_lite.security.network_policy import NetworkPolicy
 
     settings = ContainerSettings()
     policy = NetworkPolicy()
-    policy.allowlist = ["example.com", "api.internal"]
 
     args = build_docker_args(user_id=1, settings=settings, network_policy=policy)
 
     env = args["environment"]
     assert isinstance(env, dict)
     assert env["CORPCLAW_USER_ID"] == "1"
-    assert "ALLOWED_DOMAINS" in env
-    assert "example.com" in env["ALLOWED_DOMAINS"]
+    assert args["network_mode"] == "none"
 
 
 def test_container_stop_no_docker():

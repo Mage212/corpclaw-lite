@@ -316,9 +316,6 @@ def build_agent_stack(
         from corpclaw_lite.security.network_policy import NetworkPolicy
 
         network_policy = NetworkPolicy()
-        network_policy_cfg = PROJECT_ROOT / "config" / "network_policy.yaml"
-        if network_policy_cfg.exists():
-            network_policy.load_file(network_policy_cfg)
 
         try:
             container_ipc = ContainerIPC(

@@ -153,37 +153,13 @@ class TestNetworkPolicy:
         args = policy.to_docker_args()
         assert args.get("network_mode") == "none"
 
-    def test_to_docker_args_includes_allowed_domains_env(self) -> None:
+    def test_to_docker_args_returns_deny_all(self) -> None:
         from corpclaw_lite.security.network_policy import NetworkPolicy
 
         policy = NetworkPolicy()
-        policy.allowlist = ["api.anthropic.com", "localhost"]
         args = policy.to_docker_args()
-        env = args.get("environment", [])
-        assert isinstance(env, list)
-        allowed_env = [e for e in env if isinstance(e, str) and "ALLOWED_DOMAINS" in e]
-        assert len(allowed_env) == 1
-        assert "api.anthropic.com" in allowed_env[0]
-
-    def test_load_file_populates_allowlist(self, tmp_path: Path) -> None:
-        from corpclaw_lite.security.network_policy import NetworkPolicy
-
-        yaml_content = "allowlist:\n  - api.anthropic.com\n  - localhost\n"
-        policy_file = tmp_path / "network_policy.yaml"
-        policy_file.write_text(yaml_content)
-
-        policy = NetworkPolicy()
-        policy.load_file(policy_file)
-        assert "api.anthropic.com" in policy.allowlist
-        assert "localhost" in policy.allowlist
-
-    def test_load_missing_file_graceful(self, tmp_path: Path) -> None:
-        from corpclaw_lite.security.network_policy import NetworkPolicy
-
-        policy = NetworkPolicy()
-        # Should not raise, just log warning
-        policy.load_file(tmp_path / "nonexistent.yaml")
-        assert policy.allowlist == []
+        assert args["network_mode"] == "none"
+        assert "environment" not in args
 
 
 # ── Health counters ───────────────────────────────────────────────────────────────

@@ -119,7 +119,7 @@ class OpenAIProvider(Provider):
         raw = message.content or ""
         if cfg.open_tag in raw and cfg.close_tag in raw:
             s = raw.index(cfg.open_tag) + len(cfg.open_tag)
-            e = raw.index(cfg.close_tag)
+            e = raw.index(cfg.close_tag, s)
             reasoning = raw[s:e].strip()
             content = raw[e + len(cfg.close_tag) :].strip()
             return reasoning, content
@@ -207,6 +207,8 @@ class OpenAIProvider(Provider):
         )
 
         response = await self._client.chat.completions.create(**kwargs)
+        if not response.choices:
+            return LLMResponse(content="", tool_calls=[], reasoning="")
         choice = response.choices[0]
 
         # ── Extract reasoning + content ───────────────────────────────────────
@@ -283,6 +285,10 @@ class OpenAIProvider(Provider):
         # Apply preset inference params (but NOT system_prompt_prefix for vision).
         # Non-standard params (top_k, min_p, etc.) go into extra_body.
         if self._preset:
+            # Thinking budget → cap max_tokens (same logic as chat())
+            if self._preset.thinking_budget_tokens:
+                budget = self._preset.thinking_budget_tokens
+                kwargs.setdefault("max_tokens", budget + 1024)
             extra_body: dict[str, Any] = {}
             for k, v in self._preset.inference_params.items():
                 if k in self._OPENAI_STANDARD_PARAMS:
@@ -298,6 +304,8 @@ class OpenAIProvider(Provider):
         kwargs["messages"] = messages
 
         response = await self._client.chat.completions.create(**kwargs)
+        if not response.choices:
+            return LLMResponse(content="")
         choice = response.choices[0]
         content = choice.message.content or ""
 

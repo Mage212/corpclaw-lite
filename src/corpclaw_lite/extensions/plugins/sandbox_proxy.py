@@ -109,7 +109,7 @@ class PluginToolProxy(Tool):
             str(self._tool_path),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
         )
         logger.debug(
             "PluginToolProxy: spawned subprocess for %s (pid=%d)", self.name, self._process.pid
@@ -155,16 +155,17 @@ class PluginToolProxy(Tool):
                     return f"Error: {response['error'].get('message', 'unknown error')}"
                 return str(response.get("result", ""))
             except TimeoutError:
-                self.kill()
+                await self.kill()
                 return f"Error: plugin tool '{self.name}' execution timed out"
             except Exception as e:
                 self._process = None
                 return f"Error: plugin subprocess for {self.name} communication failed: {e}"
 
-    def kill(self) -> None:
-        """Terminate the subprocess if running."""
+    async def kill(self) -> None:
+        """Terminate the subprocess if running and wait for exit."""
         if self._process is not None and self._process.returncode is None:
             self._process.terminate()
+            await self._process.wait()
             logger.debug(
                 "PluginToolProxy: killed subprocess for %s (pid=%d)", self.name, self._process.pid
             )

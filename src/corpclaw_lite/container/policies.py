@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from typing import Any, cast
+from typing import Any
 
 from corpclaw_lite.config.settings import ContainerSettings
 from corpclaw_lite.paths import PROJECT_ROOT
@@ -24,7 +24,7 @@ def build_docker_args(
     Args:
         user_id: Telegram user ID — used to name the container.
         settings: ContainerSettings with image, limits, etc.
-        network_policy: Optional network allowlist to apply.
+        network_policy: Optional network deny-all policy to apply.
         workspace_dir: Absolute host path to bind-mount at /workspace.
     """
     args: dict[str, Any] = {
@@ -61,17 +61,6 @@ def build_docker_args(
 
     if network_policy:
         net_args: dict[str, Any] = dict(network_policy.to_docker_args())
-        saved_env: dict[str, str] = dict(args.get("environment", {}))
-        net_env = net_args.pop("environment", None)
         args.update(net_args)
-        args["environment"] = saved_env
-        if isinstance(net_env, list):
-            env_list = cast(list[str], net_env)
-            for env_var in env_list:
-                k, v = env_var.split("=", 1)
-                args["environment"][k] = v
-        elif isinstance(net_env, dict):
-            env_dict = cast(dict[str, str], net_env)
-            args["environment"].update(env_dict)
 
     return args

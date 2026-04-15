@@ -25,6 +25,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_MAX_TRACKED_USERS = 5000
+
 
 class ContextCompressor:
     """Multi-phase context compression to fit long conversations in context window."""
@@ -33,6 +35,15 @@ class ContextCompressor:
         self._provider = provider
         self._settings = settings
         self._summaries: dict[str, str] = {}
+
+    def _prune_summaries(self) -> None:
+        """Evict oldest half of per-user summaries when capacity exceeded."""
+        if len(self._summaries) <= _MAX_TRACKED_USERS:
+            return
+        sorted_keys = sorted(self._summaries.keys())
+        to_remove = sorted_keys[: len(sorted_keys) - _MAX_TRACKED_USERS // 2]
+        for k in to_remove:
+            del self._summaries[k]
 
     def should_compress(self, messages: list[dict[str, Any]]) -> bool:
         """Check if compression is needed based on token threshold.
@@ -207,6 +218,7 @@ Summary:"""
             summary = response.content
             if summary and mem_key:
                 self._summaries[mem_key] = summary.strip()
+                self._prune_summaries()
             return summary
         except Exception as e:
             logger.warning("ContextCompressor: summary generation failed: %s", e)

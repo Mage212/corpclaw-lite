@@ -13,6 +13,7 @@ Calling get_system_prompt() again after a file changes returns the fresh content
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 __all__ = [
@@ -95,6 +96,8 @@ class BootstrapLoader:
         original file at ``config/bootstrap/departments/<department>.md``.
         Returns cached content, or None if no file exists.
         """
+        if not department or not re.match(r"^[a-zA-Z0-9_-]+$", department):
+            return None
         calibrated = (
             self._dir.parent / "calibrated" / "bootstrap" / "departments" / f"{department}.md"
         )

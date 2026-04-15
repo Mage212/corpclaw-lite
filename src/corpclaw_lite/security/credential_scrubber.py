@@ -41,6 +41,7 @@ class CredentialScrubber(logging.Filter):
         re.compile(r"AKIA[A-Z0-9]{16}"),  # AWS Access Key ID
         re.compile(r"xox[bprs]-[a-zA-Z0-9\-]+"),  # Slack tokens
         re.compile(r"://[^:\s]+:[^@\s]+@"),  # URL embedded credentials
+        re.compile(r"-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----"),  # PEM private keys
     )
 
     MASK = "***REDACTED***"

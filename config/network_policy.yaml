@@ -1,4 +1,0 @@
-allowlist:
-  - "api.anthropic.com"   # Cloud consolidation fallback (if configured). Safe to keep even with Ollama — container only connects if code explicitly requests it.
-  - "localhost:11434"     # Ollama local inference
-  - "api.github.com"      # GitHub API access

@@ -311,6 +311,15 @@ class TelegramBotOrchestrator:
             user = await user_manager.async_create_user(telegram_id=tid, department=dept)
             logger.info("Auto-registered user telegram_id=%d (dept=%s)", tid, dept)
 
+        # Rate limiting (before onboarding to prevent bypass via /setup)
+        allowed = await rate_limiter.check(tid)
+        if not allowed:
+            await channel.send_message(
+                user,
+                "⚠️ Слишком много сообщений. Подождите минуту и попробуйте снова.",
+            )
+            return
+
         # Onboarding intercept
         if self._onboarding_engine is not None and await self._onboarding_engine.needs_onboarding(
             tid
@@ -345,15 +354,6 @@ class TelegramBotOrchestrator:
                         "Для перенастройки — /setup",
                     )
                 return
-
-        # Rate limiting
-        allowed = await rate_limiter.check(tid)
-        if not allowed:
-            await channel.send_message(
-                user,
-                "⚠️ Слишком много сообщений. Подождите минуту и попробуйте снова.",
-            )
-            return
 
         # Progress indicator
         bot = channel.bot
@@ -462,7 +462,7 @@ class TelegramBotOrchestrator:
 
     async def handle_image(self, telegram_id: str, image_path: Path, caption: str | None) -> None:
         """Route photo uploads directly to vision LLM, bypassing agent loop."""
-        stack, channel, *_ = self._require_started()
+        stack, channel, rate_limiter, _ = self._require_started()
 
         user_manager = stack.user_manager
 
@@ -470,6 +470,18 @@ class TelegramBotOrchestrator:
             return
         user = await user_manager.async_get_by_telegram_id(int(telegram_id))
         if user is None:
+            return
+
+        # Session revocation + rate limiting (same checks as handle_message)
+        if user_manager.is_session_revoked(int(telegram_id)):
+            logger.debug("Ignoring image from revoked session telegram_id=%d", int(telegram_id))
+            return
+        allowed = await rate_limiter.check(int(telegram_id))
+        if not allowed:
+            await channel.send_message(
+                user,
+                "⚠️ Слишком много сообщений. Подождите минуту и попробуйте снова.",
+            )
             return
         if self._vision_processor is None:
             directive = (
