@@ -89,7 +89,9 @@ class TestTableQueryTool:
         self, tool: TableQueryTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.chdir(tmp_path)
-        _create_xlsx(tmp_path / "data.xlsx", ["city", "pop"], [["Moscow", 12000000], ["SPb", 5000000]])
+        _create_xlsx(
+            tmp_path / "data.xlsx", ["city", "pop"], [["Moscow", 12000000], ["SPb", 5000000]]
+        )
 
         result = await tool.execute(path="data.xlsx", query="SELECT * FROM data")
         assert "Moscow" in result
@@ -192,7 +194,7 @@ class TestTableQueryTool:
 
         result = await tool.execute(
             path="depts.csv",
-            query='SELECT отдел, SUM(оклад) as итого FROM data GROUP BY отдел ORDER BY отдел',
+            query="SELECT отдел, SUM(оклад) as итого FROM data GROUP BY отдел ORDER BY отдел",
         )
         assert "Бухгалтерия" in result
         assert "170000" in result  # 80000 + 90000

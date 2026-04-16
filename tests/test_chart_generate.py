@@ -49,7 +49,9 @@ class TestChartGenerateTool:
         monkeypatch.chdir(tmp_path)
         _create_csv(tmp_path / "data.csv", "month,sales\nJan,100\nFeb,150\nMar,120\n")
 
-        result = await tool.execute(data_path="data.csv", chart_type="line", x_column="month", y_column="sales")
+        result = await tool.execute(
+            data_path="data.csv", chart_type="line", x_column="month", y_column="sales"
+        )
         assert "Chart saved" in result
 
     @pytest.mark.asyncio
@@ -59,7 +61,9 @@ class TestChartGenerateTool:
         monkeypatch.chdir(tmp_path)
         _create_csv(tmp_path / "data.csv", "category,value\nA,40\nB,30\nC,30\n")
 
-        result = await tool.execute(data_path="data.csv", chart_type="pie", x_column="category", y_column="value")
+        result = await tool.execute(
+            data_path="data.csv", chart_type="pie", x_column="category", y_column="value"
+        )
         assert "Chart saved" in result
 
     @pytest.mark.asyncio
