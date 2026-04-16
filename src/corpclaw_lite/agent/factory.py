@@ -70,14 +70,19 @@ class AgentStack:
     skill_matcher: SkillMatcher | None = None
 
 
-def _build_router() -> Provider:
-    """Load settings.yaml + env, build an LLMRouter from ProviderRegistry."""
+def _build_router(settings: Settings | None = None) -> Provider:
+    """Build an LLMRouter from ProviderRegistry.
+
+    Args:
+        settings: Pre-loaded Settings. If None, loads from config/settings.yaml.
+    """
     from corpclaw_lite.config.loader import load_settings
     from corpclaw_lite.config.providers import ProviderRegistry
     from corpclaw_lite.llm.presets import PresetRegistry
     from corpclaw_lite.llm.router import LLMRouter
 
-    settings = load_settings(PROJECT_ROOT / "config" / "settings.yaml")
+    if settings is None:
+        settings = load_settings(PROJECT_ROOT / "config" / "settings.yaml")
     provider_registry = ProviderRegistry.from_env()
 
     if not provider_registry.list_all():
@@ -293,7 +298,7 @@ def build_agent_stack(
     container_cfg = full_settings.container
     agent_settings = full_settings.agent if full_settings.agent else AgentSettings()
 
-    provider = _build_router()
+    provider = _build_router(settings=full_settings)
     registry = ToolRegistry()
 
     container_manager: ContainerManager | None = None
