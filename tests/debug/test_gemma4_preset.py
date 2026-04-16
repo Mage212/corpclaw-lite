@@ -36,14 +36,16 @@ logger = logging.getLogger("preset_test")
 async def main() -> None:
     from dotenv import load_dotenv
 
-    load_dotenv()  # load .env so ${OPENAI_BASE_URL} etc. are resolved
+    load_dotenv()  # load .env so PROVIDER_* vars are resolved
 
     from corpclaw_lite.config.loader import load_settings
+    from corpclaw_lite.config.providers import ProviderRegistry
     from corpclaw_lite.llm.presets import PresetRegistry
     from corpclaw_lite.llm.router import build_provider
 
     project_root = Path(__file__).parent.parent.parent
     settings = load_settings(project_root / "config" / "settings.yaml")
+    provider_registry = ProviderRegistry.from_env()
     preset_registry = PresetRegistry.from_yaml(project_root / "config" / "model_presets.yaml")
 
     # ── 1. Preset loading ──────────────────────────────────────────────────────
@@ -60,15 +62,24 @@ async def main() -> None:
     print(f"   thinking.close_tag   = {preset.thinking.close_tag if preset.thinking else None!r}")
     print(f"   inference_params     = {preset.inference_params}")
 
-    # ── 2. Build provider from settings (uses preset embedded in settings.yaml) ─
-    default_cfg = settings.llm.named.get("default")
-    if default_cfg is None:
-        print("❌ FAIL: 'default' provider not configured")
+    # ── 2. Build provider from env + routing rules ──────────────────────────────
+    default_rule = next((r for r in settings.llm.routing if r.task_kind == "default"), None)
+    if default_rule is None or default_rule.provider is None or default_rule.model is None:
+        print("❌ FAIL: 'default' routing rule not configured")
         sys.exit(1)
 
-    provider = build_provider(default_cfg, preset_registry=preset_registry)
-    print(f"\n✅ Provider built: {default_cfg.model} @ {default_cfg.base_url}")
-    print(f"   Preset applied: {default_cfg.preset!r}")
+    conn = provider_registry.get(default_rule.provider)
+    if conn is None:
+        print(f"❌ FAIL: provider '{default_rule.provider}' not found in env")
+        sys.exit(1)
+
+    rule_preset = preset_registry.get(default_rule.preset) if default_rule.preset else None
+    provider = build_provider(conn, model=default_rule.model, preset=rule_preset)
+    if provider is None:
+        print("❌ FAIL: could not build provider")
+        sys.exit(1)
+    print(f"\n✅ Provider built: {default_rule.model} @ {conn.base_url}")
+    print(f"   Preset applied: {default_rule.preset!r}")
 
     # ── 3. Actual LLM call ────────────────────────────────────────────────────
     test_message = "Сколько будет 145 умножить на 37? Считай пошагово."

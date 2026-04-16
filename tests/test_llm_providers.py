@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from corpclaw_lite.config.settings import ProviderSettings
+from corpclaw_lite.config.providers import ProviderSettings
 from corpclaw_lite.llm.base import LLMResponse, ToolCall
 
 

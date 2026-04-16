@@ -12,7 +12,6 @@ __all__ = [
     "ContainerSettings",
     "LLMSettings",
     "LoggingSettings",
-    "ProviderSettings",
     "RoutingRule",
     "Settings",
     "SkillsSettings",
@@ -20,29 +19,27 @@ __all__ = [
 ]
 
 
-class ProviderSettings(BaseModel):
-    """Settings for a specific LLM provider."""
-
-    type: str = "openai"
-    model: str = "gpt-4o-mini"
-    api_key: str | None = None
-    base_url: str | None = None
-    preset: str | None = None
-
-
 class RoutingRule(BaseModel):
-    """Rule for routing tasks to specific providers."""
+    """Rule for routing tasks to specific providers with model selection.
+
+    Each rule specifies a provider (registered via ``PROVIDER_*__*`` env vars),
+    a model from that provider, and an optional preset.
+    """
 
     task_kind: str | None = None
     subagent_id: str | None = None
     provider: str = "default"
+    model: str | None = None
+    preset: str | None = None
 
 
 class LLMSettings(BaseModel):
-    """Settings for all LLM providers and routing."""
+    """Settings for LLM provider routing.
 
-    default: str = "local"
-    named: dict[str, ProviderSettings] = {}
+    Providers are registered via ``PROVIDER_*__*`` env vars in ``.env``.
+    This model only contains routing rules that map tasks to providers + models.
+    """
+
     routing: list[RoutingRule] = []
 
 

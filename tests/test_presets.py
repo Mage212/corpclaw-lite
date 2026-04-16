@@ -109,7 +109,7 @@ def test_inference_params_merge_request_priority() -> None:
     Non-standard params (top_k) are routed to kwargs["extra_body"] so the
     OpenAI SDK doesn't reject them client-side.
     """
-    from corpclaw_lite.config.settings import ProviderSettings
+    from corpclaw_lite.config.providers import ProviderSettings
     from corpclaw_lite.llm.openai import OpenAIProvider
 
     preset = ModelPreset(inference_params={"temperature": 1.0, "top_p": 0.95, "top_k": 64})
@@ -131,7 +131,7 @@ def test_inference_params_merge_request_priority() -> None:
 
 def test_inference_params_merge_no_preset() -> None:
     """Without preset, kwargs are unchanged."""
-    from corpclaw_lite.config.settings import ProviderSettings
+    from corpclaw_lite.config.providers import ProviderSettings
     from corpclaw_lite.llm.openai import OpenAIProvider
 
     provider = OpenAIProvider(
@@ -148,7 +148,7 @@ def test_inference_params_merge_no_preset() -> None:
 
 def test_system_prompt_injection() -> None:
     """system_prompt_prefix is prepended to existing system prompt."""
-    from corpclaw_lite.config.settings import ProviderSettings
+    from corpclaw_lite.config.providers import ProviderSettings
     from corpclaw_lite.llm.openai import OpenAIProvider
 
     preset = ModelPreset(system_prompt_prefix="<|think|>")
@@ -162,7 +162,7 @@ def test_system_prompt_injection() -> None:
 
 def test_system_prompt_injection_no_existing() -> None:
     """system_prompt_prefix works when system is None."""
-    from corpclaw_lite.config.settings import ProviderSettings
+    from corpclaw_lite.config.providers import ProviderSettings
     from corpclaw_lite.llm.openai import OpenAIProvider
 
     preset = ModelPreset(system_prompt_prefix="<|think|>")
@@ -179,7 +179,7 @@ def test_system_prompt_injection_no_existing() -> None:
 
 def test_thinking_budget_caps_max_tokens() -> None:
     """thinking_budget_tokens sets max_tokens = budget + 1024."""
-    from corpclaw_lite.config.settings import ProviderSettings
+    from corpclaw_lite.config.providers import ProviderSettings
     from corpclaw_lite.llm.openai import OpenAIProvider
 
     preset = ModelPreset(thinking_budget_tokens=512)
@@ -194,7 +194,7 @@ def test_thinking_budget_caps_max_tokens() -> None:
 
 def test_thinking_budget_does_not_override_explicit() -> None:
     """Explicit max_tokens in request is not overridden by thinking budget."""
-    from corpclaw_lite.config.settings import ProviderSettings
+    from corpclaw_lite.config.providers import ProviderSettings
     from corpclaw_lite.llm.openai import OpenAIProvider
 
     preset = ModelPreset(thinking_budget_tokens=512)
@@ -212,7 +212,7 @@ def test_thinking_budget_does_not_override_explicit() -> None:
 
 def test_parse_reasoning_content_tags() -> None:
     """Gemma4-style: reasoning extracted from content tags."""
-    from corpclaw_lite.config.settings import ProviderSettings
+    from corpclaw_lite.config.providers import ProviderSettings
     from corpclaw_lite.llm.openai import OpenAIProvider
 
     preset = ModelPreset(
@@ -237,7 +237,7 @@ def test_parse_reasoning_content_tags() -> None:
 
 def test_parse_reasoning_native_field() -> None:
     """Qwen3-style: reasoning from native reasoning_content field."""
-    from corpclaw_lite.config.settings import ProviderSettings
+    from corpclaw_lite.config.providers import ProviderSettings
     from corpclaw_lite.llm.openai import OpenAIProvider
 
     preset = ModelPreset(thinking=ThinkingConfig(source="native"))
@@ -257,7 +257,7 @@ def test_parse_reasoning_native_field() -> None:
 
 def test_parse_reasoning_no_preset() -> None:
     """Without preset, content is returned as-is, no reasoning."""
-    from corpclaw_lite.config.settings import ProviderSettings
+    from corpclaw_lite.config.providers import ProviderSettings
     from corpclaw_lite.llm.openai import OpenAIProvider
 
     provider = OpenAIProvider(
@@ -275,7 +275,7 @@ def test_parse_reasoning_no_preset() -> None:
 
 def test_parse_reasoning_no_tags_found() -> None:
     """With content-tag preset but no tags in output, returns raw content."""
-    from corpclaw_lite.config.settings import ProviderSettings
+    from corpclaw_lite.config.providers import ProviderSettings
     from corpclaw_lite.llm.openai import OpenAIProvider
 
     preset = ModelPreset(
@@ -384,53 +384,40 @@ async def test_add_message_without_reasoning(tmp_path: Path) -> None:
 
 def test_build_provider_with_preset() -> None:
     """build_provider passes preset to OpenAIProvider."""
-    from corpclaw_lite.config.settings import ProviderSettings
+    from corpclaw_lite.config.providers import ProviderConnection
     from corpclaw_lite.llm.router import build_provider
 
     preset = ModelPreset(inference_params={"temperature": 0.9})
-    registry = PresetRegistry({"my-preset": preset})
-
-    settings = ProviderSettings(
+    conn = ProviderConnection(
         type="openai",
-        model="test-model",
         api_key="dummy",
         base_url="http://localhost:1234/v1",
-        preset="my-preset",
     )
-    provider = build_provider(settings, preset_registry=registry)
+    provider = build_provider(conn, model="test-model", preset=preset)
     assert provider is not None
     assert provider._preset is preset  # type: ignore[attr-defined]
 
 
-def test_build_provider_unknown_preset() -> None:
-    """Unknown preset name → provider still created, preset is None."""
-    from corpclaw_lite.config.settings import ProviderSettings
+def test_build_provider_without_preset() -> None:
+    """build_provider works without preset — preset is None."""
+    from corpclaw_lite.config.providers import ProviderConnection
     from corpclaw_lite.llm.router import build_provider
 
-    registry = PresetRegistry()
-    settings = ProviderSettings(
+    conn = ProviderConnection(
         type="openai",
-        model="test-model",
         api_key="dummy",
         base_url="http://localhost:1234/v1",
-        preset="unknown",
     )
-    provider = build_provider(settings, preset_registry=registry)
+    provider = build_provider(conn, model="test-model")
     assert provider is not None
     assert provider._preset is None  # type: ignore[attr-defined]
 
 
-def test_build_provider_no_preset_field() -> None:
-    """Provider without preset field → backward compatible."""
-    from corpclaw_lite.config.settings import ProviderSettings
+def test_build_provider_anthropic_requires_key() -> None:
+    """build_provider returns None for Anthropic without api_key."""
+    from corpclaw_lite.config.providers import ProviderConnection
     from corpclaw_lite.llm.router import build_provider
 
-    settings = ProviderSettings(
-        type="openai",
-        model="test-model",
-        api_key="dummy",
-        base_url="http://localhost:1234/v1",
-    )
-    provider = build_provider(settings)
-    assert provider is not None
-    assert provider._preset is None  # type: ignore[attr-defined]
+    conn = ProviderConnection(type="anthropic")
+    provider = build_provider(conn, model="claude-3-haiku-20240307")
+    assert provider is None

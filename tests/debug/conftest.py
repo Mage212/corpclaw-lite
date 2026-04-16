@@ -66,8 +66,8 @@ def agent_stack_no_container() -> tuple[AgentLoop, ToolRegistry]:
 
     # Load real settings (with .env already applied above)
     real_settings = load_settings(cfg_path)
-    if not real_settings.llm.named:
-        pytest.skip("No named LLM providers in settings.yaml — skipping debug tests")
+    if not real_settings.llm.routing:
+        pytest.skip("No routing rules in settings.yaml — skipping debug tests")
 
     # Build patched settings with container disabled — pass directly to factory
     patched_settings = real_settings.model_copy(

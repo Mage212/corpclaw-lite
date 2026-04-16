@@ -1,13 +1,14 @@
 # CorpClaw Lite — Model Presets
 #
 # Named presets define inference parameters and thinking/reasoning configuration
-# for specific models. Reference a preset by name in settings.yaml:
+# for specific models. Reference a preset by name in settings.yaml routing rules:
 #
 #   llm:
-#     named:
-#       default:
+#     routing:
+#       - task_kind: "default"
+#         provider: "ollama"
 #         model: "qwen3.5-4b"
-#         preset: "qwen3-thinking"    # ← uses this preset
+#         preset: "qwen3.5-thinking"    # ← uses this preset
 #
 # All fields are optional — include only what the model needs.
 # Priority: request-level params > preset params > provider defaults.

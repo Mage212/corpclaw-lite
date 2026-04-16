@@ -57,8 +57,9 @@ uv run pytest tests/debug/test_B_tools.py::test_B01_write_file -v -s
 ## Требования
 
 ### LLM провайдер
-Тесты используют `config/settings.yaml` как есть. Убедитесь что:
-- Настроен провайдер в `llm.named.default`
+Тесты используют `config/settings.yaml` + `.env` как есть. Убедитесь что:
+- В `.env` заданы `PROVIDER_*__*` переменные (e.g. `PROVIDER_OLLAMA__BASE_URL`)
+- В `settings.yaml` есть routing rule с `task_kind: "default"`
 - API ключ задан в `.env` (если используется cloud-провайдер)
 - Или Ollama запущен на `localhost:11434` (для локальных моделей)
 

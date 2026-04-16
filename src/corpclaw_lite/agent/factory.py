@@ -20,7 +20,6 @@ Dev mode (container.enabled=false):
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -71,55 +70,39 @@ class AgentStack:
     skill_matcher: SkillMatcher | None = None
 
 
-def _build_provider_from_env() -> Provider:
-    """Fallback: build a single provider directly from environment variables.
-
-    Used when config/settings.yaml is missing or has no llm.named providers.
-    """
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if api_key:
-        from corpclaw_lite.config.settings import ProviderSettings
-        from corpclaw_lite.llm.anthropic import AnthropicProvider
-
-        model = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
-        base_url = os.environ.get("ANTHROPIC_BASE_URL")
-        logger.info("Fallback provider: Anthropic model=%s", model)
-        return AnthropicProvider(
-            ProviderSettings(type="anthropic", model=model, api_key=api_key, base_url=base_url)
-        )
-
-    from corpclaw_lite.config.settings import ProviderSettings
-    from corpclaw_lite.llm.openai import OpenAIProvider
-
-    base_url = os.environ.get("OPENAI_BASE_URL", "http://localhost:11434/v1")
-    model = os.environ.get("OPENAI_MODEL", "qwen2.5:7b")
-    openai_api_key = os.environ.get("OPENAI_API_KEY", "ollama")
-    logger.info("Fallback provider: OpenAI-compatible base_url=%s model=%s", base_url, model)
-    return OpenAIProvider(
-        ProviderSettings(type="openai", model=model, api_key=openai_api_key, base_url=base_url)
-    )
-
-
 def _build_router() -> Provider:
-    """Load settings.yaml and build an LLMRouter (or a single fallback provider)."""
+    """Load settings.yaml + env, build an LLMRouter from ProviderRegistry."""
     from corpclaw_lite.config.loader import load_settings
+    from corpclaw_lite.config.providers import ProviderRegistry
     from corpclaw_lite.llm.presets import PresetRegistry
     from corpclaw_lite.llm.router import LLMRouter
 
     settings = load_settings(PROJECT_ROOT / "config" / "settings.yaml")
+    provider_registry = ProviderRegistry.from_env()
+
+    if not provider_registry.list_all():
+        raise RuntimeError(
+            "No LLM providers configured. Set PROVIDER_* env vars in .env.\n"
+            "Example:\n"
+            "  PROVIDER_OLLAMA__TYPE=openai\n"
+            '  PROVIDER_OLLAMA__BASE_URL="http://localhost:11434/v1"\n'
+            '  PROVIDER_OLLAMA__API_KEY="ollama"'
+        )
 
     # Load model presets (optional — file may not exist)
     presets_path = PROJECT_ROOT / "config" / "model_presets.yaml"
     preset_registry = PresetRegistry.from_yaml(presets_path) if presets_path.exists() else None
 
-    if settings.llm.named:
-        logger.info("Building LLMRouter from settings.yaml (%d providers)", len(settings.llm.named))
-        return LLMRouter.from_settings(settings.llm, preset_registry=preset_registry)
-
     logger.info(
-        "No named providers in settings.yaml — falling back to env-based provider selection"
+        "Building LLMRouter (%d providers from env, %d routing rules)",
+        len(provider_registry),
+        len(settings.llm.routing),
     )
-    return _build_provider_from_env()
+    return LLMRouter.from_settings(
+        settings.llm,
+        provider_registry=provider_registry,
+        preset_registry=preset_registry,
+    )
 
 
 def _sandboxed_tool_classes() -> list[Any]:

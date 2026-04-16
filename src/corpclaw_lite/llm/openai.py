@@ -8,7 +8,7 @@ from typing import Any
 
 import openai
 
-from corpclaw_lite.config.settings import ProviderSettings
+from corpclaw_lite.config.providers import ProviderSettings
 from corpclaw_lite.llm.base import LLMResponse, Provider, StreamChunk, TokenUsage, ToolCall
 from corpclaw_lite.llm.presets import ModelPreset
 from corpclaw_lite.llm.xml_tool_calling import parse_xml_tool_call

@@ -1,15 +1,16 @@
-"""
-LLM Router — routes LLM requests to named providers based on task_kind or subagent_id.
+"""LLM Router — routes LLM requests to named providers based on task_kind or subagent_id.
 
 Design:
-    - Reads named providers from LLMSettings (populated from config/settings.yaml)
-    - Routing rules: task_kind and/or subagent_id → provider name
-    - Falls back to the 'default' provider if no rule matches
+    - Provider connections are registered via ``PROVIDER_*__*`` env vars (ProviderRegistry)
+    - Routing rules in ``config/settings.yaml`` map tasks to provider + model + preset
+    - Provider instances are cached per (provider_name, model, preset) combination
+    - Falls back to the "default" task_kind rule if no specific rule matches
     - Implements both Provider and VisionProvider protocols, so the router can be
       used as a drop-in replacement everywhere a Provider is expected
 
 Usage:
-    router = LLMRouter.from_settings(settings.llm, providers)
+    registry = ProviderRegistry.from_env()
+    router = LLMRouter.from_settings(settings.llm, registry, preset_registry)
     provider = router.for_task("vision")        # → vision-specific provider
     provider = router.for_subagent("exec-agent") # → subagent-specific provider
     response = await router.chat(messages)       # → uses default provider
@@ -21,9 +22,10 @@ import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
-from corpclaw_lite.config.settings import LLMSettings, ProviderSettings
+from corpclaw_lite.config.providers import ProviderConnection, ProviderRegistry, ProviderSettings
+from corpclaw_lite.config.settings import LLMSettings
 from corpclaw_lite.llm.base import LLMResponse, Provider, StreamChunk, VisionProvider
-from corpclaw_lite.llm.presets import PresetRegistry
+from corpclaw_lite.llm.presets import ModelPreset, PresetRegistry
 
 __all__ = [
     "LLMRouter",
@@ -34,34 +36,29 @@ logger = logging.getLogger(__name__)
 
 
 def build_provider(
-    settings: ProviderSettings,
-    preset_registry: PresetRegistry | None = None,
+    conn: ProviderConnection,
+    model: str,
+    preset: ModelPreset | None = None,
 ) -> Provider | None:
-    """Build a concrete Provider from a ProviderSettings spec.
+    """Build a concrete Provider from a connection + model + preset.
 
     Returns None if the provider cannot be built (e.g., missing required API key).
-    The caller should decide whether this is a fatal error or just skip the provider.
     """
-    # Resolve preset by name
-    preset = None
-    if settings.preset and preset_registry:
-        preset = preset_registry.get(settings.preset)
-        if preset is None:
-            logger.warning("Unknown preset '%s' for provider, ignoring", settings.preset)
-
-    if settings.type == "anthropic":
-        if not settings.api_key:
+    if conn.type == "anthropic":
+        if not conn.api_key:
             return None  # Anthropic requires a key; skip silently
         from corpclaw_lite.llm.anthropic import AnthropicProvider
 
+        settings = ProviderSettings(
+            type="anthropic", model=model, api_key=conn.api_key, base_url=conn.base_url
+        )
         return AnthropicProvider(settings, preset=preset)
 
     # Default: openai-compatible (Ollama, vLLM, LM Studio, OpenRouter, etc.)
     from corpclaw_lite.llm.openai import OpenAIProvider
 
-    # openai-compatible providers work without a real key (local models)
-    if not settings.api_key:
-        settings = ProviderSettings(**{**settings.model_dump(), "api_key": "dummy"})
+    api_key = conn.api_key or "dummy"  # local models may not need a real key
+    settings = ProviderSettings(type="openai", model=model, api_key=api_key, base_url=conn.base_url)
     return OpenAIProvider(settings, preset=preset)
 
 
@@ -70,89 +67,153 @@ class LLMRouter:
 
     Implements both Provider and VisionProvider protocols so it can be used
     as a drop-in replacement anywhere a Provider is expected. Internally,
-    `chat()` and `stream()` always use the default provider. To get a
-    task-specific provider, call `for_task()` or `for_subagent()`.
+    ``chat()`` and ``stream()`` always use the default routing rule
+    (``task_kind="default"``). To get a task-specific provider, call
+    ``for_task()`` or ``for_subagent()``.
     """
 
     def __init__(
         self,
         providers: dict[str, Provider],
-        default_name: str,
-        # (task_kind, subagent_id, provider_name)
-        routing: list[tuple[str | None, str | None, str]],
+        default_provider: Provider,
+        # (task_kind, subagent_id, provider)
+        routing: list[tuple[str | None, str | None, Provider]],
     ) -> None:
-        if default_name not in providers:
-            raise ValueError(
-                f"Default provider '{default_name}' not in providers: {list(providers)}"
-            )
         self._providers = providers
-        self._default_name = default_name
+        self._default_provider = default_provider
         self._routing = routing
         logger.info(
-            "LLMRouter ready: providers=%s default=%s rules=%d",
-            list(providers),
-            default_name,
+            "LLMRouter ready: %d provider instances, %d routing rules",
+            len(providers),
             len(routing),
         )
 
     @classmethod
     def from_settings(
-        cls, llm: LLMSettings, preset_registry: PresetRegistry | None = None
+        cls,
+        llm: LLMSettings,
+        provider_registry: ProviderRegistry,
+        preset_registry: PresetRegistry | None = None,
     ) -> LLMRouter:
-        """Build an LLMRouter from LLMSettings (populated from settings.yaml)."""
-        providers: dict[str, Provider] = {}
-        for name, spec in llm.named.items():
-            built = build_provider(spec, preset_registry=preset_registry)
-            if built is None:
-                logger.warning(
-                    "  [provider] %s skipped (type=%s, missing required credentials)",
-                    name,
-                    spec.type,
-                )
-                continue
-            providers[name] = built
-            preset_info = f" preset={spec.preset}" if spec.preset else ""
-            logger.info(
-                "  [provider] %s: type=%s model=%s%s", name, spec.type, spec.model, preset_info
-            )
+        """Build an LLMRouter from LLMSettings + ProviderRegistry + PresetRegistry."""
+        # Cache: (provider_name, model, preset_name) → Provider instance
+        cache: dict[tuple[str, str, str | None], Provider] = {}
+        default_provider: Provider | None = None
 
-        # Build routing table: list of (task_kind, subagent_id, provider_name)
-        routing: list[tuple[str | None, str | None, str]] = []
+        def _get_or_create(
+            provider_name: str,
+            model: str,
+            preset_name: str | None,
+        ) -> Provider | None:
+            cache_key = (provider_name, model, preset_name)
+            if cache_key in cache:
+                return cache[cache_key]
+
+            conn = provider_registry.get(provider_name)
+            if conn is None:
+                return None
+
+            preset: ModelPreset | None = None
+            if preset_name and preset_registry:
+                preset = preset_registry.get(preset_name)
+                if preset is None:
+                    logger.warning("Unknown preset '%s', ignoring", preset_name)
+
+            provider = build_provider(conn, model=model, preset=preset)
+            if provider is not None:
+                cache[cache_key] = provider
+            return provider
+
+        # Process routing rules
+        routing: list[tuple[str | None, str | None, Provider]] = []
+
         for rule in llm.routing:
-            provider_name = rule.provider
-            if provider_name not in providers:
+            rule_label = rule.task_kind or rule.subagent_id or "(unnamed)"
+
+            # Validate provider exists
+            if not provider_registry.get(rule.provider):
                 logger.warning(
-                    "Routing rule references unknown provider '%s', skipping", provider_name
+                    "Routing rule '%s': provider '%s' not found in registry, skipping. "
+                    "Available: %s",
+                    rule_label,
+                    rule.provider,
+                    provider_registry.list_all(),
                 )
                 continue
-            routing.append((rule.task_kind, rule.subagent_id, provider_name))
 
-        return cls(providers, llm.default, routing)
+            # Validate model is specified
+            if not rule.model:
+                logger.warning("Routing rule '%s': no model specified, skipping", rule_label)
+                continue
+
+            provider = _get_or_create(rule.provider, rule.model, rule.preset)
+            if provider is None:
+                logger.warning(
+                    "Routing rule '%s': failed to build provider '%s' with model '%s', skipping",
+                    rule_label,
+                    rule.provider,
+                    rule.model,
+                )
+                continue
+
+            logger.info(
+                "  [route] %s → provider=%s model=%s%s",
+                rule_label,
+                rule.provider,
+                rule.model,
+                f" preset={rule.preset}" if rule.preset else "",
+            )
+            routing.append((rule.task_kind, rule.subagent_id, provider))
+
+            # Track default provider
+            if rule.task_kind == "default" and default_provider is None:
+                default_provider = provider
+
+        if default_provider is None:
+            # Try first routing rule as fallback
+            if routing:
+                default_provider = routing[0][2]
+                logger.warning(
+                    "No routing rule with task_kind='default' found. "
+                    "Using first rule's provider as default."
+                )
+            else:
+                raise RuntimeError(
+                    "No valid routing rules found. Ensure settings.yaml has at least one "
+                    "routing rule with task_kind='default' and a valid provider + model."
+                )
+
+        # Build providers dict for lookup by cache key
+        providers: dict[str, Provider] = {}
+        for key, provider in cache.items():
+            providers[f"{key[0]}:{key[1]}"] = provider
+
+        return cls(providers, default_provider, routing)
 
     def for_task(self, task_kind: str) -> Provider:
         """Return the provider configured for a given task_kind.
 
         Falls back to the default provider if no rule matches.
         """
-        for rule_task, _rule_subagent, provider_name in self._routing:
+        for rule_task, _rule_subagent, provider in self._routing:
             if rule_task == task_kind:
-                return self._providers[provider_name]
-        return self._providers[self._default_name]
+                return provider
+        return self._default_provider
 
     def for_subagent(self, subagent_id: str) -> Provider:
         """Return the provider configured for a given subagent_id.
 
         Falls back to the default provider if no rule matches.
         """
-        for _rule_task, rule_subagent, provider_name in self._routing:
+        for _rule_task, rule_subagent, provider in self._routing:
             if rule_subagent == subagent_id:
-                return self._providers[provider_name]
-        return self._providers[self._default_name]
+                return provider
+        return self._default_provider
 
     @property
     def default(self) -> Provider:
         """Return the default provider."""
-        return self._providers[self._default_name]
+        return self._default_provider
 
     # ── Provider protocol implementation (delegates to default) ───────────────
 

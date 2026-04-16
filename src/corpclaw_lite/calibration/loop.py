@@ -152,12 +152,14 @@ class CalibrationLoop:
             )
 
         # Get cloud provider for analysis
+        from corpclaw_lite.config.providers import ProviderRegistry
         from corpclaw_lite.llm.router import build_provider
 
-        cloud_spec = settings.llm.named.get(self._cloud_name)
-        if not cloud_spec:
-            print(f"\n⚠️  Cloud provider '{self._cloud_name}' not configured in settings.yaml")
-            print("   Add it to llm.named or use --dry-run for score-only mode")
+        provider_registry = ProviderRegistry.from_env()
+        cloud_conn = provider_registry.get(self._cloud_name)
+        if not cloud_conn:
+            print(f"\n⚠️  Cloud provider '{self._cloud_name}' not registered in .env")
+            print("   Register it via PROVIDER_* env vars or use --dry-run for score-only mode")
             if workspace.exists():
                 shutil.rmtree(workspace)
             return CalibrationReport(
@@ -170,7 +172,15 @@ class CalibrationLoop:
                 improvements=["Cloud provider not available — dry-run only"],
             )
 
-        cloud_provider = build_provider(cloud_spec)
+        # Find calibration model from routing rules
+        cloud_model: str = "calibration"
+        for rule in settings.llm.routing:
+            if rule.task_kind == "calibration" and rule.provider == self._cloud_name:
+                if rule.model is not None:
+                    cloud_model = rule.model
+                break
+
+        cloud_provider = build_provider(cloud_conn, model=cloud_model)
         if cloud_provider is None:
             print(f"\n⚠️  Cloud provider '{self._cloud_name}' could not be built (missing API key?)")
             if workspace.exists():
@@ -376,11 +386,14 @@ class CalibrationLoop:
 
     @staticmethod
     def _get_model_id(settings: Settings) -> str:
-        """Extract model identifier from settings."""
-        default_name = settings.llm.default
-        provider = settings.llm.named.get(default_name)
-        if provider:
-            return str(provider.model)
+        """Extract model identifier from default routing rule."""
+        for rule in settings.llm.routing:
+            if rule.task_kind == "default" and rule.model:
+                return rule.model
+        # Fallback: first rule with a model
+        for rule in settings.llm.routing:
+            if rule.model:
+                return rule.model
         return "unknown"
 
     @staticmethod

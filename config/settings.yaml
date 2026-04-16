@@ -1,67 +1,43 @@
 # CorpClaw Lite — Main Configuration
 #
-# Secrets and API keys are injected via ${VAR:-default} from .env / environment.
-# To add a new LLM provider: add it to llm.named and optionally a routing rule.
-# To change routing: edit llm.routing — no code changes needed.
+# Providers are registered via PROVIDER_* env vars in .env.
+# This file defines routing: which provider + model to use for each task.
 #
-# Provider types:
-#   openai    — OpenAI-compatible: Ollama, vLLM, LM Studio, OpenRouter, etc.
-#   anthropic — native Anthropic SDK (supports base_url for proxies/gateways)
+# To add a new provider: add PROVIDER_<NAME>__* vars in .env, then add routing below.
+# To change routing: edit llm.routing — no code changes needed.
 
 llm:
-  # Name of the default named provider (used when no routing rule matches)
-  default: "default"
-
-  # Named providers — add as many as you need
-  named:
-    # Primary provider: resolves to whatever is set in .env
-    default:
-      type: "openai"
-      # model: "stepfun/step-3.5-flash:free"
-      # model: "lfm2.5-1.2b-thinking"
-      model: "qwen3.5-4b"
-      base_url: "${OPENAI_BASE_URL:-http://localhost:11434/v1}"
-      api_key: "${OPENAI_API_KEY:-ollama}"
-      preset: ""
-
-    # Vision provider: same base by default, override to use a dedicated vision model
-    vision:
-      type: "openai"
-      model: "qwen3.5-4b"
-      base_url: "${OPENAI_BASE_URL:-http://localhost:11434/v1}"
-      api_key: "${OPENAI_API_KEY:-ollama}"
-      preset: ""
-
-    # Cloud provider for calibration analysis and heavy tasks.
-    # Option A: Anthropic Claude (requires ANTHROPIC_API_KEY in .env)
-    cloud:
-      type: "anthropic"
-      model: "claude-sonnet-4-20250514"
-      api_key: "${ANTHROPIC_API_KEY:-}"
-      base_url: "${ANTHROPIC_BASE_URL:-}"
-
-    # Option B: OpenAI-compatible cloud (OpenRouter, DeepSeek, etc.)
-    # Uncomment and set as 'cloud' or use --cloud-provider cloud-openai
-    # cloud-openai:
-    #   type: "openai"
-    #   model: "deepseek/deepseek-chat-v3-0324:free"
-    #   base_url: "https://openrouter.ai/api/v1"
-    #   api_key: "${OPENROUTER_API_KEY:-}"
-
   # Routing rules — checked top-to-bottom, first match wins
-  # task_kind and subagent_id are optional; both may be set for specificity
+  # provider: must match a name registered via PROVIDER_* env vars in .env
+  # model:    model identifier for that provider
+  # preset:   (optional) model preset from config/model_presets.yaml
   routing:
-    # Vision tasks routed to the dedicated vision provider
+    # Main chat (used by AgentLoop)
+    - task_kind: "default"
+      provider: "lmstudio"
+      model: "qwen3.5-4b"
+      preset: "qwen3.5-thinking"
+
+    # Vision analysis (separate LLM call for images)
     - task_kind: "vision"
-      provider: "vision"
+      provider: "lmstudio"
+      model: "qwen3.5-4b"
 
-    # Memory consolidation uses the default provider (light summarisation)
+    # Memory consolidation (LLM-based history compression)
     - task_kind: "consolidate"
-      provider: "default"
+      provider: "lmstudio"
+      model: "qwen3.5-4b"
 
-    # Example: route a specific subagent to the cloud provider
-    # - subagent_id: "heavy-analysis-agent"
-    #   provider: "cloud"
+    # Calibration analysis (cloud provider recommended)
+    # Uncomment and configure PROVIDER_OPENROUTER__* in .env to enable
+    # - task_kind: "calibration"
+    #   provider: "openrouter"
+    #   model: "anthropic/claude-sonnet-4-20250514"
+
+    # Per-subagent routing (optional — falls back to default if no rule matches)
+    # - subagent_id: "research-agent"
+    #   provider: "openrouter"
+    #   model: "deepseek/deepseek-chat-v3-0324"
 
 agent:
   max_steps: 15
@@ -74,39 +50,38 @@ agent:
   compression:
     enabled: true
     max_context_tokens: 64000
-    # Trigger compression only at 80% capacity (was 50% — triggered after 1 large web_fetch)
+    # Trigger compression only at 80% capacity
     threshold_ratio: 0.8
     protect_tail_tokens: 3000
-    # Don't compress until at least 15 messages in history (prevents mid-task interruption)
+    summary_ratio: 0.20
     prune_min_messages: 15
 
-# Container isolation — per-user Docker sandboxes
-# Set enabled: false for local development without Docker
 container:
-  enabled: true
+  enabled: false
   image: "corpclaw-agent-base:latest"
-  workspace_base: "${WORKSPACE_BASE:-workspaces}"
+  workspace_base: "workspaces"
   max_memory: "512m"
   cpus: 0.5
   idle_timeout_seconds: 600
-
-# Semantic skill selection — only inject relevant skills into the prompt.
-# Reduces context usage for local LLMs with limited context windows.
-# Set selection_mode to "all" to revert to the legacy behaviour (inject everything).
-skills:
-  selection_mode: "semantic"  # "all" | "semantic"
-  top_k: 3                    # max skills injected per request
-  tfidf_threshold: 0.08       # minimum score to include a skill
-  keyword_boost: 0.5          # weight multiplier for keyword hits
+  max_per_user: 1
+  strict_capabilities: false
+  ipc_timeout_seconds: 120.0
 
 telegram:
+  workspace_base: "workspaces"
   rate_limit_per_minute: 10
+  whitelist: []
   default_department: "default"
+  admin_ids: []
 
-# Logging — file rotation + structured activity log
-# Set level to "INFO" to reduce verbosity in production
-# Set log_dir to an absolute path or relative to project root
+skills:
+  selection_mode: "semantic"
+  top_k: 3
+  tfidf_threshold: 0.08
+  keyword_boost: 0.5
+
 logging:
-  level: "DEBUG"           # corpclaw.log — detailed trace for debugging
-  console_level: "INFO"    # stdout/stderr — clean output for operators
-  log_dir: "${LOG_DIR:-logs}"
+  level: "DEBUG"
+  console_level: "INFO"
+  log_dir: "logs"
+  health_port: 8080

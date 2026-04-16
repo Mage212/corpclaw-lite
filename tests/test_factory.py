@@ -12,13 +12,24 @@ from corpclaw_lite.container.proxy import IPCToolProxy
 from corpclaw_lite.extensions.tools.registry import ToolRegistry
 from corpclaw_lite.users.manager import UserManager
 
+# Minimal PROVIDER_* env vars for tests — single local provider
+_PROVIDER_ENV = {
+    "PROVIDER_OLLAMA__TYPE": "openai",
+    "PROVIDER_OLLAMA__BASE_URL": "http://test:11434/v1",
+    "PROVIDER_OLLAMA__API_KEY": "ollama",
+}
+
 
 @pytest.fixture(autouse=True)
 def _clean_env() -> None:  # type: ignore[misc]
     """Ensure no stale env vars leak between tests."""
-    env_keys = ["ANTHROPIC_API_KEY", "ANTHROPIC_MODEL", "OPENAI_BASE_URL", "OPENAI_MODEL"]
     with patch.dict(os.environ, {}, clear=False):
-        for k in env_keys:
+        # Remove all PROVIDER_* vars
+        for k in list(os.environ):
+            if k.startswith("PROVIDER_"):
+                del os.environ[k]
+        # Remove legacy vars
+        for k in ["ANTHROPIC_API_KEY", "OPENAI_BASE_URL", "OPENAI_MODEL", "OPENAI_API_KEY"]:
             os.environ.pop(k, None)
         yield  # type: ignore[misc]
 
@@ -29,12 +40,10 @@ def _disable_containers() -> None:  # type: ignore[misc]
 
     Factory tests run without Docker. Container integration is tested separately
     in test_container_proxy.py and test_container_manager.py.
-    The settings.yaml override ensures container.enabled=false during import.
     """
     from corpclaw_lite.config import loader as config_loader
     from corpclaw_lite.config.settings import ContainerSettings, Settings
 
-    # Build a settings object with containers disabled
     _original_load = config_loader.load_settings
 
     def _mock_load(path: object = None) -> Settings:  # type: ignore[misc]
@@ -47,16 +56,10 @@ def _disable_containers() -> None:  # type: ignore[misc]
 
 
 def test_build_agent_stack_local_provider() -> None:
-    """Default config (no ANTHROPIC_API_KEY) should create OpenAIProvider."""
+    """With PROVIDER_OLLAMA env vars, should create OpenAIProvider."""
     from corpclaw_lite.agent.factory import build_agent_stack
 
-    with patch.dict(
-        os.environ,
-        {"OPENAI_BASE_URL": "http://test:11434/v1", "OPENAI_MODEL": "test-model"},
-        clear=False,
-    ):
-        # Remove anthropic key if present
-        os.environ.pop("ANTHROPIC_API_KEY", None)
+    with patch.dict(os.environ, _PROVIDER_ENV, clear=False):
         stack = build_agent_stack()
         loop, user_manager, registry, mcp_manager = (
             stack.loop,
@@ -68,7 +71,6 @@ def test_build_agent_stack_local_provider() -> None:
     assert isinstance(loop, AgentLoop)
     assert isinstance(user_manager, UserManager)
     assert isinstance(registry, ToolRegistry)
-    # mcp_manager is either None (no config file) or MCPManager — both valid
     _ = mcp_manager
 
     # Check builtin tools are registered (local mode — not IPCToolProxy)
@@ -88,13 +90,34 @@ def test_build_agent_stack_local_provider() -> None:
 
 
 def test_build_agent_stack_anthropic_provider() -> None:
-    """With ANTHROPIC_API_KEY set, should create AnthropicProvider."""
+    """With PROVIDER_ANTHROPIC env vars, should create AnthropicProvider."""
     from corpclaw_lite.agent.factory import build_agent_stack
+    from corpclaw_lite.config import loader as config_loader
+    from corpclaw_lite.config.settings import ContainerSettings, LLMSettings, RoutingRule, Settings
 
-    with patch.dict(
-        os.environ,
-        {"ANTHROPIC_API_KEY": "sk-ant-test", "ANTHROPIC_MODEL": "claude-3-haiku-20240307"},
-        clear=False,
+    _original_load = config_loader.load_settings
+
+    def _mock_load(path: object = None) -> Settings:  # type: ignore[misc]
+        settings = _original_load(path)  # type: ignore[arg-type]
+        settings.container = ContainerSettings(enabled=False)
+        settings.llm = LLMSettings(
+            routing=[
+                RoutingRule(
+                    task_kind="default",
+                    provider="anthropic",
+                    model="claude-3-haiku-20240307",
+                ),
+            ]
+        )
+        return settings
+
+    anthropic_env = {
+        "PROVIDER_ANTHROPIC__TYPE": "anthropic",
+        "PROVIDER_ANTHROPIC__API_KEY": "sk-ant-test",
+    }
+    with (
+        patch.object(config_loader, "load_settings", side_effect=_mock_load),
+        patch.dict(os.environ, anthropic_env, clear=False),
     ):
         stack = build_agent_stack()
 
@@ -102,12 +125,20 @@ def test_build_agent_stack_anthropic_provider() -> None:
     assert stack.loop._provider is not None
 
 
+def test_no_providers_raises_error() -> None:
+    """Without any PROVIDER_* env vars, must raise RuntimeError."""
+    from corpclaw_lite.agent.factory import build_agent_stack
+
+    # _clean_env fixture already removes all PROVIDER_* vars
+    with pytest.raises(RuntimeError, match="No LLM providers configured"):
+        build_agent_stack()
+
+
 def test_compressor_enabled_by_default() -> None:
     """ContextCompressor should be wired when compression.enabled=True (default)."""
     from corpclaw_lite.agent.factory import build_agent_stack
 
-    with patch.dict(os.environ, {"OPENAI_BASE_URL": "http://test:11434/v1"}, clear=False):
-        os.environ.pop("ANTHROPIC_API_KEY", None)
+    with patch.dict(os.environ, _PROVIDER_ENV, clear=False):
         stack = build_agent_stack()
 
     assert stack.loop._compressor is not None
@@ -117,8 +148,7 @@ def test_consolidator_enabled_by_default() -> None:
     """MemoryConsolidator should be wired when consolidation_enabled=True (default)."""
     from corpclaw_lite.agent.factory import build_agent_stack
 
-    with patch.dict(os.environ, {"OPENAI_BASE_URL": "http://test:11434/v1"}, clear=False):
-        os.environ.pop("ANTHROPIC_API_KEY", None)
+    with patch.dict(os.environ, _PROVIDER_ENV, clear=False):
         stack = build_agent_stack()
 
     assert stack.loop._consolidator is not None
@@ -128,8 +158,7 @@ def test_tool_guard_loaded() -> None:
     """ToolGuard should be created (may or may not have rules loaded)."""
     from corpclaw_lite.agent.factory import build_agent_stack
 
-    with patch.dict(os.environ, {"OPENAI_BASE_URL": "http://test:11434/v1"}, clear=False):
-        os.environ.pop("ANTHROPIC_API_KEY", None)
+    with patch.dict(os.environ, _PROVIDER_ENV, clear=False):
         stack = build_agent_stack()
 
     assert stack.loop._tool_guard is not None
@@ -139,8 +168,7 @@ def test_memory_wired() -> None:
     """SQLiteMemory should be wired into the loop."""
     from corpclaw_lite.agent.factory import build_agent_stack
 
-    with patch.dict(os.environ, {"OPENAI_BASE_URL": "http://test:11434/v1"}, clear=False):
-        os.environ.pop("ANTHROPIC_API_KEY", None)
+    with patch.dict(os.environ, _PROVIDER_ENV, clear=False):
         stack = build_agent_stack()
 
     assert stack.loop.memory is not None
@@ -164,7 +192,7 @@ def test_container_enabled_requires_docker() -> None:
     with (
         patch.object(config_loader, "load_settings", side_effect=_mock_load_enabled),
         patch.object(ContainerManager, "is_docker_available", return_value=False),
-        patch.dict(os.environ, {"OPENAI_BASE_URL": "http://test:11434/v1"}, clear=False),
+        patch.dict(os.environ, _PROVIDER_ENV, clear=False),
         pytest.raises(RuntimeError, match="Docker daemon is not available"),
     ):
         build_agent_stack()
@@ -188,17 +216,14 @@ def test_container_enabled_registers_ipc_proxies() -> None:
     mock_docker = MagicMock()
     mock_docker.from_env.return_value.ping.return_value = True
 
+    provider_env = {
+        **_PROVIDER_ENV,
+        "CORPCLAW_IPC_SECRET": "test-secret-for-unit-test",
+    }
     with (
         patch.object(config_loader, "load_settings", side_effect=_mock_load_enabled),
         patch.object(ContainerManager, "is_docker_available", return_value=True),
-        patch.dict(
-            os.environ,
-            {
-                "OPENAI_BASE_URL": "http://test:11434/v1",
-                "CORPCLAW_IPC_SECRET": "test-secret-for-unit-test",
-            },
-            clear=False,
-        ),
+        patch.dict(os.environ, provider_env, clear=False),
         patch("corpclaw_lite.container.manager.docker", mock_docker),
     ):
         stack = build_agent_stack()

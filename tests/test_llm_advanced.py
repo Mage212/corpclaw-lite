@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from corpclaw_lite.config.settings import ProviderSettings
+from corpclaw_lite.config.providers import ProviderSettings
 from corpclaw_lite.llm.anthropic import AnthropicProvider
 from corpclaw_lite.llm.openai import OpenAIProvider
 

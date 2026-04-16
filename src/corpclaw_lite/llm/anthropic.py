@@ -6,7 +6,7 @@ from typing import Any
 
 import anthropic
 
-from corpclaw_lite.config.settings import ProviderSettings
+from corpclaw_lite.config.providers import ProviderSettings
 from corpclaw_lite.llm.base import LLMResponse, Provider, StreamChunk, TokenUsage, ToolCall
 from corpclaw_lite.llm.presets import ModelPreset
 
