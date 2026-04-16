@@ -211,7 +211,13 @@ Conversation to summarize:
 Summary:"""
 
         try:
-            response = await self._provider.chat(
+            from corpclaw_lite.llm.router import LLMRouter
+
+            effective_provider = self._provider
+            if isinstance(self._provider, LLMRouter):
+                effective_provider = self._provider.for_task("compress")
+
+            response = await effective_provider.chat(
                 messages=[{"role": "user", "content": prompt}],
                 tools=None,
             )

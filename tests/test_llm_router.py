@@ -416,3 +416,122 @@ def test_default_property() -> None:
 
     assert router.default is not None
     assert router.default is router.for_task("default")
+
+
+# ── Production task_kinds ──────────────────────────────────────────────────────
+
+
+def test_consolidate_routing() -> None:
+    """for_task('consolidate') returns a dedicated provider when rule exists."""
+    registry = _make_registry()
+    settings = _make_settings([
+        RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
+        RoutingRule(task_kind="consolidate", provider="anthropic", model="claude-3-haiku"),
+    ])
+    router = LLMRouter.from_settings(settings, registry)
+
+    consolidate = router.for_task("consolidate")
+    assert consolidate is not None
+    assert consolidate is not router.default
+
+    from corpclaw_lite.llm.anthropic import AnthropicProvider
+
+    assert isinstance(consolidate, AnthropicProvider)
+
+
+def test_compress_routing() -> None:
+    """for_task('compress') returns a dedicated provider when rule exists."""
+    registry = _make_registry()
+    settings = _make_settings([
+        RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
+        RoutingRule(task_kind="compress", provider="ollama", model="small-model"),
+    ])
+    router = LLMRouter.from_settings(settings, registry)
+
+    compress = router.for_task("compress")
+    assert compress is not None
+    assert compress is not router.default
+
+
+def test_calibration_routing() -> None:
+    """for_task('calibration') returns cloud provider when rule exists."""
+    registry = _make_registry()
+    settings = _make_settings([
+        RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
+        RoutingRule(task_kind="calibration", provider="anthropic", model="claude-sonnet"),
+    ])
+    router = LLMRouter.from_settings(settings, registry)
+
+    calibration = router.for_task("calibration")
+    assert calibration is not None
+    assert calibration is not router.default
+
+    from corpclaw_lite.llm.anthropic import AnthropicProvider
+
+    assert isinstance(calibration, AnthropicProvider)
+
+
+def test_vision_routing() -> None:
+    """for_task('vision') returns dedicated provider for image analysis."""
+    registry = _make_registry()
+    settings = _make_settings([
+        RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
+        RoutingRule(task_kind="vision", provider="ollama", model="glm-ocr"),
+    ])
+    router = LLMRouter.from_settings(settings, registry)
+
+    vision = router.for_task("vision")
+    assert vision is not None
+    assert vision is not router.default
+
+
+def test_all_production_task_kinds_with_single_provider() -> None:
+    """All production task_kinds work when pointing to same provider+model."""
+    registry = _make_registry()
+    settings = _make_settings([
+        RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
+        RoutingRule(task_kind="vision", provider="ollama", model="qwen3.5-4b"),
+        RoutingRule(task_kind="consolidate", provider="ollama", model="qwen3.5-4b"),
+        RoutingRule(task_kind="compress", provider="ollama", model="qwen3.5-4b"),
+    ])
+    router = LLMRouter.from_settings(settings, registry)
+
+    # All should return the same cached instance (same provider+model+preset)
+    default = router.for_task("default")
+    assert router.for_task("vision") is default
+    assert router.for_task("consolidate") is default
+    assert router.for_task("compress") is default
+
+
+def test_subagent_research_agent_routing() -> None:
+    """for_subagent('research-agent') returns a dedicated provider."""
+    registry = _make_registry()
+    settings = _make_settings([
+        RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
+        RoutingRule(subagent_id="research-agent", provider="anthropic", model="claude-3-haiku"),
+    ])
+    router = LLMRouter.from_settings(settings, registry)
+
+    research = router.for_subagent("research-agent")
+    assert research is not None
+    assert research is not router.default
+
+    from corpclaw_lite.llm.anthropic import AnthropicProvider
+
+    assert isinstance(research, AnthropicProvider)
+
+
+def test_unknown_task_kind_falls_back_gracefully() -> None:
+    """Unknown task_kind always returns default, no crash."""
+    registry = _make_registry()
+    settings = _make_settings([
+        RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
+        RoutingRule(task_kind="vision", provider="ollama", model="glm-ocr"),
+    ])
+    router = LLMRouter.from_settings(settings, registry)
+
+    # These have no routing rules — should all fall back to default
+    assert router.for_task("consolidate") is router.default
+    assert router.for_task("compress") is router.default
+    assert router.for_task("calibration") is router.default
+    assert router.for_task("nonexistent") is router.default

@@ -151,9 +151,9 @@ class CalibrationLoop:
                 iterations_run=0,
             )
 
-        # Get cloud provider for analysis
+        # Get cloud provider for analysis via router
         from corpclaw_lite.config.providers import ProviderRegistry
-        from corpclaw_lite.llm.router import build_provider
+        from corpclaw_lite.llm.router import LLMRouter
 
         provider_registry = ProviderRegistry.from_env()
         cloud_conn = provider_registry.get(self._cloud_name)
@@ -172,30 +172,41 @@ class CalibrationLoop:
                 improvements=["Cloud provider not available — dry-run only"],
             )
 
-        # Find calibration model from routing rules
-        cloud_model: str = "calibration"
-        for rule in settings.llm.routing:
-            if rule.task_kind == "calibration" and rule.provider == self._cloud_name:
-                if rule.model is not None:
-                    cloud_model = rule.model
-                break
+        # Build a temporary router to resolve calibration-specific provider
+        router = LLMRouter.from_settings(settings.llm, provider_registry)
+        calibration_provider = router.for_task("calibration")
 
-        cloud_provider = build_provider(cloud_conn, model=cloud_model)
-        if cloud_provider is None:
-            print(f"\n⚠️  Cloud provider '{self._cloud_name}' could not be built (missing API key?)")
-            if workspace.exists():
-                shutil.rmtree(workspace)
-            return CalibrationReport(
-                model_id=self._get_model_id(settings),
-                baseline_passed=baseline_score.passed,
-                baseline_total=baseline_score.total,
-                final_passed=baseline_score.passed,
-                final_total=baseline_score.total,
-                iterations_run=0,
-                improvements=["Cloud provider not available"],
-            )
+        # If no calibration rule, try building directly from cloud provider connection
+        if calibration_provider is router.default:
+            from corpclaw_lite.llm.router import build_provider
 
-        analyzer = CalibrationAnalyzer(cloud_provider)
+            cloud_model: str = "calibration"
+            for rule in settings.llm.routing:
+                if rule.task_kind == "calibration" and rule.provider == self._cloud_name:
+                    if rule.model is not None:
+                        cloud_model = rule.model
+                    break
+
+            built = build_provider(cloud_conn, model=cloud_model)
+            if built is None:
+                print(
+                    f"\n⚠️  Cloud provider '{self._cloud_name}' could not be built"
+                    " (missing API key?)"
+                )
+                if workspace.exists():
+                    shutil.rmtree(workspace)
+                return CalibrationReport(
+                    model_id=self._get_model_id(settings),
+                    baseline_passed=baseline_score.passed,
+                    baseline_total=baseline_score.total,
+                    final_passed=baseline_score.passed,
+                    final_total=baseline_score.total,
+                    iterations_run=0,
+                    improvements=["Cloud provider not available"],
+                )
+            calibration_provider = built
+
+        analyzer = CalibrationAnalyzer(calibration_provider)
 
         # Hill-climbing loop
         best_score = baseline_score

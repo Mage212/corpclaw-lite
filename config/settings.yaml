@@ -28,6 +28,11 @@ llm:
       provider: "lmstudio"
       model: "qwen3.5-4b"
 
+    # Context compression (LLM-based summary of old turns)
+    - task_kind: "compress"
+      provider: "lmstudio"
+      model: "qwen3.5-4b"
+
     # Calibration analysis (cloud provider recommended)
     # Uncomment and configure PROVIDER_OPENROUTER__* in .env to enable
     # - task_kind: "calibration"

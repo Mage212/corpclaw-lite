@@ -20,6 +20,7 @@ from typing import Any
 
 from corpclaw_lite.exceptions import StorageError
 from corpclaw_lite.llm.base import Provider
+from corpclaw_lite.llm.router import LLMRouter
 from corpclaw_lite.memory.sqlite import SQLiteMemory
 
 __all__ = [
@@ -157,7 +158,11 @@ class MemoryConsolidator:
         conversation_text = self._format_messages(messages)
         prompt = CONSOLIDATION_PROMPT.format(conversation=conversation_text)
 
-        response = await self._provider.chat(
+        effective_provider = self._provider
+        if isinstance(self._provider, LLMRouter):
+            effective_provider = self._provider.for_task("consolidate")
+
+        response = await effective_provider.chat(
             messages=[{"role": "user", "content": prompt}],
         )
         return response.content.strip()
