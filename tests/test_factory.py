@@ -38,17 +38,32 @@ def _clean_env() -> None:  # type: ignore[misc]
 def _disable_containers() -> None:  # type: ignore[misc]
     """Disable container isolation for all factory tests.
 
-    Factory tests run without Docker. Container integration is tested separately
-    in test_container_proxy.py and test_container_manager.py.
+    Also rewrites routing rules to use 'ollama' provider (matching _PROVIDER_ENV)
+    since settings.yaml may reference different provider names (e.g. 'lmstudio').
     """
     from corpclaw_lite.config import loader as config_loader
-    from corpclaw_lite.config.settings import ContainerSettings, Settings
+    from corpclaw_lite.config.settings import (
+        ContainerSettings,
+        LLMSettings,
+        RoutingRule,
+        Settings,
+    )
 
     _original_load = config_loader.load_settings
 
     def _mock_load(path: object = None) -> Settings:  # type: ignore[misc]
         settings = _original_load(path)  # type: ignore[arg-type]
         settings.container = ContainerSettings(enabled=False)
+        # Rewrite all routing rules to use 'ollama' provider for test env vars
+        settings.llm = LLMSettings(
+            routing=[
+                RoutingRule(
+                    task_kind="default",
+                    provider="ollama",
+                    model="test-model",
+                ),
+            ]
+        )
         return settings
 
     with patch.object(config_loader, "load_settings", side_effect=_mock_load):
@@ -177,13 +192,21 @@ def test_memory_wired() -> None:
 def test_container_enabled_requires_docker() -> None:
     """When container.enabled=true and Docker is not available, must raise RuntimeError."""
     from corpclaw_lite.config import loader as config_loader
-    from corpclaw_lite.config.settings import ContainerSettings, Settings
+    from corpclaw_lite.config.settings import (
+        ContainerSettings,
+        LLMSettings,
+        RoutingRule,
+        Settings,
+    )
 
     _original_load = config_loader.load_settings
 
     def _mock_load_enabled(path: object = None) -> Settings:  # type: ignore[misc]
         settings = _original_load(path)  # type: ignore[arg-type]
         settings.container = ContainerSettings(enabled=True)
+        settings.llm = LLMSettings(
+            routing=[RoutingRule(task_kind="default", provider="ollama", model="test-model")]
+        )
         return settings
 
     from corpclaw_lite.agent.factory import build_agent_stack
@@ -201,13 +224,21 @@ def test_container_enabled_requires_docker() -> None:
 def test_container_enabled_registers_ipc_proxies() -> None:
     """When container.enabled=true and Docker is available, file tools are IPCToolProxy."""
     from corpclaw_lite.config import loader as config_loader
-    from corpclaw_lite.config.settings import ContainerSettings, Settings
+    from corpclaw_lite.config.settings import (
+        ContainerSettings,
+        LLMSettings,
+        RoutingRule,
+        Settings,
+    )
 
     _original_load = config_loader.load_settings
 
     def _mock_load_enabled(path: object = None) -> Settings:  # type: ignore[misc]
         settings = _original_load(path)  # type: ignore[arg-type]
         settings.container = ContainerSettings(enabled=True)
+        settings.llm = LLMSettings(
+            routing=[RoutingRule(task_kind="default", provider="ollama", model="test-model")]
+        )
         return settings
 
     from corpclaw_lite.agent.factory import build_agent_stack

@@ -112,12 +112,14 @@ async def test_F4_budget_guard_stops_loop(
     """
     from corpclaw_lite.agent.factory import PROJECT_ROOT
     from corpclaw_lite.config.loader import load_settings
+    from corpclaw_lite.config.providers import ProviderRegistry
     from corpclaw_lite.llm.router import LLMRouter
 
     _, registry = agent_stack_no_container
 
     settings = load_settings(PROJECT_ROOT / "config" / "settings.yaml")
-    provider = LLMRouter.from_settings(settings.llm)
+    provider_registry = ProviderRegistry.from_env()
+    provider = LLMRouter.from_settings(settings.llm, provider_registry)
 
     tight_settings = AgentSettings(
         max_steps=1,
