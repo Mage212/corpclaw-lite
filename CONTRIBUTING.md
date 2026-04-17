@@ -6,7 +6,7 @@ Thanks for your interest in contributing! This guide covers the essentials.
 
 ```bash
 # Fork and clone
-git clone https://github.com/YOUR-USERNAME/corpclaw-lite.git
+git clone https://github.com/Mage212/corpclaw-lite.git
 cd corpclaw-lite
 
 # Install (requires uv — https://docs.astral.sh/uv/)

@@ -45,4 +45,19 @@ hello.txt
 
 # MacOS
 .DS_Store
+
+# Dev tool configs (kept locally, not for remote)
+CLAUDE.md
+AGENTS.md
+.mcp.json
+.opencode/
+.qwen/
 .axme-code/
+plans/
+
+# Build artifacts
+src/*.egg-info/
+
+# SQLite WAL files
+*.db-shm
+*.db-wal

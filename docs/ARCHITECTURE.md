@@ -1,7 +1,7 @@
 # CorpClaw Lite — Архитектура проекта
 
-> Версия документа: 2026-04-15
-> Версия проекта: Phase 7 (Production-Ready) — ~119 модулей, ~15.4K LOC, 657 тестов
+> Версия документа: 2026-04-17
+> Версия проекта: Phase 7 (Production-Ready) — ~126 модулей, ~16.6K LOC, 806 тестов
 
 ---
 
@@ -31,10 +31,10 @@ corpclaw-lite/
 │   ├── onboarding/         # Гибридный онбординг пользователей
 │   ├── llm/                # LLM провайдеры (OpenAI, Anthropic, XML fallback, presets, router)
 │   ├── extensions/
-│   │   ├── tools/          # Инструменты + registry (13 builtin) + YAML overrides
+│   │   ├── tools/          # Инструменты + registry (18 builtin) + YAML overrides
 │   │   ├── skills/         # Markdown-скиллы + TF-IDF matcher + hot-reload (5s)
 │   │   ├── plugins/        # Плагины с manifest.yaml + sandbox worker + hot-reload (10s)
-│   │   ├── subagents/      # Специализированные субагенты (4 builtin)
+│   │   ├── subagents/      # Специализированные субагенты (5 builtin)
 │   │   └── mcp/            # Model Context Protocol интеграция + hot-reload (10s)
 │   ├── channels/           # CLI и Telegram каналы (12 Telegram-модулей)
 │   ├── security/           # ToolGuard (YAML + Smart), NetworkPolicy, CredentialScrubber, IPCAuth
@@ -47,10 +47,10 @@ corpclaw-lite/
 │   ├── utils/              # DB helpers
 │   └── logging/            # Структурированное логирование + health endpoint
 ├── config/                 # YAML-конфигурации + bootstrap prompts
-├── skills/                 # 5 Markdown-скиллов (code_reviewer, content_writer, doc_writer, translator, excel_normalizer)
+├── skills/                 # 7 Markdown-скиллов (code_reviewer, content_writer, doc_writer, translator, excel_normalizer, meeting_summary, data_analyst)
 ├── plugins/                # Директория плагинов
 ├── docker/                 # Dockerfile, Dockerfile.agent, seccomp_default.json
-└── tests/                  # Тесты (657 тестов, 68 файлов)
+└── tests/                  # Тесты (806 тестов, 85 файлов)
 ```
 
 ---
@@ -310,7 +310,7 @@ class Tool(ABC):
 - `load_overrides(path)` — YAML description overrides (калибровка)
 - `to_schemas()` / `to_schemas_for_user()` — OpenAI function schemas
 
-**Builtin Tools:**
+**Builtin Tools (18):**
 
 | Tool | Risk | Назначение |
 |------|------|------------|
@@ -322,10 +322,16 @@ class Tool(ABC):
 | `exec_script` | HIGH | Shell-команды (timeout 30s/120s max, 50KB truncation) |
 | `web_fetch` | MEDIUM | HTTP-запросы (SSRF protection, 1MB limit) |
 | `read_image` | LOW | Vision-анализ (terminal=True, separate LLM call) |
-| `memory_store` / `memory_recall` | LOW | Per-user SQLite факты |
+| `memory_store` | LOW | Сохранение per-user фактов в SQLite |
+| `memory_recall` | LOW | Поиск per-user фактов в SQLite |
 | `normalize_excel` | MEDIUM | Нормализация Excel (INN, dates, invisible chars) |
 | `send_file` | MEDIUM | Отправка файла (20MB limit) |
 | `dispatch_subagent` | LOW | Делегирование субагенту (terminal=True) |
+| `diff_text` | LOW | Сравнение текстов/файлов (unified/words/chars) |
+| `table_query` | MEDIUM | SQL-запросы к CSV/XLSX/JSON через DuckDB |
+| `chart_generate` | MEDIUM | Графики (bar, line, pie, scatter, histogram) |
+| `convert_format` | MEDIUM | Конвертация CSV ↔ XLSX ↔ JSON ↔ Markdown |
+| `pdf_reader` | LOW | Извлечение текста из PDF (page ranges) |
 
 ### Skills (`extensions/skills/`)
 
@@ -344,7 +350,7 @@ always: false
 ```
 
 **TF-IDF Matcher (`skills/matcher.py`):**
-- Bilingual stop-words (120+ RU + EN)
+- Bilingual stop-words (188: 108 RU + 80 EN)
 - Cosine similarity между query и skill TF-IDF vectors
 - Keyword boost: prefix match ("нормализ" → "нормализуй")
 - `top_k=3`, `tfidf_threshold=0.08`, `keyword_boost=0.5`
@@ -355,7 +361,7 @@ always: false
 - Track mtime per file
 - Detect: new, modified, deleted
 
-**Загруженные скилы (5):**
+**Загруженные скилы (7):**
 
 | Skill | Департаменты |
 |-------|-------------|
@@ -364,6 +370,8 @@ always: false
 | `doc_writer` | it, product, admin, default |
 | `translator` | * (все) |
 | `excel_normalizer` | marketing, finance, hr, analytics, admin, default |
+| `meeting_summary` | * (все) |
+| `data_analyst` | analytics, finance, marketing, admin, development, engineering |
 
 ### Plugins (`extensions/plugins/`)
 
@@ -405,14 +413,15 @@ components:
 
 ### Subagents (`extensions/subagents/`)
 
-4 builtin субагента:
+5 builtin субагентов:
 
 | ID | Tools | Prompt |
 |----|-------|--------|
-| `filesystem-agent` | read_file, list_files, search_files | `config/bootstrap/subagents/filesystem.md` |
+| `filesystem-agent` | read_file, list_files, search_files, write_file, edit_file | `config/bootstrap/subagents/filesystem.md` |
 | `document-agent` | read_file, write_file, edit_file, normalize_excel, list_files | `config/bootstrap/subagents/document.md` |
 | `execution-agent` | exec_script, write_file, read_file | `config/bootstrap/subagents/execution.md` |
-| `research-agent` | web_fetch, read_file, search_files, memory_store, memory_recall | `config/bootstrap/subagents/research.md` |
+| `research-agent` | web_fetch, read_file, search_files, list_files, memory_store, memory_recall | `config/bootstrap/subagents/research.md` |
+| `data-agent` | table_query, chart_generate, convert_format, pdf_reader, diff_text, read/write_file, list_files, search_files, send_file | `config/bootstrap/subagents/data-agent.md` |
 
 ### MCP Integration (`extensions/mcp/`)
 
@@ -852,24 +861,24 @@ skills:
 
 | Компонент | LOC | Файлов |
 |-----------|-----|--------|
-| Agent Core | ~1,888 | 10 |
-| Calibration | ~1,498 | 8 |
+| Agent Core | ~1,901 | 10 |
+| Calibration | ~1,522 | 8 |
 | Onboarding | ~614 | 5 |
-| LLM Providers | ~1,126 | 7 |
-| Extensions | ~3,991 | 38 |
-| Security | ~528 | 5 |
-| Channels | ~2,546 | 14 |
-| Container | ~807 | 6 |
-| Memory | ~501 | 3 |
+| LLM Providers | ~1,195 | 7 |
+| Extensions | ~2,558 | 43 |
+| Security | ~506 | 5 |
+| Channels | ~5,037 | 14 |
+| Container | ~806 | 6 |
+| Memory | ~477 | 3 |
 | Config + RBAC | ~511 | 5 |
 | Departments | ~130 | 3 |
 | Users | ~287 | 3 |
 | Runtime | ~47 | 2 |
 | Logging | ~178 | 3 |
 | Root (cli, etc.) | ~802 | 4 |
-| **Исходники** | **~15,354** | **~119** |
-| **Тесты** | **~11,197** | **~68** |
-| **Тест-функций** | **657** | |
+| **Исходники** | **~16,620** | **~126** |
+| **Тесты** | **~14,685** | **~85** |
+| **Тест-функций** | **806** | |
 
 ---
 
