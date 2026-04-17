@@ -4,9 +4,9 @@
 
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/).
 
-## [0.1.0] — 2026-04-17
+## [0.1.0-beta] — 2026-04-17
 
-Первый публичный релиз.
+Первый публичный бета-релиз.
 
 ### Added
 
@@ -97,4 +97,4 @@
 - Credential Scrubber для маскирования секретов
 - Network Policy deny-by-default
 
-[0.1.0]: https://github.com/Mage212/corpclaw-lite/releases/tag/v0.1.0
+[0.1.0-beta]: https://github.com/Mage212/corpclaw-lite/releases/tag/v0.1.0-beta
