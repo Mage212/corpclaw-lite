@@ -15,23 +15,23 @@ llm:
     # Main chat (used by AgentLoop)
     - task_kind: "default"
       provider: "lmstudio"
-      model: "qwen3.5-4b"
-      preset: "qwen3.5-thinking"
+      model: "qwen/qwen3.5-9b"
+      preset: "temperature-0.4"
 
     # Vision analysis (separate LLM call for images)
     - task_kind: "vision"
       provider: "lmstudio"
-      model: "qwen3.5-4b"
+      model: "qwen/qwen3.5-9b"
 
     # Memory consolidation (LLM-based history compression)
     - task_kind: "consolidate"
       provider: "lmstudio"
-      model: "qwen3.5-4b"
+      model: "qwen/qwen3.5-9b"
 
     # Context compression (LLM-based summary of old turns)
     - task_kind: "compress"
       provider: "lmstudio"
-      model: "qwen3.5-4b"
+      model: "qwen/qwen3.5-9b"
 
     # Calibration analysis (cloud provider recommended)
     # Uncomment and configure PROVIDER_OPENROUTER__* in .env to enable
@@ -62,7 +62,7 @@ agent:
     prune_min_messages: 15
 
 container:
-  enabled: false
+  enabled: true
   image: "corpclaw-agent-base:latest"
   workspace_base: "workspaces"
   max_memory: "512m"

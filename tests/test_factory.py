@@ -97,7 +97,8 @@ def test_build_agent_stack_local_provider() -> None:
     assert "read_image" in tool_names
     assert "memory_store" in tool_names
     assert "memory_recall" in tool_names
-    assert "normalize_excel" in tool_names
+    assert "normalize_excel" not in tool_names  # subagent-only
+    assert "excel_inspect" in tool_names  # lightweight, main agent
 
     # In dev mode (containers disabled), tools run on host (not IPCToolProxy)
     read_file_tool = registry.get("read_file")

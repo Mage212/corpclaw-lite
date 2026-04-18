@@ -110,12 +110,14 @@ def _build_router(settings: Settings | None = None) -> Provider:
     )
 
 
-def _sandboxed_tool_classes() -> list[Any]:
-    """Return the list of tool classes that need container isolation."""
+def _all_tool_classes() -> list[Any]:
+    """Return ALL tool classes (for subagent filtering and container registry)."""
     from corpclaw_lite.extensions.tools.builtin.chart_generate import ChartGenerateTool
     from corpclaw_lite.extensions.tools.builtin.convert_format import ConvertFormatTool
     from corpclaw_lite.extensions.tools.builtin.diff_text import DiffTextTool
     from corpclaw_lite.extensions.tools.builtin.excel import NormalizeExcelTool
+    from corpclaw_lite.extensions.tools.builtin.excel_inspect import ExcelInspectTool
+    from corpclaw_lite.extensions.tools.builtin.excel_workbook import ExcelWorkbookTool
     from corpclaw_lite.extensions.tools.builtin.exec_script import ExecScriptTool
     from corpclaw_lite.extensions.tools.builtin.files import (
         EditFileTool,
@@ -140,24 +142,52 @@ def _sandboxed_tool_classes() -> list[Any]:
         TableQueryTool(),
         ChartGenerateTool(),
         PdfReaderTool(),
+        ExcelInspectTool(),
+        ExcelWorkbookTool(),
     ]
+
+
+# Heavy tools only available to subagents (not exposed to main agent).
+_SUBAGENT_ONLY_TOOLS = {
+    "normalize_excel",
+    "table_query",
+    "convert_format",
+    "chart_generate",
+    "excel_workbook",
+}
+
+
+def _main_agent_tool_classes() -> list[Any]:
+    """Return tool classes for the main agent (lightweight, routing-oriented).
+
+    Heavy data tools (table_query, normalize_excel, etc.) are excluded —
+    the main agent should use ``excel_inspect`` to understand a file and
+    then ``dispatch_subagent`` for actual work.
+    """
+    return [t for t in _all_tool_classes() if t.name not in _SUBAGENT_ONLY_TOOLS]
 
 
 def _register_sandboxed_tools(
     registry: ToolRegistry,
     ipc: ContainerIPC,
+    tools: list[Any] | None = None,
 ) -> None:
     """Register file/script tools as IPCToolProxy (execute inside container)."""
     from corpclaw_lite.container.proxy import IPCToolProxy
 
-    for tool in _sandboxed_tool_classes():
+    tool_list = tools or _main_agent_tool_classes()
+    for tool in tool_list:
         registry.register(IPCToolProxy.from_tool(tool, ipc))
         logger.debug("Registered sandboxed IPCToolProxy: %s", tool.name)
 
 
-def _register_local_tools(registry: ToolRegistry) -> None:
+def _register_local_tools(
+    registry: ToolRegistry,
+    tools: list[Any] | None = None,
+) -> None:
     """Register file/script tools to run directly on the host (dev/test mode)."""
-    for tool in _sandboxed_tool_classes():
+    tool_list = tools or _main_agent_tool_classes()
+    for tool in tool_list:
         registry.register(tool)
         logger.debug("Registered local tool (no container): %s", tool.name)
 
@@ -196,6 +226,7 @@ def _build_extensions_stack(
     workspace_base: Path | None = None,
     skill_matcher: SkillMatcher | None = None,
     skill_registry: SkillRegistry | None = None,
+    full_tool_registry: ToolRegistry | None = None,
 ) -> SubagentRegistry:
     """Register subagents, MCP, host-side tools."""
     from corpclaw_lite.agent.subagent import SubagentDispatcher
@@ -213,7 +244,7 @@ def _build_extensions_stack(
     if subagent_registry.list_all():
         dispatcher = SubagentDispatcher(
             provider=provider,
-            main_registry=registry,
+            main_registry=full_tool_registry or registry,
             settings=agent_settings,
             tool_guard=guard,
             permission_checker=permission_checker,
@@ -339,11 +370,22 @@ def build_agent_stack(
             workspace_base,
         )
     else:
+        container_ipc = None
         _register_local_tools(registry)
         logger.warning(
             "Container isolation DISABLED (container.enabled=false) — "
             "file/script tools run on host. Dev mode only!"
         )
+
+    # Build a separate registry with ALL tools for subagent filtering.
+    # Subagents need access to heavy tools (table_query, normalize_excel, etc.)
+    # that are NOT registered in the main agent's registry.
+    full_tool_reg = ToolRegistry()
+    all_tools = _all_tool_classes()
+    if container_cfg.enabled and container_ipc is not None:
+        _register_sandboxed_tools(full_tool_reg, container_ipc, tools=all_tools)
+    else:
+        _register_local_tools(full_tool_reg, tools=all_tools)
 
     guard, permission_checker = _build_security_stack(full_settings, provider)
 
@@ -364,6 +406,7 @@ def build_agent_stack(
         workspace_base=workspace_base,
         skill_matcher=skill_matcher,
         skill_registry=skill_registry,
+        full_tool_registry=full_tool_reg,
     )
     memory, consolidator, compressor = _build_memory_stack(agent_settings, provider, registry)
 

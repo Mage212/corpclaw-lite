@@ -14,6 +14,7 @@ allowed_tools:
   - table_query
   - chart_generate
   - convert_format
+  - excel_workbook
   - pdf_reader
   - diff_text
   - read_file

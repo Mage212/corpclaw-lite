@@ -13,5 +13,7 @@ allowed_tools:
   - read_file
   - edit_file
   - normalize_excel
+  - convert_format
+  - excel_workbook
   - list_files
 prompt_path: "config/bootstrap/subagents/document.md"
