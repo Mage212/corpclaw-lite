@@ -2,12 +2,16 @@ id: document-agent
 name: Document Agent
 description: >
   Specialised agent for creating and managing documents. Writes structured
-  content (markdown, reports, summaries) to files and confirms the result.
+  content (markdown, reports, summaries) to files, fills Excel templates,
+  extracts PDF text, compares document versions, and confirms results.
 capabilities:
   - create markdown documents
   - write structured text files
   - generate summaries and reports
   - read and verify created files
+  - extract text from PDF documents
+  - compare texts and detect differences
+  - fill Excel templates preserving formatting
 allowed_tools:
   - write_file
   - read_file
@@ -16,4 +20,6 @@ allowed_tools:
   - convert_format
   - excel_workbook
   - list_files
+  - pdf_reader
+  - diff_text
 prompt_path: "config/bootstrap/subagents/document.md"

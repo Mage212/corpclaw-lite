@@ -90,15 +90,25 @@ def test_build_agent_stack_local_provider() -> None:
 
     # Check builtin tools are registered (local mode — not IPCToolProxy)
     tool_names = [t.name for t in registry.list_all()]
+    # Main agent has lightweight inspection/routing tools
     assert "read_file" in tool_names
-    assert "write_file" in tool_names
-    assert "exec_script" in tool_names
+    assert "list_files" in tool_names
+    assert "search_files" in tool_names
+    assert "excel_inspect" in tool_names
+    # Host-side tools registered separately
     assert "web_fetch" in tool_names
     assert "read_image" in tool_names
     assert "memory_store" in tool_names
     assert "memory_recall" in tool_names
-    assert "normalize_excel" not in tool_names  # subagent-only
-    assert "excel_inspect" in tool_names  # lightweight, main agent
+    assert "dispatch_subagent" in tool_names
+    # Subagent-only tools NOT in main registry
+    assert "write_file" not in tool_names
+    assert "exec_script" not in tool_names
+    assert "normalize_excel" not in tool_names
+    assert "table_query" not in tool_names
+    assert "excel_workbook" not in tool_names
+    assert "diff_text" not in tool_names
+    assert "pdf_reader" not in tool_names
 
     # In dev mode (containers disabled), tools run on host (not IPCToolProxy)
     read_file_tool = registry.get("read_file")
@@ -264,9 +274,43 @@ def test_container_enabled_registers_ipc_proxies() -> None:
     registry = stack.tool_registry
     read_file_tool = registry.get("read_file")
     assert isinstance(read_file_tool, IPCToolProxy)
+
+    # exec_script is subagent-only, not in main registry
     exec_tool = registry.get("exec_script")
-    assert isinstance(exec_tool, IPCToolProxy)
+    assert exec_tool is None
 
     # Host-side tools should NOT be proxied
     web_fetch = registry.get("web_fetch")
     assert not isinstance(web_fetch, IPCToolProxy)
+
+
+def test_main_agent_tool_classes_has_four_factory_tools() -> None:
+    """Main agent should have exactly 4 factory tools (inspection + routing)."""
+    from corpclaw_lite.agent.factory import _main_agent_tool_classes
+
+    main_tools = {t.name for t in _main_agent_tool_classes()}
+    assert main_tools == {"read_file", "list_files", "search_files", "excel_inspect"}
+
+
+def test_all_tool_classes_has_full_set() -> None:
+    """Full tool set should include all 14 factory tools."""
+    from corpclaw_lite.agent.factory import _all_tool_classes
+
+    all_names = {t.name for t in _all_tool_classes()}
+    expected = {
+        "read_file",
+        "write_file",
+        "edit_file",
+        "list_files",
+        "search_files",
+        "exec_script",
+        "normalize_excel",
+        "diff_text",
+        "convert_format",
+        "table_query",
+        "chart_generate",
+        "pdf_reader",
+        "excel_inspect",
+        "excel_workbook",
+    }
+    assert all_names == expected

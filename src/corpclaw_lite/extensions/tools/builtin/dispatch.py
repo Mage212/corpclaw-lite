@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any
 
 from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
@@ -12,6 +13,8 @@ if TYPE_CHECKING:
     from corpclaw_lite.agent.subagent import SubagentDispatcher
     from corpclaw_lite.extensions.subagents.registry import SubagentRegistry
     from corpclaw_lite.users.models import User
+
+logger = logging.getLogger(__name__)
 
 
 class DispatchSubagentTool(Tool):
@@ -54,13 +57,33 @@ class DispatchSubagentTool(Tool):
         if user is None:
             return "Error: User context is required for subagent dispatch."
 
+        logger.info(
+            "Delegation request: subagent=%s user=%s task=%.80s",
+            subagent_id,
+            user.id,
+            task,
+        )
+
         spec = self._subagent_registry.get_spec(subagent_id)
         if not spec:
             available = [s.id for s in self._subagent_registry.get_allowed_subagents(user)]
+            logger.warning(
+                "Subagent not found: requested=%s user=%s available=%s",
+                subagent_id,
+                user.id,
+                available,
+            )
             return f"Error: Subagent '{subagent_id}' not found. Available: {available}"
 
         # Department-level permission check on the subagent spec
         if "*" not in spec.allowed_departments and user.department not in spec.allowed_departments:
+            logger.warning(
+                "Permission denied: subagent=%s user=%s dept=%s allowed=%s",
+                subagent_id,
+                user.id,
+                user.department,
+                spec.allowed_departments,
+            )
             return (
                 f"Error: Permission denied. Your department ({user.department}) "
                 f"cannot use subagent '{subagent_id}'."

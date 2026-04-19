@@ -154,6 +154,11 @@ _SUBAGENT_ONLY_TOOLS = {
     "convert_format",
     "chart_generate",
     "excel_workbook",
+    "write_file",
+    "edit_file",
+    "exec_script",
+    "diff_text",
+    "pdf_reader",
 }
 
 
@@ -257,8 +262,18 @@ def _build_extensions_stack(
             len(subagent_registry.list_all()),
         )
 
-    registry.register(WebFetchTool())
-    registry.register(ReadImageTool(VisionProcessor(provider), workspace_base=workspace_base))
+    web_fetch_tool = WebFetchTool()
+    read_image_tool = ReadImageTool(VisionProcessor(provider), workspace_base=workspace_base)
+
+    registry.register(web_fetch_tool)
+    registry.register(read_image_tool)
+
+    # Also register host-side tools on full_tool_registry so subagents
+    # can access them when listed in allowed_tools (e.g. research-agent → web_fetch).
+    if full_tool_registry is not None:
+        full_tool_registry.register(web_fetch_tool)
+        full_tool_registry.register(read_image_tool)
+
     return subagent_registry
 
 
@@ -266,6 +281,7 @@ def _build_memory_stack(
     agent_settings: AgentSettings,
     provider: Provider,
     registry: ToolRegistry,
+    full_tool_registry: ToolRegistry | None = None,
 ) -> tuple[SQLiteMemory, MemoryConsolidator | None, ContextCompressor | None]:
     """Build memory, consolidation, compression."""
     from corpclaw_lite.agent.compressor import ContextCompressor
@@ -274,8 +290,15 @@ def _build_memory_stack(
     from corpclaw_lite.memory.sqlite import SQLiteMemory
 
     memory = SQLiteMemory()
-    registry.register(MemoryStoreTool(memory))
-    registry.register(MemoryRecallTool(memory))
+    store_tool = MemoryStoreTool(memory)
+    recall_tool = MemoryRecallTool(memory)
+
+    registry.register(store_tool)
+    registry.register(recall_tool)
+
+    if full_tool_registry is not None:
+        full_tool_registry.register(store_tool)
+        full_tool_registry.register(recall_tool)
 
     consolidator = None
     if agent_settings.consolidation_enabled:
@@ -408,7 +431,9 @@ def build_agent_stack(
         skill_registry=skill_registry,
         full_tool_registry=full_tool_reg,
     )
-    memory, consolidator, compressor = _build_memory_stack(agent_settings, provider, registry)
+    memory, consolidator, compressor = _build_memory_stack(
+        agent_settings, provider, registry, full_tool_registry=full_tool_reg
+    )
 
     mcp_manager: MCPManager | None = None
     mcp_config = PROJECT_ROOT / "config" / "mcp_servers.yaml"

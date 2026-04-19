@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import TYPE_CHECKING
 
 import anyio
@@ -69,6 +70,14 @@ class SubagentDispatcher:
             if "*" in spec.allowed_tools or tool_name in spec.allowed_tools:
                 isolated_registry.register(tool)
 
+        registered_names = list(isolated_registry.items().keys())
+        logger.debug(
+            "Subagent %s: filtered to %d tools: %s",
+            spec.id,
+            len(registered_names),
+            ", ".join(registered_names),
+        )
+
         # Load system prompt: calibrated override > prompt_path > description fallback
         system_prompt = f"You are a specialized subagent: {spec.name}.\n{spec.description}\n"
         if spec.prompt_path:
@@ -132,9 +141,17 @@ class SubagentDispatcher:
         timeout_seconds = self._settings.max_wall_time_ms / 1000
 
         try:
+            t0 = time.monotonic()
             result, _ = await asyncio.wait_for(
                 loop.run(user, task_context, system_prompt=system_prompt),
                 timeout=timeout_seconds,
+            )
+            elapsed = time.monotonic() - t0
+            logger.info(
+                "Subagent %s completed: duration=%.1fs result_len=%d",
+                spec.id,
+                elapsed,
+                len(result),
             )
             return result
         except TimeoutError:

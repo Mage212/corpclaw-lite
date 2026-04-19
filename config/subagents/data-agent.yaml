@@ -2,26 +2,23 @@ id: data-agent
 name: Data Analysis Agent
 description: >
   Specialised agent for data analysis workflows. Loads CSV/XLSX/JSON data,
-  runs SQL queries, generates charts, converts formats, and extracts PDF text.
+  runs SQL queries, generates charts, converts formats, and reads/writes
+  structured Excel workbooks.
 capabilities:
   - run SQL queries on tabular data via table_query
   - generate charts and visualizations via chart_generate
   - convert between data formats via convert_format
-  - extract text from PDF via pdf_reader
-  - compare texts and files via diff_text
+  - read and write Excel workbooks by cell coordinate
   - read and write files for data workflows
 allowed_tools:
   - table_query
   - chart_generate
   - convert_format
   - excel_workbook
-  - pdf_reader
-  - diff_text
   - read_file
   - write_file
   - list_files
   - search_files
-  - send_file
 allowed_departments:
   - analytics
   - finance

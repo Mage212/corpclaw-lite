@@ -29,8 +29,20 @@ class PermissionChecker:
     def can_use_tool(self, user: User, tool_name: str) -> bool:
         dept = self._manager.get_department(user.department)
         if not dept:
+            logger.debug(
+                "Permission check: can_use_tool dept=%s not found, denying tool=%s",
+                user.department,
+                tool_name,
+            )
             return False
-        return self._is_allowed(dept.allowed_tools, tool_name)
+        result = self._is_allowed(dept.allowed_tools, tool_name)
+        logger.debug(
+            "Permission check: can_use_tool dept=%s tool=%s result=%s",
+            user.department,
+            tool_name,
+            result,
+        )
+        return result
 
     def can_use_skill(self, user: User, skill_id: str) -> bool:
         dept = self._manager.get_department(user.department)
@@ -47,8 +59,20 @@ class PermissionChecker:
     def can_dispatch_subagent(self, user: User, subagent_id: str) -> bool:
         dept = self._manager.get_department(user.department)
         if not dept:
+            logger.debug(
+                "Permission check: can_dispatch_subagent dept=%s not found, denying subagent=%s",
+                user.department,
+                subagent_id,
+            )
             return False
-        return self._is_allowed(dept.allowed_subagents, subagent_id)
+        result = self._is_allowed(dept.allowed_subagents, subagent_id)
+        logger.debug(
+            "Permission check: can_dispatch_subagent dept=%s subagent=%s result=%s",
+            user.department,
+            subagent_id,
+            result,
+        )
+        return result
 
     def can_use_mcp(self, user: User, server_name: str) -> bool:
         dept = self._manager.get_department(user.department)
