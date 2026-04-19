@@ -68,7 +68,7 @@ uv run corpclaw-lite chat
 uv run corpclaw-lite telegram
 
 # Сборка Docker-образа песочницы (для продакшена)
-cd docker && docker build -t corpclaw-agent-base:latest -f Dockerfile .
+docker build -f docker/Dockerfile -t corpclaw-agent-base:latest .
 ```
 
 Для режима разработки без Docker установите в `config/settings.yaml`:
