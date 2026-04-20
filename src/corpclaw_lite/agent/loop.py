@@ -197,16 +197,21 @@ class AgentLoop:
         if self._memory:
             await self._save_memory(mem_key, "user", message)
 
-        # Get budget from department if permission checker is available
-        guard_config = (
-            self._permission_checker.get_budget(user)
-            if self._permission_checker
-            else SimpleBudgetGuardConfig(
+        # Time budget is ALWAYS from settings (depends on hardware/model speed).
+        # Department budget controls only iterations and tool calls (complexity limits).
+        if self._permission_checker:
+            dept_budget = self._permission_checker.get_budget(user)
+            guard_config = SimpleBudgetGuardConfig(
+                max_iterations=dept_budget.max_iterations,
+                max_tool_calls=dept_budget.max_tool_calls,
+                max_time_ms=self._settings.max_wall_time_ms,
+            )
+        else:
+            guard_config = SimpleBudgetGuardConfig(
                 max_iterations=self._settings.max_steps,
                 max_tool_calls=self._settings.max_tool_calls,
                 max_time_ms=self._settings.max_wall_time_ms,
             )
-        )
         budget = SimpleBudgetGuard(guard_config)
         progress = SimpleProgressGuard()
         tools_schema = (
@@ -218,7 +223,6 @@ class AgentLoop:
 
         try:
             while True:
-                budget.check()
                 budget.consume_iteration()
                 stats.iterations += 1
 
@@ -268,7 +272,9 @@ class AgentLoop:
                     )
 
                 if not response.tool_calls:
-                    # Agent provided text directly — save and return
+                    # Final answer — ALWAYS return, even if time budget exceeded.
+                    # The model already completed its work; discarding it wastes the
+                    # entire LLM call and frustrates users who waited for a response.
                     final = response.content if response.content else "Agent provided no response."
                     if self._memory:
                         await self._save_turn(mem_key, final, stats.tools_used, response.reasoning)
@@ -284,10 +290,13 @@ class AgentLoop:
                     )
                     return final, stats
 
+                # Model wants more work — check ALL budget limits before continuing.
+                budget.check()
+                budget.consume_tool_calls(len(response.tool_calls))
+
                 # Agent requested tools — emit a single assistant message
                 # containing both content (if any) and tool_calls.
                 context.add_tool_calls(response.tool_calls, content=response.content or None)
-                budget.consume_tool_calls(len(response.tool_calls))
                 health.increment("tool_calls", len(response.tool_calls))
 
                 if self._can_parallelize(response.tool_calls):

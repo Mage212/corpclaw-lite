@@ -2,7 +2,10 @@
 #
 # Each department defines:
 #   allowed_tools: tools this department can use (["*"] = all)
-#   budget: optional override for agent loop limits
+#   budget: optional override for agent loop limits (iterations + tool_calls only)
+#
+# Time budget (max_wall_time_ms) is controlled globally in config/settings.yaml
+# because it depends on hardware/model speed, not on department complexity.
 #
 # Main agent tools (inspection + routing):
 #   read_file, list_files, search_files, excel_inspect
@@ -30,7 +33,6 @@ departments:
     budget:
       max_iterations: 10
       max_tool_calls: 20
-      max_time_ms: 60000
 
   engineering:
     description: "Software engineering and IT teams"
@@ -39,7 +41,6 @@ departments:
     budget:
       max_iterations: 20
       max_tool_calls: 50
-      max_time_ms: 120000
 
   it:
     description: "IT support and infrastructure"
@@ -57,7 +58,6 @@ departments:
     budget:
       max_iterations: 15
       max_tool_calls: 30
-      max_time_ms: 90000
 
   marketing:
     description: "Marketing and communications"
@@ -75,7 +75,6 @@ departments:
     budget:
       max_iterations: 10
       max_tool_calls: 20
-      max_time_ms: 60000
 
   finance:
     description: "Finance and accounting"
@@ -93,7 +92,6 @@ departments:
     budget:
       max_iterations: 10
       max_tool_calls: 20
-      max_time_ms: 60000
 
   hr:
     description: "Human resources"
@@ -111,7 +109,6 @@ departments:
     budget:
       max_iterations: 10
       max_tool_calls: 20
-      max_time_ms: 60000
 
   analytics:
     description: "Data analytics and BI"
@@ -129,7 +126,6 @@ departments:
     budget:
       max_iterations: 15
       max_tool_calls: 30
-      max_time_ms: 90000
 
   product:
     description: "Product management"
@@ -147,7 +143,6 @@ departments:
     budget:
       max_iterations: 10
       max_tool_calls: 20
-      max_time_ms: 60000
 
   admin:
     description: "System administrators — full access"
@@ -156,7 +151,6 @@ departments:
     budget:
       max_iterations: 25
       max_tool_calls: 60
-      max_time_ms: 180000
 
   development:
     description: "Software development team"
@@ -165,4 +159,3 @@ departments:
     budget:
       max_iterations: 20
       max_tool_calls: 50
-      max_time_ms: 120000

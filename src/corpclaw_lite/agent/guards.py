@@ -91,7 +91,7 @@ class SimpleBudgetGuardConfig:
     enabled: bool = True
     max_iterations: int = 15
     max_tool_calls: int = 30
-    max_time_ms: int = 120000  # 2 minutes by default
+    max_time_ms: int = 300000  # 5 minutes by default
 
 
 @dataclass

@@ -86,5 +86,5 @@ class PermissionChecker:
         """
         dept = self._manager.get_department(user.department)
         if not dept:
-            return SimpleBudgetGuardConfig(max_iterations=10, max_tool_calls=20, max_time_ms=60000)
+            return SimpleBudgetGuardConfig(max_iterations=10, max_tool_calls=20, max_time_ms=300000)
         return dept.budget
