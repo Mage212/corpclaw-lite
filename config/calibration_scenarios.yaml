@@ -157,6 +157,14 @@ scenarios:
       expected_subagent: "research-agent"
       has_content: true
 
+  - id: inspect_excel_delegate
+    category: multi_step
+    user_message: "Изучи детально наполнение файла report.xlsx"
+    expected:
+      tool_calls: ["excel_inspect", "dispatch_subagent"]
+      expected_subagent: "data-agent"
+      notes: "First inspect structure, then delegate to data-agent for detailed reading"
+
   # ── Web Fetch ──────────────────────────────────────────────────
   - id: web_fetch_basic
     category: tool_use

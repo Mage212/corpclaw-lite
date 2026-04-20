@@ -24,6 +24,8 @@ keywords:
   - spreadsheet
   - инн
   - дата
+scope:
+  - document-agent
 ---
 
 # Excel Normalizer Skill

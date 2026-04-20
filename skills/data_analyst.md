@@ -47,6 +47,8 @@ keywords:
   - сумма
   - count
   - количе
+scope:
+  - data-agent
 ---
 
 # Data Analyst Skill

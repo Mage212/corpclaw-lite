@@ -116,10 +116,11 @@ class SubagentDispatcher:
                         spec.prompt_path,
                     )
 
-        # Inject matched skills into subagent prompt (same logic as main agent)
+        # Inject matched skills into subagent prompt — only skills scoped to this subagent
         if self._skill_matcher is not None and self._skill_registry is not None:
             allowed_skills = self._skill_registry.get_allowed_skills(user)
-            matched = self._skill_matcher.match(task_context, allowed_skills)
+            scoped_skills = [s for s in allowed_skills if "*" in s.scope or spec.id in s.scope]
+            matched = self._skill_matcher.match(task_context, scoped_skills)
             from corpclaw_lite.agent.prompt import build_skill_block
 
             skill_block = build_skill_block(matched, [])

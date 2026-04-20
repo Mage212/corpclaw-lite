@@ -242,8 +242,10 @@ class ExcelInspectTool(Tool):
     name = "excel_inspect"
     description = (
         "Quickly inspect a tabular file's structure: sheets, dimensions, "
-        "merged cells, color groups, sample values. Use before dispatching "
-        "subagents to understand what the file contains and pick the right tool."
+        "merged cells, color groups, and a small preview. For detailed cell "
+        "contents, reading specific ranges, or data analysis, dispatch a "
+        "subagent (data-agent or document-agent) — they have excel_workbook "
+        "and table_query tools."
     )
     params = [
         ToolParam(

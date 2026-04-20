@@ -408,8 +408,10 @@ class TelegramBotOrchestrator:
             from corpclaw_lite.agent.prompt import build_skill_block
 
             all_candidate_skills = allowed_skills + plugin_skills
+            # Filter skills by scope — main agent only gets skills scoped to "main"
+            main_scoped = [s for s in all_candidate_skills if "*" in s.scope or "main" in s.scope]
             if stack.skill_matcher is not None:
-                matched_skills = stack.skill_matcher.match(message, all_candidate_skills)
+                matched_skills = stack.skill_matcher.match(message, main_scoped)
             else:
                 matched_skills = all_candidate_skills
             skill_block = build_skill_block(matched_skills, [])

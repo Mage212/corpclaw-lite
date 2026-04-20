@@ -80,5 +80,6 @@ class SkillLoader:
             path=path,
             version=metadata.get("version", "1.0.0"),
             keywords=metadata.get("keywords", []),
+            scope=metadata.get("scope", ["*"]),
             always=metadata.get("always", False),
         )
