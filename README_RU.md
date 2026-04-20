@@ -182,6 +182,7 @@ id: my_skill
 description: "Описание для семантического матчинга"
 allowed_for: ["marketing", "engineering"]
 keywords: ["отчёт", "report", "генерация"]
+scope: ["main"]  # ["*"] для всех, ["data-agent"] для сабагента
 always: false
 ---
 
