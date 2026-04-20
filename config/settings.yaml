@@ -47,7 +47,7 @@ llm:
 agent:
   max_steps: 15
   max_tool_calls: 30
-  max_wall_time_ms: 120000
+  max_wall_time_ms: 300000
   max_history: 20
   approval_mode: "manual"
   consolidation_enabled: true

@@ -158,7 +158,12 @@ class OpenAIProvider(Provider):
                 allowed_names = {t["function"]["name"] for t in tools if "function" in t}
                 parse_result = parse_xml_tool_call(reasoning_text, allowed_tool_names=allowed_names)
                 if parse_result.tool_call:
+                    logger.info(
+                        "XML fallback (reasoning_content): parsed tool_call %s",
+                        parse_result.tool_call.name,
+                    )
                     return "", [*tool_calls, parse_result.tool_call]
+                logger.debug("XML fallback (reasoning_content): no tool_call parsed from reasoning")
                 return reasoning_text.strip(), tool_calls
             return reasoning_text.strip(), tool_calls
 
@@ -241,6 +246,10 @@ class OpenAIProvider(Provider):
             allowed_names = {t["function"]["name"] for t in tools if "function" in t}
             parse_result = parse_xml_tool_call(content, allowed_tool_names=allowed_names)
             if parse_result.tool_call:
+                logger.info(
+                    "XML fallback (content): parsed tool_call %s",
+                    parse_result.tool_call.name,
+                )
                 tool_calls.append(parse_result.tool_call)
 
         usage = TokenUsage()
