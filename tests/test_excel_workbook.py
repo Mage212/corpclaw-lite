@@ -38,18 +38,18 @@ class TestExcelWorkbookRead:
     async def test_read_default(
         self, tool: ExcelWorkbookTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Read without specifying cells returns first 20 rows."""
+        """Read without specifying cells returns first 50 rows."""
         monkeypatch.chdir(tmp_path)
         headers = ["Name", "Age", "City"]
-        rows = [[f"user{i}", 20 + i, f"city{i}"] for i in range(1, 25)]
+        rows = [[f"user{i}", 20 + i, f"city{i}"] for i in range(1, 55)]
         _create_basic_xlsx(tmp_path / "data.xlsx", headers, rows)
 
         result = await tool.execute(path="data.xlsx", action="read")
         assert "Sheet:" in result
-        # Only first 20 rows returned (header + 19 data rows within limit)
+        # Default limit is 50, so rows 1-50 visible
         assert "Row 1:" in result
-        assert "Row 20:" in result
-        assert "Row 22:" not in result
+        assert "Row 50:" in result
+        assert "Row 52:" not in result
         assert "Name" in result
         assert "user1" in result
 
@@ -73,7 +73,7 @@ class TestExcelWorkbookRead:
     async def test_read_range(
         self, tool: ExcelWorkbookTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Read a range of cells like A1:C3."""
+        """Read a range of cells like A1:C3 — compact format, no None."""
         monkeypatch.chdir(tmp_path)
         _create_basic_xlsx(
             tmp_path / "data.xlsx",
@@ -85,9 +85,10 @@ class TestExcelWorkbookRead:
             path="data.xlsx", action="read", cells="A1:C3"
         )
         assert "Range: A1:C3" in result
-        assert "A1" in result
-        assert "C3" in result
-        assert "'H1'" in result
+        # Compact row-based format
+        assert "Row 1:" in result
+        assert "A1=H1" in result
+        assert "C3=f" in result
 
     @pytest.mark.asyncio
     async def test_read_comma_separated(
@@ -157,6 +158,112 @@ class TestExcelWorkbookRead:
         assert "C1" in result_formulas
         assert "=A1+B1" in result_formulas
         assert "(formula)" in result_formulas
+
+    @pytest.mark.asyncio
+    async def test_read_range_skips_none(
+        self, tool: ExcelWorkbookTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Range mode skips None cells — compact row-based output."""
+        monkeypatch.chdir(tmp_path)
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["E1"] = "Label"
+        ws["F1"] = "Value"
+        ws["E2"] = "Brand"
+        ws["F2"] = "TestCorp"
+        wb.save(str(tmp_path / "sparse.xlsx"))
+
+        result = await tool.execute(path="sparse.xlsx", action="read", cells="A1:F2")
+        assert "Range: A1:F2" in result
+        # None cells in columns A-D should not appear
+        assert "A1=" not in result
+        assert "B1=" not in result
+        # Non-None cells should appear
+        assert "E1=Label" in result
+        assert "F1=Value" in result
+        assert "E2=Brand" in result
+        assert "F2=TestCorp" in result
+
+    @pytest.mark.asyncio
+    async def test_pagination_offset_and_limit(
+        self, tool: ExcelWorkbookTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pagination: offset and limit control which rows are returned."""
+        monkeypatch.chdir(tmp_path)
+        headers = ["ID"]
+        rows = [[i] for i in range(1, 11)]
+        _create_basic_xlsx(tmp_path / "paged.xlsx", headers, rows)
+
+        # Read first 3 rows (rows 1-3, offset=0, limit=3)
+        result = await tool.execute(
+            path="paged.xlsx", action="read", offset=0, limit=3
+        )
+        assert "Row 1:" in result
+        assert "Row 3:" in result
+        assert "Row 4:" not in result
+        # Should show continuation hint
+        assert "More rows may exist" in result
+
+        # Read next page (rows 4-6, offset=3, limit=3)
+        result2 = await tool.execute(
+            path="paged.xlsx", action="read", offset=3, limit=3
+        )
+        assert "Row 4:" in result2
+        assert "Row 6:" in result2
+        assert "Row 3:" not in result2
+
+        # Read last page (rows 8+, offset=7, limit=3) — 3 rows left + row 11 beyond
+        result3 = await tool.execute(
+            path="paged.xlsx", action="read", offset=7, limit=3
+        )
+        assert "Row 8:" in result3
+        assert "Row 10:" in result3
+        assert "Row 11:" not in result3
+        # Still shows hint because limit reached
+        assert "More rows may exist" in result3
+
+        # Read final page (offset=10, limit=3) — only row 11 left
+        result4 = await tool.execute(
+            path="paged.xlsx", action="read", offset=10, limit=3
+        )
+        assert "Row 11:" in result4
+        # Less than limit rows returned — no continuation hint
+        assert "More rows may exist" not in result4
+
+    @pytest.mark.asyncio
+    async def test_pagination_range_mode(
+        self, tool: ExcelWorkbookTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pagination works in range mode too."""
+        monkeypatch.chdir(tmp_path)
+        headers = ["Val"]
+        rows = [[i] for i in range(1, 21)]
+        _create_basic_xlsx(tmp_path / "ranged.xlsx", headers, rows)
+
+        result = await tool.execute(
+            path="ranged.xlsx", action="read", cells="A1:A21", offset=0, limit=5
+        )
+        assert "Row 1:" in result
+        assert "Row 5:" in result
+        assert "Row 6:" not in result
+        assert "More rows may exist" in result
+
+    @pytest.mark.asyncio
+    async def test_max_limit_capped_at_100(
+        self, tool: ExcelWorkbookTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Limit > 100 is capped to 100."""
+        monkeypatch.chdir(tmp_path)
+        headers = ["Val"]
+        rows = [[i] for i in range(1, 201)]
+        _create_basic_xlsx(tmp_path / "big.xlsx", headers, rows)
+
+        result = await tool.execute(
+            path="big.xlsx", action="read", limit=999
+        )
+        assert "Row 100:" in result
+        assert "Row 101:" not in result
+        assert "More rows may exist" in result
 
 
 class TestExcelWorkbookFill:

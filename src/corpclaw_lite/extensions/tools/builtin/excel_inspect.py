@@ -9,7 +9,6 @@ and toolset is appropriate for the task.
 from __future__ import annotations
 
 import csv
-from collections import defaultdict
 from pathlib import Path
 from typing import Any, cast
 
@@ -22,7 +21,6 @@ __all__ = ["ExcelInspectTool"]
 
 _MAX_PREVIEW_ROWS = 5
 _MAX_MERGED_SHOW = 15
-_MAX_COLOR_GROUPS = 5
 
 
 def _format_size(size_bytes: int) -> str:
@@ -66,9 +64,8 @@ def _inspect_xlsx(path: Path, detail: str) -> str:
                     extra = len(ws.merged_cells.ranges) - _MAX_MERGED_SHOW
                     lines.append(f"    ... and {extra} more")
 
-            # Color groups — collect cells by fill color
-            # openpyxl has no py.typed stubs, so pyright reports unknown types
-            color_cells: dict[str, list[str]] = defaultdict(list)  # type: ignore[unknownMemberType]
+            # Color groups — compact summary
+            color_counts: dict[str, int] = {}
             for row_idx in range(1, min(rows + 1, 100)):
                 for col_idx in range(1, cols + 1):
                     cell = ws.cell(row=row_idx, column=col_idx)
@@ -78,21 +75,18 @@ def _inspect_xlsx(path: Path, detail: str) -> str:
                     fg = fill.fgColor  # type: ignore[unknownMemberType]
                     if fg is None or fg.rgb is None or fg.rgb in ("00000000", "0"):  # type: ignore[unknownMemberType]
                         continue
-                    rgb = str(fg.rgb)  # type: ignore[unknownMemberType]
+                    try:
+                        rgb = str(fg.rgb)  # type: ignore[unknownMemberType]
+                    except Exception:
+                        continue
                     display_rgb = rgb[2:] if len(rgb) == 8 and rgb.startswith("FF") else rgb
-                    color_cells[display_rgb].append(f"R{row_idx}C{col_idx}")
+                    color_counts[display_rgb] = color_counts.get(display_rgb, 0) + 1
 
-            if color_cells:
-                lines.append("\n  Color groups:")
-                sorted_groups = sorted(color_cells.items(), key=lambda x: -len(x[1]))
-                for rgb, cells_list in sorted_groups[:_MAX_COLOR_GROUPS]:
-                    sample = cells_list[:8]
-                    suffix = f" (+{len(cells_list) - 8} more)" if len(cells_list) > 8 else ""
-                    cells_str = ", ".join(sample)
-                    lines.append(f"    #{rgb}: {len(cells_list)} cells — {cells_str}{suffix}")
-                if len(sorted_groups) > _MAX_COLOR_GROUPS:
-                    extra = len(sorted_groups) - _MAX_COLOR_GROUPS
-                    lines.append(f"    ... and {extra} more colors")
+            if color_counts:
+                sorted_colors = sorted(color_counts.items(), key=lambda x: -x[1])
+                color_parts = [f"#{rgb}: {cnt} cells" for rgb, cnt in sorted_colors]
+                summary = ", ".join(color_parts)
+                lines.append(f"\n  Color groups: {len(sorted_colors)} colors ({summary})")
 
             # Preview: first rows
             if rows > 0:

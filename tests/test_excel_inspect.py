@@ -87,7 +87,11 @@ class TestExcelInspectTool:
 
         result = await tool.execute(path="colors.xlsx", detail="full")
         assert "Color groups" in result
+        # Compact summary format: "N colors detected (#hex: count, ...)"
         assert "FFFF00" in result
+        assert "1 colors" in result
+        # No cell coordinate lists in compact format
+        assert "R2C1" not in result
 
     @pytest.mark.asyncio
     async def test_inspect_csv(

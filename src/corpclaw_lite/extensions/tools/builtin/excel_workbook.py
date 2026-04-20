@@ -17,7 +17,9 @@ from corpclaw_lite.utils.async_helpers import run_in_thread
 
 __all__ = ["ExcelWorkbookTool"]
 
-_MAX_DEFAULT_ROWS = 20
+_MAX_DEFAULT_ROWS = 50
+_MAX_ROWS_PER_CALL = 100
+_MAX_OUTPUT_CHARS = 15_000
 
 
 def _resolve_sheet(wb: Any, sheet_name: str | None) -> Any:
@@ -35,6 +37,8 @@ def _read_cells(
     sheet_name: str | None,
     cells: str,
     show_formulas: bool,
+    offset: int,
+    limit: int,
 ) -> str:
     import openpyxl
 
@@ -47,36 +51,66 @@ def _read_cells(
         lines: list[str] = [f'Sheet: "{ws.title}"']
 
         if not cells:
-            # Default: first N rows
-            max_rows = min(ws.max_row or 0, _MAX_DEFAULT_ROWS)
-            max_cols = ws.max_column or 0
-            for row_idx in range(1, max_rows + 1):
+            # Default: rows with pagination, non-None only
+            max_row = ws.max_row or 0
+            max_col = ws.max_column or 0
+            start_row = offset + 1
+            end_row = min(start_row + limit, max_row + 1)
+            data_rows = 0
+
+            for row_idx in range(start_row, end_row):
                 row_data: list[str] = []
-                for col_idx in range(1, max_cols + 1):
+                for col_idx in range(1, max_col + 1):
                     cell = ws.cell(row=row_idx, column=col_idx)
                     if cell.value is not None:
                         val = str(cell.value)[:50]
                         row_data.append(f"{cell.coordinate}={val}")
                 if row_data:
                     lines.append(f"  Row {row_idx}: {'  |  '.join(row_data)}")
-                else:
-                    lines.append(f"  Row {row_idx}: (empty)")
+                    data_rows += 1
+
+            if data_rows == limit and end_row <= max_row:
+                lines.append(
+                    f"  Showing rows {start_row}-{end_row - 1}. "
+                    f"More rows may exist — call again with offset={offset + limit}."
+                )
             return "\n".join(lines)
 
         # Parse cells specification
         if ":" in cells and "," not in cells:
-            # Range: "B2:F7"
+            # Range: "B2:F7" — compact row-based, skip None
             lines.append(f"Range: {cells}")
             try:
-                for row in ws[cells]:
-                    for cell in row:
-                        val = cell.value
-                        is_formula = show_formulas and isinstance(val, str) and val.startswith("=")
-                        formula_hint = " (formula)" if is_formula else ""
-                        val_str = repr(val)[:60] if val is not None else "None"
-                        lines.append(f"  {cell.coordinate} = {val_str}{formula_hint}")
+                rows_in_range = list(ws[cells])
             except Exception as e:
                 return f"Error: Invalid range '{cells}': {e}"
+
+            total_rows = len(rows_in_range)
+            start_idx = min(offset, total_rows)
+            end_idx = min(start_idx + limit, total_rows)
+            data_rows = 0
+
+            for row in rows_in_range[start_idx:end_idx]:
+                row_data: list[str] = []
+                for cell in row:
+                    if cell.value is not None:
+                        val = str(cell.value)[:50]
+                        is_formula = (
+                            show_formulas
+                            and isinstance(cell.value, str)
+                            and cell.value.startswith("=")
+                        )
+                        formula_hint = " (formula)" if is_formula else ""
+                        row_data.append(f"{cell.coordinate}={val}{formula_hint}")
+                if row_data:
+                    lines.append(f"  Row {row[0].row}: {'  |  '.join(row_data)}")
+                    data_rows += 1
+
+            if data_rows == limit and end_idx < total_rows:
+                lines.append(
+                    f"  Showing rows {start_idx + 1}-{end_idx} of range. "
+                    f"More rows may exist — call again with offset={offset + limit}."
+                )
         elif "," in cells:
             # Comma-separated: "A1,C3,B2"
             for addr in cells.split(","):
@@ -160,9 +194,10 @@ class ExcelWorkbookTool(Tool):
 
     name = "excel_workbook"
     description = (
-        "Structured Excel operations: read cells by coordinate (range or "
-        "individual addresses), or fill cells while preserving all formatting, "
-        "formulas, and merged ranges."
+        "Read Excel cells by coordinate. Default: first 50 non-empty rows. "
+        "Use 'cells' for specific ranges. Use 'offset'/'limit' for pagination "
+        "(max 100 rows per call). If output shows 'More rows may exist', "
+        "call again with increased offset to continue reading."
     )
     params = [
         ToolParam(name="path", type="string", description="Path to .xlsx file"),
@@ -194,6 +229,18 @@ class ExcelWorkbookTool(Tool):
             description="Show formulas instead of values (read action only)",
             required=False,
         ),
+        ToolParam(
+            name="offset",
+            type="integer",
+            description="Row offset for pagination (0-based). Use to continue reading.",
+            required=False,
+        ),
+        ToolParam(
+            name="limit",
+            type="integer",
+            description="Max rows to return (default: 50, max: 100)",
+            required=False,
+        ),
     ]
     risk_level = RiskLevel.MEDIUM
     parallel_safe = False
@@ -220,10 +267,17 @@ class ExcelWorkbookTool(Tool):
         sheet_name: str | None = kwargs.get("sheet_name")
         cells = kwargs.get("cells", "")
         show_formulas = kwargs.get("show_formulas", False)
+        offset = kwargs.get("offset", 0)
+        limit = min(kwargs.get("limit", _MAX_DEFAULT_ROWS), _MAX_ROWS_PER_CALL)
 
         if action == "read":
             try:
-                return await run_in_thread(_read_cells, resolved, sheet_name, cells, show_formulas)
+                result = await run_in_thread(
+                    _read_cells, resolved, sheet_name, cells, show_formulas, offset, limit
+                )
+                if len(result) > _MAX_OUTPUT_CHARS:
+                    result = result[:_MAX_OUTPUT_CHARS] + "\n... (truncated)"
+                return result
             except ValueError as e:
                 return f"Error: {e}"
         if action == "fill":
