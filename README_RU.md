@@ -169,15 +169,12 @@ Markdown-файлы с YAML-фронтматтером. Автоматическ
 
 **Двуязычный TF-IDF матчинг:** скиллы поддерживают ключевые слова на русском и английском. Стоп-слов для обоих языков встроены в matcher.
 
-| Скилл | Департаменты | Назначение |
-|-------|-------------|------------|
-| `code_reviewer` | it, admin, default | Ревью кода: баги, стиль, безопасность |
-| `content_writer` | marketing, hr, admin, default | Маркетинговый контент, посты, рассылки |
-| `doc_writer` | it, product, admin, default | Техническая документация, README, гайды |
-| `translator` | * (все) | Перевод текстов между языками |
-| `excel_normalizer` | marketing, finance, hr, analytics, admin, default | Нормализация Excel: ИНН, даты, невидимые символы |
-| `meeting_summary` | * (все) | Структурированные итоги встреч с задачами и решениями |
-| `data_analyst` | analytics, finance, marketing, admin, development, engineering | Анализ данных, графики, SQL-запросы, конвертация форматов |
+| Скилл | Scope | Назначение |
+|-------|-------|------------|
+| `translator` | main | Перевод текстов между языками |
+| `excel_normalizer` | document-agent | Нормализация Excel: ИНН, даты, невидимые символы |
+| `meeting_summary` | document-agent | Структурированные итоги встреч с задачами и решениями |
+| `data_analyst` | data-agent | Анализ данных, графики, SQL-запросы, конвертация форматов |
 
 ```markdown
 ---

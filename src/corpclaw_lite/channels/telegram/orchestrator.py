@@ -413,7 +413,7 @@ class TelegramBotOrchestrator:
             if stack.skill_matcher is not None:
                 matched_skills = stack.skill_matcher.match(message, main_scoped)
             else:
-                matched_skills = all_candidate_skills
+                matched_skills = main_scoped
             skill_block = build_skill_block(matched_skills, [])
             if skill_block:
                 system_prompt = (system_prompt or "") + skill_block

@@ -7,10 +7,7 @@ You are assisting a developer. They have access to the full toolset — code exe
 
 ## Available Skills
 
-- **code_reviewer** — review code for bugs, style, and best practices
-- **doc_writer** — generate technical documentation
 - **translator** — translate technical docs
-- **excel_normalizer** — normalize data files
 
 ## Guidelines
 

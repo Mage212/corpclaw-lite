@@ -47,7 +47,7 @@ corpclaw-lite/
 │   ├── utils/              # DB helpers
 │   └── logging/            # Структурированное логирование + health endpoint
 ├── config/                 # YAML-конфигурации + bootstrap prompts
-├── skills/                 # 7 Markdown-скиллов (code_reviewer, content_writer, doc_writer, translator, excel_normalizer, meeting_summary, data_analyst)
+├── skills/                 # 4 Markdown-скилла с scope-фильтрацией (translator, excel_normalizer, meeting_summary, data_analyst)
 ├── plugins/                # Директория плагинов
 ├── docker/                 # Dockerfile, Dockerfile.agent, seccomp_default.json
 └── tests/                  # Тесты (806 тестов, 85 файлов)
@@ -361,17 +361,14 @@ always: false
 - Track mtime per file
 - Detect: new, modified, deleted
 
-**Загруженные скилы (7):**
+**Загруженные скилы (4):**
 
-| Skill | Департаменты |
-|-------|-------------|
-| `code_reviewer` | it, admin, default |
-| `content_writer` | marketing, hr, admin, default |
-| `doc_writer` | it, product, admin, default |
-| `translator` | * (все) |
-| `excel_normalizer` | marketing, finance, hr, analytics, admin, default |
-| `meeting_summary` | * (все) |
-| `data_analyst` | analytics, finance, marketing, admin, development, engineering |
+| Skill | Scope | Назначение |
+|-------|-------|------------|
+| `translator` | main | Перевод текстов |
+| `excel_normalizer` | document-agent | Нормализация Excel |
+| `meeting_summary` | document-agent | Итоги встреч |
+| `data_analyst` | data-agent | Анализ данных, SQL, графики |
 
 ### Plugins (`extensions/plugins/`)
 

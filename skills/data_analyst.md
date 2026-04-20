@@ -79,13 +79,10 @@ JSON, or PDF files in their workspace.
    - Distributions → histogram
 5. If format conversion is needed (e.g., CSV to XLSX, JSON to CSV), use
    `convert_format`.
-6. If the user has a PDF document with data, use `pdf_reader` to extract text
-   first, then analyze the extracted content.
-7. Always explain your findings in clear language. Include relevant numbers
+6. Always explain your findings in clear language. Include relevant numbers
    and percentages.
-8. If the user asks for a file, use `send_file` to deliver results.
-9. When saving analysis results, prefer CSV or XLSX format for tabular data,
-   and PNG for charts.
+7. When saving analysis results, prefer CSV or XLSX format for tabular data,
+   and PNG for charts. Use `write_file` to save results.
 
 ## Examples
 

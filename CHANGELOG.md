@@ -42,7 +42,7 @@
 - pdf_reader — извлечение текста из PDF с поддержкой диапазонов страниц
 
 #### Расширения
-- Скиллы (7) — Markdown-инструкции с TF-IDF семантическим матчем (двуязычный RU+EN): code_reviewer, content_writer, doc_writer, translator, excel_normalizer, meeting_summary, data_analyst
+- Скиллы (4) — Markdown-инструкции с TF-IDF семантическим матчем (двуязычный RU+EN): translator, excel_normalizer, meeting_summary, data_analyst. Каждый скилл имеет `scope` для привязки к конкретному агенту.
 - Плагины — subprocess-песочница с JSON-RPC через stdin/stdout
 - Субагенты (5): filesystem-agent, document-agent, execution-agent, research-agent, data-agent
 - MCP-интеграция — Model Context Protocol через stdio JSON-RPC

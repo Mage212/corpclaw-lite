@@ -66,9 +66,9 @@ def test_can_use_plugin() -> None:
 
 
 def test_can_dispatch_subagent() -> None:
-    checker = _make_checker_with_dept(subagents=["code_reviewer"])
+    checker = _make_checker_with_dept(subagents=["data-agent"])
     user = _make_user()
-    assert checker.can_dispatch_subagent(user, "code_reviewer")
+    assert checker.can_dispatch_subagent(user, "data-agent")
     assert not checker.can_dispatch_subagent(user, "other")
 
 
