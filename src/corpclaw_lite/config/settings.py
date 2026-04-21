@@ -12,6 +12,7 @@ __all__ = [
     "ContainerSettings",
     "LLMSettings",
     "LoggingSettings",
+    "QueueSettings",
     "RoutingRule",
     "Settings",
     "SkillsSettings",
@@ -33,6 +34,14 @@ class RoutingRule(BaseModel):
     preset: str | None = None
 
 
+class QueueSettings(BaseModel):
+    """Settings for the LLM request queue."""
+
+    enabled: bool = True
+    notify_position: bool = True
+    notify_interval_seconds: int = 30
+
+
 class LLMSettings(BaseModel):
     """Settings for LLM provider routing.
 
@@ -41,6 +50,8 @@ class LLMSettings(BaseModel):
     """
 
     routing: list[RoutingRule] = []
+    max_concurrent_requests: int = 4
+    queue: QueueSettings = QueueSettings()
 
 
 class ContainerSettings(BaseModel):

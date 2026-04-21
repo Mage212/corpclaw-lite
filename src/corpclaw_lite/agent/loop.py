@@ -20,6 +20,7 @@ from corpclaw_lite.exceptions import ContainerIPCError, StorageError
 from corpclaw_lite.extensions.tools.base import TOOL_ERROR_PREFIX
 from corpclaw_lite.extensions.tools.registry import ToolRegistry
 from corpclaw_lite.llm.base import Provider, ToolCall
+from corpclaw_lite.llm.router import LLMRouter
 from corpclaw_lite.logging import health
 from corpclaw_lite.memory.sqlite import SQLiteMemory
 from corpclaw_lite.security.tool_guard import ApprovalRequest, ToolGuardError
@@ -236,14 +237,29 @@ class AgentLoop:
                     context.messages = await self._compressor.compress(context.messages, mem_key)
 
                 try:
-                    response = await asyncio.wait_for(
-                        self._provider.chat(
-                            messages=context.messages,
-                            tools=tools_schema,
-                            system=context.system_prompt or None,
-                        ),
-                        timeout=self._settings.llm_timeout_seconds,
-                    )
+                    # When the provider is a queued router, separate queue wait
+                    # from LLM inference so the budget only counts active time.
+                    if isinstance(self._provider, LLMRouter) and self._provider.has_queue:
+                        budget.pause()
+                        async with self._provider.acquire_slot(str(user.id)):
+                            budget.resume()
+                            response = await asyncio.wait_for(
+                                self._provider.default.chat(
+                                    messages=context.messages,
+                                    tools=tools_schema,
+                                    system=context.system_prompt or None,
+                                ),
+                                timeout=self._settings.llm_timeout_seconds,
+                            )
+                    else:
+                        response = await asyncio.wait_for(
+                            self._provider.chat(
+                                messages=context.messages,
+                                tools=tools_schema,
+                                system=context.system_prompt or None,
+                            ),
+                            timeout=self._settings.llm_timeout_seconds,
+                        )
                 except TimeoutError:
                     msg = "I could not get a response from the language model (timed out)."
                     await self._save_memory(mem_key, "assistant", msg)

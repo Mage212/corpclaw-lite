@@ -7,6 +7,13 @@
 # To change routing: edit llm.routing — no code changes needed.
 
 llm:
+  # Max concurrent LLM inference requests (match GPU inference slots)
+  max_concurrent_requests: 2
+  # Request queue — backpressure + user notifications
+  queue:
+    enabled: true
+    notify_position: true
+    notify_interval_seconds: 30
   # Routing rules — checked top-to-bottom, first match wins
   # provider: must match a name registered via PROVIDER_* env vars in .env
   # model:    model identifier for that provider

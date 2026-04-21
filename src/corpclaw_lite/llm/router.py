@@ -20,12 +20,18 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncIterator
-from typing import Any
+from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING, Any
 
 from corpclaw_lite.config.providers import ProviderConnection, ProviderRegistry, ProviderSettings
 from corpclaw_lite.config.settings import LLMSettings
 from corpclaw_lite.llm.base import LLMResponse, Provider, StreamChunk, VisionProvider
 from corpclaw_lite.llm.presets import ModelPreset, PresetRegistry
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
+
+    from corpclaw_lite.llm.queue import LLMRequestQueue
 
 __all__ = [
     "LLMRouter",
@@ -70,6 +76,10 @@ class LLMRouter:
     ``chat()`` and ``stream()`` always use the default routing rule
     (``task_kind="default"``). To get a task-specific provider, call
     ``for_task()`` or ``for_subagent()``.
+
+    When a :class:`~corpclaw_lite.llm.queue.LLMRequestQueue` is provided,
+    all LLM calls go through the queue's semaphore, bounding concurrent
+    inference requests to match GPU capacity.
     """
 
     def __init__(
@@ -78,14 +88,17 @@ class LLMRouter:
         default_provider: Provider,
         # (task_kind, subagent_id, provider)
         routing: list[tuple[str | None, str | None, Provider]],
+        queue: LLMRequestQueue | None = None,
     ) -> None:
         self._providers = providers
         self._default_provider = default_provider
         self._routing = routing
+        self._queue = queue
         logger.info(
-            "LLMRouter ready: %d provider instances, %d routing rules",
+            "LLMRouter ready: %d provider instances, %d routing rules, queue=%s",
             len(providers),
             len(routing),
+            "enabled" if queue else "disabled",
         )
 
     @classmethod
@@ -188,7 +201,14 @@ class LLMRouter:
         for key, provider in cache.items():
             providers[f"{key[0]}:{key[1]}"] = provider
 
-        return cls(providers, default_provider, routing)
+        # Build request queue if enabled
+        queue: LLMRequestQueue | None = None
+        if llm.queue.enabled:
+            from corpclaw_lite.llm.queue import LLMRequestQueue
+
+            queue = LLMRequestQueue(max_concurrent=llm.max_concurrent_requests)
+
+        return cls(providers, default_provider, routing, queue=queue)
 
     def for_task(self, task_kind: str) -> Provider:
         """Return the provider configured for a given task_kind.
@@ -215,7 +235,42 @@ class LLMRouter:
         """Return the default provider."""
         return self._default_provider
 
-    # ── Provider protocol implementation (delegates to default) ───────────────
+    @property
+    def has_queue(self) -> bool:
+        """Return True if a request queue is configured."""
+        return self._queue is not None
+
+    @property
+    def queue(self) -> LLMRequestQueue | None:
+        """Return the request queue, or ``None`` if queuing is disabled."""
+        return self._queue
+
+    @asynccontextmanager
+    async def acquire_slot(self, user_id: str = "") -> AsyncGenerator[None, None]:
+        """Acquire an LLM inference slot via the request queue.
+
+        Use as an async context manager around the raw provider call so the
+        budget guard can pause while waiting for a slot::
+
+            budget.pause()
+            async with router.acquire_slot(user_id):
+                budget.resume()
+                response = await router.default.chat(...)
+        """
+        import time
+
+        if self._queue is None:
+            yield
+            return
+        await self._queue.acquire(user_id)
+        t0 = time.monotonic()
+        try:
+            yield
+        finally:
+            elapsed = time.monotonic() - t0
+            await self._queue.release(user_id, elapsed)
+
+    # ── Provider protocol implementation (delegates to default via queue) ────
 
     async def chat(
         self,
@@ -223,7 +278,10 @@ class LLMRouter:
         tools: list[dict[str, Any]] | None = None,
         system: str | None = None,
     ) -> LLMResponse:
-        """Chat using the default provider."""
+        """Chat using the default provider (through the queue if enabled)."""
+        if self._queue is not None:
+            async with self.acquire_slot("_router_chat"):
+                return await self.default.chat(messages=messages, tools=tools, system=system)
         return await self.default.chat(messages=messages, tools=tools, system=system)
 
     async def stream(
@@ -232,9 +290,16 @@ class LLMRouter:
         tools: list[dict[str, Any]] | None = None,
         system: str | None = None,
     ) -> AsyncIterator[StreamChunk]:
-        """Stream using the default provider."""
-        async for chunk in self.default.stream(messages=messages, tools=tools, system=system):
-            yield chunk
+        """Stream using the default provider (through the queue if enabled)."""
+        if self._queue is not None:
+            async with self.acquire_slot("_router_stream"):
+                async for chunk in self.default.stream(
+                    messages=messages, tools=tools, system=system
+                ):
+                    yield chunk
+        else:
+            async for chunk in self.default.stream(messages=messages, tools=tools, system=system):
+                yield chunk
 
     # ── VisionProvider protocol implementation (delegates to vision task) ─────
 
