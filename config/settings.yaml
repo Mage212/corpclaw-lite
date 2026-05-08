@@ -21,24 +21,24 @@ llm:
   routing:
     # Main chat (used by AgentLoop)
     - task_kind: "default"
-      provider: "lmstudio"
-      model: "qwen/qwen3.5-9b"
+      provider: "litellm"
+      model: "qwen3.5-9b"
       preset: "temperature-0.4"
 
     # Vision analysis (separate LLM call for images)
     - task_kind: "vision"
-      provider: "lmstudio"
-      model: "qwen/qwen3.5-9b"
+      provider: "litellm"
+      model: "qwen3.5-9b"
 
     # Memory consolidation (LLM-based history compression)
     - task_kind: "consolidate"
-      provider: "lmstudio"
-      model: "qwen/qwen3.5-9b"
+      provider: "litellm"
+      model: "qwen3.5-4b"
 
     # Context compression (LLM-based summary of old turns)
     - task_kind: "compress"
-      provider: "lmstudio"
-      model: "qwen/qwen3.5-9b"
+      provider: "litellm"
+      model: "qwen3.5-4b"
 
     # Calibration analysis (cloud provider recommended)
     # Uncomment and configure PROVIDER_OPENROUTER__* in .env to enable
@@ -85,6 +85,21 @@ telegram:
   whitelist: []
   default_department: "default"
   admin_ids: []
+
+  # Fallback transport — manual IP overrides (empty = DoH auto-discovery)
+  # When api.telegram.org is unreachable, requests are retried via these IPs
+  # with preserved TLS SNI. Set manually or leave empty for auto-discovery.
+  fallback_ips: []
+
+  # HTTP timeouts (seconds) — passed to python-telegram-bot's HTTPXRequest
+  connect_timeout: 10.0
+  read_timeout: 20.0
+  pool_timeout: 8.0
+
+  # Connection resilience — retries for transient failures
+  init_max_retries: 8       # app.initialize() attempts (exp backoff up to 15s)
+  network_max_retries: 10   # Runtime network error retries (exp backoff 5-60s)
+  conflict_max_retries: 3   # Runtime 409 Conflict retries (10s fixed delay)
 
 skills:
   selection_mode: "semantic"

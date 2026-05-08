@@ -1,0 +1,3 @@
+[mcp_servers.axme]
+args = ["serve"]
+command = "axme-code"

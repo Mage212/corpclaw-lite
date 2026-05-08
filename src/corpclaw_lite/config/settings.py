@@ -107,6 +107,19 @@ class TelegramSettings(BaseModel):
     default_department: str = "default"
     admin_ids: list[int] = []
 
+    # Fallback transport — manual IP overrides (empty = DoH auto-discovery)
+    fallback_ips: list[str] = []
+
+    # HTTP timeouts (seconds) — passed to python-telegram-bot's HTTPXRequest
+    connect_timeout: float = 10.0
+    read_timeout: float = 20.0
+    pool_timeout: float = 8.0
+
+    # Connection resilience
+    init_max_retries: int = 8
+    network_max_retries: int = 10
+    conflict_max_retries: int = 3
+
 
 class SkillsSettings(BaseModel):
     """Settings for semantic skill selection."""

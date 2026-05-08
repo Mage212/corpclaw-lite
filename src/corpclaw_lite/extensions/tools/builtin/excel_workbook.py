@@ -147,17 +147,22 @@ def _read_cells(
 def _fill_cells(
     path: Path,
     sheet_name: str | None,
-    cells_json: str,
+    cells_json: str | dict[str, Any],
 ) -> str:
     import openpyxl
+    from openpyxl.cell.cell import MergedCell
 
     if not cells_json:
         return 'Error: \'cells\' is required for fill action. Provide JSON like {"B2": "value"}.'
 
-    try:
-        cells_dict: dict[str, Any] = json.loads(cells_json)
-    except json.JSONDecodeError as e:
-        return f"Error: Invalid JSON in 'cells': {e}"
+    # XML fallback parser may pre-deserialize JSON, delivering a dict directly.
+    if isinstance(cells_json, dict):
+        cells_dict: dict[str, Any] = cells_json
+    else:
+        try:
+            cells_dict = json.loads(cells_json)
+        except (json.JSONDecodeError, TypeError) as e:
+            return f"Error: Invalid JSON in 'cells': {e}"
 
     if not cells_dict:
         return "Error: 'cells' must be a non-empty JSON object {\"address\": value}."
@@ -170,9 +175,14 @@ def _fill_cells(
             return "Error: Workbook has no sheets."
 
         filled: list[str] = []
+        skipped_merged: list[str] = []
         for addr, value in cells_dict.items():
             try:
-                ws[addr] = value
+                cell = ws[addr]
+                if isinstance(cell, MergedCell):
+                    skipped_merged.append(addr)
+                    continue
+                cell.value = value
                 filled.append(addr)
             except Exception as e:
                 return f"Error writing to {addr}: {e}"
@@ -183,7 +193,13 @@ def _fill_cells(
             return f"Error saving file: {e}"
 
         sheet_label = sheet_name or ws.title
-        return f"Filled {len(filled)} cells in sheet '{sheet_label}': {', '.join(filled)}. Saved."
+        msg = f"Filled {len(filled)} cells in sheet '{sheet_label}': {', '.join(filled)}. Saved."
+        if skipped_merged:
+            msg += (
+                f" Skipped {len(skipped_merged)} merged cells"
+                f" (non-top-left): {', '.join(skipped_merged)}."
+            )
+        return msg
     finally:
         wb.close()
 

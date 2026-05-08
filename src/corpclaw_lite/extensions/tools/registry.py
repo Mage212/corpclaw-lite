@@ -100,9 +100,9 @@ class ToolRegistry:
 
         try:
             result = await tool.execute(**arguments, user=user)
-        except Exception:
+        except Exception as e:
             logger.exception("Tool '%s' execution failed", name)
-            return f"Error executing '{name}': see logs for details"
+            return f"Error executing '{name}': {type(e).__name__}: {e}"
 
         from corpclaw_lite.security.credential_scrubber import scrub_text
 

@@ -156,6 +156,7 @@ class TelegramBotOrchestrator:
             memory=agent_loop.memory,
             onboarding_engine=self._onboarding_engine,
             image_handler=self.handle_image,
+            tg_settings=tg_settings,
         )
 
         # SendFile tool

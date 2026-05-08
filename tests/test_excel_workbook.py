@@ -355,6 +355,75 @@ class TestExcelWorkbookFill:
         assert "Error" in result
         assert "Invalid JSON" in result
 
+    @pytest.mark.asyncio
+    async def test_fill_accepts_dict_cells(
+        self, tool: ExcelWorkbookTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fill accepts a Python dict directly (XML fallback path)."""
+        monkeypatch.chdir(tmp_path)
+        _create_basic_xlsx(tmp_path / "dict.xlsx", ["H1", "H2"], [["old1", "old2"]])
+
+        result = await tool.execute(
+            path="dict.xlsx", action="fill", cells={"A2": "from_dict", "B2": 42}
+        )
+        assert "Filled 2 cells" in result
+        assert "Saved" in result
+
+        wb = openpyxl.load_workbook(str(tmp_path / "dict.xlsx"))
+        ws = wb.active
+        assert ws["A2"].value == "from_dict"
+        assert ws["B2"].value == 42
+        wb.close()
+
+    @pytest.mark.asyncio
+    async def test_fill_skips_merged_cells(
+        self, tool: ExcelWorkbookTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fill skips non-top-left merged cells and reports them."""
+        monkeypatch.chdir(tmp_path)
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.merge_cells("A1:C1")
+        ws["A1"] = "MergedHeader"
+        ws["D1"] = "Plain"
+        wb.save(str(tmp_path / "merged_fill.xlsx"))
+
+        result = await tool.execute(
+            path="merged_fill.xlsx",
+            action="fill",
+            cells=json.dumps({"A1": "top_ok", "B1": "skip_me", "D1": "plain_ok"}),
+        )
+        assert "Filled 2 cells" in result
+        assert "Skipped 1 merged cells" in result
+        assert "B1" in result
+
+        wb2 = openpyxl.load_workbook(str(tmp_path / "merged_fill.xlsx"))
+        ws2 = wb2.active
+        assert ws2["A1"].value == "top_ok"
+        assert ws2["D1"].value == "plain_ok"
+        assert "A1:C1" in [str(m) for m in ws2.merged_cells.ranges]
+        wb2.close()
+
+    @pytest.mark.asyncio
+    async def test_fill_all_merged_returns_skip_message(
+        self, tool: ExcelWorkbookTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When all target cells are merged non-top-left, report skip with no fills."""
+        monkeypatch.chdir(tmp_path)
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.merge_cells("A1:B1")
+        ws["A1"] = "Header"
+        wb.save(str(tmp_path / "all_merged.xlsx"))
+
+        result = await tool.execute(
+            path="all_merged.xlsx",
+            action="fill",
+            cells=json.dumps({"B1": "should_skip"}),
+        )
+        assert "Filled 0 cells" in result
+        assert "Skipped 1 merged cells" in result
+
 
 class TestExcelWorkbookErrors:
     @pytest.mark.asyncio
