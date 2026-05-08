@@ -141,6 +141,9 @@ class LoggingSettings(BaseModel):
     console_level: str = "INFO"
     log_dir: str = "logs"
     health_port: int = 8080
+    trace_enabled: bool = True
+    trace_level: Literal["metadata", "debug_preview", "full"] = "metadata"
+    trace_preview_chars: int = 200
 
 
 class Settings(BaseSettings):

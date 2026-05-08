@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Any, cast
 
 import yaml
 
+from corpclaw_lite.logging.trace import log_event
+
 __all__ = [
     "ApprovalRequest",
     "GuardRule",
@@ -125,7 +127,11 @@ class ToolGuard:
             logger.error("Failed to load ToolGuard rules from %s: %s", file_path, e)
 
     async def check(
-        self, tool_name: str, arguments: dict[str, Any], risk_level: str | None = None
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        risk_level: str | None = None,
+        run_id: str | None = None,
     ) -> None:
         """
         Evaluate ALL rules against the tool call, then apply the strictest matching action.
@@ -143,6 +149,15 @@ class ToolGuard:
                 "ToolGuard: no rules loaded — blocking high-risk tool %s (fail-closed)",
                 tool_name,
             )
+            if run_id:
+                log_event(
+                    "tool_guard_decision",
+                    run_id,
+                    tool=tool_name,
+                    decision="block",
+                    reason="fail_closed_no_rules",
+                    risk_level=risk_level,
+                )
             raise ToolGuardError(
                 f"Blocked by ToolGuard: no security rules loaded for high-risk tool '{tool_name}'"
             )
@@ -163,6 +178,15 @@ class ToolGuard:
         if hard_blocks:
             worst = max(hard_blocks, key=lambda r: _SEVERITY_RANK.get(r.severity, 0))
             msg = f"Security Rule '{worst.id}' triggered ({worst.severity}): {worst.description}"
+            if run_id:
+                log_event(
+                    "tool_guard_decision",
+                    run_id,
+                    tool=tool_name,
+                    decision="block",
+                    rule_id=worst.id,
+                    severity=worst.severity,
+                )
             raise ToolGuardError(f"Blocked by ToolGuard: {msg}")
 
         approval_rules = [r for r in matches if r.require_approval]
@@ -183,6 +207,16 @@ class ToolGuard:
                         tool_name,
                         worst.id,
                     )
+                    if run_id:
+                        log_event(
+                            "tool_guard_decision",
+                            run_id,
+                            tool=tool_name,
+                            decision="allow",
+                            rule_id=worst.id,
+                            severity=worst.severity,
+                            smart_verdict=verdict,
+                        )
                     return
                 if verdict == "deny":
                     logger.warning(
@@ -190,6 +224,16 @@ class ToolGuard:
                         tool_name,
                         worst.id,
                     )
+                    if run_id:
+                        log_event(
+                            "tool_guard_decision",
+                            run_id,
+                            tool=tool_name,
+                            decision="block",
+                            rule_id=worst.id,
+                            severity=worst.severity,
+                            smart_verdict=verdict,
+                        )
                     raise ToolGuardError(f"Blocked by smart approval: {msg}")
 
             raise ApprovalRequest(action=worst.id, details=msg)

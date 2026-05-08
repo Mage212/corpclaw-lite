@@ -206,3 +206,21 @@ class TestHealthCounters:
         assert stats["requests"] == 0
         assert stats["tool_calls"] == 0
         assert stats["errors"] == 0
+        assert stats["llm_calls"] == 0
+        assert stats["llm_timeouts"] == 0
+        assert stats["tool_errors"] == 0
+        assert stats["guard_blocks"] == 0
+        assert stats["approval_denied"] == 0
+        assert stats["active_requests"] == 0
+
+    def test_new_observability_counters(self) -> None:
+        from corpclaw_lite.logging import health
+
+        health.increment("llm_calls", 2)
+        health.increment("tool_errors")
+        health.increment("guard_blocks")
+        stats = health.get_stats()
+
+        assert stats["llm_calls"] == 2
+        assert stats["tool_errors"] == 1
+        assert stats["guard_blocks"] == 1

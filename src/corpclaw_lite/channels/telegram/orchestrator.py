@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -22,6 +24,7 @@ from corpclaw_lite.container.manager import ContainerManagerError
 from corpclaw_lite.extensions.plugins.watcher import PluginHotReloader
 from corpclaw_lite.extensions.skills.watcher import SkillHotReloader
 from corpclaw_lite.logging.agent_logger import AgentLogger, setup_logging
+from corpclaw_lite.logging.trace import log_event
 from corpclaw_lite.onboarding.engine import OnboardingEngine
 from corpclaw_lite.onboarding.finalizer import OnboardingFinalizer
 from corpclaw_lite.onboarding.storage import OnboardingStorage
@@ -93,6 +96,9 @@ class TelegramBotOrchestrator:
             log_dir=PROJECT_ROOT / log_cfg.log_dir,
             level=log_cfg.level,
             console_level=log_cfg.console_level,
+            trace_enabled=log_cfg.trace_enabled,
+            trace_level=log_cfg.trace_level,
+            trace_preview_chars=log_cfg.trace_preview_chars,
         )
         self._agent_activity_logger = AgentLogger(log_dir=PROJECT_ROOT / log_cfg.log_dir)
 
@@ -473,6 +479,7 @@ class TelegramBotOrchestrator:
                 ),
                 tools_enabled=(mode == "execute"),
                 few_shots=stack.few_shots,
+                channel="telegram",
             )
         except Exception as e:
             logger.error("AgentLoop error for user %d: %s", tid, e)
@@ -500,6 +507,12 @@ class TelegramBotOrchestrator:
                 tools_used=run_stats.tools_used if run_stats is not None else [],
                 status=run_stats.status if run_stats is not None else "error",
                 error=run_stats.error if run_stats is not None else None,
+                run_id=run_stats.run_id if run_stats is not None else None,
+                channel="telegram",
+                iterations=run_stats.iterations if run_stats is not None else None,
+                llm_calls=run_stats.llm_calls if run_stats is not None else None,
+                input_tokens=run_stats.input_tokens if run_stats is not None else None,
+                output_tokens=run_stats.output_tokens if run_stats is not None else None,
             )
 
         await channel.send_message(user, reply)
@@ -536,12 +549,37 @@ class TelegramBotOrchestrator:
             await self.handle_message(telegram_id, directive, "execute")
             return
         prompt = caption or "Опиши это изображение подробно."
+        run_id = uuid.uuid4().hex
+        t0 = time.monotonic()
+        log_event(
+            "image_request_started",
+            run_id,
+            user_id=user.id,
+            telegram_id=telegram_id,
+            channel="telegram",
+            image_name=image_path.name,
+            prompt_len=len(prompt),
+        )
 
         bot = channel.bot
         if bot is not None:
             with contextlib.suppress(Exception):
                 await bot.send_chat_action(chat_id=int(telegram_id), action="typing")
-        result = await self._vision_processor.describe(image_path, prompt, user)
+        status = "ok"
+        error: str | None = None
+        try:
+            result = await self._vision_processor.describe(image_path, prompt, user)
+        except Exception as e:
+            status = "error"
+            error = f"{type(e).__name__}: {e}"
+            log_event(
+                "image_request_finished",
+                run_id,
+                status=status,
+                duration_ms=round((time.monotonic() - t0) * 1000, 1),
+                error=error,
+            )
+            raise
 
         # Persist in agent memory — non-critical, don't block user response
         mem = stack.loop.memory
@@ -557,6 +595,26 @@ class TelegramBotOrchestrator:
                 )
 
         await channel.send_message(user, result)
+        duration_ms = (time.monotonic() - t0) * 1000
+        log_event(
+            "image_request_finished",
+            run_id,
+            status=status,
+            duration_ms=round(duration_ms, 1),
+            result_len=len(result),
+        )
+        if self._agent_activity_logger is not None:
+            self._agent_activity_logger.log_request(
+                user_id=str(telegram_id),
+                department=user.department,
+                message_preview=f"[image] {image_path.name}",
+                duration_ms=duration_ms,
+                tools_used=["read_image"],
+                status=status,
+                error=error,
+                run_id=run_id,
+                channel="telegram",
+            )
 
     async def send_file_callback(self, path: Path, user: User, caption: str) -> str:
         """File delivery callback for SendFileTool."""

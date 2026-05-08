@@ -112,3 +112,6 @@ logging:
   console_level: "INFO"
   log_dir: "logs"
   health_port: 8080
+  trace_enabled: true
+  trace_level: "metadata"
+  trace_preview_chars: 200

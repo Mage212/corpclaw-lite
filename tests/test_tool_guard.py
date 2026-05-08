@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from typing import Any
 
@@ -74,6 +75,37 @@ async def test_critical_after_medium_approval_blocks(tmp_path: Path) -> None:
 
     with pytest.raises(ToolGuardError, match="CRITICAL_BLOCK"):
         await guard.check("exec_script", {"script": "rm -rf /tmp"})
+
+
+@pytest.mark.asyncio
+async def test_tool_guard_trace_block(tmp_path: Path) -> None:
+    from corpclaw_lite.logging.trace import setup_trace_logging
+
+    rules_file = tmp_path / "rules.yaml"
+    rules_file.write_text(
+        "rules:\n"
+        "  - id: CRITICAL_BLOCK\n"
+        "    severity: CRITICAL\n"
+        "    tool: exec_script\n"
+        "    match_param: script\n"
+        "    match_pattern: rm\\s+-rf\n"
+    )
+    setup_trace_logging(tmp_path, enabled=True)
+    guard = ToolGuard()
+    guard.load_file(rules_file)
+
+    with pytest.raises(ToolGuardError):
+        await guard.check("exec_script", {"script": "rm -rf /tmp"}, run_id="run-guard")
+
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "agent_trace.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert records[0]["event"] == "tool_guard_decision"
+    assert records[0]["decision"] == "block"
+    assert records[0]["rule_id"] == "CRITICAL_BLOCK"
+
+    setup_trace_logging(tmp_path, enabled=False)
 
 
 @pytest.mark.asyncio

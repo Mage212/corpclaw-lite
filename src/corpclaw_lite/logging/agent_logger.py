@@ -17,6 +17,9 @@ def setup_logging(
     log_dir: Path | str = "logs",
     level: str = "DEBUG",
     console_level: str = "INFO",
+    trace_enabled: bool = True,
+    trace_level: str = "metadata",
+    trace_preview_chars: int = 200,
 ) -> None:
     """Configure root logging with two handlers:
 
@@ -61,6 +64,15 @@ def setup_logging(
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
+    from corpclaw_lite.logging.trace import setup_trace_logging
+
+    setup_trace_logging(
+        log_dir=log_path,
+        enabled=trace_enabled,
+        trace_level=trace_level,  # type: ignore[arg-type]
+        preview_chars=trace_preview_chars,
+    )
+
 
 class AgentLogger:
     """
@@ -95,6 +107,12 @@ class AgentLogger:
         tokens: dict[str, int] | None = None,
         status: str = "ok",
         error: str | None = None,
+        run_id: str | None = None,
+        channel: str | None = None,
+        iterations: int | None = None,
+        llm_calls: int | None = None,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
     ) -> None:
         """Write a single structured JSON record to agent_activity.jsonl."""
         record: dict[str, Any] = {
@@ -108,6 +126,18 @@ class AgentLogger:
             "tokens": tokens or {},
             "status": status,
         }
+        if run_id is not None:
+            record["run_id"] = run_id
+        if channel is not None:
+            record["channel"] = channel
+        if iterations is not None:
+            record["iterations"] = iterations
+        if llm_calls is not None:
+            record["llm_calls"] = llm_calls
+        if input_tokens is not None:
+            record["input_tokens"] = input_tokens
+        if output_tokens is not None:
+            record["output_tokens"] = output_tokens
         if error:
             record["error"] = error
 

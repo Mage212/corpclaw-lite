@@ -173,6 +173,9 @@ def cmd_chat(telegram_id: int, *, setup_mode: bool = False) -> None:
         log_dir=PROJECT_ROOT / _log.log_dir,
         level=_log.level,
         console_level=_log.console_level,
+        trace_enabled=_log.trace_enabled,
+        trace_level=_log.trace_level,
+        trace_preview_chars=_log.trace_preview_chars,
     )
 
     shutdown: asyncio.Event = asyncio.Event()
@@ -350,6 +353,7 @@ def cmd_chat(telegram_id: int, *, setup_mode: bool = False) -> None:
                         system_prompt=system_prompt,
                         approval_callback=approval_cb,
                         few_shots=stack.few_shots,
+                        channel="cli",
                     )
 
                     # ── Structured activity log ────────────────────────────────────────
@@ -366,6 +370,12 @@ def cmd_chat(telegram_id: int, *, setup_mode: bool = False) -> None:
                         tools_used=run_stats.tools_used,
                         status=run_stats.status,
                         error=run_stats.error,
+                        run_id=run_stats.run_id,
+                        channel="cli",
+                        iterations=run_stats.iterations,
+                        llm_calls=run_stats.llm_calls,
+                        input_tokens=run_stats.input_tokens,
+                        output_tokens=run_stats.output_tokens,
                     )
 
                     await channel.send_message(user, reply)
@@ -416,6 +426,9 @@ def cmd_telegram() -> None:
         log_dir=PROJECT_ROOT / _log.log_dir,
         level=_log.level,
         console_level=_log.console_level,
+        trace_enabled=_log.trace_enabled,
+        trace_level=_log.trace_level,
+        trace_preview_chars=_log.trace_preview_chars,
     )
 
     from corpclaw_lite.channels.telegram.runner import run_telegram_bot
@@ -553,6 +566,9 @@ def cmd_calibrate(
         log_dir=PROJECT_ROOT / _log.log_dir,
         level=_log.level,
         console_level=_log.console_level,
+        trace_enabled=_log.trace_enabled,
+        trace_level=_log.trace_level,
+        trace_preview_chars=_log.trace_preview_chars,
     )
 
     if reset:

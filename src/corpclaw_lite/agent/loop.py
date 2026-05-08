@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import inspect
 import json
 import logging
 import time
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
@@ -22,6 +25,7 @@ from corpclaw_lite.extensions.tools.registry import ToolRegistry
 from corpclaw_lite.llm.base import Provider, ToolCall
 from corpclaw_lite.llm.router import LLMRouter
 from corpclaw_lite.logging import health
+from corpclaw_lite.logging.trace import log_event
 from corpclaw_lite.memory.sqlite import SQLiteMemory
 from corpclaw_lite.security.tool_guard import ApprovalRequest, ToolGuardError
 from corpclaw_lite.users.models import User
@@ -44,6 +48,23 @@ logger = logging.getLogger(__name__)
 # Max chars to include from tool args / results in DEBUG logs
 # Large files / responses are truncated to avoid flooding the log file
 _LOG_TRUNCATE = 400
+
+
+def _json_preview(value: Any, limit: int = _LOG_TRUNCATE) -> str:
+    """Stable, scrubbed-by-trace preview input for structured trace fields."""
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)[:limit]
+    except TypeError:
+        return str(value)[:limit]
+
+
+def _payload_hash(value: Any) -> str:
+    """Short hash to correlate payloads without logging full contents."""
+    try:
+        raw = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    except TypeError:
+        raw = str(value)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
 
 
 def _format_tool_marker(tools_used: list[str]) -> str:
@@ -72,6 +93,11 @@ class RunStats:
     duration_ms: float = 0.0
     status: Literal["ok", "budget", "loop", "timeout", "error"] = "ok"
     error: str | None = None
+    run_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    llm_calls: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    tool_durations_ms: dict[str, float] = field(default_factory=dict[str, float])
 
 
 @dataclass
@@ -126,6 +152,7 @@ class AgentLoop:
         tools_enabled: bool = True,
         trajectory_recorder: TrajectoryRecorder | None = None,
         few_shots: list[dict[str, Any]] | None = None,
+        channel: str | None = None,
     ) -> tuple[str, RunStats]:
         """Run the ReAct loop until a final answer is given or limits are reached.
 
@@ -145,6 +172,15 @@ class AgentLoop:
             "[user=%s] run() start | msg=%r",
             user.id,
             message[:120],
+        )
+        log_event(
+            "request_started",
+            stats.run_id,
+            user_id=user.id,
+            department=user.department,
+            channel=channel,
+            message_len=len(message),
+            message_preview=message,
         )
 
         # Per-call callback takes priority over the instance-level default
@@ -167,6 +203,7 @@ class AgentLoop:
 
         # Load user facts from memory (onboarding + manually stored via memory_store)
         user_facts_block = ""
+        facts_count = 0
         if self._memory:
             facts: list[dict[str, str]] = []
             try:
@@ -176,6 +213,7 @@ class AgentLoop:
             except StorageError:
                 logger.error("[user=%s] Failed to recall facts", user.id)
             if facts:
+                facts_count = len(facts)
                 lines = [f"- {f['key']}: {f['value']}" for f in facts]
                 user_facts_block = "\n\n## Known Facts About This User\n" + "\n".join(lines)
 
@@ -221,6 +259,16 @@ class AgentLoop:
             else None
         )
         health.increment("requests")
+        health.increment("active_requests")
+        log_event(
+            "context_built",
+            stats.run_id,
+            history_count=len(history),
+            facts_count=facts_count,
+            tools_available_count=len(tools_schema or []),
+            system_prompt_chars=len(context.system_prompt or ""),
+            message_count=context.message_count,
+        )
 
         try:
             while True:
@@ -236,7 +284,15 @@ class AgentLoop:
                 if self._compressor and self._compressor.should_compress(context.messages):
                     context.messages = await self._compressor.compress(context.messages, mem_key)
 
+                llm_t0 = time.monotonic()
                 try:
+                    log_event(
+                        "llm_call_started",
+                        stats.run_id,
+                        iteration=stats.iterations,
+                        tools_count=len(tools_schema or []),
+                        message_count=context.message_count,
+                    )
                     # When the provider is a queued router, separate queue wait
                     # from LLM inference so the budget only counts active time.
                     if isinstance(self._provider, LLMRouter) and self._provider.has_queue:
@@ -265,10 +321,68 @@ class AgentLoop:
                     await self._save_memory(mem_key, "assistant", msg)
                     stats.status = "timeout"
                     stats.duration_ms = (time.monotonic() - t0) * 1000
+                    health.increment("llm_timeouts")
+                    log_event(
+                        "llm_call_finished",
+                        stats.run_id,
+                        iteration=stats.iterations,
+                        status="timeout",
+                        duration_ms=round((time.monotonic() - llm_t0) * 1000, 1),
+                    )
+                    log_event(
+                        "request_finished",
+                        stats.run_id,
+                        status=stats.status,
+                        iterations=stats.iterations,
+                        tools_used=stats.tools_used,
+                        duration_ms=round(stats.duration_ms, 1),
+                        final_answer_len=len(msg),
+                    )
                     logger.warning(
                         "[user=%s] LLM timeout on iteration %d", user.id, stats.iterations
                     )
                     return msg, stats
+                except Exception as e:
+                    health.increment("errors")
+                    stats.status = "error"
+                    stats.error = str(e)
+                    stats.duration_ms = (time.monotonic() - t0) * 1000
+                    log_event(
+                        "llm_call_finished",
+                        stats.run_id,
+                        iteration=stats.iterations,
+                        status="error",
+                        duration_ms=round((time.monotonic() - llm_t0) * 1000, 1),
+                        error=type(e).__name__,
+                    )
+                    log_event(
+                        "request_finished",
+                        stats.run_id,
+                        status=stats.status,
+                        iterations=stats.iterations,
+                        tools_used=stats.tools_used,
+                        duration_ms=round(stats.duration_ms, 1),
+                        final_answer_len=0,
+                        error=stats.error,
+                    )
+                    raise
+
+                stats.llm_calls += 1
+                stats.input_tokens += response.usage.input_tokens
+                stats.output_tokens += response.usage.output_tokens
+                health.increment("llm_calls")
+                log_event(
+                    "llm_call_finished",
+                    stats.run_id,
+                    iteration=stats.iterations,
+                    status="ok",
+                    duration_ms=round((time.monotonic() - llm_t0) * 1000, 1),
+                    input_tokens=response.usage.input_tokens,
+                    output_tokens=response.usage.output_tokens,
+                    tool_call_names=[tc.name for tc in response.tool_calls or []],
+                    finish_has_content=bool(response.content),
+                    reasoning_chars=len(response.reasoning or ""),
+                )
 
                 logger.debug(
                     "[user=%s] llm_response iter=%d | content=%r | tool_calls=%d",
@@ -304,6 +418,15 @@ class AgentLoop:
                         stats.iterations,
                         stats.duration_ms,
                     )
+                    log_event(
+                        "request_finished",
+                        stats.run_id,
+                        status=stats.status,
+                        iterations=stats.iterations,
+                        tools_used=stats.tools_used,
+                        duration_ms=round(stats.duration_ms, 1),
+                        final_answer_len=len(final),
+                    )
                     return final, stats
 
                 # Model wants more work — check ALL budget limits before continuing.
@@ -322,6 +445,7 @@ class AgentLoop:
                         _approval_cb,
                         on_tool_start,
                         trajectory_recorder,
+                        stats,
                     )
                     # Add ALL results first to keep context valid (no orphaned tool_calls)
                     loop_detected = False
@@ -348,6 +472,7 @@ class AgentLoop:
                             _approval_cb,
                             on_tool_start,
                             trajectory_recorder,
+                            stats,
                         )
                         context.add_tool_result(tc.id, tc.name, result)
                         stats.tools_used.append(tc.name)
@@ -374,6 +499,15 @@ class AgentLoop:
                                 user.id,
                                 tc.name,
                             )
+                            log_event(
+                                "request_finished",
+                                stats.run_id,
+                                status=stats.status,
+                                iterations=stats.iterations,
+                                tools_used=stats.tools_used,
+                                duration_ms=round(stats.duration_ms, 1),
+                                final_answer_len=len(result),
+                            )
                             return result, stats
 
                         if progress.detect_loop(tc.name, result):
@@ -398,7 +532,19 @@ class AgentLoop:
             stats.error = str(e)
             stats.duration_ms = (time.monotonic() - t0) * 1000
             logger.warning("[user=%s] budget exceeded: %s", user.id, e)
+            log_event(
+                "request_finished",
+                stats.run_id,
+                status=stats.status,
+                iterations=stats.iterations,
+                tools_used=stats.tools_used,
+                duration_ms=round(stats.duration_ms, 1),
+                final_answer_len=len(msg),
+                error=stats.error,
+            )
             return msg, stats
+        finally:
+            health.increment("active_requests", -1)
 
         fallback = "I detected a loop and stopped to avoid repeating the same actions."
         if self._memory:
@@ -406,6 +552,15 @@ class AgentLoop:
         stats.status = "loop"
         stats.duration_ms = (time.monotonic() - t0) * 1000
         logger.warning("[user=%s] loop detected after %d iterations", user.id, stats.iterations)
+        log_event(
+            "request_finished",
+            stats.run_id,
+            status=stats.status,
+            iterations=stats.iterations,
+            tools_used=stats.tools_used,
+            duration_ms=round(stats.duration_ms, 1),
+            final_answer_len=len(fallback),
+        )
         return fallback, stats
 
     async def _save_memory(self, mem_key: str, role: str, content: str, **kwargs: Any) -> None:
@@ -474,6 +629,7 @@ class AgentLoop:
         approval_callback: Callable[[str, str], Awaitable[bool]] | None,
         on_tool_start: Callable[[str], None] | None,
         trajectory_recorder: TrajectoryRecorder | None = None,
+        stats: RunStats | None = None,
     ) -> list[str]:
         """Execute multiple tools in parallel and return results."""
 
@@ -484,6 +640,7 @@ class AgentLoop:
                 approval_callback,
                 on_tool_start,
                 trajectory_recorder,
+                stats,
             )
 
         results = await asyncio.gather(*[execute_one(tc) for tc in tool_calls])
@@ -496,9 +653,34 @@ class AgentLoop:
         approval_callback: Callable[[str, str], Awaitable[bool]] | None,
         on_tool_start: Callable[[str], None] | None,
         trajectory_recorder: TrajectoryRecorder | None = None,
+        stats: RunStats | None = None,
     ) -> str:
         """Execute a single tool with all checks."""
+        run_id = stats.run_id if stats else "unknown"
+        tool_t0 = time.monotonic()
+        log_event(
+            "tool_call_started",
+            run_id,
+            tool=tc.name,
+            tool_call_id=tc.id,
+            args_preview=_json_preview(tc.arguments),
+            args_hash=_payload_hash(tc.arguments),
+        )
         if self._permission_checker and not self._permission_checker.can_use_tool(user, tc.name):
+            result = (
+                f"Error: Permission denied. Your department ({user.department})"
+                f" cannot use tool '{tc.name}'."
+            )
+            log_event(
+                "tool_call_finished",
+                run_id,
+                tool=tc.name,
+                tool_call_id=tc.id,
+                status="permission_denied",
+                duration_ms=round((time.monotonic() - tool_t0) * 1000, 1),
+                result_preview=result,
+                result_hash=_payload_hash(result),
+            )
             return (
                 f"Error: Permission denied. Your department ({user.department})"
                 f" cannot use tool '{tc.name}'."
@@ -520,35 +702,98 @@ class AgentLoop:
                 tool = self._registry.get(tc.name)
                 risk_level = tool.risk_level if tool else None
                 risk = risk_level.value if risk_level else None
-                await self._tool_guard.check(tc.name, tc.arguments, risk_level=risk)
+                guard_check = self._tool_guard.check
+                if "run_id" in inspect.signature(guard_check).parameters:
+                    await guard_check(
+                        tc.name,
+                        tc.arguments,
+                        risk_level=risk,
+                        run_id=run_id,
+                    )
+                else:
+                    await guard_check(tc.name, tc.arguments, risk_level=risk)
+                log_event(
+                    "tool_guard_decision",
+                    run_id,
+                    tool=tc.name,
+                    tool_call_id=tc.id,
+                    decision="allow",
+                    risk_level=risk,
+                )
 
             if on_tool_start:
                 on_tool_start(tc.name)
 
             result = await self._registry.execute(tc.name, tc.arguments, user=user)
+            status = "ok"
 
         except ApprovalRequest as e:
+            log_event(
+                "tool_guard_decision",
+                run_id,
+                tool=tc.name,
+                tool_call_id=tc.id,
+                decision="approval_required",
+                rule_id=e.action,
+                details=e.details,
+            )
             if approval_callback:
                 # Lock prevents concurrent approval prompts when tools run in parallel
                 async with self._approval_lock:
                     approved = await approval_callback(e.action, e.details)
+                log_event(
+                    "approval_finished",
+                    run_id,
+                    tool=tc.name,
+                    tool_call_id=tc.id,
+                    action=e.action,
+                    approved=approved,
+                    status="approved" if approved else "denied",
+                )
                 if approved:
                     result = await self._registry.execute(tc.name, tc.arguments, user=user)
+                    status = "ok"
                 else:
+                    health.increment("approval_denied")
                     result = f"Action '{e.action}' was denied by user."
+                    status = "approval_denied"
             else:
                 result = (
                     f"Action Paused: approval required for '{e.action}' "
                     f"but no approval channel is configured."
                 )
+                status = "approval_no_channel"
+                log_event(
+                    "approval_finished",
+                    run_id,
+                    tool=tc.name,
+                    tool_call_id=tc.id,
+                    action=e.action,
+                    approved=False,
+                    status="no_channel",
+                )
         except ToolGuardError as e:
+            health.increment("guard_blocks")
+            log_event(
+                "tool_guard_decision",
+                run_id,
+                tool=tc.name,
+                tool_call_id=tc.id,
+                decision="block",
+                details=str(e),
+            )
             result = str(e)
+            status = "guard_blocked"
         except ContainerIPCError as e:
             logger.error("[user=%s] Container IPC error for tool %s: %s", user.id, tc.name, e)
             result = str(e)
+            status = "container_error"
+            health.increment("tool_errors")
         except Exception:
             logger.exception("[user=%s] Unexpected error executing tool %s", user.id, tc.name)
             result = f"Error executing tool {tc.name}: see logs for details"
+            status = "error"
+            health.increment("tool_errors")
 
         logger.debug(
             "[user=%s] tool_result | tool=%s | result=%r",
@@ -560,5 +805,21 @@ class AgentLoop:
         # Calibration trajectory recording
         if trajectory_recorder is not None:
             trajectory_recorder.record_tool_result(tc.name, result)
+
+        duration_ms = round((time.monotonic() - tool_t0) * 1000, 1)
+        if stats is not None:
+            stats.tool_durations_ms[tc.name] = (
+                stats.tool_durations_ms.get(tc.name, 0.0) + duration_ms
+            )
+        log_event(
+            "tool_call_finished",
+            run_id,
+            tool=tc.name,
+            tool_call_id=tc.id,
+            status=status,
+            duration_ms=duration_ms,
+            result_preview=result,
+            result_hash=_payload_hash(result),
+        )
 
         return result
