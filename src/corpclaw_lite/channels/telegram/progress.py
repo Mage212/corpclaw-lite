@@ -31,6 +31,15 @@ _TOOL_STATUS_MAP: dict[str, str] = {
     "dispatch_subagent": "🤖 Делегирую субагенту...",
 }
 
+_LLM_STAGE_STATUS_MAP: dict[str, str] = {
+    "started": "🤔 Думаю...",
+    "reasoning": "🤔 Думаю...",
+    "answer": "📝 Собираю ответ...",
+    "tool_call": "⚙️ Готовлю действие...",
+    "fallback": "🤔 Думаю...",
+    "stalled": "🤔 Думаю...",
+}
+
 
 class StatusMessageSession:
     """Manage a temporary Telegram status message for one request.
@@ -100,6 +109,12 @@ class StatusMessageSession:
         """
         friendly = _TOOL_STATUS_MAP.get(tool_name, "⚙️ Выполняю действие...")
         self._set_desired_text(friendly)
+
+    def mark_llm_stage(self, stage: str) -> None:
+        """Update desired status from backend LLM streaming telemetry."""
+        friendly = _LLM_STAGE_STATUS_MAP.get(stage)
+        if friendly is not None:
+            self._set_desired_text(friendly)
 
     async def close(self) -> None:
         """Stop background work and clean up the temporary message."""

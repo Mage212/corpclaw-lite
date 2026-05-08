@@ -376,6 +376,15 @@ def cmd_chat(telegram_id: int, *, setup_mode: bool = False) -> None:
                         llm_calls=run_stats.llm_calls,
                         input_tokens=run_stats.input_tokens,
                         output_tokens=run_stats.output_tokens,
+                        stream_stats={
+                            "calls": run_stats.llm_stream_calls,
+                            "fallbacks": run_stats.llm_stream_fallbacks,
+                            "stalls": run_stats.llm_stream_stalls,
+                            "events": run_stats.llm_stream_events,
+                            "first_event_ms": run_stats.llm_first_event_ms,
+                            "first_content_ms": run_stats.llm_first_content_ms,
+                            "first_tool_call_ms": run_stats.llm_first_tool_call_ms,
+                        },
                     )
 
                     await channel.send_message(user, reply)

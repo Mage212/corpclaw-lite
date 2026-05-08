@@ -4,6 +4,69 @@
 
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/).
 
+## [0.1.2] — 2026-05-08
+
+Текущая рабочая версия. Основной фокус — backend streaming для LLM, детальная
+телеметрия выполнения и проверка совместимости с реальной моделью из конфигурации.
+
+### Added
+
+#### Backend LLM Streaming
+- Добавлен внутренний streaming-контракт: `LLMStreamEvent`, расширенный `StreamChunk`,
+  optional `StreamingProvider.chat_streamed()`.
+- `OpenAIProvider` получил `chat_streamed()`: потоково читает chunks, собирает полный
+  `LLMResponse`, сохраняет `reasoning_content`, собирает partial tool-call deltas и после
+  завершения применяет обычный post-processing.
+- `AgentLoop` использует backend streaming при `agent.llm_streaming_enabled: true`, если
+  провайдер поддерживает `StreamingProvider`.
+- Добавлен fallback: если streaming падает, запрос повторяется через обычный `chat()`.
+- Tool calls по-прежнему исполняются только после полной сборки `LLMResponse`, а не по partial
+  stream-delta.
+
+#### Observability
+- Добавлены trace-события `llm_stream_started`, `llm_stream_stage`, `llm_stream_delta`,
+  `llm_stream_stalled`, `llm_stream_fallback`, `llm_stream_finished`.
+- `llm_stream_delta` пишется только при `logging.trace_level: debug_preview|full`, чтобы
+  metadata-режим не раздувал логи содержимым ответа.
+- `logging.trace_level: full` теперь сохраняет полный scrubbed-текст, а не обрезает его до
+  preview.
+- В `agent_activity.jsonl` добавлена краткая stream-сводка: calls, fallbacks, stalls, events,
+  first_event_ms, first_content_ms, first_tool_call_ms.
+- В `/health` добавлены counters: `llm_stream_calls`, `llm_stream_fallbacks`,
+  `llm_stream_stalls`, `llm_reasoning_chars`, `llm_content_chars`.
+
+#### Telegram/CLI Statuses
+- Telegram progress получил coarse LLM-stage статусы: reasoning, preparing tool call,
+  assembling answer.
+- CLI и Telegram activity logs теперь сохраняют stream summary для каждого запроса.
+
+### Changed
+
+- `OpenAIProvider.stream()` теперь применяет тот же preset/bootstrap kwargs path, что и `chat()`.
+- Основной `llm_call_started`/`llm_call_finished` trace расширен безопасными hash/char-метриками
+  для content и reasoning.
+- В `config/settings.yaml` добавлены настройки:
+  - `agent.llm_streaming_enabled`
+  - `agent.llm_stream_stall_seconds`
+  - `agent.llm_stream_max_reasoning_chars`
+  - `agent.llm_stream_status_updates`
+
+### Verified
+
+- Реальный интеграционный запрос к текущей модели `provider=litellm`,
+  `model=llama-qwen3.6-35b-a3b`, без установки `max_tokens`.
+- Подтверждено, что модель отдаёт:
+  - `reasoning_content` stream-delta;
+  - `delta.content`;
+  - partial `delta.tool_calls`;
+  - `finish_reason=stop` для текста;
+  - `finish_reason=tool_calls` для вызова инструмента;
+  - usage tokens.
+- Точечные проверки после изменений:
+  - `uv run pytest tests/test_agent_loop.py tests/test_llm_advanced.py tests/test_logging_and_security.py tests/test_health.py -q`
+  - `uv run ruff check ...`
+  - `uv run pyright ...`
+
 ## [0.1.0] — 2026-04-17
 
 Первый публичный релиз.

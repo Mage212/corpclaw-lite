@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import inspect
 import json
@@ -22,10 +23,16 @@ from corpclaw_lite.config.settings import AgentSettings
 from corpclaw_lite.exceptions import ContainerIPCError, StorageError
 from corpclaw_lite.extensions.tools.base import TOOL_ERROR_PREFIX
 from corpclaw_lite.extensions.tools.registry import ToolRegistry
-from corpclaw_lite.llm.base import Provider, ToolCall
+from corpclaw_lite.llm.base import (
+    LLMResponse,
+    LLMStreamEvent,
+    Provider,
+    StreamingProvider,
+    ToolCall,
+)
 from corpclaw_lite.llm.router import LLMRouter
 from corpclaw_lite.logging import health
-from corpclaw_lite.logging.trace import log_event
+from corpclaw_lite.logging.trace import get_trace_logger, log_event
 from corpclaw_lite.memory.sqlite import SQLiteMemory
 from corpclaw_lite.security.tool_guard import ApprovalRequest, ToolGuardError
 from corpclaw_lite.users.models import User
@@ -67,6 +74,12 @@ def _payload_hash(value: Any) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
 
 
+def _trace_payload_enabled() -> bool:
+    """Return True when trace config allows payload previews beyond metadata."""
+    trace_logger = get_trace_logger()
+    return bool(trace_logger and trace_logger.trace_level in ("debug_preview", "full"))
+
+
 def _format_tool_marker(tools_used: list[str]) -> str:
     """Compact marker for the reasoning column (audit only, not shown to model)."""
     if not tools_used:
@@ -98,6 +111,13 @@ class RunStats:
     input_tokens: int = 0
     output_tokens: int = 0
     tool_durations_ms: dict[str, float] = field(default_factory=dict[str, float])
+    llm_stream_calls: int = 0
+    llm_stream_fallbacks: int = 0
+    llm_stream_stalls: int = 0
+    llm_stream_events: int = 0
+    llm_first_event_ms: float | None = None
+    llm_first_content_ms: float | None = None
+    llm_first_tool_call_ms: float | None = None
 
 
 @dataclass
@@ -142,6 +162,220 @@ class AgentLoop:
         """Access the LLM provider."""
         return self._provider
 
+    async def _call_llm_provider(
+        self,
+        provider: Provider,
+        *,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        system: str | None,
+        run_id: str,
+        iteration: int,
+        on_llm_stage: Callable[[str], None] | None,
+        stats: RunStats | None,
+    ) -> LLMResponse:
+        """Call an LLM provider, using backend streaming when available."""
+        if not self._settings.llm_streaming_enabled or not isinstance(provider, StreamingProvider):
+            return await provider.chat(messages=messages, tools=tools, system=system)
+
+        health.increment("llm_stream_calls")
+        if stats is not None:
+            stats.llm_stream_calls += 1
+        started_at = time.monotonic()
+        last_activity_at = started_at
+        last_stage: str | None = None
+        reasoning_limit_logged = False
+        event_count = 0
+        content_delta_count = 0
+        reasoning_delta_count = 0
+        tool_call_delta_count = 0
+        first_event_ms: float | None = None
+        first_reasoning_ms: float | None = None
+        first_content_ms: float | None = None
+        first_tool_call_ms: float | None = None
+        stage_counts: dict[str, int] = {}
+        payload_trace_enabled = _trace_payload_enabled()
+
+        def emit_status(stage: str) -> None:
+            if self._settings.llm_stream_status_updates and on_llm_stage is not None:
+                on_llm_stage(stage)
+
+        def handle_event(event: LLMStreamEvent) -> None:
+            nonlocal content_delta_count, event_count, first_content_ms, first_event_ms
+            nonlocal first_reasoning_ms, first_tool_call_ms, last_activity_at, last_stage
+            nonlocal reasoning_delta_count, reasoning_limit_logged, tool_call_delta_count
+            now = time.monotonic()
+            elapsed_ms = round((now - started_at) * 1000, 1)
+            event_count += 1
+            stage_counts[event.stage] = stage_counts.get(event.stage, 0) + 1
+            if first_event_ms is None:
+                first_event_ms = elapsed_ms
+            if event.stage != "stalled":
+                last_activity_at = now
+            if event.reasoning_delta:
+                reasoning_delta_count += 1
+                if first_reasoning_ms is None:
+                    first_reasoning_ms = elapsed_ms
+            if event.content_delta:
+                content_delta_count += 1
+                if first_content_ms is None:
+                    first_content_ms = elapsed_ms
+            if event.tool_call_arguments_delta or event.tool_call_name:
+                tool_call_delta_count += 1
+                if first_tool_call_ms is None:
+                    first_tool_call_ms = elapsed_ms
+            if event.stage != last_stage:
+                last_stage = event.stage
+                emit_status(event.stage)
+                log_event(
+                    "llm_stream_stage",
+                    run_id,
+                    iteration=iteration,
+                    stage=event.stage,
+                    elapsed_ms=elapsed_ms,
+                    content_chars=event.content_chars,
+                    reasoning_chars=event.reasoning_chars,
+                    tool_call_count=event.tool_call_count,
+                    finish_reason=event.finish_reason,
+                )
+            if payload_trace_enabled and (
+                event.content_delta or event.reasoning_delta or event.tool_call_arguments_delta
+            ):
+                log_event(
+                    "llm_stream_delta",
+                    run_id,
+                    iteration=iteration,
+                    stage=event.stage,
+                    elapsed_ms=elapsed_ms,
+                    content_delta_preview=event.content_delta,
+                    content_delta_hash=(
+                        _payload_hash(event.content_delta) if event.content_delta else ""
+                    ),
+                    reasoning_delta_preview=event.reasoning_delta,
+                    reasoning_delta_hash=(
+                        _payload_hash(event.reasoning_delta) if event.reasoning_delta else ""
+                    ),
+                    tool_call_id=event.tool_call_id,
+                    tool_call_name=event.tool_call_name,
+                    tool_call_arguments_delta_preview=event.tool_call_arguments_delta,
+                    tool_call_arguments_delta_hash=(
+                        _payload_hash(event.tool_call_arguments_delta)
+                        if event.tool_call_arguments_delta
+                        else ""
+                    ),
+                    content_chars=event.content_chars,
+                    reasoning_chars=event.reasoning_chars,
+                    tool_call_count=event.tool_call_count,
+                )
+            if (
+                event.reasoning_chars > self._settings.llm_stream_max_reasoning_chars
+                and not reasoning_limit_logged
+            ):
+                reasoning_limit_logged = True
+                log_event(
+                    "llm_stream_reasoning_over_limit",
+                    run_id,
+                    iteration=iteration,
+                    reasoning_chars=event.reasoning_chars,
+                    limit=self._settings.llm_stream_max_reasoning_chars,
+                )
+
+        async def stall_monitor() -> None:
+            stall_seconds = max(1.0, self._settings.llm_stream_stall_seconds)
+            last_logged_at = 0.0
+            while True:
+                await asyncio.sleep(stall_seconds)
+                now = time.monotonic()
+                if now - last_activity_at < stall_seconds:
+                    continue
+                if now - last_logged_at < stall_seconds:
+                    continue
+                last_logged_at = now
+                health.increment("llm_stream_stalls")
+                if stats is not None:
+                    stats.llm_stream_stalls += 1
+                emit_status("stalled")
+                log_event(
+                    "llm_stream_stalled",
+                    run_id,
+                    iteration=iteration,
+                    current_stage=last_stage,
+                    idle_seconds=round(now - last_activity_at, 1),
+                    elapsed_ms=round((now - started_at) * 1000, 1),
+                    event_count=event_count,
+                    stage_counts=stage_counts,
+                )
+
+        monitor_task = asyncio.create_task(stall_monitor())
+        log_event(
+            "llm_stream_started",
+            run_id,
+            iteration=iteration,
+            provider=type(provider).__name__,
+            message_count=len(messages),
+            tools_count=len(tools or []),
+            system_prompt_chars=len(system or ""),
+            stall_seconds=max(1.0, self._settings.llm_stream_stall_seconds),
+            payload_trace_enabled=payload_trace_enabled,
+        )
+        try:
+            response = await provider.chat_streamed(
+                messages=messages,
+                tools=tools,
+                system=system,
+                on_event=handle_event,
+            )
+        except Exception as e:
+            health.increment("llm_stream_fallbacks")
+            if stats is not None:
+                stats.llm_stream_fallbacks += 1
+            emit_status("fallback")
+            log_event(
+                "llm_stream_fallback",
+                run_id,
+                iteration=iteration,
+                error=type(e).__name__,
+                current_stage=last_stage,
+                event_count=event_count,
+                stage_counts=stage_counts,
+                elapsed_ms=round((time.monotonic() - started_at) * 1000, 1),
+            )
+            logger.warning("LLM streaming failed; falling back to chat(): %s", e)
+            return await provider.chat(messages=messages, tools=tools, system=system)
+        finally:
+            monitor_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await monitor_task
+
+        health.increment("llm_reasoning_chars", len(response.reasoning or ""))
+        health.increment("llm_content_chars", len(response.content or ""))
+        if stats is not None:
+            stats.llm_stream_events += event_count
+            stats.llm_first_event_ms = first_event_ms
+            stats.llm_first_content_ms = first_content_ms
+            stats.llm_first_tool_call_ms = first_tool_call_ms
+        log_event(
+            "llm_stream_finished",
+            run_id,
+            iteration=iteration,
+            duration_ms=round((time.monotonic() - started_at) * 1000, 1),
+            event_count=event_count,
+            content_delta_count=content_delta_count,
+            reasoning_delta_count=reasoning_delta_count,
+            tool_call_delta_count=tool_call_delta_count,
+            stage_counts=stage_counts,
+            first_event_ms=first_event_ms,
+            first_reasoning_ms=first_reasoning_ms,
+            first_content_ms=first_content_ms,
+            first_tool_call_ms=first_tool_call_ms,
+            content_chars=len(response.content or ""),
+            reasoning_chars=len(response.reasoning or ""),
+            tool_call_names=[tc.name for tc in response.tool_calls or []],
+            content_hash=_payload_hash(response.content or ""),
+            reasoning_hash=_payload_hash(response.reasoning or ""),
+        )
+        return response
+
     async def run(
         self,
         user: User,
@@ -149,6 +383,7 @@ class AgentLoop:
         system_prompt: str | None = None,
         approval_callback: Callable[[str, str], Awaitable[bool]] | None = None,
         on_tool_start: Callable[[str], None] | None = None,
+        on_llm_stage: Callable[[str], None] | None = None,
         tools_enabled: bool = True,
         trajectory_recorder: TrajectoryRecorder | None = None,
         few_shots: list[dict[str, Any]] | None = None,
@@ -292,6 +527,8 @@ class AgentLoop:
                         iteration=stats.iterations,
                         tools_count=len(tools_schema or []),
                         message_count=context.message_count,
+                        system_prompt_chars=len(context.system_prompt or ""),
+                        streaming_enabled=self._settings.llm_streaming_enabled,
                     )
                     # When the provider is a queued router, separate queue wait
                     # from LLM inference so the budget only counts active time.
@@ -300,19 +537,34 @@ class AgentLoop:
                         async with self._provider.acquire_slot(str(user.id)):
                             budget.resume()
                             response = await asyncio.wait_for(
-                                self._provider.default.chat(
+                                self._call_llm_provider(
+                                    self._provider.default,
                                     messages=context.messages,
                                     tools=tools_schema,
                                     system=context.system_prompt or None,
+                                    run_id=stats.run_id,
+                                    iteration=stats.iterations,
+                                    on_llm_stage=on_llm_stage,
+                                    stats=stats,
                                 ),
                                 timeout=self._settings.llm_timeout_seconds,
                             )
                     else:
+                        target_provider: Provider = (
+                            self._provider.default
+                            if isinstance(self._provider, LLMRouter)
+                            else self._provider
+                        )
                         response = await asyncio.wait_for(
-                            self._provider.chat(
+                            self._call_llm_provider(
+                                target_provider,
                                 messages=context.messages,
                                 tools=tools_schema,
                                 system=context.system_prompt or None,
+                                run_id=stats.run_id,
+                                iteration=stats.iterations,
+                                on_llm_stage=on_llm_stage,
+                                stats=stats,
                             ),
                             timeout=self._settings.llm_timeout_seconds,
                         )
@@ -381,7 +633,10 @@ class AgentLoop:
                     output_tokens=response.usage.output_tokens,
                     tool_call_names=[tc.name for tc in response.tool_calls or []],
                     finish_has_content=bool(response.content),
+                    content_chars=len(response.content or ""),
                     reasoning_chars=len(response.reasoning or ""),
+                    content_hash=_payload_hash(response.content or ""),
+                    reasoning_hash=_payload_hash(response.reasoning or ""),
                 )
 
                 logger.debug(

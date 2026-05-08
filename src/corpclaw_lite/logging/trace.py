@@ -78,7 +78,7 @@ class TraceLogger:
             scrubbed = scrub_text(value)
             if self.trace_level in ("metadata", "debug_preview"):
                 return scrubbed[: self.preview_chars]
-            return scrubbed[: self.preview_chars]
+            return scrubbed
         if isinstance(value, dict):
             dict_value = cast(dict[object, object], value)
             return {str(k): self._sanitize(v) for k, v in dict_value.items()}

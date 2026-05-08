@@ -95,6 +95,10 @@ class AgentSettings(BaseModel):
     approval_mode: Literal["manual", "smart", "off"] = "manual"
     compression: CompressionSettings = CompressionSettings()
     llm_timeout_seconds: int = 120
+    llm_streaming_enabled: bool = True
+    llm_stream_stall_seconds: float = 20.0
+    llm_stream_max_reasoning_chars: int = 12000
+    llm_stream_status_updates: bool = True
     max_facts_recall: int = 20
 
 

@@ -9,7 +9,14 @@ from corpclaw_lite.agent.context import ContextBuilder
 from corpclaw_lite.agent.loop import AgentConfig, AgentLoop, RunStats
 from corpclaw_lite.config.settings import AgentSettings
 from corpclaw_lite.extensions.tools.registry import ToolRegistry
-from corpclaw_lite.llm.base import LLMResponse, Provider, StreamChunk, TokenUsage, ToolCall
+from corpclaw_lite.llm.base import (
+    LLMResponse,
+    LLMStreamEvent,
+    Provider,
+    StreamChunk,
+    TokenUsage,
+    ToolCall,
+)
 from corpclaw_lite.users.models import User
 
 
@@ -63,6 +70,42 @@ async def test_agent_loop_basic(test_user: User, empty_registry: ToolRegistry) -
     assert stats.iterations == 1
     assert stats.duration_ms >= 0
     assert stats.run_id
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_uses_backend_streaming_when_available(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    class StreamingMockProvider(MockProvider):
+        def __init__(self) -> None:
+            super().__init__([LLMResponse(content="fallback")])
+            self.streamed_call_count = 0
+
+        async def chat_streamed(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]] | None = None,
+            system: str | None = None,
+            on_event: Any | None = None,
+        ) -> LLMResponse:
+            self.streamed_call_count += 1
+            if on_event is not None:
+                on_event(LLMStreamEvent(stage="started"))
+                on_event(LLMStreamEvent(stage="answer", content_delta="Hello", content_chars=5))
+                on_event(LLMStreamEvent(stage="finished", content_chars=5))
+            return LLMResponse(content="Hello")
+
+    provider = StreamingMockProvider()
+    seen_stages: list[str] = []
+    loop = AgentLoop(AgentConfig(provider, empty_registry, AgentSettings()))
+
+    res, stats = await loop.run(test_user, "Hi", on_llm_stage=seen_stages.append)
+
+    assert res == "Hello"
+    assert provider.streamed_call_count == 1
+    assert provider.call_count == 0
+    assert seen_stages == ["started", "answer", "finished"]
+    assert stats.status == "ok"
 
 
 @pytest.mark.asyncio

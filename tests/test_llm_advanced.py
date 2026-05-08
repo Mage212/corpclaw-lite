@@ -8,6 +8,7 @@ import pytest
 
 from corpclaw_lite.config.providers import ProviderSettings
 from corpclaw_lite.llm.anthropic import AnthropicProvider
+from corpclaw_lite.llm.base import LLMStreamEvent
 from corpclaw_lite.llm.openai import OpenAIProvider
 
 
@@ -133,6 +134,53 @@ async def test_openai_stream() -> None:
         ]
 
     assert chunks == ["Hey! ", "There."]
+
+
+@pytest.mark.asyncio
+async def test_openai_chat_streamed_reconstructs_full_response() -> None:
+    mock_client = AsyncMock()
+
+    async def _fake_stream(*args, **kwargs):
+        class _Chunk:
+            def __init__(
+                self,
+                *,
+                content: str = "",
+                reasoning: str = "",
+                finish_reason: str | None = None,
+            ) -> None:
+                self.choices = [MagicMock()]
+                self.choices[0].delta.content = content
+                self.choices[0].delta.reasoning_content = reasoning
+                self.choices[0].delta.tool_calls = None
+                self.choices[0].finish_reason = finish_reason
+
+        yield _Chunk(reasoning="thinking ")
+        yield _Chunk(content="Hello ")
+        yield _Chunk(content="world", finish_reason="stop")
+
+    mock_client.chat.completions.create = AsyncMock(return_value=_fake_stream())
+    events: list[LLMStreamEvent] = []
+
+    with patch("corpclaw_lite.llm.openai.openai.AsyncOpenAI", return_value=mock_client):
+        provider = OpenAIProvider(_openai_settings())
+        resp = await provider.chat_streamed(
+            [{"role": "user", "content": "Hi"}],
+            on_event=events.append,
+        )
+
+    assert resp.content == "Hello world"
+    assert resp.reasoning == "thinking "
+    assert resp.tool_calls == []
+    assert [event.stage for event in events] == [
+        "started",
+        "reasoning",
+        "answer",
+        "answer",
+        "finished",
+    ]
+    args = mock_client.chat.completions.create.await_args.kwargs
+    assert args["stream"] is True
 
 
 # ── _resolve_reasoning_fallback ───────────────────────────────────────────────

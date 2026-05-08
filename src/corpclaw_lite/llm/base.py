@@ -1,17 +1,30 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from typing import Any, Protocol, runtime_checkable
+from collections.abc import AsyncIterator, Callable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
 __all__ = [
     "LLMResponse",
+    "LLMStreamEvent",
+    "LLMStreamStage",
     "Provider",
     "StreamChunk",
+    "StreamingProvider",
     "TokenUsage",
     "ToolCall",
     "VisionProvider",
+]
+
+LLMStreamStage = Literal[
+    "started",
+    "reasoning",
+    "answer",
+    "tool_call",
+    "finished",
+    "stalled",
+    "fallback",
 ]
 
 
@@ -43,6 +56,26 @@ class StreamChunk(BaseModel):
     """A chunk of streamed response."""
 
     content: str = ""
+    reasoning: str = ""
+    tool_call_id: str | None = None
+    tool_call_name: str | None = None
+    tool_call_arguments_delta: str = ""
+    finish_reason: str | None = None
+
+
+class LLMStreamEvent(BaseModel):
+    """Backend telemetry event emitted while a full LLM response is streaming."""
+
+    stage: LLMStreamStage
+    content_delta: str = ""
+    reasoning_delta: str = ""
+    tool_call_id: str | None = None
+    tool_call_name: str | None = None
+    tool_call_arguments_delta: str = ""
+    finish_reason: str | None = None
+    content_chars: int = 0
+    reasoning_chars: int = 0
+    tool_call_count: int = 0
 
 
 @runtime_checkable
@@ -65,6 +98,21 @@ class Provider(Protocol):
         system: str | None = None,
     ) -> AsyncIterator[StreamChunk]:
         """Stream a chat request from the LLM."""
+        ...
+
+
+@runtime_checkable
+class StreamingProvider(Protocol):
+    """Optional provider capability: stream internally and return a full response."""
+
+    async def chat_streamed(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        system: str | None = None,
+        on_event: Callable[[LLMStreamEvent], None] | None = None,
+    ) -> LLMResponse:
+        """Stream a chat request for telemetry, then return a complete response."""
         ...
 
 

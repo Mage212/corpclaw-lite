@@ -477,6 +477,9 @@ class TelegramBotOrchestrator:
                 on_tool_start=(
                     status_session.mark_tool_start if status_session is not None else None
                 ),
+                on_llm_stage=(
+                    status_session.mark_llm_stage if status_session is not None else None
+                ),
                 tools_enabled=(mode == "execute"),
                 few_shots=stack.few_shots,
                 channel="telegram",
@@ -513,6 +516,19 @@ class TelegramBotOrchestrator:
                 llm_calls=run_stats.llm_calls if run_stats is not None else None,
                 input_tokens=run_stats.input_tokens if run_stats is not None else None,
                 output_tokens=run_stats.output_tokens if run_stats is not None else None,
+                stream_stats=(
+                    {
+                        "calls": run_stats.llm_stream_calls,
+                        "fallbacks": run_stats.llm_stream_fallbacks,
+                        "stalls": run_stats.llm_stream_stalls,
+                        "events": run_stats.llm_stream_events,
+                        "first_event_ms": run_stats.llm_first_event_ms,
+                        "first_content_ms": run_stats.llm_first_content_ms,
+                        "first_tool_call_ms": run_stats.llm_first_tool_call_ms,
+                    }
+                    if run_stats is not None
+                    else None
+                ),
             )
 
         await channel.send_message(user, reply)
