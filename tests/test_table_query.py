@@ -189,7 +189,12 @@ class TestTableQueryTool:
     ) -> None:
         """Aggregation on Windows-1251 CSV with Cyrillic column names."""
         monkeypatch.chdir(tmp_path)
-        content = "отдел,сотрудник,оклад\nБухгалтерия,Иванов,80000\nIT,Сидоров,120000\nБухгалтерия,Петрова,90000\n"
+        content = (
+            "отдел,сотрудник,оклад\n"
+            "Бухгалтерия,Иванов,80000\n"
+            "IT,Сидоров,120000\n"
+            "Бухгалтерия,Петрова,90000\n"
+        )
         (tmp_path / "depts.csv").write_bytes(content.encode("cp1251"))
 
         result = await tool.execute(
@@ -296,9 +301,7 @@ class TestTableQueryTool:
     ) -> None:
         """Invalid sheet name returns an error."""
         monkeypatch.chdir(tmp_path)
-        _create_xlsx(
-            tmp_path / "data.xlsx", ["a"], [[1]]
-        )
+        _create_xlsx(tmp_path / "data.xlsx", ["a"], [[1]])
 
         result = await tool.execute(
             path="data.xlsx",

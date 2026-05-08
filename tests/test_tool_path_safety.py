@@ -120,7 +120,7 @@ class TestResolveContainerPath:
     """Test the shared resolve_container_path utility used by SendFileTool, ReadImageTool."""
 
     def test_relative_path_inside_workspace(self, tmp_path: Path) -> None:
-        ws = _make_workspace(tmp_path)
+        _make_workspace(tmp_path)
         ws_base = tmp_path / "workspaces"
 
         resolved = resolve_container_path("test.txt", ws_base, _TEST_USER)
@@ -182,8 +182,6 @@ class TestResolveContainerPath:
     def test_relative_workspace_base_still_works(self, tmp_path: Path) -> None:
         """Regression test: workspace_base as relative Path must not break boundary check."""
         _make_workspace(tmp_path)
-        # Simulate the default config value: relative "workspaces" path
-        rel_base = Path("workspaces")
         # We can't use a truly relative path from CWD, but we can verify
         # the boundary check works when workspace_base is NOT pre-resolved.
         # The _validate_boundary function must resolve internally.

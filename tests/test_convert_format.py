@@ -42,8 +42,7 @@ def _create_json(path: Path, data: list[dict[str, object]]) -> Path:
 def _create_markdown(path: Path, headers: list[str], rows: list[list[str]]) -> Path:
     lines = ["| " + " | ".join(headers) + " |"]
     lines.append("| " + " | ".join("---" for _ in headers) + " |")
-    for row in rows:
-        lines.append("| " + " | ".join(row) + " |")
+    lines.extend("| " + " | ".join(row) + " |" for row in rows)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
 

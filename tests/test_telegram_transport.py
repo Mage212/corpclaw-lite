@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
@@ -120,7 +119,10 @@ class TestTelegramFallbackTransport:
 
         mock_response = httpx.Response(200)
         with patch.object(
-            transport._primary, "handle_async_request", new_callable=AsyncMock, return_value=mock_response
+            transport._primary,
+            "handle_async_request",
+            new_callable=AsyncMock,
+            return_value=mock_response,
         ):
             result = await transport.handle_async_request(request)
             assert result.status_code == 200
@@ -132,7 +134,10 @@ class TestTelegramFallbackTransport:
 
         mock_response = httpx.Response(200)
         with patch.object(
-            transport._primary, "handle_async_request", new_callable=AsyncMock, return_value=mock_response
+            transport._primary,
+            "handle_async_request",
+            new_callable=AsyncMock,
+            return_value=mock_response,
         ):
             result = await transport.handle_async_request(request)
             assert result.status_code == 200
@@ -144,7 +149,10 @@ class TestTelegramFallbackTransport:
 
         mock_response = httpx.Response(200)
         with patch.object(
-            transport._primary, "handle_async_request", new_callable=AsyncMock, return_value=mock_response
+            transport._primary,
+            "handle_async_request",
+            new_callable=AsyncMock,
+            return_value=mock_response,
         ):
             result = await transport.handle_async_request(request)
             assert result.status_code == 200
@@ -193,23 +201,25 @@ class TestTelegramFallbackTransport:
                 new_callable=AsyncMock,
                 side_effect=httpx.ConnectTimeout("fallback timeout"),
             ),
+            pytest.raises(httpx.ConnectTimeout, match="fallback timeout"),
         ):
-            with pytest.raises(httpx.ConnectTimeout, match="fallback timeout"):
-                await transport.handle_async_request(request)
+            await transport.handle_async_request(request)
 
     @pytest.mark.asyncio
     async def test_non_retryable_error_reraises(self) -> None:
         transport = TelegramFallbackTransport(["149.154.167.220"])
         request = httpx.Request("GET", "https://api.telegram.org/bot123/getMe")
 
-        with patch.object(
-            transport._primary,
-            "handle_async_request",
-            new_callable=AsyncMock,
-            side_effect=ValueError("permanent error"),
+        with (
+            patch.object(
+                transport._primary,
+                "handle_async_request",
+                new_callable=AsyncMock,
+                side_effect=ValueError("permanent error"),
+            ),
+            pytest.raises(ValueError, match="permanent error"),
         ):
-            with pytest.raises(ValueError, match="permanent error"):
-                await transport.handle_async_request(request)
+            await transport.handle_async_request(request)
 
     @pytest.mark.asyncio
     async def test_sticky_ip_used_first(self) -> None:
@@ -243,41 +253,43 @@ class TestTelegramFallbackTransport:
 class TestDiscoverFallbackIps:
     @pytest.mark.asyncio
     async def test_returns_seed_when_doh_fails(self) -> None:
-        with patch(
-            "corpclaw_lite.channels.telegram.transport._resolve_system_dns",
-            return_value={"1.2.3.4"},
+        with (
+            patch(
+                "corpclaw_lite.channels.telegram.transport._resolve_system_dns",
+                return_value={"1.2.3.4"},
+            ),
+            patch("httpx.AsyncClient") as mock_client_cls,
         ):
-            with patch("httpx.AsyncClient") as mock_client_cls:
-                mock_client = AsyncMock()
-                mock_client.get = AsyncMock(side_effect=Exception("network down"))
-                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-                mock_client.__aexit__ = AsyncMock(return_value=False)
-                mock_client_cls.return_value = mock_client
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(side_effect=Exception("network down"))
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
 
-                result = await discover_fallback_ips()
-                assert result == ["149.154.167.220"]
+            result = await discover_fallback_ips()
+            assert result == ["149.154.167.220"]
 
     @pytest.mark.asyncio
     async def test_excludes_system_dns_ips(self) -> None:
-        with patch(
-            "corpclaw_lite.channels.telegram.transport._resolve_system_dns",
-            return_value={"149.154.167.220"},
-        ):
-            with patch(
+        with (
+            patch(
+                "corpclaw_lite.channels.telegram.transport._resolve_system_dns",
+                return_value={"149.154.167.220"},
+            ),
+            patch(
                 "corpclaw_lite.channels.telegram.transport._query_doh_provider",
                 side_effect=[
                     ["149.154.167.220", "1.1.1.1"],
                     ["8.8.8.8"],
                 ],
-            ):
-                with patch(
-                    "corpclaw_lite.channels.telegram.transport.httpx.AsyncClient"
-                ) as mock_client_cls:
-                    mock_client = AsyncMock()
-                    mock_client_cls.return_value = mock_client
-                    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-                    mock_client.__aexit__ = AsyncMock(return_value=False)
+            ),
+            patch("corpclaw_lite.channels.telegram.transport.httpx.AsyncClient") as mock_client_cls,
+        ):
+            mock_client = AsyncMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
 
-                    result = await discover_fallback_ips()
-                    assert "149.154.167.220" not in result
-                    assert "1.1.1.1" in result
+            result = await discover_fallback_ips()
+            assert "149.154.167.220" not in result
+            assert "1.1.1.1" in result

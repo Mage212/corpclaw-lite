@@ -266,9 +266,9 @@ async def test_tool_timeout_propagated_in_payload(ipc, auth) -> None:
 
     sent_input: bytes = b""
 
-    async def _capture_communicate(input: bytes) -> tuple[bytes, bytes]:
+    async def _capture_communicate(**kwargs: bytes) -> tuple[bytes, bytes]:
         nonlocal sent_input
-        sent_input = input
+        sent_input = kwargs["input"]
         return (stdout, b"")
 
     proc.communicate = _capture_communicate

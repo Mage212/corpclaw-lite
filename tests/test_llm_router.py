@@ -12,7 +12,7 @@ Covers:
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -21,7 +21,6 @@ from corpclaw_lite.config.settings import LLMSettings, RoutingRule
 from corpclaw_lite.llm.base import LLMResponse
 from corpclaw_lite.llm.presets import ModelPreset, PresetRegistry
 from corpclaw_lite.llm.router import LLMRouter, build_provider
-
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -93,9 +92,11 @@ def test_build_provider_with_preset() -> None:
 def test_from_settings_single_default_rule() -> None:
     """Single routing rule with task_kind='default' creates router."""
     registry = _make_registry()
-    settings = _make_settings([
-        RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
-    ])
+    settings = _make_settings(
+        [
+            RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
+        ]
+    )
     router = LLMRouter.from_settings(settings, registry)
     assert router.default is not None
 
@@ -103,11 +104,13 @@ def test_from_settings_single_default_rule() -> None:
 def test_from_settings_multiple_tasks() -> None:
     """Multiple routing rules map different tasks to different providers."""
     registry = _make_registry()
-    settings = _make_settings([
-        RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
-        RoutingRule(task_kind="vision", provider="ollama", model="glm-ocr"),
-        RoutingRule(task_kind="consolidate", provider="anthropic", model="claude-3-haiku"),
-    ])
+    settings = _make_settings(
+        [
+            RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
+            RoutingRule(task_kind="vision", provider="ollama", model="glm-ocr"),
+            RoutingRule(task_kind="consolidate", provider="anthropic", model="claude-3-haiku"),
+        ]
+    )
     router = LLMRouter.from_settings(settings, registry)
 
     # Default provider
@@ -128,11 +131,13 @@ def test_from_settings_multiple_tasks() -> None:
 def test_from_settings_with_subagent_routing() -> None:
     """Routing by subagent_id works alongside task_kind."""
     registry = _make_registry()
-    settings = _make_settings([
-        RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
-        RoutingRule(subagent_id="research-agent", provider="anthropic", model="claude-3-haiku"),
-        RoutingRule(subagent_id="exec-agent", provider="ollama", model="qwen3.5-4b"),
-    ])
+    settings = _make_settings(
+        [
+            RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
+            RoutingRule(subagent_id="research-agent", provider="anthropic", model="claude-3-haiku"),
+            RoutingRule(subagent_id="exec-agent", provider="ollama", model="qwen3.5-4b"),
+        ]
+    )
     router = LLMRouter.from_settings(settings, registry)
 
     # Subagent routing
@@ -155,9 +160,11 @@ def test_from_settings_with_subagent_routing() -> None:
 def test_for_task_unknown_returns_default() -> None:
     """Unknown task_kind falls back to default provider."""
     registry = _make_registry()
-    settings = _make_settings([
-        RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
-    ])
+    settings = _make_settings(
+        [
+            RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
+        ]
+    )
     router = LLMRouter.from_settings(settings, registry)
 
     unknown = router.for_task("nonexistent-task")
@@ -167,9 +174,11 @@ def test_for_task_unknown_returns_default() -> None:
 def test_for_subagent_unknown_returns_default() -> None:
     """Unknown subagent_id falls back to default provider."""
     registry = _make_registry()
-    settings = _make_settings([
-        RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
-    ])
+    settings = _make_settings(
+        [
+            RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
+        ]
+    )
     router = LLMRouter.from_settings(settings, registry)
 
     unknown = router.for_subagent("nonexistent-agent")
@@ -182,14 +191,16 @@ def test_for_subagent_unknown_returns_default() -> None:
 def test_unknown_provider_in_rule_skipped() -> None:
     """Routing rule with unknown provider is skipped, others still work."""
     registry = _make_registry()  # has ollama + anthropic
-    settings = _make_settings([
-        RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
-        RoutingRule(
-            task_kind="vision",
-            provider="nonexistent",  # ← doesn't exist
-            model="some-model",
-        ),
-    ])
+    settings = _make_settings(
+        [
+            RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
+            RoutingRule(
+                task_kind="vision",
+                provider="nonexistent",  # ← doesn't exist
+                model="some-model",
+            ),
+        ]
+    )
     router = LLMRouter.from_settings(settings, registry)
 
     # Default works
@@ -202,10 +213,12 @@ def test_unknown_provider_in_rule_skipped() -> None:
 def test_missing_model_in_rule_skipped() -> None:
     """Routing rule without model is skipped."""
     registry = _make_registry()
-    settings = _make_settings([
-        RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
-        RoutingRule(task_kind="vision", provider="ollama"),  # ← no model
-    ])
+    settings = _make_settings(
+        [
+            RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
+            RoutingRule(task_kind="vision", provider="ollama"),  # ← no model
+        ]
+    )
     router = LLMRouter.from_settings(settings, registry)
 
     # Vision falls back to default (rule was skipped)
@@ -215,9 +228,11 @@ def test_missing_model_in_rule_skipped() -> None:
 def test_no_default_rule_uses_first_as_fallback() -> None:
     """Without task_kind='default', first valid rule becomes default."""
     registry = _make_registry()
-    settings = _make_settings([
-        RoutingRule(task_kind="vision", provider="ollama", model="glm-ocr"),
-    ])
+    settings = _make_settings(
+        [
+            RoutingRule(task_kind="vision", provider="ollama", model="glm-ocr"),
+        ]
+    )
     router = LLMRouter.from_settings(settings, registry)
 
     # Default should be the vision provider (first rule)
@@ -228,9 +243,11 @@ def test_no_default_rule_uses_first_as_fallback() -> None:
 def test_no_valid_rules_raises_error() -> None:
     """No valid routing rules raises RuntimeError."""
     registry = _make_registry()
-    settings = _make_settings([
-        RoutingRule(task_kind="default", provider="nonexistent", model="test"),
-    ])
+    settings = _make_settings(
+        [
+            RoutingRule(task_kind="default", provider="nonexistent", model="test"),
+        ]
+    )
     with pytest.raises(RuntimeError, match="No valid routing rules found"):
         LLMRouter.from_settings(settings, registry)
 
@@ -245,10 +262,12 @@ def test_anthropic_without_key_skipped() -> None:
         # No API_KEY → build_provider returns None
     }
     registry = ProviderRegistry.from_env(env)
-    settings = _make_settings([
-        RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
-        RoutingRule(task_kind="vision", provider="anthropic", model="claude-3-haiku"),
-    ])
+    settings = _make_settings(
+        [
+            RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
+            RoutingRule(task_kind="vision", provider="anthropic", model="claude-3-haiku"),
+        ]
+    )
     router = LLMRouter.from_settings(settings, registry)
 
     # Vision rule was skipped (provider couldn't be built), falls back to default
@@ -261,11 +280,13 @@ def test_anthropic_without_key_skipped() -> None:
 def test_same_provider_model_preset_cached() -> None:
     """Same (provider, model, preset) returns the same Provider instance."""
     registry = _make_registry()
-    settings = _make_settings([
-        RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
-        RoutingRule(task_kind="vision", provider="ollama", model="qwen3.5-4b"),
-        RoutingRule(subagent_id="research-agent", provider="ollama", model="qwen3.5-4b"),
-    ])
+    settings = _make_settings(
+        [
+            RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
+            RoutingRule(task_kind="vision", provider="ollama", model="qwen3.5-4b"),
+            RoutingRule(subagent_id="research-agent", provider="ollama", model="qwen3.5-4b"),
+        ]
+    )
     router = LLMRouter.from_settings(settings, registry)
 
     # All three should return the SAME provider instance (cached)
@@ -279,10 +300,12 @@ def test_same_provider_model_preset_cached() -> None:
 def test_different_models_different_instances() -> None:
     """Different models → different Provider instances."""
     registry = _make_registry()
-    settings = _make_settings([
-        RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
-        RoutingRule(task_kind="vision", provider="ollama", model="glm-ocr"),
-    ])
+    settings = _make_settings(
+        [
+            RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
+            RoutingRule(task_kind="vision", provider="ollama", model="glm-ocr"),
+        ]
+    )
     router = LLMRouter.from_settings(settings, registry)
 
     assert router.for_task("default") is not router.for_task("vision")
@@ -291,17 +314,19 @@ def test_different_models_different_instances() -> None:
 def test_different_providers_different_instances() -> None:
     """Different providers (same model name) → different instances."""
     registry = _make_registry()
-    settings = _make_settings([
-        RoutingRule(task_kind="default", provider="ollama", model="test-model"),
-        RoutingRule(task_kind="vision", provider="anthropic", model="test-model"),
-    ])
+    settings = _make_settings(
+        [
+            RoutingRule(task_kind="default", provider="ollama", model="test-model"),
+            RoutingRule(task_kind="vision", provider="anthropic", model="test-model"),
+        ]
+    )
     router = LLMRouter.from_settings(settings, registry)
 
     default = router.for_task("default")
     vision = router.for_task("vision")
     assert default is not vision
-    from corpclaw_lite.llm.openai import OpenAIProvider
     from corpclaw_lite.llm.anthropic import AnthropicProvider
+    from corpclaw_lite.llm.openai import OpenAIProvider
 
     assert isinstance(default, OpenAIProvider)
     assert isinstance(vision, AnthropicProvider)
@@ -331,14 +356,16 @@ def test_preset_applied_from_routing_rule(tmp_path: None) -> None:  # type: igno
     preset_path.write_text(preset_yaml, encoding="utf-8")
     try:
         preset_reg = PresetRegistry.from_yaml(preset_path)
-        settings = _make_settings([
-            RoutingRule(
-                task_kind="default",
-                provider="ollama",
-                model="qwen3.5-4b",
-                preset="test-preset",
-            ),
-        ])
+        settings = _make_settings(
+            [
+                RoutingRule(
+                    task_kind="default",
+                    provider="ollama",
+                    model="qwen3.5-4b",
+                    preset="test-preset",
+                ),
+            ]
+        )
         router = LLMRouter.from_settings(settings, registry, preset_reg)
         provider = router.default
         assert provider is not None
@@ -353,14 +380,16 @@ def test_unknown_preset_name_ignored() -> None:
     registry = _make_registry()
     preset_reg = PresetRegistry()  # empty — no presets
 
-    settings = _make_settings([
-        RoutingRule(
-            task_kind="default",
-            provider="ollama",
-            model="qwen3.5-4b",
-            preset="nonexistent-preset",
-        ),
-    ])
+    settings = _make_settings(
+        [
+            RoutingRule(
+                task_kind="default",
+                provider="ollama",
+                model="qwen3.5-4b",
+                preset="nonexistent-preset",
+            ),
+        ]
+    )
     router = LLMRouter.from_settings(settings, registry, preset_reg)
     assert router.default is not None
     assert router.default._preset is None  # type: ignore[attr-defined]
@@ -369,14 +398,16 @@ def test_unknown_preset_name_ignored() -> None:
 def test_no_preset_registry() -> None:
     """No preset_registry → presets are ignored, providers built without presets."""
     registry = _make_registry()
-    settings = _make_settings([
-        RoutingRule(
-            task_kind="default",
-            provider="ollama",
-            model="qwen3.5-4b",
-            preset="some-preset",
-        ),
-    ])
+    settings = _make_settings(
+        [
+            RoutingRule(
+                task_kind="default",
+                provider="ollama",
+                model="qwen3.5-4b",
+                preset="some-preset",
+            ),
+        ]
+    )
     router = LLMRouter.from_settings(settings, registry, preset_registry=None)
     assert router.default is not None
     assert router.default._preset is None  # type: ignore[attr-defined]
@@ -409,9 +440,11 @@ async def test_router_chat_delegates_to_default() -> None:
 def test_default_property() -> None:
     """default property returns the default provider."""
     registry = _make_registry()
-    settings = _make_settings([
-        RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
-    ])
+    settings = _make_settings(
+        [
+            RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
+        ]
+    )
     router = LLMRouter.from_settings(settings, registry)
 
     assert router.default is not None
@@ -424,10 +457,12 @@ def test_default_property() -> None:
 def test_consolidate_routing() -> None:
     """for_task('consolidate') returns a dedicated provider when rule exists."""
     registry = _make_registry()
-    settings = _make_settings([
-        RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
-        RoutingRule(task_kind="consolidate", provider="anthropic", model="claude-3-haiku"),
-    ])
+    settings = _make_settings(
+        [
+            RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
+            RoutingRule(task_kind="consolidate", provider="anthropic", model="claude-3-haiku"),
+        ]
+    )
     router = LLMRouter.from_settings(settings, registry)
 
     consolidate = router.for_task("consolidate")
@@ -442,10 +477,12 @@ def test_consolidate_routing() -> None:
 def test_compress_routing() -> None:
     """for_task('compress') returns a dedicated provider when rule exists."""
     registry = _make_registry()
-    settings = _make_settings([
-        RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
-        RoutingRule(task_kind="compress", provider="ollama", model="small-model"),
-    ])
+    settings = _make_settings(
+        [
+            RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
+            RoutingRule(task_kind="compress", provider="ollama", model="small-model"),
+        ]
+    )
     router = LLMRouter.from_settings(settings, registry)
 
     compress = router.for_task("compress")
@@ -456,10 +493,12 @@ def test_compress_routing() -> None:
 def test_calibration_routing() -> None:
     """for_task('calibration') returns cloud provider when rule exists."""
     registry = _make_registry()
-    settings = _make_settings([
-        RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
-        RoutingRule(task_kind="calibration", provider="anthropic", model="claude-sonnet"),
-    ])
+    settings = _make_settings(
+        [
+            RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
+            RoutingRule(task_kind="calibration", provider="anthropic", model="claude-sonnet"),
+        ]
+    )
     router = LLMRouter.from_settings(settings, registry)
 
     calibration = router.for_task("calibration")
@@ -474,10 +513,12 @@ def test_calibration_routing() -> None:
 def test_vision_routing() -> None:
     """for_task('vision') returns dedicated provider for image analysis."""
     registry = _make_registry()
-    settings = _make_settings([
-        RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
-        RoutingRule(task_kind="vision", provider="ollama", model="glm-ocr"),
-    ])
+    settings = _make_settings(
+        [
+            RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
+            RoutingRule(task_kind="vision", provider="ollama", model="glm-ocr"),
+        ]
+    )
     router = LLMRouter.from_settings(settings, registry)
 
     vision = router.for_task("vision")
@@ -488,12 +529,14 @@ def test_vision_routing() -> None:
 def test_all_production_task_kinds_with_single_provider() -> None:
     """All production task_kinds work when pointing to same provider+model."""
     registry = _make_registry()
-    settings = _make_settings([
-        RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
-        RoutingRule(task_kind="vision", provider="ollama", model="qwen3.5-4b"),
-        RoutingRule(task_kind="consolidate", provider="ollama", model="qwen3.5-4b"),
-        RoutingRule(task_kind="compress", provider="ollama", model="qwen3.5-4b"),
-    ])
+    settings = _make_settings(
+        [
+            RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
+            RoutingRule(task_kind="vision", provider="ollama", model="qwen3.5-4b"),
+            RoutingRule(task_kind="consolidate", provider="ollama", model="qwen3.5-4b"),
+            RoutingRule(task_kind="compress", provider="ollama", model="qwen3.5-4b"),
+        ]
+    )
     router = LLMRouter.from_settings(settings, registry)
 
     # All should return the same cached instance (same provider+model+preset)
@@ -506,10 +549,12 @@ def test_all_production_task_kinds_with_single_provider() -> None:
 def test_subagent_research_agent_routing() -> None:
     """for_subagent('research-agent') returns a dedicated provider."""
     registry = _make_registry()
-    settings = _make_settings([
-        RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
-        RoutingRule(subagent_id="research-agent", provider="anthropic", model="claude-3-haiku"),
-    ])
+    settings = _make_settings(
+        [
+            RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
+            RoutingRule(subagent_id="research-agent", provider="anthropic", model="claude-3-haiku"),
+        ]
+    )
     router = LLMRouter.from_settings(settings, registry)
 
     research = router.for_subagent("research-agent")
@@ -524,10 +569,12 @@ def test_subagent_research_agent_routing() -> None:
 def test_unknown_task_kind_falls_back_gracefully() -> None:
     """Unknown task_kind always returns default, no crash."""
     registry = _make_registry()
-    settings = _make_settings([
-        RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
-        RoutingRule(task_kind="vision", provider="ollama", model="glm-ocr"),
-    ])
+    settings = _make_settings(
+        [
+            RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
+            RoutingRule(task_kind="vision", provider="ollama", model="glm-ocr"),
+        ]
+    )
     router = LLMRouter.from_settings(settings, registry)
 
     # These have no routing rules — should all fall back to default

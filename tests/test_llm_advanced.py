@@ -102,9 +102,10 @@ async def test_anthropic_stream() -> None:
 
     with patch("corpclaw_lite.llm.anthropic.anthropic.AsyncAnthropic", return_value=mock_client):
         provider = AnthropicProvider(_anthropic_settings())
-        chunks = []
-        async for chunk in provider.stream([{"role": "user", "content": "Hi"}], system="Hi"):
-            chunks.append(chunk.content)
+        chunks = [
+            chunk.content
+            async for chunk in provider.stream([{"role": "user", "content": "Hi"}], system="Hi")
+        ]
 
     assert chunks == ["hello ", "world!"]
 
@@ -126,9 +127,10 @@ async def test_openai_stream() -> None:
 
     with patch("corpclaw_lite.llm.openai.openai.AsyncOpenAI", return_value=mock_client):
         provider = OpenAIProvider(_openai_settings())
-        chunks = []
-        async for chunk in provider.stream([{"role": "user", "content": "Hi"}], system="Hi"):
-            chunks.append(chunk.content)
+        chunks = [
+            chunk.content
+            async for chunk in provider.stream([{"role": "user", "content": "Hi"}], system="Hi")
+        ]
 
     assert chunks == ["Hey! ", "There."]
 
@@ -284,11 +286,12 @@ async def test_anthropic_stream_does_not_apply_preset() -> None:
     preset = ModelPreset(system_prompt_prefix="<|think|>")
     with patch("corpclaw_lite.llm.anthropic.anthropic.AsyncAnthropic", return_value=mock_client):
         provider = AnthropicProvider(_anthropic_settings(), preset=preset)
-        chunks = []
-        async for chunk in provider.stream(
-            [{"role": "user", "content": "Hi"}], system="Base system"
-        ):
-            chunks.append(chunk.content)
+        _chunks = [
+            chunk.content
+            async for chunk in provider.stream(
+                [{"role": "user", "content": "Hi"}], system="Base system"
+            )
+        ]
 
     call_kwargs = mock_client.messages.stream.call_args.kwargs
     # Preset must NOT be applied to stream — system stays as-is

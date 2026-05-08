@@ -59,13 +59,9 @@ class TestExcelWorkbookRead:
     ) -> None:
         """Read a specific cell by coordinate."""
         monkeypatch.chdir(tmp_path)
-        _create_basic_xlsx(
-            tmp_path / "data.xlsx", ["Header1", "Header2"], [["val_a", 42]]
-        )
+        _create_basic_xlsx(tmp_path / "data.xlsx", ["Header1", "Header2"], [["val_a", 42]])
 
-        result = await tool.execute(
-            path="data.xlsx", action="read", cells="B2"
-        )
+        result = await tool.execute(path="data.xlsx", action="read", cells="B2")
         assert "B2" in result
         assert "42" in result
 
@@ -81,9 +77,7 @@ class TestExcelWorkbookRead:
             [["a", "b", "c"], ["d", "e", "f"]],
         )
 
-        result = await tool.execute(
-            path="data.xlsx", action="read", cells="A1:C3"
-        )
+        result = await tool.execute(path="data.xlsx", action="read", cells="A1:C3")
         assert "Range: A1:C3" in result
         # Compact row-based format
         assert "Row 1:" in result
@@ -102,9 +96,7 @@ class TestExcelWorkbookRead:
             [["v1", "v2", "v3"]],
         )
 
-        result = await tool.execute(
-            path="data.xlsx", action="read", cells="A1,B2,C3"
-        )
+        result = await tool.execute(path="data.xlsx", action="read", cells="A1,B2,C3")
         assert "A1" in result
         assert "B2" in result
         assert "C3" in result
@@ -145,9 +137,7 @@ class TestExcelWorkbookRead:
         wb.save(str(tmp_path / "formula.xlsx"))
 
         # Default read (data_only=True) — formula cell shows computed or None
-        result_values = await tool.execute(
-            path="formula.xlsx", action="read", cells="C1"
-        )
+        result_values = await tool.execute(path="formula.xlsx", action="read", cells="C1")
         # With data_only, openpyxl returns None for formula cells (no cached value)
         assert "C1" in result_values
 
@@ -195,9 +185,7 @@ class TestExcelWorkbookRead:
         _create_basic_xlsx(tmp_path / "paged.xlsx", headers, rows)
 
         # Read first 3 rows (rows 1-3, offset=0, limit=3)
-        result = await tool.execute(
-            path="paged.xlsx", action="read", offset=0, limit=3
-        )
+        result = await tool.execute(path="paged.xlsx", action="read", offset=0, limit=3)
         assert "Row 1:" in result
         assert "Row 3:" in result
         assert "Row 4:" not in result
@@ -205,17 +193,13 @@ class TestExcelWorkbookRead:
         assert "More rows may exist" in result
 
         # Read next page (rows 4-6, offset=3, limit=3)
-        result2 = await tool.execute(
-            path="paged.xlsx", action="read", offset=3, limit=3
-        )
+        result2 = await tool.execute(path="paged.xlsx", action="read", offset=3, limit=3)
         assert "Row 4:" in result2
         assert "Row 6:" in result2
         assert "Row 3:" not in result2
 
         # Read last page (rows 8+, offset=7, limit=3) — 3 rows left + row 11 beyond
-        result3 = await tool.execute(
-            path="paged.xlsx", action="read", offset=7, limit=3
-        )
+        result3 = await tool.execute(path="paged.xlsx", action="read", offset=7, limit=3)
         assert "Row 8:" in result3
         assert "Row 10:" in result3
         assert "Row 11:" not in result3
@@ -223,9 +207,7 @@ class TestExcelWorkbookRead:
         assert "More rows may exist" in result3
 
         # Read final page (offset=10, limit=3) — only row 11 left
-        result4 = await tool.execute(
-            path="paged.xlsx", action="read", offset=10, limit=3
-        )
+        result4 = await tool.execute(path="paged.xlsx", action="read", offset=10, limit=3)
         assert "Row 11:" in result4
         # Less than limit rows returned — no continuation hint
         assert "More rows may exist" not in result4
@@ -258,9 +240,7 @@ class TestExcelWorkbookRead:
         rows = [[i] for i in range(1, 201)]
         _create_basic_xlsx(tmp_path / "big.xlsx", headers, rows)
 
-        result = await tool.execute(
-            path="big.xlsx", action="read", limit=999
-        )
+        result = await tool.execute(path="big.xlsx", action="read", limit=999)
         assert "Row 100:" in result
         assert "Row 101:" not in result
         assert "More rows may exist" in result
@@ -276,9 +256,7 @@ class TestExcelWorkbookFill:
         _create_basic_xlsx(tmp_path / "fill.xlsx", ["H1", "H2"], [["old1", "old2"]])
 
         cells_json = json.dumps({"A2": "new_val", "B2": 100})
-        result = await tool.execute(
-            path="fill.xlsx", action="fill", cells=cells_json
-        )
+        result = await tool.execute(path="fill.xlsx", action="fill", cells=cells_json)
         assert "Filled 2 cells" in result
         assert "Saved" in result
 
@@ -298,9 +276,7 @@ class TestExcelWorkbookFill:
         wb = openpyxl.Workbook()
         ws = wb.active
         ws["A1"] = "Colored"
-        ws["A1"].fill = PatternFill(
-            start_color="FF0000", end_color="FF0000", fill_type="solid"
-        )
+        ws["A1"].fill = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")
         ws["B1"] = "Other"
         wb.save(str(tmp_path / "fmt.xlsx"))
 
@@ -349,9 +325,7 @@ class TestExcelWorkbookFill:
         monkeypatch.chdir(tmp_path)
         _create_basic_xlsx(tmp_path / "bad.xlsx", ["A"], [[1]])
 
-        result = await tool.execute(
-            path="bad.xlsx", action="fill", cells="{not valid json}"
-        )
+        result = await tool.execute(path="bad.xlsx", action="fill", cells="{not valid json}")
         assert "Error" in result
         assert "Invalid JSON" in result
 
@@ -432,9 +406,7 @@ class TestExcelWorkbookErrors:
     ) -> None:
         """Path traversal with ../ is blocked."""
         monkeypatch.chdir(tmp_path)
-        result = await tool.execute(
-            path="../../../etc/passwd", action="read"
-        )
+        result = await tool.execute(path="../../../etc/passwd", action="read")
         assert "Error" in result
 
     @pytest.mark.asyncio
@@ -480,9 +452,7 @@ class TestExcelWorkbookErrors:
         monkeypatch.chdir(tmp_path)
         _create_basic_xlsx(tmp_path / "data.xlsx", ["A"], [[1]])
 
-        result = await tool.execute(
-            path="data.xlsx", action="read", sheet_name="NoSuchSheet"
-        )
+        result = await tool.execute(path="data.xlsx", action="read", sheet_name="NoSuchSheet")
         assert "Error" in result
         assert "NoSuchSheet" in result
         assert "not found" in result

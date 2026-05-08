@@ -322,7 +322,8 @@ class TestPollingRecovery:
     """Tests for polling error recovery methods."""
 
     def test_looks_like_polling_conflict(self) -> None:
-        assert TelegramChannel._looks_like_polling_conflict(Exception("Conflict: terminated by other getUpdates request")) is True
+        error = Exception("Conflict: terminated by other getUpdates request")
+        assert TelegramChannel._looks_like_polling_conflict(error) is True
 
         class ConflictError(Exception):
             pass
@@ -384,7 +385,9 @@ class TestPollingRecovery:
         assert channel._polling_network_error_count == 0
 
     @pytest.mark.asyncio
-    async def test_handle_polling_network_error_raises_after_max(self, channel: TelegramChannel) -> None:
+    async def test_handle_polling_network_error_raises_after_max(
+        self, channel: TelegramChannel
+    ) -> None:
         from corpclaw_lite.config.settings import TelegramSettings
 
         channel._tg_settings = TelegramSettings(network_max_retries=2)

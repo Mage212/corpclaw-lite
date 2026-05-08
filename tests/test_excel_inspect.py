@@ -40,9 +40,7 @@ def _create_xlsx_with_merged_and_colors(path: Path) -> Path:
     ws.title = "TestSheet"
     ws.merge_cells("A1:B1")
     ws["A1"] = "Merged Header"
-    ws["A2"].fill = PatternFill(
-        start_color="FFFF00", end_color="FFFF00", fill_type="solid"
-    )
+    ws["A2"].fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
     ws["A2"] = "Yellow cell"
     ws["B2"] = "Normal cell"
     ws["A3"] = "Row 3"

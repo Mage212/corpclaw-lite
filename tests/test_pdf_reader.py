@@ -19,7 +19,7 @@ def _create_simple_pdf(path: Path, pages_text: list[str]) -> Path:
     from pypdf import PdfWriter
 
     writer = PdfWriter()
-    for text in pages_text:
+    for _text in pages_text:
         writer.add_blank_page(width=200, height=200)
         # Add text as metadata (pypdf doesn't easily add visible text).
         # For testing, we rely on the extraction logic.
