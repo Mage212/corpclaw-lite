@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import contextvars
 from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
 __all__ = [
+    "BackendRequestOptions",
     "LLMResponse",
     "LLMStreamEvent",
     "LLMStreamStage",
@@ -15,6 +18,9 @@ __all__ = [
     "TokenUsage",
     "ToolCall",
     "VisionProvider",
+    "get_backend_request_options",
+    "reset_backend_request_options",
+    "set_backend_request_options",
 ]
 
 LLMStreamStage = Literal[
@@ -41,6 +47,35 @@ class TokenUsage(BaseModel):
 
     input_tokens: int = 0
     output_tokens: int = 0
+
+
+@dataclass(frozen=True)
+class BackendRequestOptions:
+    """Request-local backend-specific options passed through provider transports."""
+
+    extra_body: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
+
+
+_backend_request_options: contextvars.ContextVar[BackendRequestOptions | None] = (
+    contextvars.ContextVar("backend_request_options", default=None)
+)
+
+
+def set_backend_request_options(
+    options: BackendRequestOptions | None,
+) -> contextvars.Token[BackendRequestOptions | None]:
+    """Set backend-specific request options for the current async context."""
+    return _backend_request_options.set(options)
+
+
+def reset_backend_request_options(token: contextvars.Token[BackendRequestOptions | None]) -> None:
+    """Reset backend-specific request options to the previous value."""
+    _backend_request_options.reset(token)
+
+
+def get_backend_request_options() -> BackendRequestOptions | None:
+    """Return backend-specific request options for the current async context."""
+    return _backend_request_options.get()
 
 
 class LLMResponse(BaseModel):

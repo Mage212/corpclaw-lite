@@ -11,7 +11,7 @@ import logging
 import math
 import time
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 from corpclaw_lite.logging import health
 from corpclaw_lite.logging.trace import log_event
@@ -20,6 +20,7 @@ __all__ = [
     "LLMLoadClass",
     "LLMRequestQueue",
     "QueueEntry",
+    "SlotAffinityConfig",
 ]
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,33 @@ LLMLoadClass = Literal[
     "calibration",
     "maintenance",
 ]
+QueueStrategy = Literal["simple", "slot_affinity"]
+SlotKind = Literal["simple", "sticky", "overflow"]
+
+
+@dataclass(frozen=True)
+class SlotAffinityConfig:
+    """Configuration for llama.cpp-compatible slot affinity."""
+
+    enabled: bool = False
+    provider_names: tuple[str, ...] = ("llamacpp",)
+    sticky_slot_ids: tuple[int, ...] = (0, 1, 2)
+    overflow_slot_ids: tuple[int, ...] = (3,)
+    idle_ttl_seconds: float = 120.0
+    cache_prompt: bool = True
+    auxiliary_policy: Literal["overflow_only"] = "overflow_only"
+
+
+@dataclass
+class _SlotState:
+    """Runtime state for one logical inference slot."""
+
+    slot_id: int
+    kind: Literal["sticky", "overflow"]
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    assigned_user_id: str | None = None
+    active: bool = False
+    expires_at: float = 0.0
 
 
 @dataclass
@@ -49,6 +77,11 @@ class QueueEntry:
     last_notified_at: float = field(default_factory=time.monotonic)
     acquired_at: float | None = None
     queue_position_at_entry: int = 0
+    provider_name: str | None = None
+    slot_id: int | None = None
+    slot_kind: SlotKind = "simple"
+    assignment_reused: bool = False
+    backend_extra_body: dict[str, Any] = field(default_factory=lambda: dict[str, Any]())
 
     @property
     def queue_wait_seconds(self) -> float | None:
@@ -69,14 +102,36 @@ class LLMRequestQueue:
     and used to estimate wait times for queued users.
     """
 
-    def __init__(self, max_concurrent: int = 2) -> None:
+    def __init__(
+        self,
+        max_concurrent: int = 2,
+        *,
+        strategy: QueueStrategy = "simple",
+        slot_affinity: SlotAffinityConfig | None = None,
+    ) -> None:
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._waiting: list[QueueEntry] = []
         self._active: list[QueueEntry] = []
         self._avg_request_seconds: float = _DEFAULT_AVG_SECONDS
         self._lock = asyncio.Lock()
         self._max_concurrent = max_concurrent
-        logger.info("LLMRequestQueue initialized: max_concurrent=%d", max_concurrent)
+        self._strategy: QueueStrategy = strategy
+        self._slot_affinity = slot_affinity or SlotAffinityConfig()
+        self._slots: dict[int, _SlotState] = {}
+        self._slot_affinity_provider_warnings: set[str] = set()
+        if self._strategy == "slot_affinity" and self._slot_affinity.enabled:
+            for slot_id in self._slot_affinity.sticky_slot_ids:
+                self._slots[slot_id] = _SlotState(slot_id=slot_id, kind="sticky")
+            for slot_id in self._slot_affinity.overflow_slot_ids:
+                self._slots[slot_id] = _SlotState(slot_id=slot_id, kind="overflow")
+            if not self._slots:
+                logger.warning("LLMRequestQueue slot_affinity enabled without slot ids")
+                self._strategy = "simple"
+        logger.info(
+            "LLMRequestQueue initialized: max_concurrent=%d strategy=%s",
+            max_concurrent,
+            self._strategy,
+        )
 
     async def acquire(
         self,
@@ -85,6 +140,7 @@ class LLMRequestQueue:
         task_kind: str = "default",
         load_class: LLMLoadClass = "interactive",
         run_id: str | None = None,
+        provider_name: str | None = None,
     ) -> QueueEntry:
         """Enter the queue and wait for an inference slot.
 
@@ -97,8 +153,10 @@ class LLMRequestQueue:
             task_kind=task_kind,
             load_class=load_class,
             run_id=run_id,
+            provider_name=provider_name,
         )
-        acquired = False
+        semaphore_acquired = False
+        slot_lock_acquired = False
         async with self._lock:
             self._waiting.append(entry)
             entry.queue_position_at_entry = len(self._waiting) - 1
@@ -124,13 +182,29 @@ class LLMRequestQueue:
             task_kind,
             load_class,
         )
+        selected_slot: _SlotState | None = None
         try:
+            selected_slot = await self._select_slot(entry)
+            if selected_slot is not None:
+                await selected_slot.lock.acquire()
+                slot_lock_acquired = True
             await self._semaphore.acquire()
-            acquired = True
+            semaphore_acquired = True
             async with self._lock:
                 if entry in self._waiting:
                     self._waiting.remove(entry)
                 entry.acquired_at = time.monotonic()
+                if selected_slot is not None:
+                    selected_slot.active = True
+                    entry.slot_id = selected_slot.slot_id
+                    entry.slot_kind = selected_slot.kind
+                    if selected_slot.kind == "sticky":
+                        selected_slot.assigned_user_id = entry.user_id
+                        selected_slot.expires_at = 0.0
+                    entry.backend_extra_body = {
+                        "id_slot": selected_slot.slot_id,
+                        "cache_prompt": self._slot_affinity.cache_prompt,
+                    }
                 self._active.append(entry)
                 waiting_count = len(self._waiting)
                 active_count = len(self._active)
@@ -138,10 +212,21 @@ class LLMRequestQueue:
             async with self._lock:
                 if entry in self._waiting:
                     self._waiting.remove(entry)
+                if (
+                    selected_slot is not None
+                    and selected_slot.kind == "sticky"
+                    and selected_slot.assigned_user_id == entry.user_id
+                    and not selected_slot.active
+                    and not entry.assignment_reused
+                ):
+                    selected_slot.assigned_user_id = None
+                    selected_slot.expires_at = 0.0
                 waiting_count = len(self._waiting)
                 active_count = len(self._active)
-            if acquired:
+            if semaphore_acquired:
                 self._semaphore.release()
+                if slot_lock_acquired and selected_slot is not None and selected_slot.lock.locked():
+                    selected_slot.lock.release()
             health.increment("llm_queue_cancelled")
             log_event(
                 "llm_queue_cancelled",
@@ -166,7 +251,35 @@ class LLMRequestQueue:
             waiting_count=waiting_count,
             active_count=active_count,
             max_concurrent=self._max_concurrent,
+            provider_name=provider_name,
+            slot_id=entry.slot_id,
+            slot_kind=entry.slot_kind,
+            assignment_reused=entry.assignment_reused,
+            provider_extra_body_keys=sorted(entry.backend_extra_body.keys()),
         )
+        if entry.slot_id is not None:
+            health.increment("llm_slot_acquired")
+            event_name = (
+                "llm_slot_reused"
+                if entry.assignment_reused
+                else "llm_slot_overflow_used"
+                if entry.slot_kind == "overflow"
+                else "llm_slot_assigned"
+            )
+            log_event(
+                event_name,
+                run_id or "unknown",
+                user_id=user_id,
+                task_kind=task_kind,
+                load_class=load_class,
+                provider_name=provider_name,
+                slot_id=entry.slot_id,
+                slot_kind=entry.slot_kind,
+                assignment_reused=entry.assignment_reused,
+                queue_wait_ms=round(queue_wait * 1000, 1),
+                idle_ttl_seconds=self._slot_affinity.idle_ttl_seconds,
+                provider_extra_body_keys=sorted(entry.backend_extra_body.keys()),
+            )
         logger.debug(
             "[queue] user=%s acquired slot after %.1fs (%s/%s)",
             user_id,
@@ -176,6 +289,86 @@ class LLMRequestQueue:
         )
         return entry
 
+    async def _select_slot(self, entry: QueueEntry) -> _SlotState | None:
+        """Select a slot for the entry, or None when simple queue mode applies."""
+        if not self._slot_affinity_applies(entry):
+            return None
+        async with self._lock:
+            self._expire_idle_slots_locked(time.monotonic())
+            if self._is_sticky_eligible(entry):
+                existing = self._assigned_sticky_slot_locked(entry.user_id)
+                if existing is not None:
+                    entry.assignment_reused = True
+                    return existing
+                free = self._free_sticky_slot_locked()
+                if free is not None:
+                    free.assigned_user_id = entry.user_id
+                    free.expires_at = 0.0
+                    return free
+            return self._overflow_slot_locked()
+
+    def _slot_affinity_applies(self, entry: QueueEntry) -> bool:
+        if self._strategy != "slot_affinity" or not self._slot_affinity.enabled:
+            return False
+        if not self._slots:
+            return False
+        if entry.provider_name is None:
+            return False
+        if entry.provider_name in self._slot_affinity.provider_names:
+            return True
+        if entry.provider_name not in self._slot_affinity_provider_warnings:
+            self._slot_affinity_provider_warnings.add(entry.provider_name)
+            logger.warning(
+                "LLM slot_affinity is enabled but provider '%s' is not in provider_names=%s; "
+                "using simple queue without id_slot/cache_prompt for this provider.",
+                entry.provider_name,
+                list(self._slot_affinity.provider_names),
+            )
+        return False
+
+    @staticmethod
+    def _is_sticky_eligible(entry: QueueEntry) -> bool:
+        return entry.load_class == "interactive" and entry.task_kind == "default"
+
+    def _assigned_sticky_slot_locked(self, user_id: str) -> _SlotState | None:
+        for slot in self._slots.values():
+            if slot.kind == "sticky" and slot.assigned_user_id == user_id:
+                return slot
+        return None
+
+    def _free_sticky_slot_locked(self) -> _SlotState | None:
+        for slot in self._slots.values():
+            if slot.kind == "sticky" and slot.assigned_user_id is None and not slot.active:
+                return slot
+        return None
+
+    def _overflow_slot_locked(self) -> _SlotState | None:
+        for slot in self._slots.values():
+            if slot.kind == "overflow":
+                return slot
+        return None
+
+    def _expire_idle_slots_locked(self, now: float) -> None:
+        for slot in self._slots.values():
+            if (
+                slot.kind == "sticky"
+                and not slot.active
+                and slot.assigned_user_id is not None
+                and slot.expires_at > 0
+                and now >= slot.expires_at
+            ):
+                expired_user_id = slot.assigned_user_id
+                slot.assigned_user_id = None
+                slot.expires_at = 0.0
+                health.increment("llm_slot_expired")
+                log_event(
+                    "llm_slot_expired",
+                    "unknown",
+                    user_id=expired_user_id,
+                    slot_id=slot.slot_id,
+                    slot_kind=slot.kind,
+                )
+
     async def release(self, user_id: str | QueueEntry, elapsed_seconds: float) -> None:
         """Release an inference slot after the LLM call completes.
 
@@ -183,6 +376,7 @@ class LLMRequestQueue:
         """
         entry: QueueEntry | None = user_id if isinstance(user_id, QueueEntry) else None
         target_user_id = user_id.user_id if isinstance(user_id, QueueEntry) else user_id
+        slot_to_release: _SlotState | None = None
         async with self._lock:
             if entry is None:
                 for active_entry in self._active:
@@ -191,6 +385,19 @@ class LLMRequestQueue:
                         break
             if entry is not None and entry in self._active:
                 self._active.remove(entry)
+            if entry is not None and entry.slot_id is not None:
+                slot_to_release = self._slots.get(entry.slot_id)
+                if slot_to_release is not None:
+                    slot_to_release.active = False
+                    if slot_to_release.kind == "sticky":
+                        slot_to_release.expires_at = (
+                            time.monotonic() + self._slot_affinity.idle_ttl_seconds
+                        )
+                    else:
+                        slot_to_release.assigned_user_id = None
+                        slot_to_release.expires_at = 0.0
+                    if slot_to_release.lock.locked():
+                        slot_to_release.lock.release()
             waiting_count = len(self._waiting)
             active_count = len(self._active)
         if entry is None:
@@ -213,7 +420,23 @@ class LLMRequestQueue:
             waiting_count=waiting_count,
             active_count=active_count,
             max_concurrent=self._max_concurrent,
+            provider_name=entry.provider_name,
+            slot_id=entry.slot_id,
+            slot_kind=entry.slot_kind,
+            expires_at=slot_to_release.expires_at if slot_to_release is not None else None,
         )
+        if entry.slot_id is not None:
+            log_event(
+                "llm_slot_released",
+                entry.run_id or "unknown",
+                user_id=entry.user_id,
+                task_kind=entry.task_kind,
+                load_class=entry.load_class,
+                provider_name=entry.provider_name,
+                slot_id=entry.slot_id,
+                slot_kind=entry.slot_kind,
+                expires_at=slot_to_release.expires_at if slot_to_release is not None else None,
+            )
         logger.debug(
             "[queue] user=%s released slot (elapsed=%.1fs, avg=%.1fs)",
             entry.user_id,

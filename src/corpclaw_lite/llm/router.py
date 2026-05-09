@@ -27,15 +27,18 @@ from typing import TYPE_CHECKING, Any
 from corpclaw_lite.config.providers import ProviderConnection, ProviderRegistry, ProviderSettings
 from corpclaw_lite.config.settings import LLMSettings
 from corpclaw_lite.llm.base import (
+    BackendRequestOptions,
     LLMResponse,
     LLMStreamEvent,
     Provider,
     StreamChunk,
     StreamingProvider,
     VisionProvider,
+    reset_backend_request_options,
+    set_backend_request_options,
 )
 from corpclaw_lite.llm.presets import ModelPreset, PresetRegistry
-from corpclaw_lite.llm.queue import LLMLoadClass, LLMRequestQueue
+from corpclaw_lite.llm.queue import LLMLoadClass, LLMRequestQueue, SlotAffinityConfig
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -106,12 +109,14 @@ class LLMRouter:
         self,
         providers: dict[str, Provider],
         default_provider: Provider,
-        # (task_kind, subagent_id, provider)
-        routing: list[tuple[str | None, str | None, Provider]],
+        default_provider_name: str | None,
+        # (task_kind, subagent_id, provider, provider_name)
+        routing: list[tuple[str | None, str | None, Provider, str]],
         queue: LLMRequestQueue | None = None,
     ) -> None:
         self._providers = providers
         self._default_provider = default_provider
+        self._default_provider_name = default_provider_name
         self._routing = routing
         self._queue = queue
         logger.info(
@@ -132,6 +137,7 @@ class LLMRouter:
         # Cache: (provider_name, model, preset_name) → Provider instance
         cache: dict[tuple[str, str, str | None], Provider] = {}
         default_provider: Provider | None = None
+        default_provider_name: str | None = None
 
         def _get_or_create(
             provider_name: str,
@@ -158,7 +164,7 @@ class LLMRouter:
             return provider
 
         # Process routing rules
-        routing: list[tuple[str | None, str | None, Provider]] = []
+        routing: list[tuple[str | None, str | None, Provider, str]] = []
 
         for rule in llm.routing:
             rule_label = rule.task_kind or rule.subagent_id or "(unnamed)"
@@ -196,16 +202,18 @@ class LLMRouter:
                 rule.model,
                 f" preset={rule.preset}" if rule.preset else "",
             )
-            routing.append((rule.task_kind, rule.subagent_id, provider))
+            routing.append((rule.task_kind, rule.subagent_id, provider, rule.provider))
 
             # Track default provider
             if rule.task_kind == "default" and default_provider is None:
                 default_provider = provider
+                default_provider_name = rule.provider
 
         if default_provider is None:
             # Try first routing rule as fallback
             if routing:
                 default_provider = routing[0][2]
+                default_provider_name = routing[0][3]
                 logger.warning(
                     "No routing rule with task_kind='default' found. "
                     "Using first rule's provider as default."
@@ -226,14 +234,28 @@ class LLMRouter:
         if llm.queue.enabled:
             from corpclaw_lite.llm.queue import LLMRequestQueue
 
-            queue = LLMRequestQueue(max_concurrent=llm.max_concurrent_requests)
+            slot_cfg = llm.queue.slot_affinity
+            queue = LLMRequestQueue(
+                max_concurrent=llm.max_concurrent_requests,
+                strategy=llm.queue.strategy,
+                slot_affinity=SlotAffinityConfig(
+                    enabled=slot_cfg.enabled,
+                    provider_names=tuple(slot_cfg.provider_names),
+                    sticky_slot_ids=tuple(slot_cfg.sticky_slot_ids),
+                    overflow_slot_ids=tuple(slot_cfg.overflow_slot_ids),
+                    idle_ttl_seconds=slot_cfg.idle_ttl_seconds,
+                    cache_prompt=slot_cfg.cache_prompt,
+                    auxiliary_policy=slot_cfg.auxiliary_policy,
+                ),
+            )
 
-        return cls(providers, default_provider, routing, queue=queue)
+        return cls(providers, default_provider, default_provider_name, routing, queue=queue)
 
     def _wrap_provider(
         self,
         provider: Provider,
         *,
+        provider_name: str | None,
         user_id: str,
         task_kind: str,
         load_class: LLMLoadClass,
@@ -248,11 +270,15 @@ class LLMRouter:
             task_kind=task_kind,
             load_class=load_class,
             run_id=run_id,
+            provider_name=provider_name,
         )
 
     def has_task_route(self, task_kind: str) -> bool:
         """Return True if a task-specific routing rule exists."""
-        return any(rule_task == task_kind for rule_task, _rule_subagent, _provider in self._routing)
+        return any(
+            rule_task == task_kind
+            for rule_task, _rule_subagent, _provider, _provider_name in self._routing
+        )
 
     def for_task(
         self,
@@ -266,10 +292,11 @@ class LLMRouter:
 
         Falls back to the default provider if no rule matches.
         """
-        for rule_task, _rule_subagent, provider in self._routing:
+        for rule_task, _rule_subagent, provider, provider_name in self._routing:
             if rule_task == task_kind:
                 return self._wrap_provider(
                     provider,
+                    provider_name=provider_name,
                     user_id=user_id,
                     task_kind=task_kind,
                     load_class=load_class or _load_class_for_task(task_kind),
@@ -277,6 +304,7 @@ class LLMRouter:
                 )
         return self._wrap_provider(
             self._default_provider,
+            provider_name=self._default_provider_name,
             user_id=user_id,
             task_kind=task_kind,
             load_class=load_class or _load_class_for_task(task_kind),
@@ -294,10 +322,11 @@ class LLMRouter:
 
         Falls back to the default provider if no rule matches.
         """
-        for _rule_task, rule_subagent, provider in self._routing:
+        for _rule_task, rule_subagent, provider, provider_name in self._routing:
             if rule_subagent == subagent_id:
                 return self._wrap_provider(
                     provider,
+                    provider_name=provider_name,
                     user_id=user_id,
                     task_kind=f"subagent:{subagent_id}",
                     load_class="subagent",
@@ -305,6 +334,7 @@ class LLMRouter:
                 )
         return self._wrap_provider(
             self._default_provider,
+            provider_name=self._default_provider_name,
             user_id=user_id,
             task_kind=f"subagent:{subagent_id}",
             load_class="subagent",
@@ -334,6 +364,7 @@ class LLMRouter:
         task_kind: str = "default",
         load_class: LLMLoadClass = "interactive",
         run_id: str | None = None,
+        provider_name: str | None = None,
     ) -> AsyncGenerator[None, None]:
         """Acquire an LLM inference slot via the request queue.
 
@@ -355,11 +386,18 @@ class LLMRouter:
             task_kind=task_kind,
             load_class=load_class,
             run_id=run_id,
+            provider_name=provider_name or self._default_provider_name,
         )
         t0 = time.monotonic()
+        token = set_backend_request_options(
+            BackendRequestOptions(extra_body=entry.backend_extra_body)
+            if entry.backend_extra_body
+            else None
+        )
         try:
             yield
         finally:
+            reset_backend_request_options(token)
             elapsed = time.monotonic() - t0
             await self._queue.release(entry, elapsed)
 
@@ -373,7 +411,11 @@ class LLMRouter:
     ) -> LLMResponse:
         """Chat using the default provider (through the queue if enabled)."""
         if self._queue is not None:
-            async with self.acquire_slot("_router_chat", task_kind="default"):
+            async with self.acquire_slot(
+                "_router_chat",
+                task_kind="default",
+                provider_name=self._default_provider_name,
+            ):
                 return await self.default.chat(messages=messages, tools=tools, system=system)
         return await self.default.chat(messages=messages, tools=tools, system=system)
 
@@ -385,7 +427,11 @@ class LLMRouter:
     ) -> AsyncIterator[StreamChunk]:
         """Stream using the default provider (through the queue if enabled)."""
         if self._queue is not None:
-            async with self.acquire_slot("_router_stream", task_kind="default"):
+            async with self.acquire_slot(
+                "_router_stream",
+                task_kind="default",
+                provider_name=self._default_provider_name,
+            ):
                 async for chunk in self.default.stream(
                     messages=messages, tools=tools, system=system
                 ):
@@ -429,6 +475,7 @@ class QueuedProvider:
         provider: Provider,
         queue: LLMRequestQueue,
         *,
+        provider_name: str | None,
         user_id: str,
         task_kind: str,
         load_class: LLMLoadClass,
@@ -436,6 +483,7 @@ class QueuedProvider:
     ) -> None:
         self._provider = provider
         self._queue = queue
+        self._provider_name = provider_name
         self._user_id = user_id or f"_{task_kind}"
         self._task_kind = task_kind
         self._load_class: LLMLoadClass = load_class
@@ -448,11 +496,18 @@ class QueuedProvider:
             task_kind=self._task_kind,
             load_class=self._load_class,
             run_id=self._run_id,
+            provider_name=self._provider_name,
         )
         t0 = time.monotonic()
+        token = set_backend_request_options(
+            BackendRequestOptions(extra_body=entry.backend_extra_body)
+            if entry.backend_extra_body
+            else None
+        )
         try:
             yield
         finally:
+            reset_backend_request_options(token)
             await self._queue.release(entry, time.monotonic() - t0)
 
     async def chat(

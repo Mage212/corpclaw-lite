@@ -12,8 +12,18 @@ llm:
   # Request queue — backpressure + user notifications
   queue:
     enabled: true
+    strategy: "slot_affinity"
     notify_position: true
     notify_interval_seconds: 30
+    slot_affinity:
+      enabled: true
+      backend: "llama_cpp"
+      provider_names: ["llamacpp"]
+      sticky_slot_ids: [0, 1, 2]
+      overflow_slot_ids: [3]
+      idle_ttl_seconds: 120.0
+      cache_prompt: true
+      auxiliary_policy: "overflow_only"
   # Routing rules — checked top-to-bottom, first match wins
   # provider: must match a name registered via PROVIDER_* env vars in .env
   # model:    model identifier for that provider
@@ -21,23 +31,23 @@ llm:
   routing:
     # Main chat (used by AgentLoop)
     - task_kind: "default"
-      provider: "litellm"
+      provider: "llamacpp"
       model: "llama-qwen3.6-35b-a3b"
       preset: "temperature-0.4"
 
     # Vision analysis (separate LLM call for images)
     - task_kind: "vision"
-      provider: "litellm"
+      provider: "llamacpp"
       model: "llama-qwen3.6-35b-a3b"
 
     # Memory consolidation (LLM-based history compression)
     - task_kind: "consolidate"
-      provider: "litellm"
+      provider: "llamacpp"
       model: "llama-qwen3.6-35b-a3b"
 
     # Context compression (LLM-based summary of old turns)
     - task_kind: "compress"
-      provider: "litellm"
+      provider: "llamacpp"
       model: "llama-qwen3.6-35b-a3b"
 
     # Calibration analysis (cloud provider recommended)

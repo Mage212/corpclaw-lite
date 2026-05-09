@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from corpclaw_lite.llm.queue import LLMRequestQueue
+from corpclaw_lite.llm.queue import LLMRequestQueue, SlotAffinityConfig
 
 
 class TestQueueBasic:
@@ -183,3 +183,104 @@ class TestConcurrentAccess:
         assert peak_active <= max_c
         assert q.active_count == 0
         assert q.queue_length == 0
+
+
+class TestSlotAffinity:
+    """llama.cpp slot-affinity scheduling."""
+
+    @pytest.mark.asyncio
+    async def test_interactive_users_get_sticky_slots_then_overflow(self) -> None:
+        q = LLMRequestQueue(
+            max_concurrent=4,
+            strategy="slot_affinity",
+            slot_affinity=SlotAffinityConfig(
+                enabled=True,
+                provider_names=("llamacpp",),
+                sticky_slot_ids=(0, 1, 2),
+                overflow_slot_ids=(3,),
+            ),
+        )
+
+        e1 = await q.acquire("u1", provider_name="llamacpp")
+        e2 = await q.acquire("u2", provider_name="llamacpp")
+        e3 = await q.acquire("u3", provider_name="llamacpp")
+        e4 = await q.acquire("u4", provider_name="llamacpp")
+
+        assert (e1.slot_id, e1.slot_kind) == (0, "sticky")
+        assert (e2.slot_id, e2.slot_kind) == (1, "sticky")
+        assert (e3.slot_id, e3.slot_kind) == (2, "sticky")
+        assert (e4.slot_id, e4.slot_kind) == (3, "overflow")
+        assert e1.backend_extra_body == {"id_slot": 0, "cache_prompt": True}
+        assert e4.backend_extra_body == {"id_slot": 3, "cache_prompt": True}
+
+        await q.release(e4, 1.0)
+        await q.release(e3, 1.0)
+        await q.release(e2, 1.0)
+        await q.release(e1, 1.0)
+
+    @pytest.mark.asyncio
+    async def test_sticky_slot_reused_before_ttl(self) -> None:
+        q = LLMRequestQueue(
+            max_concurrent=4,
+            strategy="slot_affinity",
+            slot_affinity=SlotAffinityConfig(
+                enabled=True,
+                provider_names=("llamacpp",),
+                sticky_slot_ids=(0, 1, 2),
+                overflow_slot_ids=(3,),
+                idle_ttl_seconds=120.0,
+            ),
+        )
+
+        first = await q.acquire("u1", provider_name="llamacpp")
+        await q.release(first, 1.0)
+        second = await q.acquire("u1", provider_name="llamacpp")
+
+        assert second.slot_id == first.slot_id
+        assert second.slot_kind == "sticky"
+        assert second.assignment_reused is True
+
+        await q.release(second, 1.0)
+
+    @pytest.mark.asyncio
+    async def test_auxiliary_load_uses_overflow(self) -> None:
+        q = LLMRequestQueue(
+            max_concurrent=4,
+            strategy="slot_affinity",
+            slot_affinity=SlotAffinityConfig(
+                enabled=True,
+                provider_names=("llamacpp",),
+                sticky_slot_ids=(0, 1, 2),
+                overflow_slot_ids=(3,),
+            ),
+        )
+
+        entry = await q.acquire(
+            "u1",
+            task_kind="vision",
+            load_class="vision",
+            provider_name="llamacpp",
+        )
+
+        assert (entry.slot_id, entry.slot_kind) == (3, "overflow")
+        await q.release(entry, 1.0)
+
+    @pytest.mark.asyncio
+    async def test_non_matching_provider_uses_simple_queue(self) -> None:
+        q = LLMRequestQueue(
+            max_concurrent=4,
+            strategy="slot_affinity",
+            slot_affinity=SlotAffinityConfig(
+                enabled=True,
+                provider_names=("llamacpp",),
+                sticky_slot_ids=(0, 1, 2),
+                overflow_slot_ids=(3,),
+            ),
+        )
+
+        entry = await q.acquire("u1", provider_name="litellm")
+
+        assert entry.slot_id is None
+        assert entry.slot_kind == "simple"
+        assert entry.backend_extra_body == {}
+        await q.release(entry, 1.0)
