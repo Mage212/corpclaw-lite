@@ -50,6 +50,34 @@ def test_scrub_text_removes_github_pat():
     assert "***REDACTED***" in result
 
 
+def test_scrub_text_removes_telegram_bot_token():
+    raw = "https://api.telegram.org/bot123456:abcdefghijklmnopqrstuvwxyzABCDEF/getMe"
+    result = scrub_text(raw)
+    assert "8395052378:AAG_" not in result
+    assert "bot***REDACTED***" not in result
+    assert "***REDACTED***" in result
+    assert "https://api.telegram.org/" in result
+
+
+def test_credential_scrubber_removes_telegram_token_in_args():
+    scrubber = CredentialScrubber()
+    token = "123456:abcdefghijklmnopqrstuvwxyzABCDEF"
+    record = logging.LogRecord(
+        name="test",
+        level=logging.INFO,
+        pathname="",
+        lineno=0,
+        msg="Bot URL: %s",
+        args=(f"https://api.telegram.org/bot{token}/sendMessage",),
+        exc_info=None,
+    )
+
+    scrubber.filter(record)
+
+    assert token not in record.args[0]
+    assert "***REDACTED***" in record.args[0]
+
+
 def test_scrub_text_clean_string_unchanged():
     clean = "The result is 42, no secrets here."
     assert scrub_text(clean) == clean
