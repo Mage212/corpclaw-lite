@@ -60,7 +60,7 @@ class SubagentDispatcher:
 
         effective_provider: Provider
         if isinstance(self._provider, LLMRouter):
-            effective_provider = self._provider.for_subagent(spec.id)
+            effective_provider = self._provider.for_subagent(spec.id, user_id=str(user.id))
         else:
             effective_provider = self._provider
 

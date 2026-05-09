@@ -19,26 +19,46 @@ Usage:
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator
+import time
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
 from corpclaw_lite.config.providers import ProviderConnection, ProviderRegistry, ProviderSettings
 from corpclaw_lite.config.settings import LLMSettings
-from corpclaw_lite.llm.base import LLMResponse, Provider, StreamChunk, VisionProvider
+from corpclaw_lite.llm.base import (
+    LLMResponse,
+    LLMStreamEvent,
+    Provider,
+    StreamChunk,
+    StreamingProvider,
+    VisionProvider,
+)
 from corpclaw_lite.llm.presets import ModelPreset, PresetRegistry
+from corpclaw_lite.llm.queue import LLMLoadClass, LLMRequestQueue
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
 
-    from corpclaw_lite.llm.queue import LLMRequestQueue
-
 __all__ = [
     "LLMRouter",
+    "QueuedProvider",
     "build_provider",
 ]
 
 logger = logging.getLogger(__name__)
+
+
+def _load_class_for_task(task_kind: str) -> LLMLoadClass:
+    if task_kind == "vision":
+        return "vision"
+    if task_kind == "compress":
+        return "compression"
+    if task_kind == "consolidate":
+        return "consolidation"
+    if task_kind == "calibration":
+        return "calibration"
+    return "interactive"
 
 
 def build_provider(
@@ -210,25 +230,86 @@ class LLMRouter:
 
         return cls(providers, default_provider, routing, queue=queue)
 
-    def for_task(self, task_kind: str) -> Provider:
+    def _wrap_provider(
+        self,
+        provider: Provider,
+        *,
+        user_id: str,
+        task_kind: str,
+        load_class: LLMLoadClass,
+        run_id: str | None = None,
+    ) -> Provider:
+        if self._queue is None:
+            return provider
+        return QueuedProvider(
+            provider,
+            self._queue,
+            user_id=user_id,
+            task_kind=task_kind,
+            load_class=load_class,
+            run_id=run_id,
+        )
+
+    def has_task_route(self, task_kind: str) -> bool:
+        """Return True if a task-specific routing rule exists."""
+        return any(rule_task == task_kind for rule_task, _rule_subagent, _provider in self._routing)
+
+    def for_task(
+        self,
+        task_kind: str,
+        *,
+        user_id: str = "",
+        load_class: LLMLoadClass | None = None,
+        run_id: str | None = None,
+    ) -> Provider:
         """Return the provider configured for a given task_kind.
 
         Falls back to the default provider if no rule matches.
         """
         for rule_task, _rule_subagent, provider in self._routing:
             if rule_task == task_kind:
-                return provider
-        return self._default_provider
+                return self._wrap_provider(
+                    provider,
+                    user_id=user_id,
+                    task_kind=task_kind,
+                    load_class=load_class or _load_class_for_task(task_kind),
+                    run_id=run_id,
+                )
+        return self._wrap_provider(
+            self._default_provider,
+            user_id=user_id,
+            task_kind=task_kind,
+            load_class=load_class or _load_class_for_task(task_kind),
+            run_id=run_id,
+        )
 
-    def for_subagent(self, subagent_id: str) -> Provider:
+    def for_subagent(
+        self,
+        subagent_id: str,
+        *,
+        user_id: str = "",
+        run_id: str | None = None,
+    ) -> Provider:
         """Return the provider configured for a given subagent_id.
 
         Falls back to the default provider if no rule matches.
         """
         for _rule_task, rule_subagent, provider in self._routing:
             if rule_subagent == subagent_id:
-                return provider
-        return self._default_provider
+                return self._wrap_provider(
+                    provider,
+                    user_id=user_id,
+                    task_kind=f"subagent:{subagent_id}",
+                    load_class="subagent",
+                    run_id=run_id,
+                )
+        return self._wrap_provider(
+            self._default_provider,
+            user_id=user_id,
+            task_kind=f"subagent:{subagent_id}",
+            load_class="subagent",
+            run_id=run_id,
+        )
 
     @property
     def default(self) -> Provider:
@@ -246,7 +327,14 @@ class LLMRouter:
         return self._queue
 
     @asynccontextmanager
-    async def acquire_slot(self, user_id: str = "") -> AsyncGenerator[None, None]:
+    async def acquire_slot(
+        self,
+        user_id: str = "",
+        *,
+        task_kind: str = "default",
+        load_class: LLMLoadClass = "interactive",
+        run_id: str | None = None,
+    ) -> AsyncGenerator[None, None]:
         """Acquire an LLM inference slot via the request queue.
 
         Use as an async context manager around the raw provider call so the
@@ -262,13 +350,18 @@ class LLMRouter:
         if self._queue is None:
             yield
             return
-        await self._queue.acquire(user_id)
+        entry = await self._queue.acquire(
+            user_id,
+            task_kind=task_kind,
+            load_class=load_class,
+            run_id=run_id,
+        )
         t0 = time.monotonic()
         try:
             yield
         finally:
             elapsed = time.monotonic() - t0
-            await self._queue.release(user_id, elapsed)
+            await self._queue.release(entry, elapsed)
 
     # ── Provider protocol implementation (delegates to default via queue) ────
 
@@ -280,7 +373,7 @@ class LLMRouter:
     ) -> LLMResponse:
         """Chat using the default provider (through the queue if enabled)."""
         if self._queue is not None:
-            async with self.acquire_slot("_router_chat"):
+            async with self.acquire_slot("_router_chat", task_kind="default"):
                 return await self.default.chat(messages=messages, tools=tools, system=system)
         return await self.default.chat(messages=messages, tools=tools, system=system)
 
@@ -292,7 +385,7 @@ class LLMRouter:
     ) -> AsyncIterator[StreamChunk]:
         """Stream using the default provider (through the queue if enabled)."""
         if self._queue is not None:
-            async with self.acquire_slot("_router_stream"):
+            async with self.acquire_slot("_router_stream", task_kind="default"):
                 async for chunk in self.default.stream(
                     messages=messages, tools=tools, system=system
                 ):
@@ -311,7 +404,7 @@ class LLMRouter:
         system: str | None = None,
     ) -> LLMResponse:
         """Image chat using the provider routed for 'vision' task_kind."""
-        vision_provider = self.for_task("vision")
+        vision_provider = self.for_task("vision", load_class="vision")
         if isinstance(vision_provider, VisionProvider):
             return await vision_provider.chat_with_image(
                 image_data=image_data,
@@ -326,3 +419,92 @@ class LLMRouter:
         )
         messages: list[dict[str, Any]] = [{"role": "user", "content": f"{prompt}"}]
         return await vision_provider.chat(messages=messages, system=system)
+
+
+class QueuedProvider:
+    """Provider wrapper that routes every LLM call through ``LLMRequestQueue``."""
+
+    def __init__(
+        self,
+        provider: Provider,
+        queue: LLMRequestQueue,
+        *,
+        user_id: str,
+        task_kind: str,
+        load_class: LLMLoadClass,
+        run_id: str | None = None,
+    ) -> None:
+        self._provider = provider
+        self._queue = queue
+        self._user_id = user_id or f"_{task_kind}"
+        self._task_kind = task_kind
+        self._load_class: LLMLoadClass = load_class
+        self._run_id = run_id
+
+    @asynccontextmanager
+    async def _slot(self) -> AsyncGenerator[None, None]:
+        entry = await self._queue.acquire(
+            self._user_id,
+            task_kind=self._task_kind,
+            load_class=self._load_class,
+            run_id=self._run_id,
+        )
+        t0 = time.monotonic()
+        try:
+            yield
+        finally:
+            await self._queue.release(entry, time.monotonic() - t0)
+
+    async def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        system: str | None = None,
+    ) -> LLMResponse:
+        async with self._slot():
+            return await self._provider.chat(messages=messages, tools=tools, system=system)
+
+    async def stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        system: str | None = None,
+    ) -> AsyncIterator[StreamChunk]:
+        async with self._slot():
+            async for chunk in self._provider.stream(messages=messages, tools=tools, system=system):
+                yield chunk
+
+    async def chat_streamed(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        system: str | None = None,
+        on_event: Callable[[LLMStreamEvent], None] | None = None,
+    ) -> LLMResponse:
+        async with self._slot():
+            if isinstance(self._provider, StreamingProvider):
+                return await self._provider.chat_streamed(
+                    messages=messages,
+                    tools=tools,
+                    system=system,
+                    on_event=on_event,
+                )
+            return await self._provider.chat(messages=messages, tools=tools, system=system)
+
+    async def chat_with_image(
+        self,
+        image_data: str,
+        image_media_type: str,
+        prompt: str,
+        system: str | None = None,
+    ) -> LLMResponse:
+        async with self._slot():
+            if isinstance(self._provider, VisionProvider):
+                return await self._provider.chat_with_image(
+                    image_data=image_data,
+                    image_media_type=image_media_type,
+                    prompt=prompt,
+                    system=system,
+                )
+            messages: list[dict[str, Any]] = [{"role": "user", "content": f"{prompt}"}]
+            return await self._provider.chat(messages=messages, system=system)

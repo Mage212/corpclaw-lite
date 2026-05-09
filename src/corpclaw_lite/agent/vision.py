@@ -58,7 +58,11 @@ class VisionProcessor:
 
         effective_provider: Provider
         if isinstance(self._provider, LLMRouter):
-            effective_provider = self._provider.for_task("vision")
+            effective_provider = self._provider.for_task(
+                "vision",
+                user_id=str(_user.id) if _user is not None else "",
+                load_class="vision",
+            )
         else:
             effective_provider = self._provider
 

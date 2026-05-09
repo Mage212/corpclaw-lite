@@ -69,6 +69,21 @@ class TelegramBotOrchestrator:
         self._queue_notify_task: asyncio.Task[None] | None = None
         self._shutdown_event = asyncio.Event()
         self._agent_activity_logger: AgentLogger | None = None
+        self._active_user_requests: set[int] = set()
+        self._active_user_requests_lock = asyncio.Lock()
+
+    async def _try_start_user_request(self, telegram_id: int) -> bool:
+        """Return False when the user already has an active workflow."""
+        async with self._active_user_requests_lock:
+            if telegram_id in self._active_user_requests:
+                return False
+            self._active_user_requests.add(telegram_id)
+            return True
+
+    async def _finish_user_request(self, telegram_id: int) -> None:
+        """Mark a user's active workflow as finished."""
+        async with self._active_user_requests_lock:
+            self._active_user_requests.discard(telegram_id)
 
     def _require_started(
         self,
@@ -360,7 +375,7 @@ class TelegramBotOrchestrator:
             queue = agent_loop.provider.queue
             if queue is not None:
                 position = queue.get_position(str(tid))
-                if position is not None and position > 0:
+                if position is not None:
                     est_wait = queue.get_estimated_wait(str(tid))
                     wait_text = f" ~{int(est_wait)}с." if est_wait is not None else "."
                     await channel.send_message(
@@ -403,6 +418,14 @@ class TelegramBotOrchestrator:
                     )
                 return
 
+        if not await self._try_start_user_request(tid):
+            await channel.send_message(
+                user,
+                "⏳ Предыдущая задача ещё выполняется. "
+                "Дождитесь ответа и отправьте новый запрос после завершения.",
+            )
+            return
+
         # Progress indicator
         bot = channel.bot
         status_session: StatusMessageSession | None = None
@@ -430,6 +453,7 @@ class TelegramBotOrchestrator:
                     "⚠️ Изолированная рабочая среда временно недоступна.\n"
                     "Пожалуйста, повторите попытку позже или обратитесь к администратору.",
                 )
+                await self._finish_user_request(tid)
                 return
 
         # Agent execution
@@ -531,7 +555,10 @@ class TelegramBotOrchestrator:
                 ),
             )
 
-        await channel.send_message(user, reply)
+        try:
+            await channel.send_message(user, reply)
+        finally:
+            await self._finish_user_request(tid)
 
     async def handle_image(self, telegram_id: str, image_path: Path, caption: str | None) -> None:
         """Route photo uploads directly to vision LLM, bypassing agent loop."""
@@ -564,6 +591,13 @@ class TelegramBotOrchestrator:
             )
             await self.handle_message(telegram_id, directive, "execute")
             return
+        if not await self._try_start_user_request(int(telegram_id)):
+            await channel.send_message(
+                user,
+                "⏳ Предыдущая задача ещё выполняется. "
+                "Дождитесь ответа и отправьте новый запрос после завершения.",
+            )
+            return
         prompt = caption or "Опиши это изображение подробно."
         run_id = uuid.uuid4().hex
         t0 = time.monotonic()
@@ -595,6 +629,7 @@ class TelegramBotOrchestrator:
                 duration_ms=round((time.monotonic() - t0) * 1000, 1),
                 error=error,
             )
+            await self._finish_user_request(int(telegram_id))
             raise
 
         # Persist in agent memory — non-critical, don't block user response
@@ -610,7 +645,11 @@ class TelegramBotOrchestrator:
                     "Failed to persist image interaction in memory for user %s", telegram_id
                 )
 
-        await channel.send_message(user, result)
+        try:
+            await channel.send_message(user, result)
+        except Exception:
+            await self._finish_user_request(int(telegram_id))
+            raise
         duration_ms = (time.monotonic() - t0) * 1000
         log_event(
             "image_request_finished",
@@ -631,6 +670,7 @@ class TelegramBotOrchestrator:
                 run_id=run_id,
                 channel="telegram",
             )
+        await self._finish_user_request(int(telegram_id))
 
     async def send_file_callback(self, path: Path, user: User, caption: str) -> str:
         """File delivery callback for SendFileTool."""
@@ -673,7 +713,7 @@ class TelegramBotOrchestrator:
                 if now - entry.last_notified_at < interval_seconds:
                     continue
                 position = queue.get_position(entry.user_id)
-                if position is None or position == 0:
+                if position is None:
                     continue
                 est = queue.get_estimated_wait(entry.user_id)
                 wait_text = f" ~{int(est)}с." if est is not None else "."

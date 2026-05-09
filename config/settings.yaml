@@ -8,7 +8,7 @@
 
 llm:
   # Max concurrent LLM inference requests (match GPU inference slots)
-  max_concurrent_requests: 2
+  max_concurrent_requests: 4
   # Request queue — backpressure + user notifications
   queue:
     enabled: true

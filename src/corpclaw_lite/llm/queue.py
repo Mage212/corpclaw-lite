@@ -8,10 +8,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from dataclasses import dataclass, field
+from typing import Literal
+
+from corpclaw_lite.logging import health
+from corpclaw_lite.logging.trace import log_event
 
 __all__ = [
+    "LLMLoadClass",
     "LLMRequestQueue",
     "QueueEntry",
 ]
@@ -20,6 +26,15 @@ logger = logging.getLogger(__name__)
 
 _ROLLING_AVG_WEIGHT = 0.2
 _DEFAULT_AVG_SECONDS = 15.0
+LLMLoadClass = Literal[
+    "interactive",
+    "subagent",
+    "vision",
+    "compression",
+    "consolidation",
+    "calibration",
+    "maintenance",
+]
 
 
 @dataclass
@@ -27,8 +42,20 @@ class QueueEntry:
     """Tracks a single request in the queue."""
 
     user_id: str
+    task_kind: str = "default"
+    load_class: LLMLoadClass = "interactive"
+    run_id: str | None = None
     enqueued_at: float = field(default_factory=time.monotonic)
     last_notified_at: float = field(default_factory=time.monotonic)
+    acquired_at: float | None = None
+    queue_position_at_entry: int = 0
+
+    @property
+    def queue_wait_seconds(self) -> float | None:
+        """Return queue wait duration once acquired."""
+        if self.acquired_at is None:
+            return None
+        return self.acquired_at - self.enqueued_at
 
 
 class LLMRequestQueue:
@@ -45,47 +72,151 @@ class LLMRequestQueue:
     def __init__(self, max_concurrent: int = 2) -> None:
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._waiting: list[QueueEntry] = []
-        self._active: dict[str, QueueEntry] = {}
+        self._active: list[QueueEntry] = []
         self._avg_request_seconds: float = _DEFAULT_AVG_SECONDS
         self._lock = asyncio.Lock()
         self._max_concurrent = max_concurrent
         logger.info("LLMRequestQueue initialized: max_concurrent=%d", max_concurrent)
 
-    async def acquire(self, user_id: str) -> QueueEntry:
+    async def acquire(
+        self,
+        user_id: str,
+        *,
+        task_kind: str = "default",
+        load_class: LLMLoadClass = "interactive",
+        run_id: str | None = None,
+    ) -> QueueEntry:
         """Enter the queue and wait for an inference slot.
 
         Returns a ``QueueEntry`` once the slot is acquired. The entry's
         ``enqueued_at`` records when the request entered the queue (not when
         the slot was acquired).
         """
-        entry = QueueEntry(user_id=user_id)
+        entry = QueueEntry(
+            user_id=user_id,
+            task_kind=task_kind,
+            load_class=load_class,
+            run_id=run_id,
+        )
+        acquired = False
         async with self._lock:
             self._waiting.append(entry)
-            pos = len(self._waiting)
-        logger.debug("[queue] user=%s entered queue at position %d", user_id, pos)
-        await self._semaphore.acquire()
-        async with self._lock:
-            if entry in self._waiting:
-                self._waiting.remove(entry)
-            self._active[user_id] = entry
-        logger.debug("[queue] user=%s acquired slot", user_id)
+            entry.queue_position_at_entry = len(self._waiting) - 1
+            pos = entry.queue_position_at_entry
+            waiting_count = len(self._waiting)
+            active_count = len(self._active)
+        health.increment("llm_queue_entered")
+        log_event(
+            "llm_queue_entered",
+            run_id or "unknown",
+            user_id=user_id,
+            task_kind=task_kind,
+            load_class=load_class,
+            queue_position=pos,
+            waiting_count=waiting_count,
+            active_count=active_count,
+            max_concurrent=self._max_concurrent,
+        )
+        logger.debug(
+            "[queue] user=%s entered queue at position %d (%s/%s)",
+            user_id,
+            pos + 1,
+            task_kind,
+            load_class,
+        )
+        try:
+            await self._semaphore.acquire()
+            acquired = True
+            async with self._lock:
+                if entry in self._waiting:
+                    self._waiting.remove(entry)
+                entry.acquired_at = time.monotonic()
+                self._active.append(entry)
+                waiting_count = len(self._waiting)
+                active_count = len(self._active)
+        except asyncio.CancelledError:
+            async with self._lock:
+                if entry in self._waiting:
+                    self._waiting.remove(entry)
+                waiting_count = len(self._waiting)
+                active_count = len(self._active)
+            if acquired:
+                self._semaphore.release()
+            health.increment("llm_queue_cancelled")
+            log_event(
+                "llm_queue_cancelled",
+                run_id or "unknown",
+                user_id=user_id,
+                task_kind=task_kind,
+                load_class=load_class,
+                waiting_count=waiting_count,
+                active_count=active_count,
+                max_concurrent=self._max_concurrent,
+            )
+            raise
+        queue_wait = entry.queue_wait_seconds or 0.0
+        health.increment("llm_queue_acquired")
+        log_event(
+            "llm_queue_acquired",
+            run_id or "unknown",
+            user_id=user_id,
+            task_kind=task_kind,
+            load_class=load_class,
+            queue_wait_ms=round(queue_wait * 1000, 1),
+            waiting_count=waiting_count,
+            active_count=active_count,
+            max_concurrent=self._max_concurrent,
+        )
+        logger.debug(
+            "[queue] user=%s acquired slot after %.1fs (%s/%s)",
+            user_id,
+            queue_wait,
+            task_kind,
+            load_class,
+        )
         return entry
 
-    async def release(self, user_id: str, elapsed_seconds: float) -> None:
+    async def release(self, user_id: str | QueueEntry, elapsed_seconds: float) -> None:
         """Release an inference slot after the LLM call completes.
 
         Updates the rolling average request duration used for wait estimates.
         """
+        entry: QueueEntry | None = user_id if isinstance(user_id, QueueEntry) else None
+        target_user_id = user_id.user_id if isinstance(user_id, QueueEntry) else user_id
         async with self._lock:
-            self._active.pop(user_id, None)
+            if entry is None:
+                for active_entry in self._active:
+                    if active_entry.user_id == target_user_id:
+                        entry = active_entry
+                        break
+            if entry is not None and entry in self._active:
+                self._active.remove(entry)
+            waiting_count = len(self._waiting)
+            active_count = len(self._active)
+        if entry is None:
+            logger.warning("[queue] release requested for non-active user=%s", target_user_id)
+            return
         if elapsed_seconds > 0:
             self._avg_request_seconds = (
                 1 - _ROLLING_AVG_WEIGHT
             ) * self._avg_request_seconds + _ROLLING_AVG_WEIGHT * elapsed_seconds
         self._semaphore.release()
+        health.increment("llm_queue_released")
+        log_event(
+            "llm_queue_released",
+            entry.run_id or "unknown",
+            user_id=entry.user_id,
+            task_kind=entry.task_kind,
+            load_class=entry.load_class,
+            elapsed_seconds=round(elapsed_seconds, 3),
+            avg_request_seconds=round(self._avg_request_seconds, 3),
+            waiting_count=waiting_count,
+            active_count=active_count,
+            max_concurrent=self._max_concurrent,
+        )
         logger.debug(
             "[queue] user=%s released slot (elapsed=%.1fs, avg=%.1fs)",
-            user_id,
+            entry.user_id,
             elapsed_seconds,
             self._avg_request_seconds,
         )
@@ -102,7 +233,7 @@ class LLMRequestQueue:
         pos = self.get_position(user_id)
         if pos is None:
             return None
-        return pos * self._avg_request_seconds
+        return math.ceil((pos + 1) / self._max_concurrent) * self._avg_request_seconds
 
     def get_waiting_entries(self) -> list[QueueEntry]:
         """Return a snapshot of all waiting entries (for notification loops)."""

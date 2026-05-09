@@ -215,7 +215,11 @@ Summary:"""
 
             effective_provider = self._provider
             if isinstance(self._provider, LLMRouter):
-                effective_provider = self._provider.for_task("compress")
+                effective_provider = self._provider.for_task(
+                    "compress",
+                    user_id=mem_key or "",
+                    load_class="compression",
+                )
 
             response = await effective_provider.chat(
                 messages=[{"role": "user", "content": prompt}],

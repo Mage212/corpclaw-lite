@@ -68,7 +68,7 @@ class TestPositionTracking:
         assert q.get_position("u2") == 0
         est = q.get_estimated_wait("u2")
         assert est is not None
-        assert est == 0.0  # Position 0 = next in line, no one ahead
+        assert est == 15.0  # Next in line still waits for the active request slot
 
         # u3 enters queue
         task3 = asyncio.create_task(q.acquire("u3"))
