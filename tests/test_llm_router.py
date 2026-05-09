@@ -43,7 +43,7 @@ def _make_registry(env: dict[str, str] | None = None) -> ProviderRegistry:
 
 
 def _make_settings(rules: list[RoutingRule]) -> LLMSettings:
-    return LLMSettings(routing=rules)
+    return LLMSettings(routing=rules, queue={"enabled": False})
 
 
 # ── build_provider ─────────────────────────────────────────────────────────────
@@ -426,7 +426,8 @@ async def test_router_chat_delegates_to_default() -> None:
     router = LLMRouter(
         providers={"ollama:test": mock_provider},
         default_provider=mock_provider,
-        routing=[("default", None, mock_provider)],
+        default_provider_name="ollama",
+        routing=[("default", None, mock_provider, "ollama")],
     )
 
     result = await router.chat(messages=[{"role": "user", "content": "hi"}])

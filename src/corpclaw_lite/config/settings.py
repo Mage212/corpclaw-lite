@@ -16,6 +16,7 @@ __all__ = [
     "RoutingRule",
     "Settings",
     "SkillsSettings",
+    "SlotAffinitySettings",
     "TelegramSettings",
 ]
 
@@ -34,12 +35,27 @@ class RoutingRule(BaseModel):
     preset: str | None = None
 
 
+class SlotAffinitySettings(BaseModel):
+    """Settings for llama.cpp-compatible slot affinity."""
+
+    enabled: bool = False
+    backend: Literal["llama_cpp"] = "llama_cpp"
+    provider_names: list[str] = ["llamacpp"]
+    sticky_slot_ids: list[int] = [0, 1, 2]
+    overflow_slot_ids: list[int] = [3]
+    idle_ttl_seconds: float = 120.0
+    cache_prompt: bool = True
+    auxiliary_policy: Literal["overflow_only"] = "overflow_only"
+
+
 class QueueSettings(BaseModel):
     """Settings for the LLM request queue."""
 
     enabled: bool = True
+    strategy: Literal["simple", "slot_affinity"] = "simple"
     notify_position: bool = True
     notify_interval_seconds: int = 30
+    slot_affinity: SlotAffinitySettings = SlotAffinitySettings()
 
 
 class LLMSettings(BaseModel):

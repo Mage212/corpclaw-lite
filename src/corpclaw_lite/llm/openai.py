@@ -17,6 +17,7 @@ from corpclaw_lite.llm.base import (
     StreamChunk,
     TokenUsage,
     ToolCall,
+    get_backend_request_options,
 )
 from corpclaw_lite.llm.presets import ModelPreset
 from corpclaw_lite.llm.xml_tool_calling import parse_xml_tool_call
@@ -196,6 +197,7 @@ class OpenAIProvider(Provider):
 
         # Apply preset: merge inference params + inject system_prompt_prefix
         system = self._apply_preset(system, kwargs)
+        self._apply_backend_options(kwargs)
 
         if system:
             final_messages.append({"role": "system", "content": system})
@@ -213,6 +215,15 @@ class OpenAIProvider(Provider):
             kwargs["tools"] = tools
 
         return kwargs, final_messages
+
+    def _apply_backend_options(self, kwargs: dict[str, Any]) -> None:
+        """Merge request-local backend-specific options into OpenAI kwargs."""
+        options = get_backend_request_options()
+        if options is None or not options.extra_body:
+            return
+        extra_body: dict[str, Any] = dict(kwargs.pop("extra_body", None) or {})
+        extra_body.update(options.extra_body)
+        kwargs["extra_body"] = extra_body
 
     def _tool_calls_from_native(self, native_tool_calls: Any) -> list[ToolCall]:
         """Normalize OpenAI SDK tool calls into our ToolCall model."""
@@ -494,6 +505,7 @@ class OpenAIProvider(Provider):
                     extra_body.setdefault(k, v)
             if extra_body:
                 kwargs["extra_body"] = extra_body
+        self._apply_backend_options(kwargs)
 
         if system:
             messages.insert(0, {"role": "system", "content": system})
