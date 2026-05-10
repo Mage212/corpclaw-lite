@@ -46,11 +46,13 @@ venv = ".venv"
 asyncio_mode = "auto"
 pythonpath = ["src"]
 testpaths = ["tests"]
-addopts = "--ignore=tests/debug"
+addopts = "--ignore=tests/debug --ignore=tests/live_llm"
 markers = [
     "integration: Full pipeline integration test (requires LLM + optionally Docker)",
     "docker_required: Requires running Docker daemon and corpclaw-agent-base:latest image",
     "llm_required: Requires a real LLM provider (Anthropic API key or local Ollama)",
+    "live_llm: Manual tests that require a real llama-server backend",
+    "live_llm_slow: Slow manual tests that require CORPCLAW_LIVE_LLM_RUN_SLOW=1",
 ]
 
 [tool.ruff]
@@ -67,4 +69,3 @@ dev = [
     "pytest-cov>=7.0.0",
     "ruff>=0.15.4",
 ]
-
