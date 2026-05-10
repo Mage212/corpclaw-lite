@@ -34,6 +34,44 @@ def _text_delta(value: Any) -> str:
     return value if isinstance(value, str) else ""
 
 
+def _raw_get(value: Any, key: str, default: Any = None) -> Any:
+    if isinstance(value, dict):
+        return value.get(key, default)
+    return getattr(value, key, default)
+
+
+def _usage_from_raw(raw_usage: Any) -> TokenUsage:
+    if not raw_usage:
+        return TokenUsage()
+    details = _raw_get(raw_usage, "prompt_tokens_details", None) or {}
+    cached_tokens = int(_raw_get(details, "cached_tokens", 0) or 0)
+    return TokenUsage(
+        input_tokens=int(_raw_get(raw_usage, "prompt_tokens", 0) or 0),
+        output_tokens=int(_raw_get(raw_usage, "completion_tokens", 0) or 0),
+        cached_input_tokens=cached_tokens,
+    )
+
+
+def _apply_timings(usage: TokenUsage, raw_timings: Any) -> TokenUsage:
+    if not raw_timings:
+        return usage
+    return TokenUsage(
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        cached_input_tokens=usage.cached_input_tokens,
+        prompt_processing_tokens=int(_raw_get(raw_timings, "prompt_n", 0) or 0),
+        prompt_processing_ms=float(_raw_get(raw_timings, "prompt_ms", 0.0) or 0.0),
+        predicted_tokens=int(_raw_get(raw_timings, "predicted_n", 0) or 0),
+        predicted_ms=float(_raw_get(raw_timings, "predicted_ms", 0.0) or 0.0),
+    )
+
+
+def _enable_stream_usage(kwargs: dict[str, Any]) -> None:
+    stream_options: dict[str, Any] = dict(kwargs.get("stream_options") or {})
+    stream_options["include_usage"] = True
+    kwargs["stream_options"] = stream_options
+
+
 class OpenAIProvider(Provider):
     """LLM Provider passing through to OpenAI-compatible models."""
 
@@ -304,12 +342,8 @@ class OpenAIProvider(Provider):
         # ── Extract reasoning + content ───────────────────────────────────────
         reasoning, content = self._parse_reasoning(choice.message)
 
-        usage = TokenUsage()
-        if response.usage:
-            usage = TokenUsage(
-                input_tokens=response.usage.prompt_tokens or 0,
-                output_tokens=response.usage.completion_tokens or 0,
-            )
+        usage = _usage_from_raw(response.usage)
+        usage = _apply_timings(usage, getattr(response, "timings", None))
 
         return self._finalize_response(
             content=content,
@@ -330,6 +364,7 @@ class OpenAIProvider(Provider):
         """Stream for backend telemetry, then return a complete LLMResponse."""
         kwargs, final_messages = self._build_chat_kwargs(messages, tools, system)
         kwargs["stream"] = True
+        _enable_stream_usage(kwargs)
 
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
@@ -355,10 +390,10 @@ class OpenAIProvider(Provider):
         async for chunk in stream:  # type: ignore
             chunk_usage = getattr(chunk, "usage", None)
             if chunk_usage:
-                usage = TokenUsage(
-                    input_tokens=getattr(chunk_usage, "prompt_tokens", 0) or 0,
-                    output_tokens=getattr(chunk_usage, "completion_tokens", 0) or 0,
-                )
+                usage = _usage_from_raw(chunk_usage)
+            chunk_timings = getattr(chunk, "timings", None)
+            if chunk_timings:
+                usage = _apply_timings(usage, chunk_timings)
             if not getattr(chunk, "choices", None):
                 continue
 
@@ -402,9 +437,7 @@ class OpenAIProvider(Provider):
                     part["id"] = tc.id
                 fn = getattr(tc, "function", None)
                 name_delta = _text_delta(getattr(fn, "name", None)) if fn is not None else ""
-                args_delta = (
-                    _text_delta(getattr(fn, "arguments", None)) if fn is not None else ""
-                )
+                args_delta = _text_delta(getattr(fn, "arguments", None)) if fn is not None else ""
                 if name_delta:
                     part["name"] = name_delta
                 if args_delta:
@@ -518,12 +551,8 @@ class OpenAIProvider(Provider):
         choice = response.choices[0]
         content = choice.message.content or ""
 
-        usage = TokenUsage()
-        if response.usage:
-            usage = TokenUsage(
-                input_tokens=response.usage.prompt_tokens or 0,
-                output_tokens=response.usage.completion_tokens or 0,
-            )
+        usage = _usage_from_raw(response.usage)
+        usage = _apply_timings(usage, getattr(response, "timings", None))
         return LLMResponse(content=content, usage=usage)
 
     async def stream(
@@ -539,6 +568,7 @@ class OpenAIProvider(Provider):
         """
         kwargs, _final_messages = self._build_chat_kwargs(messages, tools, system)
         kwargs["stream"] = True
+        _enable_stream_usage(kwargs)
 
         stream = await self._client.chat.completions.create(**kwargs)
         async for chunk in stream:  # type: ignore

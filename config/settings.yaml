@@ -24,6 +24,25 @@ llm:
       idle_ttl_seconds: 120.0
       cache_prompt: true
       auxiliary_policy: "overflow_only"
+    persistent_cache:
+      enabled: true
+      # Must point to the same directory llama-server uses for --slot-save-path
+      # when CorpClaw is expected to prune files directly. Save/restore still
+      # works through the llama-server API when this path is not locally mounted.
+      root_dir: "data/llm_cache/slot-cache"
+      index_path: "data/llm_cache/index.sqlite"
+      slot_api_base_url: null
+      max_total_bytes: 107374182400
+      max_age_days: 30
+      save_policy: "hybrid"
+      save_min_tokens: 1024
+      save_dirty_seconds: 60.0
+      validation_min_reuse_ratio: 0.70
+      validation_large_context_tokens: 16000
+      validation_large_reuse_ratio: 0.90
+      strict_mismatch_retry: true
+      prune_interval_seconds: 600.0
+      http_timeout_seconds: 30.0
   # Routing rules — checked top-to-bottom, first match wins
   # provider: must match a name registered via PROVIDER_* env vars in .env
   # model:    model identifier for that provider
