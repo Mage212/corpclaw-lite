@@ -534,16 +534,16 @@ class AgentLoop:
                     # from LLM inference so the budget only counts active time.
                     if isinstance(self._provider, LLMRouter) and self._provider.has_queue:
                         budget.pause()
-                        async with self._provider.acquire_slot(
-                            str(user.id),
-                            task_kind="default",
-                            load_class="interactive",
+                        response = await self._provider.call_default_with_slot(
+                            user_id=str(user.id),
                             run_id=stats.run_id,
-                        ):
-                            budget.resume()
-                            response = await asyncio.wait_for(
+                            messages=context.messages,
+                            tools=tools_schema,
+                            system=context.system_prompt or None,
+                            on_acquired=budget.resume,
+                            call=lambda target_provider: asyncio.wait_for(
                                 self._call_llm_provider(
-                                    self._provider.default,
+                                    target_provider,
                                     messages=context.messages,
                                     tools=tools_schema,
                                     system=context.system_prompt or None,
@@ -553,7 +553,8 @@ class AgentLoop:
                                     stats=stats,
                                 ),
                                 timeout=self._settings.llm_timeout_seconds,
-                            )
+                            ),
+                        )
                     else:
                         target_provider: Provider = (
                             self._provider.default

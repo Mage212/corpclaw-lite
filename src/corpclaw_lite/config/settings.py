@@ -12,6 +12,7 @@ __all__ = [
     "ContainerSettings",
     "LLMSettings",
     "LoggingSettings",
+    "PersistentCacheSettings",
     "QueueSettings",
     "RoutingRule",
     "Settings",
@@ -48,6 +49,26 @@ class SlotAffinitySettings(BaseModel):
     auxiliary_policy: Literal["overflow_only"] = "overflow_only"
 
 
+class PersistentCacheSettings(BaseModel):
+    """Settings for llama.cpp persistent slot KV-cache files."""
+
+    enabled: bool = False
+    root_dir: str = "data/llm_cache/slot-cache"
+    index_path: str = "data/llm_cache/index.sqlite"
+    slot_api_base_url: str | None = None
+    max_total_bytes: int = 100 * 1024 * 1024 * 1024
+    max_age_days: int = 30
+    save_policy: Literal["hybrid", "every_response", "eviction_only"] = "hybrid"
+    save_min_tokens: int = 1024
+    save_dirty_seconds: float = 60.0
+    validation_min_reuse_ratio: float = 0.70
+    validation_large_context_tokens: int = 16000
+    validation_large_reuse_ratio: float = 0.90
+    strict_mismatch_retry: bool = True
+    prune_interval_seconds: float = 600.0
+    http_timeout_seconds: float = 30.0
+
+
 class QueueSettings(BaseModel):
     """Settings for the LLM request queue."""
 
@@ -56,6 +77,7 @@ class QueueSettings(BaseModel):
     notify_position: bool = True
     notify_interval_seconds: int = 30
     slot_affinity: SlotAffinitySettings = SlotAffinitySettings()
+    persistent_cache: PersistentCacheSettings = PersistentCacheSettings()
 
 
 class LLMSettings(BaseModel):

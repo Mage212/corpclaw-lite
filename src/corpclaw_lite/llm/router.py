@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
@@ -37,8 +37,10 @@ from corpclaw_lite.llm.base import (
     reset_backend_request_options,
     set_backend_request_options,
 )
+from corpclaw_lite.llm.cache import LLMCacheManager, config_from_settings
 from corpclaw_lite.llm.presets import ModelPreset, PresetRegistry
 from corpclaw_lite.llm.queue import LLMLoadClass, LLMRequestQueue, SlotAffinityConfig
+from corpclaw_lite.logging.trace import log_event
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -50,6 +52,8 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+ProviderMeta = tuple[str | None, str, str | None]
 
 
 def _load_class_for_task(task_kind: str) -> LLMLoadClass:
@@ -113,12 +117,16 @@ class LLMRouter:
         # (task_kind, subagent_id, provider, provider_name)
         routing: list[tuple[str | None, str | None, Provider, str]],
         queue: LLMRequestQueue | None = None,
+        provider_meta: dict[int, ProviderMeta] | None = None,
+        cache_manager: LLMCacheManager | None = None,
     ) -> None:
         self._providers = providers
         self._default_provider = default_provider
         self._default_provider_name = default_provider_name
         self._routing = routing
         self._queue = queue
+        self._provider_meta = provider_meta or {}
+        self._cache_manager = cache_manager
         logger.info(
             "LLMRouter ready: %d provider instances, %d routing rules, queue=%s",
             len(providers),
@@ -136,6 +144,7 @@ class LLMRouter:
         """Build an LLMRouter from LLMSettings + ProviderRegistry + PresetRegistry."""
         # Cache: (provider_name, model, preset_name) → Provider instance
         cache: dict[tuple[str, str, str | None], Provider] = {}
+        provider_meta: dict[int, ProviderMeta] = {}
         default_provider: Provider | None = None
         default_provider_name: str | None = None
 
@@ -161,6 +170,7 @@ class LLMRouter:
             provider = build_provider(conn, model=model, preset=preset)
             if provider is not None:
                 cache[cache_key] = provider
+                provider_meta[id(provider)] = (provider_name, model, preset_name)
             return provider
 
         # Process routing rules
@@ -231,6 +241,7 @@ class LLMRouter:
 
         # Build request queue if enabled
         queue: LLMRequestQueue | None = None
+        cache_manager: LLMCacheManager | None = None
         if llm.queue.enabled:
             from corpclaw_lite.llm.queue import LLMRequestQueue
 
@@ -248,8 +259,32 @@ class LLMRouter:
                     auxiliary_policy=slot_cfg.auxiliary_policy,
                 ),
             )
+            persistent_cfg = llm.queue.persistent_cache
+            if persistent_cfg.enabled:
+                provider_base_urls: dict[str, str] = {}
+                provider_api_keys: dict[str, str | None] = {}
+                for provider_name in provider_registry.list_all():
+                    conn = provider_registry.get(provider_name)
+                    if conn is None:
+                        continue
+                    if conn.base_url:
+                        provider_base_urls[provider_name] = conn.base_url
+                    provider_api_keys[provider_name] = conn.api_key
+                cache_manager = LLMCacheManager(
+                    config_from_settings(persistent_cfg),
+                    provider_base_urls=provider_base_urls,
+                    provider_api_keys=provider_api_keys,
+                )
 
-        return cls(providers, default_provider, default_provider_name, routing, queue=queue)
+        return cls(
+            providers,
+            default_provider,
+            default_provider_name,
+            routing,
+            queue=queue,
+            provider_meta=provider_meta,
+            cache_manager=cache_manager,
+        )
 
     def _wrap_provider(
         self,
@@ -260,18 +295,39 @@ class LLMRouter:
         task_kind: str,
         load_class: LLMLoadClass,
         run_id: str | None = None,
+        agent_id: str = "main",
     ) -> Provider:
         if self._queue is None:
             return provider
+        _meta_provider_name, model, preset_name = self._details_for_provider(
+            provider,
+            provider_name=provider_name,
+        )
         return QueuedProvider(
             provider,
             self._queue,
+            cache_manager=self._cache_manager,
             user_id=user_id,
             task_kind=task_kind,
             load_class=load_class,
             run_id=run_id,
             provider_name=provider_name,
+            model=model,
+            preset_name=preset_name,
+            agent_id=agent_id,
         )
+
+    def _details_for_provider(
+        self,
+        provider: Provider,
+        *,
+        provider_name: str | None,
+    ) -> ProviderMeta:
+        meta = self._provider_meta.get(id(provider))
+        if meta is not None:
+            return meta
+        model = str(getattr(provider, "_model", "unknown"))
+        return provider_name, model, None
 
     def has_task_route(self, task_kind: str) -> bool:
         """Return True if a task-specific routing rule exists."""
@@ -301,6 +357,7 @@ class LLMRouter:
                     task_kind=task_kind,
                     load_class=load_class or _load_class_for_task(task_kind),
                     run_id=run_id,
+                    agent_id="main" if task_kind == "default" else task_kind,
                 )
         return self._wrap_provider(
             self._default_provider,
@@ -309,6 +366,7 @@ class LLMRouter:
             task_kind=task_kind,
             load_class=load_class or _load_class_for_task(task_kind),
             run_id=run_id,
+            agent_id="main" if task_kind == "default" else task_kind,
         )
 
     def for_subagent(
@@ -331,6 +389,7 @@ class LLMRouter:
                     task_kind=f"subagent:{subagent_id}",
                     load_class="subagent",
                     run_id=run_id,
+                    agent_id=subagent_id,
                 )
         return self._wrap_provider(
             self._default_provider,
@@ -339,6 +398,7 @@ class LLMRouter:
             task_kind=f"subagent:{subagent_id}",
             load_class="subagent",
             run_id=run_id,
+            agent_id=subagent_id,
         )
 
     @property
@@ -355,6 +415,45 @@ class LLMRouter:
     def queue(self) -> LLMRequestQueue | None:
         """Return the request queue, or ``None`` if queuing is disabled."""
         return self._queue
+
+    async def call_default_with_slot(
+        self,
+        *,
+        user_id: str,
+        run_id: str | None,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        system: str | None,
+        on_acquired: Callable[[], None] | None,
+        call: Callable[[Provider], Awaitable[LLMResponse]],
+    ) -> LLMResponse:
+        """Call the default provider through queue/cache while preserving budget control."""
+        if self._queue is None:
+            if on_acquired is not None:
+                on_acquired()
+            return await call(self._default_provider)
+        provider_name, model, preset_name = self._details_for_provider(
+            self._default_provider,
+            provider_name=self._default_provider_name,
+        )
+        return await _execute_with_queue(
+            provider=self._default_provider,
+            queue=self._queue,
+            cache_manager=self._cache_manager,
+            provider_name=provider_name,
+            model=model,
+            preset_name=preset_name,
+            user_id=user_id,
+            task_kind="default",
+            load_class="interactive",
+            run_id=run_id,
+            agent_id="main",
+            messages=messages,
+            tools=tools,
+            system=system,
+            on_acquired=on_acquired,
+            call=call,
+        )
 
     @asynccontextmanager
     async def acquire_slot(
@@ -411,12 +510,15 @@ class LLMRouter:
     ) -> LLMResponse:
         """Chat using the default provider (through the queue if enabled)."""
         if self._queue is not None:
-            async with self.acquire_slot(
-                "_router_chat",
-                task_kind="default",
-                provider_name=self._default_provider_name,
-            ):
-                return await self.default.chat(messages=messages, tools=tools, system=system)
+            return await self.call_default_with_slot(
+                user_id="_router_chat",
+                run_id=None,
+                messages=messages,
+                tools=tools,
+                system=system,
+                on_acquired=None,
+                call=lambda provider: provider.chat(messages=messages, tools=tools, system=system),
+            )
         return await self.default.chat(messages=messages, tools=tools, system=system)
 
     async def stream(
@@ -467,6 +569,96 @@ class LLMRouter:
         return await vision_provider.chat(messages=messages, system=system)
 
 
+async def _execute_with_queue(
+    *,
+    provider: Provider,
+    queue: LLMRequestQueue,
+    cache_manager: LLMCacheManager | None,
+    provider_name: str | None,
+    model: str,
+    preset_name: str | None,
+    user_id: str,
+    task_kind: str,
+    load_class: LLMLoadClass,
+    run_id: str | None,
+    agent_id: str,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None,
+    system: str | None,
+    on_acquired: Callable[[], None] | None,
+    call: Callable[[Provider], Awaitable[LLMResponse]],
+) -> LLMResponse:
+    entry = await queue.acquire(
+        user_id,
+        task_kind=task_kind,
+        load_class=load_class,
+        run_id=run_id,
+        provider_name=provider_name,
+    )
+    t0 = time.monotonic()
+    if on_acquired is not None:
+        on_acquired()
+    lease = None
+    scope = None
+    try:
+        extra_body = dict(entry.backend_extra_body)
+        if cache_manager is not None and cache_manager.enabled:
+            scope = cache_manager.build_scope(
+                user_id=user_id,
+                conversation_id="default",
+                agent_id=agent_id,
+                provider_name=provider_name or "",
+                model=model,
+                preset=preset_name,
+                system=system,
+                tools=tools,
+            )
+            lease = await cache_manager.prepare(entry, scope)
+            if lease.enabled:
+                extra_body["timings_per_token"] = True
+        token = set_backend_request_options(
+            BackendRequestOptions(extra_body=extra_body) if extra_body else None
+        )
+        try:
+            response = await call(provider)
+        except Exception:
+            if cache_manager is not None and lease is not None:
+                await cache_manager.abort(lease)
+            raise
+        finally:
+            reset_backend_request_options(token)
+        if cache_manager is None or lease is None:
+            return response
+        result = await cache_manager.finalize(entry, lease, response)
+        if not result.retry_without_cache or scope is None:
+            return response
+
+        retry_lease = await cache_manager.prepare_uncached_retry(entry, scope)
+        retry_extra_body = dict(entry.backend_extra_body)
+        retry_extra_body["cache_prompt"] = True
+        retry_extra_body["timings_per_token"] = True
+        retry_token = set_backend_request_options(
+            BackendRequestOptions(extra_body=retry_extra_body)
+        )
+        try:
+            retry_response = await call(provider)
+        finally:
+            reset_backend_request_options(retry_token)
+        await cache_manager.finalize(entry, retry_lease, retry_response, allow_retry=False)
+        log_event(
+            "llm_cache_mismatch_fallback_finished",
+            run_id or "unknown",
+            user_id=user_id,
+            agent_id=agent_id,
+            slot_id=entry.slot_id,
+            scope_key=scope.key,
+            mismatch_reason=result.mismatch_reason,
+        )
+        return retry_response
+    finally:
+        await queue.release(entry, time.monotonic() - t0)
+
+
 class QueuedProvider:
     """Provider wrapper that routes every LLM call through ``LLMRequestQueue``."""
 
@@ -475,22 +667,59 @@ class QueuedProvider:
         provider: Provider,
         queue: LLMRequestQueue,
         *,
+        cache_manager: LLMCacheManager | None,
         provider_name: str | None,
+        model: str,
+        preset_name: str | None,
         user_id: str,
         task_kind: str,
         load_class: LLMLoadClass,
+        agent_id: str,
         run_id: str | None = None,
     ) -> None:
         self._provider = provider
         self._queue = queue
+        self._cache_manager = cache_manager
         self._provider_name = provider_name
+        self._model = model
+        self._preset_name = preset_name
         self._user_id = user_id or f"_{task_kind}"
         self._task_kind = task_kind
         self._load_class: LLMLoadClass = load_class
+        self._agent_id = agent_id
         self._run_id = run_id
 
-    @asynccontextmanager
-    async def _slot(self) -> AsyncGenerator[None, None]:
+    async def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        system: str | None = None,
+    ) -> LLMResponse:
+        return await _execute_with_queue(
+            provider=self._provider,
+            queue=self._queue,
+            cache_manager=self._cache_manager,
+            provider_name=self._provider_name,
+            model=self._model,
+            preset_name=self._preset_name,
+            user_id=self._user_id,
+            task_kind=self._task_kind,
+            load_class=self._load_class,
+            run_id=self._run_id,
+            agent_id=self._agent_id,
+            messages=messages,
+            tools=tools,
+            system=system,
+            on_acquired=None,
+            call=lambda provider: provider.chat(messages=messages, tools=tools, system=system),
+        )
+
+    async def stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        system: str | None = None,
+    ) -> AsyncIterator[StreamChunk]:
         entry = await self._queue.acquire(
             self._user_id,
             task_kind=self._task_kind,
@@ -505,29 +734,11 @@ class QueuedProvider:
             else None
         )
         try:
-            yield
+            async for chunk in self._provider.stream(messages=messages, tools=tools, system=system):
+                yield chunk
         finally:
             reset_backend_request_options(token)
             await self._queue.release(entry, time.monotonic() - t0)
-
-    async def chat(
-        self,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]] | None = None,
-        system: str | None = None,
-    ) -> LLMResponse:
-        async with self._slot():
-            return await self._provider.chat(messages=messages, tools=tools, system=system)
-
-    async def stream(
-        self,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]] | None = None,
-        system: str | None = None,
-    ) -> AsyncIterator[StreamChunk]:
-        async with self._slot():
-            async for chunk in self._provider.stream(messages=messages, tools=tools, system=system):
-                yield chunk
 
     async def chat_streamed(
         self,
@@ -536,15 +747,34 @@ class QueuedProvider:
         system: str | None = None,
         on_event: Callable[[LLMStreamEvent], None] | None = None,
     ) -> LLMResponse:
-        async with self._slot():
-            if isinstance(self._provider, StreamingProvider):
-                return await self._provider.chat_streamed(
+        async def call(provider: Provider) -> LLMResponse:
+            if isinstance(provider, StreamingProvider):
+                return await provider.chat_streamed(
                     messages=messages,
                     tools=tools,
                     system=system,
                     on_event=on_event,
                 )
-            return await self._provider.chat(messages=messages, tools=tools, system=system)
+            return await provider.chat(messages=messages, tools=tools, system=system)
+
+        return await _execute_with_queue(
+            provider=self._provider,
+            queue=self._queue,
+            cache_manager=self._cache_manager,
+            provider_name=self._provider_name,
+            model=self._model,
+            preset_name=self._preset_name,
+            user_id=self._user_id,
+            task_kind=self._task_kind,
+            load_class=self._load_class,
+            run_id=self._run_id,
+            agent_id=self._agent_id,
+            messages=messages,
+            tools=tools,
+            system=system,
+            on_acquired=None,
+            call=call,
+        )
 
     async def chat_with_image(
         self,
@@ -553,7 +783,20 @@ class QueuedProvider:
         prompt: str,
         system: str | None = None,
     ) -> LLMResponse:
-        async with self._slot():
+        entry = await self._queue.acquire(
+            self._user_id,
+            task_kind=self._task_kind,
+            load_class=self._load_class,
+            run_id=self._run_id,
+            provider_name=self._provider_name,
+        )
+        t0 = time.monotonic()
+        token = set_backend_request_options(
+            BackendRequestOptions(extra_body=entry.backend_extra_body)
+            if entry.backend_extra_body
+            else None
+        )
+        try:
             if isinstance(self._provider, VisionProvider):
                 return await self._provider.chat_with_image(
                     image_data=image_data,
@@ -563,3 +806,6 @@ class QueuedProvider:
                 )
             messages: list[dict[str, Any]] = [{"role": "user", "content": f"{prompt}"}]
             return await self._provider.chat(messages=messages, system=system)
+        finally:
+            reset_backend_request_options(token)
+            await self._queue.release(entry, time.monotonic() - t0)
