@@ -7,7 +7,7 @@ import asyncio
 import logging
 import os
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from html import escape as html_escape
 from pathlib import Path
@@ -71,6 +71,7 @@ class TelegramChannel(Channel):
         memory: SQLiteMemory | None = None,
         onboarding_engine: Any | None = None,
         image_handler: Callable[..., Any] | None = None,
+        cache_reset_callback: Callable[[str], Awaitable[None]] | None = None,
         tg_settings: TelegramSettings | None = None,
     ) -> None:
         """
@@ -85,6 +86,8 @@ class TelegramChannel(Channel):
                            direct image processing that bypasses the agent loop. When set,
                            uploaded images are routed here instead of through message_handler
                            so the raw vision-model response reaches the user unmodified.
+            cache_reset_callback: Optional async callback invoked by /new after
+                                  memory is cleared, so LLM cache state can be invalidated.
             tg_settings: Telegram configuration (fallback IPs, timeouts, retry limits).
         """
         self.token = token
@@ -95,6 +98,7 @@ class TelegramChannel(Channel):
         self._tool_registry = tool_registry
         self._memory = memory
         self._onboarding_engine = onboarding_engine
+        self._cache_reset_callback = cache_reset_callback
         self._tg_settings = tg_settings
 
         # Approval system: message_id → (Future[bool], expected_telegram_user_id)
@@ -548,6 +552,8 @@ class TelegramChannel(Channel):
         tid = update.effective_user.id
         if self._memory:
             await self._memory.clear(str(tid))
+        if self._cache_reset_callback is not None:
+            await self._cache_reset_callback(str(tid))
         await update.effective_chat.send_message("🔄 Сессия сброшена. Можете начать заново.")
         logger.info("User %d reset session", tid)
 

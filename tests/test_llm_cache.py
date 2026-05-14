@@ -194,3 +194,44 @@ async def test_l2_restore_then_low_reuse_requests_retry(tmp_path: Path) -> None:
     assert result.mismatch_reason == "low_cache_reuse_ratio"
     assert ("erase", 0, None) in client.calls
     await second_queue.release(second_entry, 1.0)
+
+
+@pytest.mark.asyncio
+async def test_user_reset_skips_l2_restore_and_erases_slot(tmp_path: Path) -> None:
+    client = FakeSlotCacheClient()
+    config = _config(tmp_path)
+    first_manager = LLMCacheManager(
+        config,
+        provider_base_urls={"llamacpp": "http://llama:8080/v1"},
+        client=client,
+    )
+    first_queue = _queue()
+    first_entry = await first_queue.acquire("u1", provider_name="llamacpp")
+    scope = first_manager.build_scope(
+        user_id="u1",
+        conversation_id="default",
+        agent_id="main",
+        provider_name="llamacpp",
+        model="gpt-oss",
+        preset=None,
+        system="system",
+        tools=[],
+    )
+    first_lease = await first_manager.prepare(first_entry, scope)
+    await first_manager.finalize(first_entry, first_lease, _response())
+    await first_queue.release(first_entry, 1.0)
+
+    second_manager = LLMCacheManager(
+        config,
+        provider_base_urls={"llamacpp": "http://llama:8080/v1"},
+        client=client,
+    )
+    await second_manager.mark_user_reset("u1")
+    second_queue = _queue()
+    second_entry = await second_queue.acquire("u1", provider_name="llamacpp")
+    second_lease = await second_manager.prepare(second_entry, scope)
+
+    assert second_lease.hit_kind == "none"
+    assert ("erase", 0, None) in client.calls
+    assert ("restore", 0, scope.filename) not in client.calls
+    await second_queue.release(second_entry, 1.0)

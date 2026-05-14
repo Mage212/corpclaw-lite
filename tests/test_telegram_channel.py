@@ -170,6 +170,27 @@ class TestTelegramChannel:
         update.effective_chat.send_message.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_handle_new_marks_cache_reset(self, mock_app: MagicMock) -> None:
+        async def mock_handler(tid: str, text: str, mode: str = "execute") -> None:
+            pass
+
+        cache_reset = AsyncMock()
+        channel = TelegramChannel(
+            token="test_token",
+            message_handler=mock_handler,
+            memory=AsyncMock(),
+            cache_reset_callback=cache_reset,
+        )
+        channel._app = mock_app
+        update = MagicMock()
+        update.effective_user.id = 123
+        update.effective_chat.send_message = AsyncMock()
+
+        await channel._handle_new(update, MagicMock())
+
+        cache_reset.assert_awaited_once_with("123")
+
+    @pytest.mark.asyncio
     async def test_handle_chat(self, channel: TelegramChannel) -> None:
         update = MagicMock()
         update.effective_chat.send_message = AsyncMock()

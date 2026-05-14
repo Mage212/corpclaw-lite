@@ -207,7 +207,7 @@ def cmd_chat(telegram_id: int, *, setup_mode: bool = False) -> None:
 
         install_signal_handlers(shutdown)
 
-        stack = build_agent_stack()
+        stack = build_agent_stack(_settings)
         agent_loop = stack.loop
         tool_registry = stack.tool_registry
         mcp_manager = stack.mcp_manager
