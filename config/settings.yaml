@@ -25,7 +25,7 @@ llm:
       cache_prompt: true
       auxiliary_policy: "overflow_only"
     persistent_cache:
-      enabled: true
+      enabled: false
       # Must point to the same directory llama-server uses for --slot-save-path
       # when CorpClaw is expected to prune files directly. Save/restore still
       # works through the llama-server API when this path is not locally mounted.
