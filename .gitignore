@@ -51,6 +51,7 @@ hello.txt
 CLAUDE.md
 AGENTS.md
 .mcp.json
+.codex/config.toml
 .opencode/
 .qwen/
 .axme-code/
