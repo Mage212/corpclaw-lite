@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -314,3 +315,29 @@ def test_all_tool_classes_has_full_set() -> None:
         "excel_workbook",
     }
     assert all_names == expected
+
+
+def test_calibrated_tool_overrides_apply_to_both_registries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Runtime should apply calibrated tool descriptions to main and full registries."""
+    from corpclaw_lite.agent import factory
+    from corpclaw_lite.extensions.tools.builtin.files import ReadFileTool
+
+    calibrated = tmp_path / "config" / "calibrated"
+    calibrated.mkdir(parents=True)
+    (calibrated / "tool_overrides.yaml").write_text(
+        "overrides:\n  read_file:\n    description: Calibrated read description\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(factory, "PROJECT_ROOT", tmp_path)
+
+    main_registry = ToolRegistry()
+    full_registry = ToolRegistry()
+    main_registry.register(ReadFileTool())
+    full_registry.register(ReadFileTool())
+
+    factory._load_calibrated_tool_overrides(main_registry, full_registry)
+
+    assert main_registry.to_schemas()[0]["function"]["description"] == "Calibrated read description"
+    assert full_registry.to_schemas()[0]["function"]["description"] == "Calibrated read description"

@@ -61,6 +61,7 @@ class AgentStack:
     loop: AgentLoop
     user_manager: UserManager
     tool_registry: ToolRegistry
+    full_tool_registry: ToolRegistry | None
     mcp_manager: MCPManager | None
     container_manager: ContainerManager | None
     few_shots: list[dict[str, Any]] | None = None
@@ -256,7 +257,13 @@ def _build_extensions_stack(
             skill_matcher=skill_matcher,
             skill_registry=skill_registry,
         )
-        registry.register(DispatchSubagentTool(dispatcher, subagent_registry))
+        registry.register(
+            DispatchSubagentTool(
+                dispatcher,
+                subagent_registry,
+                permission_checker=permission_checker,
+            )
+        )
         logger.info(
             "dispatch_subagent registered (%d subagents available)",
             len(subagent_registry.list_all()),
@@ -332,6 +339,16 @@ def _build_system_prompt() -> str | None:
     else:
         logger.warning("No bootstrap/*.md files found — using minimal default system prompt")
     return system_prompt
+
+
+def _load_calibrated_tool_overrides(*registries: ToolRegistry) -> None:
+    """Apply calibrated tool description overrides to all active registries."""
+    overrides_path = PROJECT_ROOT / "config" / "calibrated" / "tool_overrides.yaml"
+    if not overrides_path.exists():
+        return
+    for registry in registries:
+        registry.load_overrides(overrides_path)
+    logger.info("Loaded calibrated tool overrides from %s", overrides_path)
 
 
 def build_agent_stack(
@@ -417,7 +434,10 @@ def build_agent_stack(
     from corpclaw_lite.extensions.bootstrap import load_extensions
 
     skill_registry, plugin_registry, skill_matcher = load_extensions(
-        PROJECT_ROOT, registry, full_settings.skills
+        PROJECT_ROOT,
+        registry,
+        full_settings.skills,
+        full_tool_registry=full_tool_reg,
     )
 
     subagent_registry = _build_extensions_stack(
@@ -434,6 +454,7 @@ def build_agent_stack(
     memory, consolidator, compressor = _build_memory_stack(
         agent_settings, provider, registry, full_tool_registry=full_tool_reg
     )
+    _load_calibrated_tool_overrides(registry, full_tool_reg)
 
     mcp_manager: MCPManager | None = None
     mcp_config = PROJECT_ROOT / "config" / "mcp_servers.yaml"
@@ -478,6 +499,7 @@ def build_agent_stack(
         loop=loop,
         user_manager=user_manager,
         tool_registry=registry,
+        full_tool_registry=full_tool_reg,
         mcp_manager=mcp_manager,
         container_manager=container_manager,
         few_shots=few_shots,

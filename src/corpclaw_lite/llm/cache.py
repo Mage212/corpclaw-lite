@@ -23,6 +23,7 @@ from corpclaw_lite.llm.queue import LLMLoadClass, QueueEntry
 from corpclaw_lite.logging import health
 from corpclaw_lite.logging.trace import log_event
 from corpclaw_lite.paths import DATA_DIR, PROJECT_ROOT
+from corpclaw_lite.utils.db import db_connect
 
 __all__ = [
     "LLMCacheLease",
@@ -392,15 +393,14 @@ class LLMCacheMetadataStore:
 
     async def _execute_write(self, sql: str, params: tuple[Any, ...]) -> None:
         def run() -> None:
-            with sqlite3.connect(self._path) as conn:
+            with db_connect(self._path) as conn:
                 conn.execute(sql, params)
-                conn.commit()
 
         await asyncio.to_thread(run)
 
     async def _execute_fetchall(self, sql: str, params: tuple[Any, ...]) -> list[sqlite3.Row]:
         def run() -> list[sqlite3.Row]:
-            with sqlite3.connect(self._path) as conn:
+            with db_connect(self._path) as conn:
                 conn.row_factory = sqlite3.Row
                 return list(conn.execute(sql, params).fetchall())
 
@@ -424,6 +424,7 @@ class LLMCacheManager:
         self._client_override = client
         self._store = LLMCacheMetadataStore(config.index_path)
         self._slot_scopes: dict[int, LLMCacheScope] = {}
+        self._reset_users: set[str] = set()
         self._slot_lock = asyncio.Lock()
         self._last_prune_at = 0.0
         self._cleanup_available = self._prepare_root_dir(config.root_dir)
@@ -462,6 +463,37 @@ class LLMCacheManager:
             tools_hash=_hash_payload(tools or []),
         )
 
+    async def mark_user_reset(self, user_id: str) -> None:
+        """Mark a user's persistent cache as invalid after conversation reset.
+
+        CorpClaw Lite currently treats one user as one active conversation stream.
+        When that stream is reset, any L2 metadata for the user is removed and
+        the next prepare() call erases the live slot before prompt processing.
+        """
+        if not self._config.enabled:
+            return
+        normalized_user_id = user_id or "anonymous"
+        async with self._slot_lock:
+            self._reset_users.add(normalized_user_id)
+            stale_slots = [
+                slot_id
+                for slot_id, scope in self._slot_scopes.items()
+                if scope.user_id == normalized_user_id
+            ]
+            for slot_id in stale_slots:
+                self._slot_scopes.pop(slot_id, None)
+
+        deleted = 0
+        for entry in await self._store.list_all():
+            if entry.scope.user_id == normalized_user_id and await self._delete_cache_entry(entry):
+                deleted += 1
+        log_event(
+            "llm_cache_user_reset_marked",
+            "unknown",
+            user_id=normalized_user_id,
+            deleted_entries=deleted,
+        )
+
     async def prepare(
         self,
         entry: QueueEntry,
@@ -471,8 +503,27 @@ class LLMCacheManager:
             return LLMCacheLease(enabled=False)
         assert entry.slot_id is not None
         slot_id = entry.slot_id
+        reset_requested = False
         async with self._slot_lock:
+            if scope.user_id in self._reset_users:
+                self._reset_users.remove(scope.user_id)
+                self._slot_scopes.pop(slot_id, None)
+                reset_requested = True
             existing_scope = self._slot_scopes.get(slot_id)
+        if reset_requested:
+            await self._erase_slot(entry, scope.model)
+            async with self._slot_lock:
+                self._slot_scopes[slot_id] = scope
+            health.increment("llm_cache_reset_skip_restore")
+            log_event(
+                "llm_cache_reset_skip_restore",
+                entry.run_id or "unknown",
+                user_id=entry.user_id,
+                agent_id=scope.agent_id,
+                slot_id=slot_id,
+                scope_key=scope.key,
+            )
+            return LLMCacheLease(enabled=True, scope=scope, slot_id=slot_id)
         if existing_scope is not None and existing_scope.key == scope.key:
             metadata = await self._store.get(scope.key)
             if metadata is not None:

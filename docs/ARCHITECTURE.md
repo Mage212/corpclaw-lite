@@ -1,7 +1,7 @@
 # CorpClaw Lite — Архитектура проекта
 
 > Версия документа: 2026-04-17
-> Версия проекта: Phase 7 (Production-Ready) — ~126 модулей, ~16.6K LOC, 806 тестов
+> Версия проекта: Phase 7 (Production-Ready) — ~132 модулей, ~21.7K LOC, 932 теста
 
 ---
 
@@ -24,6 +24,19 @@
 | **Security by Design** | Безопасность встроена в ядро, не добавлена поверх |
 | **Manifest-based Extensions** | Skills, plugins, subagents через YAML-манифесты |
 | **Fail-Fast** | Ошибка при отсутствии критичных секретов |
+
+### LLM Queue, Slot Affinity и KV-cache
+
+Текущая эксплуатационная модель CorpClaw Lite: **один активный рабочий поток на
+пользователя**. Поэтому persistent KV-cache scoped по пользователю, агенту, модели,
+system prompt и набору tools; полноценный `conversation_id/session_id` пока не
+вводится.
+
+Команда `/new` очищает память пользователя и помечает LLM cache как сброшенный:
+следующий запрос этого пользователя не восстанавливает L2 cache и очищает live slot
+перед новым prompt processing. Если в будущем появятся несколько параллельных потоков
+на пользователя (Telegram topics, mission sessions, независимые CLI-сессии), cache
+scope нужно расширить реальным `conversation_id` или `session_id`.
 
 ---
 
@@ -56,7 +69,7 @@ corpclaw-lite/
 ├── skills/                 # 4 Markdown-скилла с scope-фильтрацией (translator, excel_normalizer, meeting_summary, data_analyst)
 ├── plugins/                # Директория плагинов
 ├── docker/                 # Dockerfile, Dockerfile.agent, seccomp_default.json
-└── tests/                  # Тесты (806 тестов, 85 файлов)
+└── tests/                  # Тесты (932 теста, 95 файлов)
 ```
 
 ---
@@ -879,9 +892,9 @@ skills:
 | Runtime | ~47 | 2 |
 | Logging | ~178 | 3 |
 | Root (cli, etc.) | ~802 | 4 |
-| **Исходники** | **~16,620** | **~126** |
-| **Тесты** | **~14,685** | **~85** |
-| **Тест-функций** | **806** | |
+| **Исходники** | **~21,712** | **~132** |
+| **Тесты** | **~18,507** | **~95** |
+| **Тест-кейсов pytest** | **932** | |
 
 ---
 

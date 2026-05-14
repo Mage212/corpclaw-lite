@@ -11,6 +11,7 @@ __all__ = [
 
 if TYPE_CHECKING:
     from corpclaw_lite.agent.subagent import SubagentDispatcher
+    from corpclaw_lite.departments.permissions import PermissionChecker
     from corpclaw_lite.extensions.subagents.registry import SubagentRegistry
     from corpclaw_lite.users.models import User
 
@@ -43,9 +44,11 @@ class DispatchSubagentTool(Tool):
         self,
         dispatcher: SubagentDispatcher,
         subagent_registry: SubagentRegistry,
+        permission_checker: PermissionChecker | None = None,
     ) -> None:
         self._dispatcher = dispatcher
         self._subagent_registry = subagent_registry
+        self._permission_checker = permission_checker
 
     async def execute(self, *, user: User | None = None, **kwargs: Any) -> str:
         subagent_id = kwargs.get("subagent_id")
@@ -74,6 +77,21 @@ class DispatchSubagentTool(Tool):
                 available,
             )
             return f"Error: Subagent '{subagent_id}' not found. Available: {available}"
+
+        if (
+            self._permission_checker is not None
+            and not self._permission_checker.can_dispatch_subagent(user, subagent_id)
+        ):
+            logger.warning(
+                "Permission denied by department RBAC: subagent=%s user=%s dept=%s",
+                subagent_id,
+                user.id,
+                user.department,
+            )
+            return (
+                f"Error: Permission denied. Your department ({user.department}) "
+                f"cannot dispatch subagent '{subagent_id}'."
+            )
 
         # Department-level permission check on the subagent spec
         if "*" not in spec.allowed_departments and user.department not in spec.allowed_departments:

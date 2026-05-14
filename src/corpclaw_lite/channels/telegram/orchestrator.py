@@ -117,7 +117,7 @@ class TelegramBotOrchestrator:
         )
         self._agent_activity_logger = AgentLogger(log_dir=PROJECT_ROOT / log_cfg.log_dir)
 
-        stack = build_agent_stack()
+        stack = build_agent_stack(self._settings)
         self._stack = stack
         agent_loop = stack.loop
         user_manager = stack.user_manager
@@ -177,6 +177,7 @@ class TelegramBotOrchestrator:
             memory=agent_loop.memory,
             onboarding_engine=self._onboarding_engine,
             image_handler=self.handle_image,
+            cache_reset_callback=self._mark_user_cache_reset,
             tg_settings=tg_settings,
         )
 
@@ -678,6 +679,16 @@ class TelegramBotOrchestrator:
             raise RuntimeError("TelegramChannel not initialized")
         await self._channel.send_file(user, path, caption)
         return f"File '{path.name}' sent to user."
+
+    async def _mark_user_cache_reset(self, telegram_id: str) -> None:
+        """Invalidate LLM cache state for a user after /new clears memory."""
+        if self._stack is None:
+            return
+        from corpclaw_lite.llm.router import LLMRouter
+
+        provider = self._stack.loop.provider
+        if isinstance(provider, LLMRouter):
+            await provider.mark_user_cache_reset(telegram_id)
 
     async def _rate_limit_cleanup_loop(self) -> None:
         """Periodic rate limiter cleanup."""

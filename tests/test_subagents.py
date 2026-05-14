@@ -301,6 +301,47 @@ async def test_dispatch_subagent_tool_dispatches() -> None:
     dispatcher.dispatch.assert_called_once_with(spec, user, "do the work")
 
 
+@pytest.mark.asyncio
+async def test_dispatch_subagent_tool_enforces_department_subagent_rbac() -> None:
+    """Department allowed_subagents must be enforced before dispatch."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from corpclaw_lite.departments.manager import DepartmentConfig, DepartmentManager
+    from corpclaw_lite.departments.permissions import PermissionChecker
+    from corpclaw_lite.extensions.subagents.base import SubagentSpec
+    from corpclaw_lite.extensions.subagents.registry import SubagentRegistry
+    from corpclaw_lite.extensions.tools.builtin.dispatch import DispatchSubagentTool
+
+    spec = SubagentSpec(
+        id="data-agent",
+        name="Data",
+        description="desc",
+        allowed_tools=["*"],
+        allowed_departments=["analytics"],
+    )
+    registry = SubagentRegistry()
+    registry.register(spec)
+
+    manager = DepartmentManager()
+    manager._departments["analytics"] = DepartmentConfig(
+        {
+            "description": "Analytics",
+            "allowed_tools": ["*"],
+            "allowed_subagents": ["research-agent"],
+        }
+    )
+    checker = PermissionChecker(manager)
+    dispatcher = MagicMock()
+    dispatcher.dispatch = AsyncMock(return_value="subagent result")
+    tool = DispatchSubagentTool(dispatcher, registry, permission_checker=checker)
+    user = User(id=1, name="U", department="analytics")
+
+    result = await tool.execute(subagent_id="data-agent", task="analyze", user=user)
+
+    assert "Permission denied" in result
+    dispatcher.dispatch.assert_not_called()
+
+
 # ── Department filtering tests ───────────────────────────────────────────────
 
 

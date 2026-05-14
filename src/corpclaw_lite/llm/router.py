@@ -416,6 +416,12 @@ class LLMRouter:
         """Return the request queue, or ``None`` if queuing is disabled."""
         return self._queue
 
+    async def mark_user_cache_reset(self, user_id: str) -> None:
+        """Invalidate persistent cache state for a user after conversation reset."""
+        if self._cache_manager is None or not self._cache_manager.enabled:
+            return
+        await self._cache_manager.mark_user_reset(user_id)
+
     async def call_default_with_slot(
         self,
         *,

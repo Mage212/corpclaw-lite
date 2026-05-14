@@ -1,8 +1,20 @@
 from pathlib import Path
 
+from corpclaw_lite.extensions.plugins.base import Plugin, PluginManifest
 from corpclaw_lite.extensions.plugins.loader import PluginLoader
 from corpclaw_lite.extensions.plugins.registry import PluginRegistry
+from corpclaw_lite.extensions.tools.base import Tool
+from corpclaw_lite.extensions.tools.registry import ToolRegistry
 from corpclaw_lite.users.models import User
+
+
+class DummyPluginTool(Tool):
+    name = "plugin_tool"
+    description = "Plugin tool"
+    params = []
+
+    async def execute(self, **kwargs: object) -> str:
+        return "ok"
 
 
 def test_plugin_loader(tmp_path: Path) -> None:
@@ -88,3 +100,38 @@ def test_plugin_registry(tmp_path: Path) -> None:
     assert len(registry.get_allowed_plugins(user_hr)) == 2
     assert len(registry.get_allowed_plugins(user_sales)) == 1
     assert registry.get_allowed_plugins(user_sales)[0].manifest.name == "p1"
+
+
+def test_load_extensions_registers_plugin_tools_in_full_registry(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from corpclaw_lite.extensions import bootstrap
+
+    plugins_dir = tmp_path / "plugins"
+    plugins_dir.mkdir()
+    plugin = Plugin(
+        manifest=PluginManifest(
+            name="p_tool",
+            version="1.0",
+            type="plugin",
+            description="Plugin",
+        ),
+        tools=[DummyPluginTool()],
+    )
+
+    def fake_load_directory(self: PluginRegistry, path: Path) -> None:
+        self.register(plugin)
+
+    monkeypatch.setattr(PluginRegistry, "load_directory", fake_load_directory)
+
+    main_registry = ToolRegistry()
+    full_registry = ToolRegistry()
+    bootstrap.load_extensions(
+        tmp_path,
+        main_registry,
+        bootstrap.SkillsSettings(),
+        full_tool_registry=full_registry,
+    )
+
+    assert main_registry.get("plugin_tool") is not None
+    assert full_registry.get("plugin_tool") is not None
