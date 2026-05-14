@@ -20,6 +20,7 @@ __all__ = ["ConvertFormatTool"]
 
 _SUPPORTED_INPUT = {".csv", ".xlsx", ".json", ".md", ".markdown"}
 _SUPPORTED_OUTPUT = {"csv", "xlsx", "json", "markdown"}
+_MAX_INPUT_BYTES = 50 * 1024 * 1024
 
 
 # --- Loaders ---
@@ -241,6 +242,13 @@ class ConvertFormatTool(Tool):
 
         if not resolved_input.is_file():
             return f"Error: File not found: {input_str}"
+        if resolved_input.stat().st_size > _MAX_INPUT_BYTES:
+            size_mb = resolved_input.stat().st_size / (1024 * 1024)
+            limit_mb = _MAX_INPUT_BYTES / (1024 * 1024)
+            return (
+                f"Error: Input file too large for convert_format "
+                f"({size_mb:.1f} MB, limit {limit_mb:.1f} MB)."
+            )
 
         output_path: Path | None = None
         if output_str:

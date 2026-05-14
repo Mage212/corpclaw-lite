@@ -128,6 +128,7 @@ class AgentConfig:
     registry: ToolRegistry
     settings: AgentSettings
     permission_checker: PermissionChecker | None = None
+    enforce_tool_permissions: bool = True
     tool_guard: ToolGuard | None = None
     memory: SQLiteMemory | None = None
     approval_callback: Callable[[str, str], Awaitable[bool]] | None = None
@@ -144,6 +145,7 @@ class AgentLoop:
         self._registry = config.registry
         self._settings = config.settings
         self._permission_checker = config.permission_checker
+        self._enforce_tool_permissions = config.enforce_tool_permissions
         self._tool_guard = config.tool_guard
         self._memory = config.memory
         self._approval_callback = config.approval_callback
@@ -488,11 +490,12 @@ class AgentLoop:
             )
         budget = SimpleBudgetGuard(guard_config)
         progress = SimpleProgressGuard()
-        tools_schema = (
-            self._registry.to_schemas_for_user(self._permission_checker, user)
-            if tools_enabled
-            else None
-        )
+        tools_schema = None
+        if tools_enabled:
+            if self._enforce_tool_permissions:
+                tools_schema = self._registry.to_schemas_for_user(self._permission_checker, user)
+            else:
+                tools_schema = self._registry.to_schemas()
         health.increment("requests")
         health.increment("active_requests")
         log_event(
@@ -927,7 +930,11 @@ class AgentLoop:
             args_preview=_json_preview(tc.arguments),
             args_hash=_payload_hash(tc.arguments),
         )
-        if self._permission_checker and not self._permission_checker.can_use_tool(user, tc.name):
+        if (
+            self._enforce_tool_permissions
+            and self._permission_checker
+            and not self._permission_checker.can_use_tool(user, tc.name)
+        ):
             result = (
                 f"Error: Permission denied. Your department ({user.department})"
                 f" cannot use tool '{tc.name}'."

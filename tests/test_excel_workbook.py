@@ -258,14 +258,17 @@ class TestExcelWorkbookFill:
         cells_json = json.dumps({"A2": "new_val", "B2": 100})
         result = await tool.execute(path="fill.xlsx", action="fill", cells=cells_json)
         assert "Filled 2 cells" in result
-        assert "Saved" in result
+        assert "Saved to fill_filled.xlsx" in result
 
         # Verify values persisted
-        wb = openpyxl.load_workbook(str(tmp_path / "fill.xlsx"))
+        wb = openpyxl.load_workbook(str(tmp_path / "fill_filled.xlsx"))
         ws = wb.active
         assert ws["A2"].value == "new_val"
         assert ws["B2"].value == 100
         wb.close()
+        original = openpyxl.load_workbook(str(tmp_path / "fill.xlsx"))
+        assert original.active["A2"].value == "old1"
+        original.close()
 
     @pytest.mark.asyncio
     async def test_fill_preserves_formatting(
@@ -286,7 +289,7 @@ class TestExcelWorkbookFill:
         assert "Filled 1 cells" in result
 
         # Verify A1's fill color is preserved
-        wb2 = openpyxl.load_workbook(str(tmp_path / "fmt.xlsx"))
+        wb2 = openpyxl.load_workbook(str(tmp_path / "fmt_filled.xlsx"))
         ws2 = wb2.active
         assert ws2["A1"].fill.start_color.rgb == "00FF0000"
         assert ws2["B1"].value == "updated"
@@ -311,7 +314,7 @@ class TestExcelWorkbookFill:
         assert "Filled 1 cells" in result
 
         # Verify merged range is preserved
-        wb2 = openpyxl.load_workbook(str(tmp_path / "merged.xlsx"))
+        wb2 = openpyxl.load_workbook(str(tmp_path / "merged_filled.xlsx"))
         ws2 = wb2.active
         assert "A1:B1" in [str(m) for m in ws2.merged_cells.ranges]
         assert ws2["C1"].value == "filled"
@@ -341,9 +344,9 @@ class TestExcelWorkbookFill:
             path="dict.xlsx", action="fill", cells={"A2": "from_dict", "B2": 42}
         )
         assert "Filled 2 cells" in result
-        assert "Saved" in result
+        assert "Saved to dict_filled.xlsx" in result
 
-        wb = openpyxl.load_workbook(str(tmp_path / "dict.xlsx"))
+        wb = openpyxl.load_workbook(str(tmp_path / "dict_filled.xlsx"))
         ws = wb.active
         assert ws["A2"].value == "from_dict"
         assert ws["B2"].value == 42
@@ -371,7 +374,7 @@ class TestExcelWorkbookFill:
         assert "Skipped 1 merged cells" in result
         assert "B1" in result
 
-        wb2 = openpyxl.load_workbook(str(tmp_path / "merged_fill.xlsx"))
+        wb2 = openpyxl.load_workbook(str(tmp_path / "merged_fill_filled.xlsx"))
         ws2 = wb2.active
         assert ws2["A1"].value == "top_ok"
         assert ws2["D1"].value == "plain_ok"
@@ -398,6 +401,47 @@ class TestExcelWorkbookFill:
         assert "Filled 0 cells" in result
         assert "Skipped 1 merged cells" in result
 
+    @pytest.mark.asyncio
+    async def test_fill_in_place_explicit(
+        self, tool: ExcelWorkbookTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """in_place=true overwrites the original workbook explicitly."""
+        monkeypatch.chdir(tmp_path)
+        _create_basic_xlsx(tmp_path / "inplace.xlsx", ["H1"], [["old"]])
+
+        result = await tool.execute(
+            path="inplace.xlsx",
+            action="fill",
+            cells=json.dumps({"A2": "new"}),
+            in_place=True,
+        )
+
+        assert "Saved to inplace.xlsx" in result
+        wb = openpyxl.load_workbook(str(tmp_path / "inplace.xlsx"))
+        assert wb.active["A2"].value == "new"
+        wb.close()
+
+    @pytest.mark.asyncio
+    async def test_fill_custom_output_path(
+        self, tool: ExcelWorkbookTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fill can write to a caller-provided output workbook."""
+        monkeypatch.chdir(tmp_path)
+        _create_basic_xlsx(tmp_path / "template.xlsx", ["H1"], [["old"]])
+
+        result = await tool.execute(
+            path="template.xlsx",
+            action="fill",
+            cells=json.dumps({"A2": "new"}),
+            output_path="result.xlsx",
+        )
+
+        assert "Saved to result.xlsx" in result
+        assert (tmp_path / "result.xlsx").exists()
+        original = openpyxl.load_workbook(str(tmp_path / "template.xlsx"))
+        assert original.active["A2"].value == "old"
+        original.close()
+
 
 class TestExcelWorkbookErrors:
     @pytest.mark.asyncio
@@ -420,6 +464,26 @@ class TestExcelWorkbookErrors:
         result = await tool.execute(path="data.csv", action="read")
         assert "Error" in result
         assert ".xlsx" in result
+
+    @pytest.mark.asyncio
+    async def test_fill_output_path_outside_workspace_blocked(
+        self, tool: ExcelWorkbookTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fill output_path cannot escape the workspace."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        monkeypatch.chdir(workspace)
+        _create_basic_xlsx(workspace / "data.xlsx", ["A"], [[1]])
+
+        result = await tool.execute(
+            path="data.xlsx",
+            action="fill",
+            cells=json.dumps({"A2": "new"}),
+            output_path="../escaped.xlsx",
+        )
+
+        assert "Error" in result
+        assert not (tmp_path / "escaped.xlsx").exists()
 
     @pytest.mark.asyncio
     async def test_unknown_action_error(

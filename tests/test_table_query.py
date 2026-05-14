@@ -153,6 +153,33 @@ class TestTableQueryTool:
         assert "leaked" not in result
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "SELECT * FROM glob('/etc/*')",
+            "SELECT * FROM read_text('/etc/passwd')",
+            "SELECT * FROM read_blob('/etc/passwd')",
+            "SELECT * FROM parquet_scan('/etc/passwd')",
+            "COPY data TO '/tmp/out.csv'",
+            "ATTACH '/tmp/db.duckdb' AS other",
+        ],
+    )
+    async def test_blocks_duckdb_file_access_patterns(
+        self,
+        tool: TableQueryTool,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        query: str,
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        _create_csv(tmp_path / "data.csv", "a,b\n1,2\n")
+
+        result = await tool.execute(path="data.csv", query=query)
+
+        assert "Error" in result
+        assert "read-only" in result
+
+    @pytest.mark.asyncio
     async def test_blocks_non_select_query(
         self, tool: TableQueryTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -299,6 +326,28 @@ class TestTableQueryTool:
             sheet_name="all",
         )
         assert "700" in result
+
+    @pytest.mark.asyncio
+    async def test_xlsx_numeric_columns_support_aggregations(
+        self, tool: TableQueryTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Numeric XLSX cells should remain numeric in DuckDB."""
+        monkeypatch.chdir(tmp_path)
+        _create_xlsx(
+            tmp_path / "salaries.xlsx",
+            ["dept", "salary"],
+            [["IT", 100], ["IT", 200], ["HR", 150]],
+        )
+
+        result = await tool.execute(
+            path="salaries.xlsx",
+            query="SELECT dept, SUM(salary) as total FROM data GROUP BY dept ORDER BY dept",
+        )
+
+        assert "HR" in result
+        assert "150" in result
+        assert "IT" in result
+        assert "300" in result
 
     @pytest.mark.asyncio
     async def test_xlsx_all_sheets_data_alias(

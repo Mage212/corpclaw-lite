@@ -144,3 +144,16 @@ class TestChartGenerateTool:
 
         result = await tool.execute(data_path="data.csv", chart_type="bar")
         assert "Chart saved" in result
+
+    @pytest.mark.asyncio
+    async def test_default_output_warns_when_overwriting(
+        self, tool: ChartGenerateTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        _create_csv(tmp_path / "data.csv", "name,value\nA,10\nB,20\n")
+        (tmp_path / "chart.png").write_bytes(b"old")
+
+        result = await tool.execute(data_path="data.csv", chart_type="bar")
+
+        assert "Warning" in result
+        assert "overwritten" in result

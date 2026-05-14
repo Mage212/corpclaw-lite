@@ -148,6 +148,7 @@ def _fill_cells(
     path: Path,
     sheet_name: str | None,
     cells_json: str | dict[str, Any],
+    output_path: Path,
 ) -> str:
     import openpyxl
     from openpyxl.cell.cell import MergedCell
@@ -188,12 +189,15 @@ def _fill_cells(
                 return f"Error writing to {addr}: {e}"
 
         try:
-            wb.save(str(path))
+            wb.save(str(output_path))
         except Exception as e:
             return f"Error saving file: {e}"
 
         sheet_label = sheet_name or ws.title
-        msg = f"Filled {len(filled)} cells in sheet '{sheet_label}': {', '.join(filled)}. Saved."
+        msg = (
+            f"Filled {len(filled)} cells in sheet '{sheet_label}': {', '.join(filled)}. "
+            f"Saved to {output_path.name}."
+        )
         if skipped_merged:
             msg += (
                 f" Skipped {len(skipped_merged)} merged cells"
@@ -213,7 +217,9 @@ class ExcelWorkbookTool(Tool):
         "Read Excel cells by coordinate. Default: first 50 non-empty rows. "
         "Use 'cells' for specific ranges. Use 'offset'/'limit' for pagination "
         "(max 100 rows per call). If output shows 'More rows may exist', "
-        "call again with increased offset to continue reading."
+        "call again with increased offset to continue reading. For fill action, "
+        "the default is a safe <name>_filled.xlsx copy; use in_place=true only "
+        "when overwriting the original is explicitly requested."
     )
     params = [
         ToolParam(name="path", type="string", description="Path to .xlsx file"),
@@ -237,6 +243,21 @@ class ExcelWorkbookTool(Tool):
                 "comma-separated ('A1,C3'). For 'fill': JSON object "
                 '({"B2": "value", "G15": 150})'
             ),
+            required=False,
+        ),
+        ToolParam(
+            name="output_path",
+            type="string",
+            description=(
+                "Output .xlsx path for fill action. Default: <name>_filled.xlsx. "
+                "Ignored for read action."
+            ),
+            required=False,
+        ),
+        ToolParam(
+            name="in_place",
+            type="boolean",
+            description="For fill action only: true to overwrite the original workbook explicitly",
             required=False,
         ),
         ToolParam(
@@ -297,8 +318,20 @@ class ExcelWorkbookTool(Tool):
             except ValueError as e:
                 return f"Error: {e}"
         if action == "fill":
+            output_path = resolved.parent / f"{resolved.stem}_filled{resolved.suffix}"
+            in_place = bool(kwargs.get("in_place", False))
+            output_str = kwargs.get("output_path")
+            if in_place:
+                output_path = resolved
+            elif output_str:
+                try:
+                    output_path = resolve_and_validate_path(output_str)
+                except PermissionError as e:
+                    return f"Error: {e}"
+                if output_path.suffix.lower() != ".xlsx":
+                    return "Error: output_path must end with .xlsx."
             try:
-                return await run_in_thread(_fill_cells, resolved, sheet_name, cells)
+                return await run_in_thread(_fill_cells, resolved, sheet_name, cells, output_path)
             except ValueError as e:
                 return f"Error: {e}"
         return f"Error: Unknown action '{action}'. Use 'read' or 'fill'."

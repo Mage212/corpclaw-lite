@@ -8,6 +8,7 @@ pipe-delimited text table and optionally saved to CSV.
 from __future__ import annotations
 
 import csv
+import datetime as dt
 import re
 from pathlib import Path
 from typing import Any
@@ -52,6 +53,13 @@ _BLOCKED_SQL_PATTERNS = [
     r"\bread_json_auto\s*\(",
     r"\bread_ndjson\s*\(",
     r"\bread_parquet\s*\(",
+    r"\bread_text\s*\(",
+    r"\bread_blob\s*\(",
+    r"\bglob\s*\(",
+    r"\bcsv_scan\s*\(",
+    r"\bjson_scan\s*\(",
+    r"\bparquet_scan\s*\(",
+    r"\b[a-zA-Z_][a-zA-Z0-9_]*_scan\s*\(",
 ]
 
 
@@ -164,12 +172,33 @@ def _init_duckdb_table(
         return
     columns = list(rows[0].keys())
     safe_cols = [c.replace('"', '""') for c in columns]
-    col_defs = ", ".join(f'"{c}" VARCHAR' for c in safe_cols)
+    col_defs = ", ".join(
+        f'"{c}" {_infer_duckdb_type([row.get(col) for row in rows])}'
+        for c, col in zip(safe_cols, columns, strict=False)
+    )
     conn.execute(f'CREATE TABLE "{table_name}" ({col_defs})')
     conn.executemany(
         f'INSERT INTO "{table_name}" VALUES ({", ".join("?" for _ in columns)})',
-        [tuple(str(v) if v is not None else None for v in row.values()) for row in rows],
+        [tuple(row.get(col) for col in columns) for row in rows],
     )
+
+
+def _infer_duckdb_type(values: list[Any]) -> str:
+    """Infer a conservative DuckDB type for values loaded from XLSX."""
+    non_null = [v for v in values if v is not None]
+    if not non_null:
+        return "VARCHAR"
+    if all(isinstance(v, bool) for v in non_null):
+        return "BOOLEAN"
+    if all(isinstance(v, int) and not isinstance(v, bool) for v in non_null):
+        return "BIGINT"
+    if all(isinstance(v, int | float) and not isinstance(v, bool) for v in non_null):
+        return "DOUBLE"
+    if all(isinstance(v, dt.datetime) for v in non_null):
+        return "TIMESTAMP"
+    if all(isinstance(v, dt.date) and not isinstance(v, dt.datetime) for v in non_null):
+        return "DATE"
+    return "VARCHAR"
 
 
 def init_duckdb_with_xlsx(path: Path, rows: list[dict[str, Any]], conn: Any) -> None:

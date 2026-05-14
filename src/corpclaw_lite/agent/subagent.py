@@ -134,6 +134,7 @@ class SubagentDispatcher:
                 provider=effective_provider,
                 registry=isolated_registry,
                 settings=self._settings,
+                enforce_tool_permissions=False,
                 tool_guard=self._tool_guard,
                 permission_checker=self._permission_checker,
             )

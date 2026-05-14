@@ -92,6 +92,22 @@ class TestExcelInspectTool:
         assert "R2C1" not in result
 
     @pytest.mark.asyncio
+    async def test_full_xlsx_inspection_size_limit(
+        self, tool: ExcelInspectTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        _create_simple_xlsx(tmp_path / "large.xlsx")
+        monkeypatch.setattr(
+            "corpclaw_lite.extensions.tools.builtin.excel_inspect._MAX_FULL_XLSX_BYTES",
+            1,
+        )
+
+        result = await tool.execute(path="large.xlsx", detail="full")
+
+        assert "Error" in result
+        assert "too large" in result
+
+    @pytest.mark.asyncio
     async def test_inspect_csv(
         self, tool: ExcelInspectTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

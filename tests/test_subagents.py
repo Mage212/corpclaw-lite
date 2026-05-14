@@ -65,6 +65,38 @@ async def test_subagent_dispatcher():
         isolated_registry = agent_config.registry
         assert "tool_a" in isolated_registry._tools
         assert "tool_b" not in isolated_registry._tools
+        assert agent_config.enforce_tool_permissions is False
+
+
+@pytest.mark.asyncio
+async def test_subagent_loop_keeps_allowed_tools_even_if_department_lacks_direct_tool_access():
+    """Subagent allowed_tools are the authority inside the isolated subagent loop."""
+    registry = ToolRegistry()
+    registry.register(DummyToolA())
+    registry.register(DummyToolB())
+
+    dispatcher = SubagentDispatcher(
+        provider=DummyProvider(), main_registry=registry, settings=AgentSettings()
+    )  # type: ignore
+
+    spec = SubagentSpec(
+        id="data-agent",
+        name="Data Agent",
+        description="Data work",
+        allowed_tools=["tool_a"],
+    )
+    user = User(id=1, name="User", department="marketing")
+
+    with patch("corpclaw_lite.agent.subagent.AgentLoop") as MockLoop:
+        mock_loop_instance = MockLoop.return_value
+        mock_loop_instance.run = AsyncMock(return_value=("Subagent result", RunStats()))
+
+        await dispatcher.dispatch(spec, user, "Analyze data")
+
+        call_args = MockLoop.call_args
+        agent_config = call_args.args[0] if call_args.args else call_args.kwargs["config"]
+        assert agent_config.enforce_tool_permissions is False
+        assert set(agent_config.registry.items()) == {"tool_a"}
 
 
 @pytest.mark.asyncio
