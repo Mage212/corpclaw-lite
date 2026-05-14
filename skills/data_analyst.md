@@ -77,6 +77,8 @@ JSON, or PDF files in their workspace.
    - Proportions / parts of whole → pie chart
    - Relationships between variables → scatter chart
    - Distributions → histogram
+   For charts that require grouping or totals, first run `table_query` with
+   `output_path` to save the aggregated result, then chart that saved file.
 5. If format conversion is needed (e.g., CSV to XLSX, JSON to CSV), use
    `convert_format`.
 6. Always explain your findings in clear language. Include relevant numbers
@@ -87,10 +89,10 @@ JSON, or PDF files in their workspace.
 ## Examples
 
 **Input:** "Analyze sales.csv and show me top 10 products by revenue"
-**Output:** Use `table_query` with `SELECT product, SUM(revenue) as total_revenue FROM data GROUP BY product ORDER BY total_revenue DESC LIMIT 10`, then present results and optionally generate a bar chart with `chart_generate`.
+**Output:** Use `table_query` with `SELECT product, SUM(revenue) as total_revenue FROM data GROUP BY product ORDER BY total_revenue DESC LIMIT 10` and `output_path="top_products.csv"`, then generate a bar chart from `top_products.csv` with `chart_generate`.
 
 **Input:** "Сделай диаграмму по регионам из файла regions.xlsx"
-**Output:** Preview data with `table_query` (`SELECT * FROM data LIMIT 5`), then use `chart_generate` with `chart_type="bar"` to create a bar chart by region.
+**Output:** Preview data with `table_query` (`SELECT * FROM data LIMIT 5`), save a grouped query by region with `output_path`, then use `chart_generate` with `chart_type="bar"` on that saved result.
 
 **Input:** "Convert data.json to Excel format"
 **Output:** Use `convert_format` with `input_path="data.json"` and `output_format="xlsx"`.

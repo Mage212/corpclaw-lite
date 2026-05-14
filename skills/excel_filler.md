@@ -70,7 +70,8 @@ After filling, read back the filled cells to confirm values were placed correctl
 3. **Read template — target zone** — read the area that needs filling **with generous margin**.
    Find the exact rows by matching date labels in the template, not by assuming row numbers.
 4. **Build fill map** — create `{"G28": 39015, "G29": 41200, ...}` based on discovered positions.
-5. **Fill** — `excel_workbook action=fill` with the cell map.
+5. **Fill** — `excel_workbook action=fill` with the cell map. By default this creates a
+   `_filled.xlsx` copy; use `output_path` for a specific result filename.
 6. **Verify** — read back the filled cells and compare with source data.
 
 ## What NOT to do

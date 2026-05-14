@@ -161,6 +161,22 @@ class TestConvertFormatTool:
         assert "Error" in result
 
     @pytest.mark.asyncio
+    async def test_input_file_too_large(
+        self, tool: ConvertFormatTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        _create_csv(tmp_path / "large.csv", "a,b\n1,2\n")
+        monkeypatch.setattr(
+            "corpclaw_lite.extensions.tools.builtin.convert_format._MAX_INPUT_BYTES",
+            1,
+        )
+
+        result = await tool.execute(input_path="large.csv", output_format="json")
+
+        assert "Error" in result
+        assert "too large" in result
+
+    @pytest.mark.asyncio
     async def test_unsupported_input(
         self, tool: ConvertFormatTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

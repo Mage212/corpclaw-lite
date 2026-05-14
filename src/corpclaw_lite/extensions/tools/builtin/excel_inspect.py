@@ -21,6 +21,9 @@ __all__ = ["ExcelInspectTool"]
 
 _MAX_PREVIEW_ROWS = 5
 _MAX_MERGED_SHOW = 15
+_MAX_FULL_XLSX_BYTES = 20 * 1024 * 1024
+_MAX_CSV_COUNT_BYTES = 20 * 1024 * 1024
+_MAX_CSV_COUNT_ROWS = 10_000
 
 
 def _format_size(size_bytes: int) -> str:
@@ -34,7 +37,15 @@ def _format_size(size_bytes: int) -> str:
 def _inspect_xlsx(path: Path, detail: str) -> str:
     import openpyxl
 
-    wb = openpyxl.load_workbook(str(path), data_only=False)
+    size = path.stat().st_size
+    if detail == "full" and size > _MAX_FULL_XLSX_BYTES:
+        return (
+            f"File: {path.name} ({_format_size(size)})\n"
+            f"Error: XLSX file too large for full inspection ({_format_size(size)}). "
+            f"Limit: {_format_size(_MAX_FULL_XLSX_BYTES)}. Use detail='summary'."
+        )
+
+    wb = openpyxl.load_workbook(str(path), read_only=(detail == "summary"), data_only=False)
     try:
         lines: list[str] = [f"File: {path.name} ({_format_size(path.stat().st_size)})"]
         lines.append(f"Sheets: {len(wb.sheetnames)}")
@@ -43,7 +54,8 @@ def _inspect_xlsx(path: Path, detail: str) -> str:
             ws = wb[name]
             rows = ws.max_row or 0
             cols = ws.max_column or 0
-            merged_count = len(ws.merged_cells.ranges)
+            merged_ranges = getattr(getattr(ws, "merged_cells", None), "ranges", [])
+            merged_count = len(merged_ranges)
 
             lines.append(
                 f'\n--- Sheet {idx}: "{name}" '
@@ -110,7 +122,8 @@ def _inspect_xlsx(path: Path, detail: str) -> str:
 
 def _inspect_csv(path: Path) -> str:
     enc = detect_csv_encoding(path)
-    lines: list[str] = [f"File: {path.name} ({_format_size(path.stat().st_size)})"]
+    size = path.stat().st_size
+    lines: list[str] = [f"File: {path.name} ({_format_size(size)})"]
     lines.append(f"Format: CSV (encoding: {enc})")
 
     with open(path, newline="", encoding=enc) as f:
@@ -119,14 +132,20 @@ def _inspect_csv(path: Path) -> str:
         if headers:
             lines.append(f"Columns ({len(headers)}): {', '.join(str(h) for h in headers[:20])}")
 
-        # Count rows and collect preview
+        # Count rows and collect preview.  Large CSVs are sampled to avoid
+        # spending unbounded time just to count rows for a lightweight inspect.
         row_count = 0
         preview: list[list[str]] = []
         for row in reader:
             row_count += 1
             if len(preview) < _MAX_PREVIEW_ROWS:
                 preview.append(row)
-        lines.append(f"Data rows: {row_count}")
+            if size > _MAX_CSV_COUNT_BYTES and row_count >= _MAX_CSV_COUNT_ROWS:
+                break
+        if size > _MAX_CSV_COUNT_BYTES and row_count >= _MAX_CSV_COUNT_ROWS:
+            lines.append(f"Data rows: at least {row_count} (large file; count limited)")
+        else:
+            lines.append(f"Data rows: {row_count}")
 
         if preview:
             lines.append(f"\nPreview (first {len(preview)} rows):")
