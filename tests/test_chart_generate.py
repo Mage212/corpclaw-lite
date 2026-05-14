@@ -102,6 +102,24 @@ class TestChartGenerateTool:
         assert (tmp_path / "my_chart.png").exists()
 
     @pytest.mark.asyncio
+    async def test_output_path_outside_workspace_blocked(
+        self, tool: ChartGenerateTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        monkeypatch.chdir(workspace)
+        _create_csv(workspace / "data.csv", "x,y\n1,2\n3,4\n")
+
+        result = await tool.execute(
+            data_path="data.csv",
+            chart_type="bar",
+            output_path="../escaped.png",
+        )
+
+        assert "Error" in result
+        assert not (tmp_path / "escaped.png").exists()
+
+    @pytest.mark.asyncio
     async def test_file_not_found(self, tool: ChartGenerateTool) -> None:
         result = await tool.execute(data_path="nonexistent.csv", chart_type="bar")
         assert "Error" in result

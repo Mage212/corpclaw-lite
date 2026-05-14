@@ -138,6 +138,24 @@ class TestConvertFormatTool:
         assert (tmp_path / "custom.json").exists()
 
     @pytest.mark.asyncio
+    async def test_output_path_outside_workspace_blocked(
+        self, tool: ConvertFormatTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        monkeypatch.chdir(workspace)
+        _create_csv(workspace / "data.csv", "a,b\n1,2\n")
+
+        result = await tool.execute(
+            input_path="data.csv",
+            output_format="json",
+            output_path="../escaped.json",
+        )
+
+        assert "Error" in result
+        assert not (tmp_path / "escaped.json").exists()
+
+    @pytest.mark.asyncio
     async def test_file_not_found(self, tool: ConvertFormatTool) -> None:
         result = await tool.execute(input_path="nonexistent.csv", output_format="json")
         assert "Error" in result

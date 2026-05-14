@@ -135,6 +135,36 @@ class TestTableQueryTool:
         assert "Error" in result
 
     @pytest.mark.asyncio
+    async def test_blocks_file_reading_sql_function(
+        self, tool: TableQueryTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        _create_csv(workspace / "data.csv", "a,b\n1,2\n")
+        outside = tmp_path / "outside.csv"
+        _create_csv(outside, "secret,value\nleaked,42\n")
+        monkeypatch.chdir(workspace)
+
+        query = f"SELECT * FROM read_csv_auto('{outside}')"
+        result = await tool.execute(path="data.csv", query=query)
+
+        assert "Error" in result
+        assert "read-only" in result
+        assert "leaked" not in result
+
+    @pytest.mark.asyncio
+    async def test_blocks_non_select_query(
+        self, tool: TableQueryTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        _create_csv(tmp_path / "data.csv", "a,b\n1,2\n")
+
+        result = await tool.execute(path="data.csv", query="DROP TABLE data")
+
+        assert "Error" in result
+        assert "read-only" in result
+
+    @pytest.mark.asyncio
     async def test_file_not_found(self, tool: TableQueryTool) -> None:
         result = await tool.execute(path="nonexistent.csv", query="SELECT 1")
         assert "Error" in result

@@ -28,6 +28,31 @@ __all__ = [
 
 _MAX_RESULT_ROWS = 10_000
 _MAX_RESULT_CHARS = 50_000
+_SQL_READ_ONLY_ERROR = (
+    "Error: table_query only supports read-only SELECT/WITH queries against loaded tables. "
+    "Use the 'path' parameter to load files; file-reading SQL functions and DDL/DML are blocked."
+)
+_BLOCKED_SQL_PATTERNS = [
+    r"\bATTACH\b",
+    r"\bCOPY\b",
+    r"\bCREATE\b",
+    r"\bDELETE\b",
+    r"\bDETACH\b",
+    r"\bDROP\b",
+    r"\bEXPORT\b",
+    r"\bIMPORT\b",
+    r"\bINSERT\b",
+    r"\bINSTALL\b",
+    r"\bLOAD\b",
+    r"\bTRUNCATE\b",
+    r"\bUPDATE\b",
+    r"\bread_csv\s*\(",
+    r"\bread_csv_auto\s*\(",
+    r"\bread_json\s*\(",
+    r"\bread_json_auto\s*\(",
+    r"\bread_ndjson\s*\(",
+    r"\bread_parquet\s*\(",
+]
 
 
 def detect_csv_encoding(path: Path) -> str:
@@ -198,6 +223,22 @@ def _format_results(columns: list[str], rows: list[tuple[Any, ...]]) -> str:
     return result
 
 
+def _validate_read_only_query(query: str) -> str | None:
+    """Return an error if query can access files or mutate DuckDB state."""
+    stripped = query.strip()
+    if not stripped:
+        return _SQL_READ_ONLY_ERROR
+
+    first_token = stripped.split(None, 1)[0].upper()
+    if first_token not in {"SELECT", "WITH"}:
+        return _SQL_READ_ONLY_ERROR
+
+    for pattern in _BLOCKED_SQL_PATTERNS:
+        if re.search(pattern, stripped, flags=re.IGNORECASE):
+            return _SQL_READ_ONLY_ERROR
+    return None
+
+
 def _run_query(
     path: Path,
     query: str,
@@ -206,6 +247,10 @@ def _run_query(
 ) -> str:
     """Execute SQL query against a data file. Returns formatted result string."""
     import duckdb
+
+    query_error = _validate_read_only_query(query)
+    if query_error:
+        return query_error
 
     conn = duckdb.connect(":memory:")
     try:
