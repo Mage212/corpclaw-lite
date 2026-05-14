@@ -68,10 +68,11 @@ class ExecScriptTool(Tool):
 
             proc = await asyncio.create_subprocess_shell(script, **proc_kwargs)
             try:
-                stdout, stderr = await asyncio.wait_for(
+                stdout, stderr, _ = await asyncio.wait_for(
                     asyncio.gather(
                         _read_stream_limited(proc.stdout, MAX_OUTPUT_BYTES),
                         _read_stream_limited(proc.stderr, MAX_OUTPUT_BYTES),
+                        proc.wait(),
                     ),
                     timeout=timeout_val,
                 )
@@ -85,10 +86,6 @@ class ExecScriptTool(Tool):
                     proc.kill()
                 await proc.wait()
                 return f"Error: Command timed out after {timeout_val}s"
-
-            # Streams are read, but the process may not have fully exited yet
-            # (race condition on Windows). Wait for the actual exit code.
-            await proc.wait()
 
             output_parts: list[str] = []
             if stdout:

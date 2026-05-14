@@ -246,8 +246,7 @@ class ConvertFormatTool(Tool):
         if output_str:
             try:
                 output_path = resolve_and_validate_path(output_str)
-            except PermissionError:
-                # Allow creating new files — just use as-is if parent exists.
-                output_path = Path(output_str)
+            except PermissionError as e:
+                return f"Error: {e}"
 
         return await run_in_thread(_do_convert, resolved_input, output_format, output_path)

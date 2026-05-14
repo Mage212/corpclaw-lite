@@ -28,6 +28,10 @@ import logging
 import os
 import sys
 import threading
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from corpclaw_lite.extensions.skills.base import Skill
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +63,11 @@ def _require_env(name: str) -> str:
         print(f"Error: environment variable {name!r} is required but not set.", file=sys.stderr)
         sys.exit(1)
     return value
+
+
+def _filter_main_scoped_skills(skills: list[Skill]) -> list[Skill]:
+    """Return skills that are safe to inject into the main agent prompt."""
+    return [skill for skill in skills if "*" in skill.scope or "main" in skill.scope]
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -335,10 +344,11 @@ def cmd_chat(telegram_id: int, *, setup_mode: bool = False) -> None:
                         else []
                     )
                     all_candidate_skills = allowed_skills + plugin_skills
+                    main_scoped = _filter_main_scoped_skills(all_candidate_skills)
                     if skill_matcher is not None:
-                        matched_skills = skill_matcher.match(msg, all_candidate_skills)
+                        matched_skills = skill_matcher.match(msg, main_scoped)
                     else:
-                        matched_skills = all_candidate_skills
+                        matched_skills = main_scoped
                     skill_block = build_skill_block(matched_skills, [])
                     system_prompt = base_system_prompt
                     if skill_block:

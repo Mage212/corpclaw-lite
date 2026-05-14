@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from corpclaw_lite.cli import (
+    _filter_main_scoped_skills,
     cmd_generate,
     cmd_plugin_list,
     cmd_skill_list,
@@ -14,6 +15,7 @@ from corpclaw_lite.cli import (
     cmd_user_list,
     main,
 )
+from corpclaw_lite.extensions.skills.base import Skill
 
 _SKILL_MD = """\
 ---
@@ -220,6 +222,30 @@ def test_require_env_success(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setenv("TEST_ENV_VAR", "value")
     assert _require_env("TEST_ENV_VAR") == "value"
+
+
+def test_filter_main_scoped_skills_excludes_subagent_only() -> None:
+    skills = [
+        Skill(id="main", description="", allowed_for=["*"], instructions="", scope=["main"]),
+        Skill(
+            id="global",
+            description="",
+            allowed_for=["*"],
+            instructions="",
+            scope=["*"],
+        ),
+        Skill(
+            id="data_only",
+            description="",
+            allowed_for=["*"],
+            instructions="",
+            scope=["data-agent"],
+        ),
+    ]
+
+    filtered = _filter_main_scoped_skills(skills)
+
+    assert [skill.id for skill in filtered] == ["main", "global"]
 
 
 def test_require_env_fail(

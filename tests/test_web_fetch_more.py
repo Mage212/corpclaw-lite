@@ -1,10 +1,43 @@
 """Extra web fetch tool tests."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from collections.abc import AsyncIterator
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from corpclaw_lite.extensions.tools.builtin.web import WebFetchTool
+
+
+class _StreamContext:
+    def __init__(self, response: object) -> None:
+        self._response = response
+
+    async def __aenter__(self) -> object:
+        return self._response
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        return None
+
+
+class _MockResponse:
+    def __init__(
+        self,
+        *,
+        status_code: int = 200,
+        headers: dict[str, str] | None = None,
+        text: str = "",
+        is_redirect: bool = False,
+        chunks: list[bytes] | None = None,
+    ) -> None:
+        self.status_code = status_code
+        self.headers = headers or {}
+        self.is_redirect = is_redirect
+        self.encoding = "utf-8"
+        self._chunks = chunks if chunks is not None else [text.encode("utf-8")]
+
+    async def aiter_bytes(self) -> AsyncIterator[bytes]:
+        for chunk in self._chunks:
+            yield chunk
 
 
 @pytest.mark.asyncio
@@ -14,12 +47,12 @@ async def test_web_fetch_binary_response():
         patch("httpx.AsyncClient") as mock_client_cls,
         patch("socket.getaddrinfo", return_value=[(1, 2, 3, "", ("8.8.8.8", 80))]),
     ):
-        mock_client = AsyncMock()
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.headers = {"content-type": "application/pdf"}
-        mock_response.is_redirect = False
-        mock_client.get.return_value = mock_response
+        mock_client = MagicMock()
+        mock_response = _MockResponse(
+            status_code=200,
+            headers={"content-type": "application/pdf"},
+        )
+        mock_client.stream.return_value = _StreamContext(mock_response)
         mock_client_cls.return_value.__aenter__.return_value = mock_client
 
         res = await tool.execute(url="http://test.com")
@@ -33,12 +66,12 @@ async def test_web_fetch_too_large():
         patch("httpx.AsyncClient") as mock_client_cls,
         patch("socket.getaddrinfo", return_value=[(1, 2, 3, "", ("8.8.8.8", 80))]),
     ):
-        mock_client = AsyncMock()
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.headers = {"content-type": "text/html", "content-length": "2000000"}
-        mock_response.is_redirect = False
-        mock_client.get.return_value = mock_response
+        mock_client = MagicMock()
+        mock_response = _MockResponse(
+            status_code=200,
+            headers={"content-type": "text/html", "content-length": "2000000"},
+        )
+        mock_client.stream.return_value = _StreamContext(mock_response)
         mock_client_cls.return_value.__aenter__.return_value = mock_client
 
         res = await tool.execute(url="http://test.com")
@@ -52,20 +85,40 @@ async def test_web_fetch_redirect():
         patch("httpx.AsyncClient") as mock_client_cls,
         patch("socket.getaddrinfo", return_value=[(1, 2, 3, "", ("8.8.8.8", 80))]),
     ):
-        mock_client = AsyncMock()
+        mock_client = MagicMock()
 
-        redir_response = MagicMock()
-        redir_response.is_redirect = True
-        redir_response.headers = {"location": "http://other.com"}
+        redir_response = _MockResponse(is_redirect=True, headers={"location": "http://other.com"})
+        final_response = _MockResponse(
+            status_code=200,
+            headers={"content-type": "text/html"},
+            text="Redirected text",
+        )
 
-        final_response = MagicMock()
-        final_response.is_redirect = False
-        final_response.headers = {"content-type": "text/html"}
-        final_response.text = "Redirected text"
-        final_response.status_code = 200
-
-        mock_client.get.side_effect = [redir_response, final_response]
+        mock_client.stream.side_effect = [
+            _StreamContext(redir_response),
+            _StreamContext(final_response),
+        ]
         mock_client_cls.return_value.__aenter__.return_value = mock_client
 
         res = await tool.execute(url="http://test.com")
         assert "Redirected text" in res
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_stream_body_too_large_without_content_length():
+    tool = WebFetchTool()
+    with (
+        patch("httpx.AsyncClient") as mock_client_cls,
+        patch("socket.getaddrinfo", return_value=[(1, 2, 3, "", ("8.8.8.8", 80))]),
+    ):
+        mock_client = MagicMock()
+        mock_response = _MockResponse(
+            status_code=200,
+            headers={"content-type": "text/html"},
+            chunks=[b"x" * 600_000, b"y" * 600_000],
+        )
+        mock_client.stream.return_value = _StreamContext(mock_response)
+        mock_client_cls.return_value.__aenter__.return_value = mock_client
+
+        res = await tool.execute(url="http://test.com")
+        assert "too large" in res

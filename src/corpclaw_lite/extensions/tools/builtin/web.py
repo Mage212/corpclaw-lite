@@ -108,6 +108,29 @@ def _is_binary_content_type(content_type: str) -> bool:
     return any(ct.startswith(bt) for bt in _BINARY_CONTENT_TYPES)
 
 
+async def _read_response_text_limited(response: httpx.Response) -> tuple[str | None, str, int]:
+    """Read a text response with a hard byte limit."""
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in response.aiter_bytes():
+        if not chunk:
+            continue
+        total += len(chunk)
+        if total > MAX_RESPONSE_SIZE:
+            return (
+                f"Error: Response too large (exceeded {MAX_RESPONSE_SIZE} bytes).",
+                "",
+                total,
+            )
+        chunks.append(chunk)
+
+    raw = b"".join(chunks)
+    encoding = getattr(response, "encoding", None)
+    if not isinstance(encoding, str) or not encoding:
+        encoding = "utf-8"
+    return None, raw.decode(encoding, errors="replace"), total
+
+
 class WebFetchTool(Tool):
     """Fetch content from a URL with SSRF protection."""
 
@@ -181,11 +204,10 @@ class WebFetchTool(Tool):
                 headers = {}
                 verify = True
 
-            async with httpx.AsyncClient(
-                timeout=timeout, follow_redirects=False, verify=verify
-            ) as client:
-                response = await client.get(url_to_fetch, headers=headers)
-
+            async with (
+                httpx.AsyncClient(timeout=timeout, follow_redirects=False, verify=verify) as client,
+                client.stream("GET", url_to_fetch, headers=headers) as response,
+            ):
                 if response.is_redirect:
                     location = response.headers.get("location", "")
                     if not location:
@@ -232,14 +254,18 @@ class WebFetchTool(Tool):
                             f" max {MAX_RESPONSE_SIZE})."
                         )
 
-                text = response.text[:MAX_TEXT_CHARS]
-                truncated = " (truncated)" if len(response.text) > MAX_TEXT_CHARS else ""
+                read_error, full_text, byte_count = await _read_response_text_limited(response)
+                if read_error:
+                    return read_error
+
+                text = full_text[:MAX_TEXT_CHARS]
+                truncated = " (truncated)" if len(full_text) > MAX_TEXT_CHARS else ""
 
                 header = (
                     f"URL: {current_url}\n"
                     f"Status: {response.status_code}\n"
                     f"Content-Type: {content_type}\n"
-                    f"Size: {len(response.text)} chars{truncated}\n"
+                    f"Size: {len(full_text)} chars / {byte_count} bytes{truncated}\n"
                     f"---\n"
                 )
                 return header + text

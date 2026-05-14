@@ -237,8 +237,8 @@ class ChartGenerateTool(Tool):
         if output_str:
             try:
                 output_path = resolve_and_validate_path(output_str)
-            except PermissionError:
-                output_path = Path(output_str)
+            except PermissionError as e:
+                return f"Error: {e}"
 
         return await run_in_thread(
             _generate_chart, resolved, chart_type, x_column, y_column, title, output_path
