@@ -4,6 +4,116 @@
 
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/).
 
+## [0.1.3] — 2026-05-10
+
+Текущая рабочая версия. Основной фокус — управление конкурентностью локальных LLM, slot affinity
+для llama.cpp, экспериментальный persistent KV-cache в файлах и ручные live-тесты на реальном
+llama-server.
+
+### Added
+
+#### LLM Queue и backpressure
+- Добавлена очередь LLM-запросов `LLMRequestQueue`, ограничивающая реальную inference-
+  конкурентность через `llm.max_concurrent_requests`.
+- Базовая конкурентность для локальной машины установлена в `4` одновременных запроса.
+- Очередь отслеживает позицию запроса, время ожидания, время выполнения и отдаёт эти данные в
+  trace/health.
+- `SimpleBudgetGuard` теперь может ставиться на pause на время ожидания LLM-слота, чтобы агентный
+  budget расходовался на работу модели и инструментов, а не на ожидание очереди.
+- `LLMRouter` получил единый путь выполнения через queue/cache для обычных и default-вызовов.
+
+#### llama.cpp Slot Affinity
+- Добавлена стратегия очереди `slot_affinity` для llama.cpp-compatible backend.
+- Конфигурация по умолчанию: sticky-слоты `0,1,2` для активных пользователей и overflow-слот `3`
+  для нагрузки сверх sticky-ёмкости.
+- Sticky-слот удерживается за пользователем на `idle_ttl_seconds` после ответа, чтобы сохранить
+  горячий KV-cache между последовательными запросами.
+- Для llama.cpp-вызовов автоматически добавляются `id_slot` и `cache_prompt`.
+- Добавлена политика `auxiliary_policy: "overflow_only"` для вспомогательных LLM-вызовов, чтобы
+  они не разрушали sticky-cache основных пользовательских сессий.
+
+#### Persistent Slot KV-cache
+- Добавлен `LLMCacheManager` в `src/corpclaw_lite/llm/cache.py`.
+- Реализован L1/L2 cache-подход: L1 — живой KV-cache в слоте llama.cpp, L2 — сохранённый
+  файловый cache через llama-server slot save/restore/erase API.
+- L2 файловый cache помечен как экспериментальная возможность и отключён по умолчанию на
+  тестовой машине, чтобы не создавать лишнюю write-нагрузку на SSD.
+- Добавлен SQLite index для L2 cache с метаданными scope, размера, возраста, restore count и
+  последнего использования.
+- Cache scope учитывает `user_id`, `conversation_id`, `agent_id`, провайдера, модель, preset,
+  hash system prompt и hash набора tools.
+- Это позволяет хранить отдельные cache-файлы для основного агента и субагентов одного
+  пользователя.
+- Добавлены save policies: `hybrid`, `every_response`, `eviction_only`.
+- Добавлены параметры автоочистки: `max_total_bytes`, `max_age_days`,
+  `prune_interval_seconds`.
+- Добавлена валидация восстановленного cache по фактическим usage-метрикам модели:
+  `cached_input_tokens`, prompt tokens и reuse ratio.
+- При низком reuse ratio включается безопасный fallback: слот очищается, cache scope сбрасывается,
+  запрос повторяется без доверия к старому cache.
+
+#### Token usage и observability
+- `TokenUsage` расширен метрикой `cached_input_tokens`, чтобы видеть реальное переиспользование
+  prompt cache.
+- Добавлены trace/health события для queue, slot affinity и persistent cache: вход/выход из
+  очереди, получение/освобождение слота, reuse sticky slot, overflow slot, L1/L2 cache hit,
+  restore/save, mismatch validation, prune.
+- Логика логирования теперь даёт достаточно данных для отладки долгого TTFT, неправильного
+  cache restore, очередей и поведения слотов.
+
+#### Manual Live LLM Tests
+- Добавлен каталог `tests/live_llm/` с ручными интеграционными тестами против реального
+  llama-server.
+- Live-тесты не входят в обычный pytest-пул и запускаются только при
+  `CORPCLAW_LIVE_LLM_TESTS=1`.
+- Медленные сценарии дополнительно требуют `CORPCLAW_LIVE_LLM_RUN_SLOW=1`.
+- Покрыты сценарии: доступность API и `/slots`, cache save/restore roundtrip, mismatch
+  validation, 4 параллельных запроса по слотам, интеграция router/queue/cache, prune/cleanup.
+- Тесты пишут JSON-отчёты в `reports/live_llm/` для ручного анализа TTFT, TPS, prompt processing,
+  cache reuse ratio и save/restore latency.
+
+### Changed
+
+- `config/settings.yaml` теперь включает production-oriented настройки очереди, slot affinity и
+  экспериментального persistent cache для llama.cpp.
+- Текущий эксплуатационный приоритет изменён на `slot_affinity` + RAM KV-cache в живых слотах:
+  3 sticky-слота для активных пользователей и 1 общий overflow-слот.
+- `pyproject.toml` исключает `tests/live_llm/` из обычного тестового пула.
+- LLM streaming продолжает использоваться "под капотом", но теперь работает поверх queue/cache
+  слоя, а не в обход контроля конкурентности.
+- Слоты рассматриваются как ценный локальный ресурс: проект старается сохранять их состояние,
+  а не просто равномерно размазывать запросы по backend.
+
+### Verified
+
+- Полная проверка после реализации persistent cache:
+  - `uv run ruff check src/ tests/ --fix`
+  - `uv run ruff format src/ tests/`
+  - `uv run pyright src/`
+  - `uv run pytest tests/ -v`
+- Результат полной проверки: `903 passed, 1 skipped`.
+- Ручные live-тесты на `llama-server` с моделью `gpt-oss-20b-UD-Q4_K_XL`:
+  - обычный live-прогон: `7 passed, 1 skipped`;
+  - slow large cache roundtrip: `1 passed`;
+  - запуск без `CORPCLAW_LIVE_LLM_TESTS`: `8 skipped`.
+- Практические метрики на реальном backend:
+  - 1k prompt cold: TTFT около `0.67s`, prompt processing около `614ms`;
+  - 1k prompt warm from cache: TTFT около `0.085s`, prompt processing около `14ms`;
+  - 5k prompt cold: TTFT около `2.94s`, prompt processing около `2865ms`;
+  - 5k prompt warm from cache: TTFT около `0.084s`, prompt processing около `15ms`;
+  - 4 parallel slots: общий wall time около `3.19s`, TTFT по слотам около `2.64-2.68s`.
+
+### Notes
+
+- Persistent cache даёт главный выигрыш именно на длинных локальных контекстах: вместо повторного
+  prompt processing на десятках тысяч токенов можно восстановить KV-cache из файла и продолжить
+  диалог.
+- Пока проект тестируется на рабочем ПК с одним SSD, L2 cache следует держать выключенным и
+  включать только для целевых ручных экспериментов.
+- Если директория `persistent_cache.root_dir` не является той же директорией, которую использует
+  llama-server `--slot-save-path`, API save/restore работает, но физическая очистка server-side
+  cache-файлов требует отдельного доступа к этой директории.
+
 ## [0.1.2] — 2026-05-08
 
 Текущая рабочая версия. Основной фокус — backend streaming для LLM, детальная
