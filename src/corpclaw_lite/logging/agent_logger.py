@@ -117,6 +117,8 @@ class AgentLogger:
         llm_calls: int | None = None,
         input_tokens: int | None = None,
         output_tokens: int | None = None,
+        total_tokens: int | None = None,
+        latest_total_tokens: int | None = None,
         stream_stats: dict[str, Any] | None = None,
     ) -> None:
         """Write a single structured JSON record to agent_activity.jsonl."""
@@ -143,6 +145,10 @@ class AgentLogger:
             record["input_tokens"] = input_tokens
         if output_tokens is not None:
             record["output_tokens"] = output_tokens
+        if total_tokens is not None:
+            record["total_tokens"] = total_tokens
+        if latest_total_tokens is not None:
+            record["latest_total_tokens"] = latest_total_tokens
         if stream_stats is not None:
             record["stream"] = stream_stats
         if error:

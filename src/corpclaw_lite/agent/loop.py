@@ -110,6 +110,8 @@ class RunStats:
     llm_calls: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    total_tokens: int = 0
+    latest_total_tokens: int = 0
     tool_durations_ms: dict[str, float] = field(default_factory=dict[str, float])
     llm_stream_calls: int = 0
     llm_stream_fallbacks: int = 0
@@ -403,6 +405,7 @@ class AgentLoop:
         """
         stats = RunStats()
         loop_warning_count = 0
+        last_actual_total_tokens: int | None = None
         t0 = time.monotonic()
 
         logger.debug(
@@ -519,8 +522,16 @@ class AgentLoop:
                 ):
                     context.prune_old_tool_results(protect_tail=6)
 
-                if self._compressor and self._compressor.should_compress(context.messages):
-                    context.messages = await self._compressor.compress(context.messages, mem_key)
+                if self._compressor and self._compressor.should_compress(
+                    context.messages,
+                    actual_tokens=last_actual_total_tokens,
+                ):
+                    context.messages = await self._compressor.compress(
+                        context.messages,
+                        mem_key,
+                        actual_tokens=last_actual_total_tokens,
+                    )
+                    last_actual_total_tokens = None
 
                 llm_t0 = time.monotonic()
                 try:
@@ -631,6 +642,11 @@ class AgentLoop:
                 stats.llm_calls += 1
                 stats.input_tokens += response.usage.input_tokens
                 stats.output_tokens += response.usage.output_tokens
+                stats.total_tokens += response.usage.total_tokens
+                stats.latest_total_tokens = response.usage.total_tokens
+                last_actual_total_tokens = (
+                    response.usage.total_tokens if response.usage.total_tokens > 0 else None
+                )
                 health.increment("llm_calls")
                 log_event(
                     "llm_call_finished",
@@ -640,6 +656,7 @@ class AgentLoop:
                     duration_ms=round((time.monotonic() - llm_t0) * 1000, 1),
                     input_tokens=response.usage.input_tokens,
                     output_tokens=response.usage.output_tokens,
+                    total_tokens=response.usage.total_tokens,
                     tool_call_names=[tc.name for tc in response.tool_calls or []],
                     finish_has_content=bool(response.content),
                     content_chars=len(response.content or ""),

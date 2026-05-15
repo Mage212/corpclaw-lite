@@ -47,11 +47,17 @@ class TokenUsage(BaseModel):
 
     input_tokens: int = 0
     output_tokens: int = 0
+    total_tokens: int = 0
     cached_input_tokens: int = 0
     prompt_processing_tokens: int = 0
     prompt_processing_ms: float = 0.0
     predicted_tokens: int = 0
     predicted_ms: float = 0.0
+
+    def model_post_init(self, __context: Any) -> None:
+        """Fill total_tokens for providers that only report prompt/completion tokens."""
+        if self.total_tokens == 0 and (self.input_tokens or self.output_tokens):
+            self.total_tokens = self.input_tokens + self.output_tokens
 
 
 @dataclass(frozen=True)

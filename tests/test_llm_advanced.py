@@ -148,16 +148,29 @@ async def test_openai_chat_streamed_reconstructs_full_response() -> None:
                 content: str = "",
                 reasoning: str = "",
                 finish_reason: str | None = None,
+                usage: dict[str, object] | None = None,
             ) -> None:
-                self.choices = [MagicMock()]
-                self.choices[0].delta.content = content
-                self.choices[0].delta.reasoning_content = reasoning
-                self.choices[0].delta.tool_calls = None
-                self.choices[0].finish_reason = finish_reason
+                self.usage = usage
+                if usage is not None:
+                    self.choices = []
+                else:
+                    self.choices = [MagicMock()]
+                    self.choices[0].delta.content = content
+                    self.choices[0].delta.reasoning_content = reasoning
+                    self.choices[0].delta.tool_calls = None
+                    self.choices[0].finish_reason = finish_reason
 
         yield _Chunk(reasoning="thinking ")
         yield _Chunk(content="Hello ")
         yield _Chunk(content="world", finish_reason="stop")
+        yield _Chunk(
+            usage={
+                "prompt_tokens": 11,
+                "completion_tokens": 7,
+                "total_tokens": 18,
+                "prompt_tokens_details": {"cached_tokens": 2},
+            }
+        )
 
     mock_client.chat.completions.create = AsyncMock(return_value=_fake_stream())
     events: list[LLMStreamEvent] = []
@@ -172,6 +185,10 @@ async def test_openai_chat_streamed_reconstructs_full_response() -> None:
     assert resp.content == "Hello world"
     assert resp.reasoning == "thinking "
     assert resp.tool_calls == []
+    assert resp.usage.input_tokens == 11
+    assert resp.usage.output_tokens == 7
+    assert resp.usage.total_tokens == 18
+    assert resp.usage.cached_input_tokens == 2
     assert [event.stage for event in events] == [
         "started",
         "reasoning",
