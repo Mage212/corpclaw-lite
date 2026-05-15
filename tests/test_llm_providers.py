@@ -181,6 +181,7 @@ class TestOpenAIProvider:
         resp.choices = [choice]
         resp.usage.prompt_tokens = 8
         resp.usage.completion_tokens = 16
+        resp.usage.total_tokens = 99
         return resp
 
     def _tool_resp(self, tool_name: str, args: dict[str, Any]) -> MagicMock:
@@ -197,6 +198,7 @@ class TestOpenAIProvider:
         resp.choices = [choice]
         resp.usage.prompt_tokens = 12
         resp.usage.completion_tokens = 18
+        resp.usage.total_tokens = 30
         return resp
 
     @pytest.mark.asyncio
@@ -219,6 +221,23 @@ class TestOpenAIProvider:
         assert result.tool_calls == []
         assert isinstance(result.usage.input_tokens, int)
         assert isinstance(result.usage.output_tokens, int)
+        assert result.usage.total_tokens == 99
+
+    def test_usage_total_tokens_fallback(self) -> None:
+        from corpclaw_lite.llm.openai import _usage_from_raw
+
+        usage = _usage_from_raw(
+            {
+                "prompt_tokens": 8,
+                "completion_tokens": 16,
+                "prompt_tokens_details": {"cached_tokens": 3},
+            }
+        )
+
+        assert usage.input_tokens == 8
+        assert usage.output_tokens == 16
+        assert usage.total_tokens == 24
+        assert usage.cached_input_tokens == 3
 
     @pytest.mark.asyncio
     async def test_tool_call_response(self) -> None:
@@ -238,6 +257,7 @@ class TestOpenAIProvider:
         assert len(result.tool_calls) == 1
         assert result.tool_calls[0].name == "list_files"
         assert result.tool_calls[0].arguments == {"path": "/"}
+        assert result.usage.total_tokens == 30
 
     @pytest.mark.asyncio
     async def test_empty_tool_calls_list(self) -> None:

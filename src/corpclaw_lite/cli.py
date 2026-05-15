@@ -386,6 +386,8 @@ def cmd_chat(telegram_id: int, *, setup_mode: bool = False) -> None:
                         llm_calls=run_stats.llm_calls,
                         input_tokens=run_stats.input_tokens,
                         output_tokens=run_stats.output_tokens,
+                        total_tokens=run_stats.total_tokens,
+                        latest_total_tokens=run_stats.latest_total_tokens,
                         stream_stats={
                             "calls": run_stats.llm_stream_calls,
                             "fallbacks": run_stats.llm_stream_fallbacks,

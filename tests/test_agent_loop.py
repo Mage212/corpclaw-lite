@@ -121,7 +121,7 @@ async def test_agent_loop_trace_and_token_stats(
         responses=[
             LLMResponse(
                 content="Hello!",
-                usage=TokenUsage(input_tokens=11, output_tokens=7),
+                usage=TokenUsage(input_tokens=11, output_tokens=7, total_tokens=19),
             ),
         ]
     )
@@ -145,6 +145,10 @@ async def test_agent_loop_trace_and_token_stats(
     assert stats.llm_calls == 1
     assert stats.input_tokens == 11
     assert stats.output_tokens == 7
+    assert stats.total_tokens == 19
+    assert stats.latest_total_tokens == 19
+    llm_finished = [r for r in records if r["event"] == "llm_call_finished"][0]
+    assert llm_finished["total_tokens"] == 19
 
     setup_trace_logging(tmp_path, enabled=False)
 

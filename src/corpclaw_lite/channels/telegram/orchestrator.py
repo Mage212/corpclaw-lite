@@ -541,6 +541,10 @@ class TelegramBotOrchestrator:
                 llm_calls=run_stats.llm_calls if run_stats is not None else None,
                 input_tokens=run_stats.input_tokens if run_stats is not None else None,
                 output_tokens=run_stats.output_tokens if run_stats is not None else None,
+                total_tokens=run_stats.total_tokens if run_stats is not None else None,
+                latest_total_tokens=(
+                    run_stats.latest_total_tokens if run_stats is not None else None
+                ),
                 stream_stats=(
                     {
                         "calls": run_stats.llm_stream_calls,

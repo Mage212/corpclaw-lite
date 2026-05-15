@@ -40,14 +40,42 @@ def _raw_get(value: Any, key: str, default: Any = None) -> Any:
     return getattr(value, key, default)
 
 
+def _raw_int(value: Any, key: str, default: int = 0) -> int:
+    raw = _raw_get(value, key, default)
+    if isinstance(raw, bool):
+        return int(raw)
+    if isinstance(raw, int | float | str):
+        try:
+            return int(raw)
+        except ValueError:
+            return default
+    return default
+
+
+def _raw_float(value: Any, key: str, default: float = 0.0) -> float:
+    raw = _raw_get(value, key, default)
+    if isinstance(raw, bool):
+        return float(raw)
+    if isinstance(raw, int | float | str):
+        try:
+            return float(raw)
+        except ValueError:
+            return default
+    return default
+
+
 def _usage_from_raw(raw_usage: Any) -> TokenUsage:
     if not raw_usage:
         return TokenUsage()
     details = _raw_get(raw_usage, "prompt_tokens_details", None) or {}
-    cached_tokens = int(_raw_get(details, "cached_tokens", 0) or 0)
+    cached_tokens = _raw_int(details, "cached_tokens")
+    input_tokens = _raw_int(raw_usage, "prompt_tokens")
+    output_tokens = _raw_int(raw_usage, "completion_tokens")
+    total_tokens = _raw_int(raw_usage, "total_tokens")
     return TokenUsage(
-        input_tokens=int(_raw_get(raw_usage, "prompt_tokens", 0) or 0),
-        output_tokens=int(_raw_get(raw_usage, "completion_tokens", 0) or 0),
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens or input_tokens + output_tokens,
         cached_input_tokens=cached_tokens,
     )
 
@@ -58,11 +86,12 @@ def _apply_timings(usage: TokenUsage, raw_timings: Any) -> TokenUsage:
     return TokenUsage(
         input_tokens=usage.input_tokens,
         output_tokens=usage.output_tokens,
+        total_tokens=usage.total_tokens,
         cached_input_tokens=usage.cached_input_tokens,
-        prompt_processing_tokens=int(_raw_get(raw_timings, "prompt_n", 0) or 0),
-        prompt_processing_ms=float(_raw_get(raw_timings, "prompt_ms", 0.0) or 0.0),
-        predicted_tokens=int(_raw_get(raw_timings, "predicted_n", 0) or 0),
-        predicted_ms=float(_raw_get(raw_timings, "predicted_ms", 0.0) or 0.0),
+        prompt_processing_tokens=_raw_int(raw_timings, "prompt_n"),
+        prompt_processing_ms=_raw_float(raw_timings, "prompt_ms"),
+        predicted_tokens=_raw_int(raw_timings, "predicted_n"),
+        predicted_ms=_raw_float(raw_timings, "predicted_ms"),
     )
 
 
