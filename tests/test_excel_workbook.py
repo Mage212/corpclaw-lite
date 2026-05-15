@@ -37,7 +37,10 @@ def _create_basic_xlsx(
 def _inject_cached_formula_value(path: Path, cell: str, formula: str, cached_value: str) -> None:
     """Patch worksheet XML to simulate a workbook last recalculated by Excel/LibreOffice."""
     patched = path.with_suffix(".patched.xlsx")
-    old_xml = f'<c r="{cell}"><f>{formula}</f><v /></c>'
+    old_xml_variants = [
+        f'<c r="{cell}"><f>{formula}</f><v /></c>',
+        f'<c r="{cell}"><f>{formula}</f><v></v></c>',
+    ]
     new_xml = f'<c r="{cell}"><f>{formula}</f><v>{cached_value}</v></c>'
 
     with zipfile.ZipFile(path) as zin, zipfile.ZipFile(patched, "w") as zout:
@@ -45,7 +48,8 @@ def _inject_cached_formula_value(path: Path, cell: str, formula: str, cached_val
             data = zin.read(item.filename)
             if item.filename == "xl/worksheets/sheet1.xml":
                 text = data.decode("utf-8")
-                if old_xml not in text:
+                old_xml = next((variant for variant in old_xml_variants if variant in text), None)
+                if old_xml is None:
                     raise AssertionError(f"Could not find formula XML for {cell}")
                 data = text.replace(old_xml, new_xml).encode("utf-8")
             zout.writestr(item, data)

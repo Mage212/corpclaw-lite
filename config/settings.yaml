@@ -51,23 +51,23 @@ llm:
     # Main chat (used by AgentLoop)
     - task_kind: "default"
       provider: "llamacpp"
-      model: "llama-qwen3.6-35b-a3b"
+      model: "qwen3.6-35b-a3b"
       preset: "temperature-0.4"
 
     # Vision analysis (separate LLM call for images)
     - task_kind: "vision"
       provider: "llamacpp"
-      model: "llama-qwen3.6-35b-a3b"
+      model: "qwen3.6-35b-a3b"
 
     # Memory consolidation (LLM-based history compression)
     - task_kind: "consolidate"
       provider: "llamacpp"
-      model: "llama-qwen3.6-35b-a3b"
+      model: "qwen3.6-35b-a3b"
 
     # Context compression (LLM-based summary of old turns)
     - task_kind: "compress"
       provider: "llamacpp"
-      model: "llama-qwen3.6-35b-a3b"
+      model: "qwen3.6-35b-a3b"
 
     # Calibration analysis (cloud provider recommended)
     # Uncomment and configure PROVIDER_OPENROUTER__* in .env to enable
@@ -100,6 +100,13 @@ agent:
     protect_tail_tokens: 3000
     summary_ratio: 0.20
     prune_min_messages: 15
+
+web:
+  search_backend: "duckduckgo"
+  search_max_concurrent: 3
+  fetch_max_concurrent: 4
+  timeout_seconds: 20
+  user_agent: "CorpClawLite/0.1 web tools"
 
 container:
   enabled: true

@@ -98,6 +98,7 @@ def test_build_agent_stack_local_provider() -> None:
     assert "excel_inspect" in tool_names
     # Host-side tools registered separately
     assert "web_fetch" in tool_names
+    assert "web_search" in tool_names
     assert "read_image" in tool_names
     assert "memory_store" in tool_names
     assert "memory_recall" in tool_names
@@ -283,6 +284,8 @@ def test_container_enabled_registers_ipc_proxies() -> None:
     # Host-side tools should NOT be proxied
     web_fetch = registry.get("web_fetch")
     assert not isinstance(web_fetch, IPCToolProxy)
+    web_search = registry.get("web_search")
+    assert not isinstance(web_search, IPCToolProxy)
 
 
 def test_main_agent_tool_classes_has_four_factory_tools() -> None:
