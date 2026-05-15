@@ -53,6 +53,8 @@ class DispatchSubagentTool(Tool):
     async def execute(self, *, user: User | None = None, **kwargs: Any) -> str:
         subagent_id = kwargs.get("subagent_id")
         task = kwargs.get("task")
+        run_id = kwargs.get("run_id")
+        parent_run_id = run_id if isinstance(run_id, str) else None
 
         if not isinstance(subagent_id, str) or not isinstance(task, str):
             return "Error: 'subagent_id' and 'task' are required string parameters."
@@ -107,4 +109,4 @@ class DispatchSubagentTool(Tool):
                 f"cannot use subagent '{subagent_id}'."
             )
 
-        return await self._dispatcher.dispatch(spec, user, task)
+        return await self._dispatcher.dispatch(spec, user, task, parent_run_id=parent_run_id)

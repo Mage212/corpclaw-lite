@@ -100,6 +100,65 @@ async def test_subagent_loop_keeps_allowed_tools_even_if_department_lacks_direct
 
 
 @pytest.mark.asyncio
+async def test_subagent_dispatcher_uses_same_run_id_for_router_and_loop() -> None:
+    """Subagent LLM queue/cache events must use the subagent's own run_id."""
+    from types import SimpleNamespace
+
+    from corpclaw_lite.config.providers import ProviderRegistry
+    from corpclaw_lite.config.settings import LLMSettings, RoutingRule
+    from corpclaw_lite.llm.router import LLMRouter
+
+    registry = ToolRegistry()
+    registry.register(DummyToolA())
+    provider_registry = ProviderRegistry.from_env(
+        {
+            "PROVIDER_OLLAMA__TYPE": "openai",
+            "PROVIDER_OLLAMA__BASE_URL": "http://localhost:11434/v1",
+            "PROVIDER_OLLAMA__API_KEY": "ollama",
+        }
+    )
+    router = LLMRouter.from_settings(
+        LLMSettings(
+            routing=[RoutingRule(task_kind="default", provider="ollama", model="qwen")],
+            queue={"enabled": True},
+        ),
+        provider_registry,
+    )
+    router.for_subagent = MagicMock(return_value=DummyProvider())  # type: ignore[method-assign]
+
+    dispatcher = SubagentDispatcher(
+        provider=router,
+        main_registry=registry,
+        settings=AgentSettings(),
+    )
+    spec = SubagentSpec(
+        id="data-agent",
+        name="Data Agent",
+        description="Data work",
+        allowed_tools=["tool_a"],
+    )
+    user = User(id=1, name="User", department="dev")
+
+    with (
+        patch("corpclaw_lite.agent.subagent.uuid.uuid4") as mock_uuid4,
+        patch("corpclaw_lite.agent.subagent.AgentLoop") as MockLoop,
+    ):
+        mock_uuid4.return_value = SimpleNamespace(hex="sub-run-id")
+        mock_loop_instance = MockLoop.return_value
+        mock_loop_instance.run = AsyncMock(return_value=("Subagent result", RunStats()))
+
+        await dispatcher.dispatch(spec, user, "Analyze data", parent_run_id="parent-run-id")
+
+    router.for_subagent.assert_called_once_with(
+        "data-agent",
+        user_id="1",
+        run_id="sub-run-id",
+    )
+    mock_loop_instance.run.assert_called_once()
+    assert mock_loop_instance.run.call_args.kwargs["run_id"] == "sub-run-id"
+
+
+@pytest.mark.asyncio
 async def test_subagent_prompt_loading(tmp_path: Path) -> None:
     """Subagent loads system prompt from prompt_path when the file exists."""
     prompt_file = tmp_path / "test_agent.md"
@@ -126,7 +185,10 @@ async def test_subagent_prompt_loading(tmp_path: Path) -> None:
     captured_system: list[str] = []
 
     async def _capture_run(
-        u: object, msg: str, system_prompt: str | None = None
+        u: object,
+        msg: str,
+        system_prompt: str | None = None,
+        **kwargs: Any,
     ) -> tuple[str, RunStats]:
         captured_system.append(system_prompt or "")
         return "done", RunStats()
@@ -167,7 +229,10 @@ async def test_subagent_prompt_fallback_when_missing() -> None:
     captured_system: list[str] = []
 
     async def _capture_run(
-        u: object, msg: str, system_prompt: str | None = None
+        u: object,
+        msg: str,
+        system_prompt: str | None = None,
+        **kwargs: Any,
     ) -> tuple[str, RunStats]:
         captured_system.append(system_prompt or "")
         return "done", RunStats()
@@ -205,7 +270,10 @@ async def test_subagent_system_prompt_passed_as_kwarg() -> None:
     captured_args: list[tuple[str, str | None]] = []
 
     async def _capture(
-        u: object, msg: str, system_prompt: str | None = None
+        u: object,
+        msg: str,
+        system_prompt: str | None = None,
+        **kwargs: Any,
     ) -> tuple[str, RunStats]:
         captured_args.append((msg, system_prompt))
         return "done", RunStats()
@@ -295,10 +363,20 @@ async def test_dispatch_subagent_tool_dispatches() -> None:
     tool = DispatchSubagentTool(dispatcher, registry)
     user = User(id=1, name="U", department="dev")
 
-    result = await tool.execute(subagent_id="worker", task="do the work", user=user)
+    result = await tool.execute(
+        subagent_id="worker",
+        task="do the work",
+        user=user,
+        run_id="parent-run",
+    )
 
     assert result == "subagent result"
-    dispatcher.dispatch.assert_called_once_with(spec, user, "do the work")
+    dispatcher.dispatch.assert_called_once_with(
+        spec,
+        user,
+        "do the work",
+        parent_run_id="parent-run",
+    )
 
 
 @pytest.mark.asyncio
@@ -435,7 +513,10 @@ async def test_subagent_receives_matched_skills() -> None:
     captured_system: list[str] = []
 
     async def _capture_run(
-        u: object, msg: str, system_prompt: str | None = None
+        u: object,
+        msg: str,
+        system_prompt: str | None = None,
+        **kwargs: Any,
     ) -> tuple[str, RunStats]:
         captured_system.append(system_prompt or "")
         return "done", RunStats()
@@ -478,7 +559,10 @@ async def test_subagent_no_skills_when_matcher_none() -> None:
     captured_system: list[str] = []
 
     async def _capture_run(
-        u: object, msg: str, system_prompt: str | None = None
+        u: object,
+        msg: str,
+        system_prompt: str | None = None,
+        **kwargs: Any,
     ) -> tuple[str, RunStats]:
         captured_system.append(system_prompt or "")
         return "done", RunStats()

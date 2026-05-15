@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import uuid
 from typing import TYPE_CHECKING
 
 import anyio
@@ -11,6 +12,7 @@ from corpclaw_lite.agent.loop import AgentConfig, AgentLoop
 from corpclaw_lite.config.settings import AgentSettings
 from corpclaw_lite.extensions.subagents.base import SubagentSpec
 from corpclaw_lite.extensions.tools.registry import ToolRegistry
+from corpclaw_lite.logging.trace import log_event
 from corpclaw_lite.users.models import User
 
 __all__ = [
@@ -51,16 +53,36 @@ class SubagentDispatcher:
         self._skill_matcher = skill_matcher
         self._skill_registry = skill_registry
 
-    async def dispatch(self, spec: SubagentSpec, user: User, task_context: str) -> str:
+    async def dispatch(
+        self,
+        spec: SubagentSpec,
+        user: User,
+        task_context: str,
+        *,
+        parent_run_id: str | None = None,
+    ) -> str:
         """Run the subagent on a specific task."""
+        subagent_run_id = uuid.uuid4().hex
         logger.info("Dispatching subagent %s for user %s", spec.id, user.id)
+        log_event(
+            "subagent_dispatch_started",
+            subagent_run_id,
+            parent_run_id=parent_run_id,
+            subagent_id=spec.id,
+            user_id=user.id,
+            task_len=len(task_context),
+        )
 
         # Resolve provider: if we have a router, use subagent-specific routing
         from corpclaw_lite.llm.router import LLMRouter
 
         effective_provider: Provider
         if isinstance(self._provider, LLMRouter):
-            effective_provider = self._provider.for_subagent(spec.id, user_id=str(user.id))
+            effective_provider = self._provider.for_subagent(
+                spec.id,
+                user_id=str(user.id),
+                run_id=subagent_run_id,
+            )
         else:
             effective_provider = self._provider
 
@@ -145,10 +167,25 @@ class SubagentDispatcher:
         try:
             t0 = time.monotonic()
             result, _ = await asyncio.wait_for(
-                loop.run(user, task_context, system_prompt=system_prompt),
+                loop.run(
+                    user,
+                    task_context,
+                    system_prompt=system_prompt,
+                    run_id=subagent_run_id,
+                ),
                 timeout=timeout_seconds,
             )
             elapsed = time.monotonic() - t0
+            log_event(
+                "subagent_dispatch_finished",
+                subagent_run_id,
+                parent_run_id=parent_run_id,
+                subagent_id=spec.id,
+                user_id=user.id,
+                status="ok",
+                duration_ms=round(elapsed * 1000, 1),
+                result_len=len(result),
+            )
             logger.info(
                 "Subagent %s completed: duration=%.1fs result_len=%d",
                 spec.id,
@@ -158,7 +195,25 @@ class SubagentDispatcher:
             return result
         except TimeoutError:
             logger.error("Subagent %s timed out after %.0fs", spec.id, timeout_seconds)
+            log_event(
+                "subagent_dispatch_finished",
+                subagent_run_id,
+                parent_run_id=parent_run_id,
+                subagent_id=spec.id,
+                user_id=user.id,
+                status="timeout",
+                timeout_seconds=timeout_seconds,
+            )
             return f"Subagent error: execution timed out after {int(timeout_seconds)}s"
         except Exception as e:
             logger.error("Subagent %s failed: %s", spec.id, e)
+            log_event(
+                "subagent_dispatch_finished",
+                subagent_run_id,
+                parent_run_id=parent_run_id,
+                subagent_id=spec.id,
+                user_id=user.id,
+                status="error",
+                error=str(e),
+            )
             return f"Subagent error: {e}"

@@ -392,6 +392,7 @@ class AgentLoop:
         trajectory_recorder: TrajectoryRecorder | None = None,
         few_shots: list[dict[str, Any]] | None = None,
         channel: str | None = None,
+        run_id: str | None = None,
     ) -> tuple[str, RunStats]:
         """Run the ReAct loop until a final answer is given or limits are reached.
 
@@ -403,7 +404,7 @@ class AgentLoop:
         Returns:
             (reply, stats) — the agent's final answer and execution metrics.
         """
-        stats = RunStats()
+        stats = RunStats(run_id=run_id) if run_id is not None else RunStats()
         loop_warning_count = 0
         last_actual_total_tokens: int | None = None
         t0 = time.monotonic()
@@ -1009,7 +1010,12 @@ class AgentLoop:
             if on_tool_start:
                 on_tool_start(tc.name)
 
-            result = await self._registry.execute(tc.name, tc.arguments, user=user)
+            result = await self._registry.execute(
+                tc.name,
+                tc.arguments,
+                user=user,
+                run_id=run_id,
+            )
             status = "ok"
 
         except ApprovalRequest as e:
@@ -1036,7 +1042,12 @@ class AgentLoop:
                     status="approved" if approved else "denied",
                 )
                 if approved:
-                    result = await self._registry.execute(tc.name, tc.arguments, user=user)
+                    result = await self._registry.execute(
+                        tc.name,
+                        tc.arguments,
+                        user=user,
+                        run_id=run_id,
+                    )
                     status = "ok"
                 else:
                     health.increment("approval_denied")
