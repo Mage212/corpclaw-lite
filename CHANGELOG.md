@@ -12,6 +12,14 @@ llama-server.
 
 ### Added
 
+#### PDF extraction cleanup
+- `pdf_reader` теперь очищает PDF extraction от непечатаемых control-символов, которые могут
+  появляться в формулах после `pypdf.extract_text()` и ломать LLM/tool context.
+- Добавлен параметр `output_path` для сохранения очищенного PDF-текста в `.md`, `.markdown` или
+  `.txt` без промежуточного копирования сырого вывода через `write_file`.
+- `document-agent` теперь инструктируется использовать `pdf_reader output_path` для PDF→Markdown
+  задач.
+
 #### Excel formula-aware reads
 - `excel_workbook action=read` теперь по умолчанию показывает формульные ячейки как
   `formula + cached_value`, чтобы агент видел и саму формулу, и фактическое сохранённое значение
