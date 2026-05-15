@@ -117,6 +117,7 @@ async def test_registry_execute_passes_user_kwarg(monkeypatch: pytest.MonkeyPatc
     from corpclaw_lite.users.models import User
 
     received_user: list[Any] = []
+    received_run_id: list[Any] = []
 
     class UserCapturingTool(Tool):
         name = "capture_user"
@@ -126,16 +127,18 @@ async def test_registry_execute_passes_user_kwarg(monkeypatch: pytest.MonkeyPatc
 
         async def execute(self, *, user: Any = None, **kwargs: Any) -> str:
             received_user.append(user)
+            received_run_id.append(kwargs.get("run_id"))
             return "ok"
 
     r = ToolRegistry()
     r.register(UserCapturingTool())
 
     user = User(id=42, name="Test", department="qa")
-    result = await r.execute("capture_user", {}, user=user)
+    result = await r.execute("capture_user", {}, user=user, run_id="run-tool")
 
     assert result == "ok"
     assert received_user == [user], "user kwarg was not forwarded to tool.execute()"
+    assert received_run_id == ["run-tool"], "run_id kwarg was not forwarded to tool.execute()"
 
 
 @pytest.mark.asyncio

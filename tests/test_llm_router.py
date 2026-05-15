@@ -567,6 +567,29 @@ def test_subagent_research_agent_routing() -> None:
     assert isinstance(research, AnthropicProvider)
 
 
+def test_for_subagent_preserves_run_id_on_queued_provider() -> None:
+    """Queue/cache wrapper must receive the subagent run_id for trace correlation."""
+    registry = _make_registry()
+    settings = LLMSettings(
+        routing=[
+            RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
+            RoutingRule(subagent_id="research-agent", provider="ollama", model="qwen3.5-4b"),
+        ],
+        max_concurrent_requests=1,
+        queue={"enabled": True},
+    )
+    router = LLMRouter.from_settings(settings, registry)
+
+    research = router.for_subagent("research-agent", user_id="user-1", run_id="sub-run")
+
+    from corpclaw_lite.llm.router import QueuedProvider
+
+    assert isinstance(research, QueuedProvider)
+    assert research._run_id == "sub-run"  # type: ignore[attr-defined]
+    assert research._agent_id == "research-agent"  # type: ignore[attr-defined]
+    assert research._task_kind == "subagent:research-agent"  # type: ignore[attr-defined]
+
+
 def test_unknown_task_kind_falls_back_gracefully() -> None:
     """Unknown task_kind always returns default, no crash."""
     registry = _make_registry()

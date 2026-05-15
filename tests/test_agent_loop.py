@@ -73,6 +73,18 @@ async def test_agent_loop_basic(test_user: User, empty_registry: ToolRegistry) -
 
 
 @pytest.mark.asyncio
+async def test_agent_loop_accepts_explicit_run_id(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    provider = MockProvider(responses=[LLMResponse(content="ok")])
+    loop = AgentLoop(AgentConfig(provider, empty_registry, AgentSettings()))
+
+    _, stats = await loop.run(test_user, "Hi", run_id="fixed-run-id")
+
+    assert stats.run_id == "fixed-run-id"
+
+
+@pytest.mark.asyncio
 async def test_agent_loop_uses_backend_streaming_when_available(
     test_user: User, empty_registry: ToolRegistry
 ) -> None:

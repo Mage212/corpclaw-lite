@@ -82,13 +82,14 @@ class ToolRegistry:
         name: str,
         arguments: dict[str, Any],
         user: User | None = None,
+        run_id: str | None = None,
     ) -> str:
         """Execute a tool by name with arguments.
 
-        ``user`` is passed as a keyword argument so tools that need user context
-        (e.g. DispatchSubagentTool, ReadImageTool) can receive it without the
-        LLM having to supply it explicitly.  Tools that do not need it simply
-        absorb it via ``**kwargs``.
+        ``user`` and ``run_id`` are passed as keyword arguments so tools that need
+        runtime context (e.g. DispatchSubagentTool, ReadImageTool) can receive it
+        without the LLM having to supply it explicitly. Tools that do not need it
+        simply absorb it via ``**kwargs``.
 
         Results are scrubbed for credentials before being returned so that
         API keys or tokens inside read files never reach the LLM context or
@@ -99,7 +100,10 @@ class ToolRegistry:
             return f"Error: Tool '{name}' not found."
 
         try:
-            result = await tool.execute(**arguments, user=user)
+            tool_kwargs = dict(arguments)
+            tool_kwargs["user"] = user
+            tool_kwargs["run_id"] = run_id
+            result = await tool.execute(**tool_kwargs)
         except Exception as e:
             logger.exception("Tool '%s' execution failed", name)
             return f"Error executing '{name}': {type(e).__name__}: {e}"
