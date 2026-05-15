@@ -12,6 +12,17 @@ llama-server.
 
 ### Added
 
+#### Excel formula-aware reads
+- `excel_workbook action=read` теперь по умолчанию показывает формульные ячейки как
+  `formula + cached_value`, чтобы агент видел и саму формулу, и фактическое сохранённое значение
+  из workbook.
+- Добавлен `formula_mode`: `both` (по умолчанию), `values` для старого value-only поведения и
+  `formulas` для чтения только формул.
+- `excel_workbook` теперь поддерживает comma-separated mix одиночных ячеек и диапазонов в `cells`,
+  например `A1,B2:D4,F8:G9`.
+- Промпты Excel-заполнения и субагентов уточнены: для шаблонов с датами/периодами/формулами нужно
+  читать диапазоны в `formula_mode=both` и не перезаписывать формульные ячейки без явной просьбы.
+
 #### LLM Queue и backpressure
 - Добавлена очередь LLM-запросов `LLMRequestQueue`, ограничивающая реальную inference-
   конкурентность через `llm.max_concurrent_requests`.
