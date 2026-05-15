@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import zipfile
 from pathlib import Path
 
 import openpyxl
@@ -31,6 +32,24 @@ def _create_basic_xlsx(
             ws.cell(row=row_idx, column=col, value=val)
     wb.save(str(path))
     return path
+
+
+def _inject_cached_formula_value(path: Path, cell: str, formula: str, cached_value: str) -> None:
+    """Patch worksheet XML to simulate a workbook last recalculated by Excel/LibreOffice."""
+    patched = path.with_suffix(".patched.xlsx")
+    old_xml = f'<c r="{cell}"><f>{formula}</f><v /></c>'
+    new_xml = f'<c r="{cell}"><f>{formula}</f><v>{cached_value}</v></c>'
+
+    with zipfile.ZipFile(path) as zin, zipfile.ZipFile(patched, "w") as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if item.filename == "xl/worksheets/sheet1.xml":
+                text = data.decode("utf-8")
+                if old_xml not in text:
+                    raise AssertionError(f"Could not find formula XML for {cell}")
+                data = text.replace(old_xml, new_xml).encode("utf-8")
+            zout.writestr(item, data)
+    patched.replace(path)
 
 
 class TestExcelWorkbookRead:
@@ -136,10 +155,11 @@ class TestExcelWorkbookRead:
         ws["C1"] = "=A1+B1"
         wb.save(str(tmp_path / "formula.xlsx"))
 
-        # Default read (data_only=True) — formula cell shows computed or None
+        # Default read shows formula plus cached value status.
         result_values = await tool.execute(path="formula.xlsx", action="read", cells="C1")
-        # With data_only, openpyxl returns None for formula cells (no cached value)
         assert "C1" in result_values
+        assert "formula:=A1+B1" in result_values
+        assert "cached_value=<unavailable>" in result_values
 
         # show_formulas=True — formula string shown
         result_formulas = await tool.execute(
@@ -148,6 +168,69 @@ class TestExcelWorkbookRead:
         assert "C1" in result_formulas
         assert "=A1+B1" in result_formulas
         assert "(formula)" in result_formulas
+
+    @pytest.mark.asyncio
+    async def test_read_formula_mode_both_shows_cached_value(
+        self, tool: ExcelWorkbookTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Default formula-aware mode shows formulas together with cached workbook values."""
+        monkeypatch.chdir(tmp_path)
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = 10
+        ws["B1"] = 20
+        ws["C1"] = "=A1+B1"
+        wb.save(str(tmp_path / "cached_formula.xlsx"))
+        wb.close()
+        _inject_cached_formula_value(tmp_path / "cached_formula.xlsx", "C1", "A1+B1", "30")
+
+        result = await tool.execute(path="cached_formula.xlsx", action="read", cells="C1")
+
+        assert "C1" in result
+        assert "formula:=A1+B1" in result
+        assert "cached_value=30" in result
+
+    @pytest.mark.asyncio
+    async def test_read_formula_mode_values_keeps_old_value_only_behavior(
+        self, tool: ExcelWorkbookTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """formula_mode=values keeps the old data_only read behavior for callers that need it."""
+        monkeypatch.chdir(tmp_path)
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = 10
+        ws["B1"] = 20
+        ws["C1"] = "=A1+B1"
+        wb.save(str(tmp_path / "cached_formula.xlsx"))
+        wb.close()
+        _inject_cached_formula_value(tmp_path / "cached_formula.xlsx", "C1", "A1+B1", "30")
+
+        result = await tool.execute(
+            path="cached_formula.xlsx", action="read", cells="C1", formula_mode="values"
+        )
+
+        assert "C1 = 30" in result
+        assert "formula:" not in result
+        assert "cached_value=" not in result
+
+    @pytest.mark.asyncio
+    async def test_read_range_includes_formula_without_cached_value(
+        self, tool: ExcelWorkbookTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Range mode must not hide formula cells just because cached value is missing."""
+        monkeypatch.chdir(tmp_path)
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = "Date"
+        ws["A2"] = "=A1+1"
+        wb.save(str(tmp_path / "missing_cached.xlsx"))
+        wb.close()
+
+        result = await tool.execute(path="missing_cached.xlsx", action="read", cells="A1:A2")
+
+        assert "Row 2:" in result
+        assert "A2=formula:=A1+1" in result
+        assert "cached_value=<unavailable>" in result
 
     @pytest.mark.asyncio
     async def test_read_range_skips_none(
@@ -173,6 +256,61 @@ class TestExcelWorkbookRead:
         assert "F1=Value" in result
         assert "E2=Brand" in result
         assert "F2=TestCorp" in result
+
+    @pytest.mark.asyncio
+    async def test_read_multiple_ranges(
+        self, tool: ExcelWorkbookTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Read comma-separated ranges in one call."""
+        monkeypatch.chdir(tmp_path)
+        _create_basic_xlsx(
+            tmp_path / "multi_range.xlsx",
+            ["H1", "H2", "H3"],
+            [["a", "b", "c"], ["d", "e", "f"]],
+        )
+
+        result = await tool.execute(path="multi_range.xlsx", action="read", cells="A1:B2,C2:C3")
+
+        assert "Range: A1:B2" in result
+        assert "Range: C2:C3" in result
+        assert "A1=H1" in result
+        assert "B2=b" in result
+        assert "C2=c" in result
+        assert "C3=f" in result
+
+    @pytest.mark.asyncio
+    async def test_read_mixed_cells_and_ranges(
+        self, tool: ExcelWorkbookTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Read a comma-separated mix of single cells and ranges."""
+        monkeypatch.chdir(tmp_path)
+        _create_basic_xlsx(
+            tmp_path / "mixed.xlsx",
+            ["H1", "H2", "H3"],
+            [["a", "b", "c"], ["d", "e", "f"]],
+        )
+
+        result = await tool.execute(path="mixed.xlsx", action="read", cells="A1,B2:C3")
+
+        assert "A1 = 'H1'" in result
+        assert "Range: B2:C3" in result
+        assert "B2=b" in result
+        assert "C3=f" in result
+
+    @pytest.mark.asyncio
+    async def test_read_invalid_range_in_list_returns_error(
+        self, tool: ExcelWorkbookTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Invalid comma-list entries return readable errors instead of raising."""
+        monkeypatch.chdir(tmp_path)
+        _create_basic_xlsx(tmp_path / "invalid_range.xlsx", ["H1"], [["a"]])
+
+        result = await tool.execute(
+            path="invalid_range.xlsx", action="read", cells="A1,not-a-range:B2"
+        )
+
+        assert "A1 = 'H1'" in result
+        assert "Error: invalid range 'not-a-range:B2'" in result
 
     @pytest.mark.asyncio
     async def test_pagination_offset_and_limit(
