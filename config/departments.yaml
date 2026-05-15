@@ -10,7 +10,7 @@
 # Main agent tools (inspection + routing):
 #   read_file, list_files, search_files, excel_inspect
 # Host-side tools (registered separately):
-#   web_fetch, read_image, memory_store, memory_recall,
+#   web_fetch, web_search, read_image, memory_store, memory_recall,
 #   dispatch_subagent, send_file
 # Subagent-only tools (NOT available to main agent):
 #   write_file, edit_file, exec_script, normalize_excel, diff_text,
@@ -29,6 +29,7 @@ departments:
       - dispatch_subagent
       - excel_inspect
       - web_fetch
+      - web_search
       - send_file
     budget:
       max_iterations: 10
@@ -54,6 +55,7 @@ departments:
       - dispatch_subagent
       - excel_inspect
       - web_fetch
+      - web_search
       - send_file
     budget:
       max_iterations: 15
@@ -68,6 +70,7 @@ departments:
       - memory_store
       - memory_recall
       - web_fetch
+      - web_search
       - send_file
       - read_image
       - dispatch_subagent
@@ -89,6 +92,7 @@ departments:
       - dispatch_subagent
       - excel_inspect
       - web_fetch
+      - web_search
     budget:
       max_iterations: 10
       max_tool_calls: 20
@@ -106,6 +110,7 @@ departments:
       - dispatch_subagent
       - excel_inspect
       - web_fetch
+      - web_search
     budget:
       max_iterations: 10
       max_tool_calls: 20
@@ -119,6 +124,7 @@ departments:
       - memory_store
       - memory_recall
       - web_fetch
+      - web_search
       - send_file
       - read_image
       - dispatch_subagent
@@ -136,6 +142,7 @@ departments:
       - memory_store
       - memory_recall
       - web_fetch
+      - web_search
       - read_image
       - dispatch_subagent
       - excel_inspect

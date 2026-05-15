@@ -12,6 +12,14 @@ llama-server.
 
 ### Added
 
+#### Host-side web search
+- Добавлен инструмент `web_search` через `ddgs` с явным backend DuckDuckGo, лимитами
+  конкурентности и безопасным контрактом `query -> URL/snippet`.
+- `web_fetch` усилен `format=raw|text`, User-Agent и process-level backpressure; `format=text`
+  очищает HTML в компактный текстовый вид для локальных LLM.
+- `research-agent` теперь использует цепочку `web_search -> web_fetch(format="text")` для
+  веб-исследований, а доступ к поиску выдан тем же департаментам, где уже был разрешён web fetch.
+
 #### PDF extraction cleanup
 - `pdf_reader` теперь очищает PDF extraction от непечатаемых control-символов, которые могут
   появляться в формулах после `pypdf.extract_text()` и ломать LLM/tool context.

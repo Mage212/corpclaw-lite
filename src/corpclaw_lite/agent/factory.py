@@ -36,7 +36,7 @@ __all__ = [
 
 if TYPE_CHECKING:
     from corpclaw_lite.agent.compressor import ContextCompressor
-    from corpclaw_lite.config.settings import AgentSettings, Settings
+    from corpclaw_lite.config.settings import AgentSettings, Settings, WebSettings
     from corpclaw_lite.container.ipc import ContainerIPC
     from corpclaw_lite.container.manager import ContainerManager
     from corpclaw_lite.departments.permissions import PermissionChecker
@@ -225,6 +225,7 @@ def _build_security_stack(
 
 def _build_extensions_stack(
     agent_settings: AgentSettings,
+    web_settings: WebSettings,
     provider: Provider,
     registry: ToolRegistry,
     guard: ToolGuard,
@@ -240,7 +241,7 @@ def _build_extensions_stack(
     from corpclaw_lite.extensions.subagents.registry import SubagentRegistry
     from corpclaw_lite.extensions.tools.builtin.dispatch import DispatchSubagentTool
     from corpclaw_lite.extensions.tools.builtin.image import ReadImageTool
-    from corpclaw_lite.extensions.tools.builtin.web import WebFetchTool
+    from corpclaw_lite.extensions.tools.builtin.web import WebFetchTool, WebSearchTool
 
     subagent_registry = SubagentRegistry()
     subagent_dir = PROJECT_ROOT / "config" / "subagents"
@@ -269,16 +270,19 @@ def _build_extensions_stack(
             len(subagent_registry.list_all()),
         )
 
-    web_fetch_tool = WebFetchTool()
+    web_fetch_tool = WebFetchTool(web_settings)
+    web_search_tool = WebSearchTool(web_settings)
     read_image_tool = ReadImageTool(VisionProcessor(provider), workspace_base=workspace_base)
 
     registry.register(web_fetch_tool)
+    registry.register(web_search_tool)
     registry.register(read_image_tool)
 
     # Also register host-side tools on full_tool_registry so subagents
     # can access them when listed in allowed_tools (e.g. research-agent → web_fetch).
     if full_tool_registry is not None:
         full_tool_registry.register(web_fetch_tool)
+        full_tool_registry.register(web_search_tool)
         full_tool_registry.register(read_image_tool)
 
     return subagent_registry
@@ -442,6 +446,7 @@ def build_agent_stack(
 
     subagent_registry = _build_extensions_stack(
         agent_settings,
+        full_settings.web,
         provider,
         registry,
         guard,

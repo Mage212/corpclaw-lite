@@ -20,6 +20,7 @@ _TOOL_STATUS_MAP: dict[str, str] = {
     "read_image": "🖼️ Просматриваю изображение...",
     "normalize_excel": "📊 Обрабатываю таблицу...",
     "web_fetch": "🌐 Ищу информацию...",
+    "web_search": "🌐 Ищу информацию...",
     "exec_script": "💻 Запускаю команду...",
     "exec_command": "💻 Запускаю команду...",
     "send_file_to_user": "📎 Готовлю файл...",

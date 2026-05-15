@@ -19,6 +19,7 @@ __all__ = [
     "SkillsSettings",
     "SlotAffinitySettings",
     "TelegramSettings",
+    "WebSettings",
 ]
 
 
@@ -140,6 +141,16 @@ class AgentSettings(BaseModel):
     max_facts_recall: int = 20
 
 
+class WebSettings(BaseModel):
+    """Settings for host-side web tools."""
+
+    search_backend: Literal["duckduckgo"] = "duckduckgo"
+    search_max_concurrent: int = 3
+    fetch_max_concurrent: int = 4
+    timeout_seconds: int = 20
+    user_agent: str = "CorpClawLite/0.1 web tools"
+
+
 class TelegramSettings(BaseModel):
     """Settings for Telegram channel."""
 
@@ -193,6 +204,7 @@ class Settings(BaseSettings):
 
     llm: LLMSettings = LLMSettings()
     agent: AgentSettings = AgentSettings()
+    web: WebSettings = WebSettings()
     container: ContainerSettings = ContainerSettings()
     telegram: TelegramSettings = TelegramSettings()
     skills: SkillsSettings = SkillsSettings()
