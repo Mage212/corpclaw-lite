@@ -54,6 +54,7 @@ AGENTS.md
 .codex/config.toml
 .opencode/
 .qwen/
+.antigravitycli/
 .axme-code/
 plans/
 

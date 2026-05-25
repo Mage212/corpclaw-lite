@@ -85,6 +85,44 @@ class TelegramBotOrchestrator:
         async with self._active_user_requests_lock:
             self._active_user_requests.discard(telegram_id)
 
+    async def check_channel_access(self, telegram_id: int, action: str) -> bool:
+        """Shared Telegram preflight for commands, callbacks and uploads."""
+        stack, channel, rate_limiter, _ = self._require_started()
+        user_manager = stack.user_manager
+
+        if user_manager.is_session_revoked(telegram_id):
+            logger.debug(
+                "Ignoring Telegram action from revoked session telegram_id=%d action=%s",
+                telegram_id,
+                action,
+            )
+            return False
+
+        temp_user = User(
+            id=0,
+            name=f"user_{telegram_id}",
+            department="default",
+            telegram_id=telegram_id,
+        )
+        if not user_manager.is_allowed(telegram_id):
+            await channel.send_message(temp_user, "⛔ У вас нет доступа к этому боту.")
+            return False
+
+        user = await user_manager.async_get_by_telegram_id(telegram_id)
+        if not user:
+            dept = user_manager.get_whitelist_department(telegram_id)
+            user = await user_manager.async_create_user(telegram_id=telegram_id, department=dept)
+            logger.info("Auto-registered user telegram_id=%d (dept=%s)", telegram_id, dept)
+
+        allowed = await rate_limiter.check(telegram_id)
+        if not allowed:
+            await channel.send_message(
+                user,
+                "⚠️ Слишком много сообщений. Подождите минуту и попробуйте снова.",
+            )
+            return False
+        return True
+
     def _require_started(
         self,
     ) -> tuple[AgentStack, TelegramChannel, RateLimiter, BootstrapLoader]:
@@ -178,6 +216,8 @@ class TelegramBotOrchestrator:
             onboarding_engine=self._onboarding_engine,
             image_handler=self.handle_image,
             cache_reset_callback=self._mark_user_cache_reset,
+            setup_handler=self.handle_setup,
+            access_checker=self.check_channel_access,
             tg_settings=tg_settings,
         )
 
@@ -330,7 +370,49 @@ class TelegramBotOrchestrator:
                 logger.warning("Container cleanup failed: %s", e)
         logger.info("Telegram bot stopped cleanly.")
 
-    async def handle_message(self, telegram_id: str, message: str, mode: str = "execute") -> None:
+    async def handle_setup(self, telegram_id: int) -> str:
+        """Reset and restart onboarding under the shared per-user workflow lock."""
+        stack, _, _, _ = self._require_started()
+        if self._onboarding_engine is None:
+            return "⚠️ Настройка недоступна."
+
+        if not await self._try_start_user_request(telegram_id):
+            return (
+                "⏳ Предыдущая задача ещё выполняется. "
+                "Дождитесь ответа и отправьте новый запрос после завершения."
+            )
+
+        try:
+            user_manager = stack.user_manager
+            user = await user_manager.async_get_by_telegram_id(telegram_id)
+            if user is None:
+                dept = user_manager.get_whitelist_department(telegram_id)
+                user = await user_manager.async_create_user(
+                    telegram_id=telegram_id,
+                    department=dept,
+                )
+
+            await self._onboarding_engine.reset(telegram_id)
+            question = await self._onboarding_engine.start(telegram_id, user.department)
+            if question is None:
+                return "⚠️ Не удалось начать настройку. Попробуйте позже."
+
+            text = f"🔄 Перенастройка! Предыдущие настройки будут обновлены.\n\n{question.prompt}"
+            if question.hint:
+                text += f"\n💡 {question.hint}"
+            logger.info("User %d started /setup", telegram_id)
+            return text
+        finally:
+            await self._finish_user_request(telegram_id)
+
+    async def handle_message(
+        self,
+        telegram_id: str,
+        message: str,
+        mode: str = "execute",
+        *,
+        prechecked_access: bool = False,
+    ) -> None:
         """Main message handler — replaces nested _handle_and_reply."""
         stack, channel, rate_limiter, bootstrap = self._require_started()
 
@@ -340,14 +422,15 @@ class TelegramBotOrchestrator:
         container_manager = stack.container_manager
 
         # Access control
-        if user_manager.is_session_revoked(tid):
-            logger.debug("Ignoring message from revoked session telegram_id=%d", tid)
-            return
+        if not prechecked_access:
+            if user_manager.is_session_revoked(tid):
+                logger.debug("Ignoring message from revoked session telegram_id=%d", tid)
+                return
 
-        if not user_manager.is_allowed(tid):
-            temp_user = User(id=0, name=f"user_{tid}", department="default", telegram_id=tid)
-            await channel.send_message(temp_user, "⛔ У вас нет доступа к этому боту.")
-            return
+            if not user_manager.is_allowed(tid):
+                temp_user = User(id=0, name=f"user_{tid}", department="default", telegram_id=tid)
+                await channel.send_message(temp_user, "⛔ У вас нет доступа к этому боту.")
+                return
 
         # Get or register user
         user = await user_manager.async_get_by_telegram_id(tid)
@@ -357,13 +440,14 @@ class TelegramBotOrchestrator:
             logger.info("Auto-registered user telegram_id=%d (dept=%s)", tid, dept)
 
         # Rate limiting (before onboarding to prevent bypass via /setup)
-        allowed = await rate_limiter.check(tid)
-        if not allowed:
-            await channel.send_message(
-                user,
-                "⚠️ Слишком много сообщений. Подождите минуту и попробуйте снова.",
-            )
-            return
+        if not prechecked_access:
+            allowed = await rate_limiter.check(tid)
+            if not allowed:
+                await channel.send_message(
+                    user,
+                    "⚠️ Слишком много сообщений. Подождите минуту и попробуйте снова.",
+                )
+                return
 
         # Queue position notification
         from corpclaw_lite.llm.router import LLMRouter
@@ -388,36 +472,48 @@ class TelegramBotOrchestrator:
         if self._onboarding_engine is not None and await self._onboarding_engine.needs_onboarding(
             tid
         ):
-            if not await self._onboarding_engine.is_in_progress(tid):
-                question = await self._onboarding_engine.start(tid, user.department)
-                if question:
-                    text = (
-                        "👋 Добро пожаловать! Давай настроим меня под тебя "
-                        "— это займёт пару минут.\n\n"
-                        f"{question.prompt}"
-                    )
-                    if question.hint:
-                        text += f"\n💡 {question.hint}"
-                    await channel.send_message(user, text)
-                    return
-            else:
-                next_q = await self._onboarding_engine.submit_answer(tid, message, user.department)
-                if next_q:
-                    text = next_q.prompt
-                    if next_q.hint:
-                        text += f"\n💡 {next_q.hint}"
-                    await channel.send_message(user, text)
-                else:
-                    user = await user_manager.async_get_by_telegram_id(tid) or user
-                    answers = await self._onboarding_engine.get_summary(tid)
-                    name = answers.get("preferred_name", user.name)
-                    await channel.send_message(
-                        user,
-                        f"✅ Готово, {name}! Я настроен под тебя.\n\n"
-                        "Можешь задавать вопросы и давать задачи. "
-                        "Для перенастройки — /setup",
-                    )
+            if not await self._try_start_user_request(tid):
+                await channel.send_message(
+                    user,
+                    "⏳ Предыдущая задача ещё выполняется. "
+                    "Дождитесь ответа и отправьте новый запрос после завершения.",
+                )
                 return
+            try:
+                if not await self._onboarding_engine.is_in_progress(tid):
+                    question = await self._onboarding_engine.start(tid, user.department)
+                    if question:
+                        text = (
+                            "👋 Добро пожаловать! Давай настроим меня под тебя "
+                            "— это займёт пару минут.\n\n"
+                            f"{question.prompt}"
+                        )
+                        if question.hint:
+                            text += f"\n💡 {question.hint}"
+                        await channel.send_message(user, text)
+                        return
+                else:
+                    next_q = await self._onboarding_engine.submit_answer(
+                        tid, message, user.department
+                    )
+                    if next_q:
+                        text = next_q.prompt
+                        if next_q.hint:
+                            text += f"\n💡 {next_q.hint}"
+                        await channel.send_message(user, text)
+                    else:
+                        user = await user_manager.async_get_by_telegram_id(tid) or user
+                        answers = await self._onboarding_engine.get_summary(tid)
+                        name = answers.get("preferred_name", user.name)
+                        await channel.send_message(
+                            user,
+                            f"✅ Готово, {name}! Я настроен под тебя.\n\n"
+                            "Можешь задавать вопросы и давать задачи. "
+                            "Для перенастройки — /setup",
+                        )
+                    return
+            finally:
+                await self._finish_user_request(tid)
 
         if not await self._try_start_user_request(tid):
             await channel.send_message(
@@ -565,38 +661,57 @@ class TelegramBotOrchestrator:
         finally:
             await self._finish_user_request(tid)
 
-    async def handle_image(self, telegram_id: str, image_path: Path, caption: str | None) -> None:
+    async def handle_image(
+        self,
+        telegram_id: str,
+        image_path: Path,
+        caption: str | None,
+        *,
+        prechecked_access: bool = False,
+    ) -> None:
         """Route photo uploads directly to vision LLM, bypassing agent loop."""
         stack, channel, rate_limiter, _ = self._require_started()
 
         user_manager = stack.user_manager
+        tid = int(telegram_id)
 
-        if not user_manager.is_allowed(int(telegram_id)):
-            return
-        user = await user_manager.async_get_by_telegram_id(int(telegram_id))
+        if not prechecked_access:
+            if user_manager.is_session_revoked(tid):
+                logger.debug("Ignoring image from revoked session telegram_id=%d", tid)
+                return
+            if not user_manager.is_allowed(tid):
+                return
+
+        user = await user_manager.async_get_by_telegram_id(tid)
         if user is None:
-            return
+            if not user_manager.is_allowed(tid):
+                return
+            dept = user_manager.get_whitelist_department(tid)
+            user = await user_manager.async_create_user(telegram_id=tid, department=dept)
 
         # Session revocation + rate limiting (same checks as handle_message)
-        if user_manager.is_session_revoked(int(telegram_id)):
-            logger.debug("Ignoring image from revoked session telegram_id=%d", int(telegram_id))
-            return
-        allowed = await rate_limiter.check(int(telegram_id))
-        if not allowed:
-            await channel.send_message(
-                user,
-                "⚠️ Слишком много сообщений. Подождите минуту и попробуйте снова.",
-            )
-            return
+        if not prechecked_access:
+            allowed = await rate_limiter.check(tid)
+            if not allowed:
+                await channel.send_message(
+                    user,
+                    "⚠️ Слишком много сообщений. Подождите минуту и попробуйте снова.",
+                )
+                return
         if self._vision_processor is None:
             directive = (
                 f"Немедленно проанализируй изображение '{image_path.name}' "
                 f"с помощью read_image и верни результат. "
                 + (f"Запрос: {caption}" if caption else "")
             )
-            await self.handle_message(telegram_id, directive, "execute")
+            await self.handle_message(
+                telegram_id,
+                directive,
+                "execute",
+                prechecked_access=prechecked_access,
+            )
             return
-        if not await self._try_start_user_request(int(telegram_id)):
+        if not await self._try_start_user_request(tid):
             await channel.send_message(
                 user,
                 "⏳ Предыдущая задача ещё выполняется. "

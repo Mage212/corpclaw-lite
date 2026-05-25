@@ -79,6 +79,13 @@ class ReadFileTool(Tool):
                 return f"Error: '{resolved}' is not a file."
             if resolved.suffix.lower() in IMAGE_EXTENSIONS:
                 return "Error: Use read_image tool for image files."
+            size = resolved.stat().st_size
+            if size > _MAX_FILE_SEARCH_BYTES:
+                return (
+                    f"Error: File '{resolved}' is too large to read directly "
+                    f"({size} bytes, max {_MAX_FILE_SEARCH_BYTES}). "
+                    "Use search_files or a narrower file-specific tool instead."
+                )
 
             content = await anyio.to_thread.run_sync(partial(resolved.read_text, encoding="utf-8"))
             return content
@@ -309,8 +316,13 @@ class SearchFilesTool(Tool):
                                 if len(results) > self.max_results:
                                     results.append("... search truncated.")
                                     return results
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            if len(results) <= self.max_results:
+                                rel_path = file_path.relative_to(resolved)
+                                results.append(
+                                    f"Skipped unreadable file {rel_path.as_posix()}: "
+                                    f"{type(e).__name__}: {e}"
+                                )
                 return results
 
             results = await anyio.to_thread.run_sync(_search)
