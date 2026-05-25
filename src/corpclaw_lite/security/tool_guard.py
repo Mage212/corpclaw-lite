@@ -164,6 +164,45 @@ class ToolGuard:
 
         matches = [r for r in self._rules if r.evaluate(tool_name, arguments)]
         if not matches:
+            if risk_level == "critical":
+                logger.warning(
+                    "ToolGuard: unmatched critical-risk tool %s blocked by default policy",
+                    tool_name,
+                )
+                if run_id:
+                    log_event(
+                        "tool_guard_decision",
+                        run_id,
+                        tool=tool_name,
+                        decision="block",
+                        reason="default_critical_risk_policy",
+                        risk_level=risk_level,
+                    )
+                raise ToolGuardError(
+                    f"Blocked by ToolGuard: critical-risk tool '{tool_name}' has no "
+                    "matching security rule"
+                )
+            if risk_level == "high":
+                logger.warning(
+                    "ToolGuard: unmatched high-risk tool %s requires approval by default policy",
+                    tool_name,
+                )
+                if run_id:
+                    log_event(
+                        "tool_guard_decision",
+                        run_id,
+                        tool=tool_name,
+                        decision="approval_required",
+                        reason="default_high_risk_policy",
+                        risk_level=risk_level,
+                    )
+                raise ApprovalRequest(
+                    action=f"Use high-risk tool '{tool_name}'",
+                    details=(
+                        "This high-risk tool call did not match a specific ToolGuard rule, "
+                        "so manual approval is required by default policy."
+                    ),
+                )
             return
 
         for rule in matches:

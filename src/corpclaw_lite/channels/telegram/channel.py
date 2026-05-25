@@ -72,6 +72,8 @@ class TelegramChannel(Channel):
         onboarding_engine: Any | None = None,
         image_handler: Callable[..., Any] | None = None,
         cache_reset_callback: Callable[[str], Awaitable[None]] | None = None,
+        setup_handler: Callable[[int], Awaitable[str]] | None = None,
+        access_checker: Callable[[int, str], Awaitable[bool]] | None = None,
         tg_settings: TelegramSettings | None = None,
     ) -> None:
         """
@@ -88,6 +90,8 @@ class TelegramChannel(Channel):
                            so the raw vision-model response reaches the user unmodified.
             cache_reset_callback: Optional async callback invoked by /new after
                                   memory is cleared, so LLM cache state can be invalidated.
+            setup_handler: Optional async callback invoked by /setup under orchestrator locks.
+            access_checker: Optional async callback used before commands, uploads and callbacks.
             tg_settings: Telegram configuration (fallback IPs, timeouts, retry limits).
         """
         self.token = token
@@ -99,6 +103,8 @@ class TelegramChannel(Channel):
         self._memory = memory
         self._onboarding_engine = onboarding_engine
         self._cache_reset_callback = cache_reset_callback
+        self._setup_handler = setup_handler
+        self._access_checker = access_checker
         self._tg_settings = tg_settings
 
         # Approval system: message_id → (Future[bool], expected_telegram_user_id)
@@ -130,6 +136,18 @@ class TelegramChannel(Channel):
         ws = self._workspace_base / f"user_{user.telegram_id}"
         ws.mkdir(parents=True, exist_ok=True)
         return ws
+
+    async def _check_access(self, update: Update, action: str) -> bool:
+        """Run channel-level access preflight before side effects."""
+        if self._access_checker is None:
+            return True
+        if not update.effective_user:
+            return False
+        try:
+            return await self._access_checker(update.effective_user.id, action)
+        except Exception:
+            logger.exception("Telegram access preflight failed for action=%s", action)
+            return False
 
     async def start(self) -> None:
         """Initialize the Telegram bot application with fallback transport and retry logic."""
@@ -438,17 +456,14 @@ class TelegramChannel(Channel):
     async def send_file(self, user: User, path: Path, caption: str = "") -> None:
         """Send a document wrapper."""
         if not self._app or not self._app.bot:
-            return
-        try:
-            content = await anyio.Path(path).read_bytes()
-            await self._app.bot.send_document(
-                chat_id=user.telegram_id,
-                document=content,
-                caption=caption,
-                filename=path.name,
-            )
-        except Exception as e:
-            logger.error("Failed to send file to %s: %s", user.telegram_id, e)
+            raise RuntimeError("Telegram application is not initialized")
+        content = await anyio.Path(path).read_bytes()
+        await self._app.bot.send_document(
+            chat_id=user.telegram_id,
+            document=content,
+            caption=caption,
+            filename=path.name,
+        )
 
     async def request_approval(self, user: User, action: str, details: str) -> bool:
         """Send Approve/Deny inline buttons and wait for the tap."""
@@ -502,6 +517,8 @@ class TelegramChannel(Channel):
     # ── Command handlers ──────────────────────────────────────────────────────
 
     async def _handle_start(self, update: Update, context: Any) -> None:
+        if not await self._check_access(update, "start"):
+            return
         if update.effective_chat:
             await update.effective_chat.send_message(
                 "👋 Добро пожаловать в CorpClaw Lite!\n\n"
@@ -516,6 +533,12 @@ class TelegramChannel(Channel):
     async def _handle_setup(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Reset and restart onboarding for the user."""
         if not update.effective_user or not update.effective_chat:
+            return
+        if not await self._check_access(update, "setup"):
+            return
+        if self._setup_handler is not None:
+            text = await self._setup_handler(update.effective_user.id)
+            await update.effective_chat.send_message(text)
             return
         if self._onboarding_engine is None:
             await update.effective_chat.send_message("⚠️ Настройка недоступна.")
@@ -532,7 +555,9 @@ class TelegramChannel(Channel):
 
     async def _handle_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Show available tools."""
-        if not update.effective_chat:
+        if not update.effective_chat or not update.effective_user:
+            return
+        if not await self._check_access(update, "help"):
             return
         if self._tool_registry:
             tools = self._tool_registry.list_all()
@@ -549,6 +574,8 @@ class TelegramChannel(Channel):
         """Reset conversation history."""
         if not update.effective_user or not update.effective_chat:
             return
+        if not await self._check_access(update, "new"):
+            return
         tid = update.effective_user.id
         if self._memory:
             await self._memory.clear(str(tid))
@@ -560,6 +587,8 @@ class TelegramChannel(Channel):
     async def _handle_delete(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Open interactive file manager."""
         if not update.effective_user:
+            return
+        if not await self._check_access(update, "delete"):
             return
 
         from corpclaw_lite.channels.telegram.file_manager import DeleteBrowserHandler
@@ -576,7 +605,9 @@ class TelegramChannel(Channel):
 
     async def _handle_chat(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Switch to chat mode (no tools)."""
-        if not update.effective_chat:
+        if not update.effective_chat or not update.effective_user:
+            return
+        if not await self._check_access(update, "chat"):
             return
         self._set_mode(context, "chat")
         await update.effective_chat.send_message(
@@ -587,7 +618,9 @@ class TelegramChannel(Channel):
 
     async def _handle_execute(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Switch to execute mode (with tools)."""
-        if not update.effective_chat:
+        if not update.effective_chat or not update.effective_user:
+            return
+        if not await self._check_access(update, "execute"):
             return
         self._set_mode(context, "execute")
         await update.effective_chat.send_message(
@@ -611,6 +644,8 @@ class TelegramChannel(Channel):
         """Handle document upload: download → sanitize → save → agent run."""
         if not update.message or not update.message.document or not update.effective_user:
             return
+        if not await self._check_access(update, "upload_document"):
+            return
         if await self._is_duplicate(update):
             return
 
@@ -625,6 +660,8 @@ class TelegramChannel(Channel):
     async def _handle_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle photo upload: take largest resolution → save → agent run."""
         if not update.message or not update.message.photo or not update.effective_user:
+            return
+        if not await self._check_access(update, "upload_photo"):
             return
         if await self._is_duplicate(update):
             return
@@ -705,17 +742,30 @@ class TelegramChannel(Channel):
         from corpclaw_lite.channels.telegram.upload import is_image
 
         if self._image_handler is not None and is_image(safe_name):
-            await self._image_handler(str(telegram_id), target_path, caption)
+            await self._image_handler(
+                str(telegram_id),
+                target_path,
+                caption,
+                prechecked_access=True,
+            )
         else:
             # For non-image files (or when no image_handler set), route through agent
             directive = build_agent_directive(safe_name, caption)
-            await self._on_message(str(telegram_id), directive, "execute")
+            await self._on_message(
+                str(telegram_id),
+                directive,
+                "execute",
+                prechecked_access=True,
+            )
 
     # ── Callback handler ──────────────────────────────────────────────────────
 
     async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
         if not query or not query.message:
+            return
+        if not await self._check_access(update, "callback"):
+            await query.answer("Access denied.", show_alert=True)
             return
 
         data = query.data or ""

@@ -1016,7 +1016,9 @@ class AgentLoop:
                 user=user,
                 run_id=run_id,
             )
-            status = "ok"
+            status = "error" if result.startswith("Error") else "ok"
+            if status == "error":
+                health.increment("tool_errors")
 
         except ApprovalRequest as e:
             log_event(
