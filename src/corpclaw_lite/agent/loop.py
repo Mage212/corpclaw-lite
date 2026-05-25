@@ -765,7 +765,11 @@ class AgentLoop:
                         tool_obj = self._registry.get(tc.name)
                         if (
                             tool_obj is not None
-                            and tool_obj.terminal
+                            and (
+                                tool_obj.should_return_direct(tc.arguments, result)
+                                if hasattr(tool_obj, "should_return_direct")
+                                else getattr(tool_obj, "terminal", False)
+                            )
                             and len(response.tool_calls) == 1
                             and not result.startswith(TOOL_ERROR_PREFIX)
                         ):

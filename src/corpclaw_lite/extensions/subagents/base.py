@@ -18,6 +18,7 @@ class SubagentSpec:
         capabilities: List of capability strings (mostly documentation)
         allowed_tools: List of tool names this subagent has access to
         prompt_path: Relative path to the system prompt for this subagent
+        direct_response: Whether dispatch_subagent should return this result directly to the user
     """
 
     id: str
@@ -27,3 +28,4 @@ class SubagentSpec:
     allowed_tools: list[str] = field(default_factory=lambda: ["*"])
     allowed_departments: list[str] = field(default_factory=lambda: ["*"])
     prompt_path: str = ""
+    direct_response: bool = False

@@ -108,6 +108,16 @@ web:
   timeout_seconds: 20
   user_agent: "CorpClawLite/0.1 web tools"
 
+research:
+  cache_ttl_hours: 24
+  normal_max_sources: 5
+  deep_max_sources: 10
+  normal_search_waves: 1
+  deep_search_waves: 3
+  normal_max_rereads: 0
+  deep_max_rereads: 10
+  source_excerpt_chars: 6000
+
 container:
   enabled: true
   image: "corpclaw-agent-base:latest"

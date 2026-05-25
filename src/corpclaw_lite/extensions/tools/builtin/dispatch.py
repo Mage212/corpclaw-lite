@@ -24,7 +24,9 @@ class DispatchSubagentTool(Tool):
     name = "dispatch_subagent"
     description = (
         "Delegate a task to a specialized subagent. "
-        "Use when the task requires specialized capabilities beyond available tools."
+        "Use when the task requires specialized capabilities beyond available tools. "
+        "For web research, fact-checking, source comparison, or URL analysis, use "
+        "subagent_id='research-agent' and pass the full research question."
     )
     params = [
         ToolParam(
@@ -110,3 +112,15 @@ class DispatchSubagentTool(Tool):
             )
 
         return await self._dispatcher.dispatch(spec, user, task, parent_run_id=parent_run_id)
+
+    def should_return_direct(self, arguments: dict[str, Any], result: str) -> bool:
+        subagent_id = arguments.get("subagent_id")
+        if not isinstance(subagent_id, str):
+            return False
+        spec = self._subagent_registry.get_spec(subagent_id)
+        return bool(
+            spec is not None
+            and spec.direct_response
+            and not result.startswith("Subagent error:")
+            and not result.startswith("Error")
+        )

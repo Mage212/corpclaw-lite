@@ -36,7 +36,7 @@ __all__ = [
 
 if TYPE_CHECKING:
     from corpclaw_lite.agent.compressor import ContextCompressor
-    from corpclaw_lite.config.settings import AgentSettings, Settings, WebSettings
+    from corpclaw_lite.config.settings import AgentSettings, ResearchSettings, Settings, WebSettings
     from corpclaw_lite.container.ipc import ContainerIPC
     from corpclaw_lite.container.manager import ContainerManager
     from corpclaw_lite.departments.permissions import PermissionChecker
@@ -226,6 +226,7 @@ def _build_security_stack(
 def _build_extensions_stack(
     agent_settings: AgentSettings,
     web_settings: WebSettings,
+    research_settings: ResearchSettings,
     provider: Provider,
     registry: ToolRegistry,
     guard: ToolGuard,
@@ -241,6 +242,10 @@ def _build_extensions_stack(
     from corpclaw_lite.extensions.subagents.registry import SubagentRegistry
     from corpclaw_lite.extensions.tools.builtin.dispatch import DispatchSubagentTool
     from corpclaw_lite.extensions.tools.builtin.image import ReadImageTool
+    from corpclaw_lite.extensions.tools.builtin.research import (
+        ResearchRuntime,
+        build_research_tools,
+    )
     from corpclaw_lite.extensions.tools.builtin.web import WebFetchTool, WebSearchTool
 
     subagent_registry = SubagentRegistry()
@@ -273,6 +278,8 @@ def _build_extensions_stack(
     web_fetch_tool = WebFetchTool(web_settings)
     web_search_tool = WebSearchTool(web_settings)
     read_image_tool = ReadImageTool(VisionProcessor(provider), workspace_base=workspace_base)
+    research_runtime = ResearchRuntime(research_settings, workspace_base=workspace_base)
+    research_tools = build_research_tools(research_runtime, web_search_tool, web_fetch_tool)
 
     registry.register(web_fetch_tool)
     registry.register(web_search_tool)
@@ -284,6 +291,8 @@ def _build_extensions_stack(
         full_tool_registry.register(web_fetch_tool)
         full_tool_registry.register(web_search_tool)
         full_tool_registry.register(read_image_tool)
+        for tool in research_tools:
+            full_tool_registry.register(tool)
 
     return subagent_registry
 
@@ -447,6 +456,7 @@ def build_agent_stack(
     subagent_registry = _build_extensions_stack(
         agent_settings,
         full_settings.web,
+        full_settings.research,
         provider,
         registry,
         guard,

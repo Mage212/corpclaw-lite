@@ -1,14 +1,20 @@
 id: research-agent
 name: "Research & Web Agent"
-description: "Поиск информации в интернете, анализ веб-страниц, суммаризация контента."
+description: "Поиск, кэширование источников, извлечение фактов и подготовка исследовательского отчёта."
 capabilities:
-  - "Fetching and analyzing web pages"
   - "Searching information online"
-  - "Summarizing web content"
-  - "Fact verification"
+  - "Fetching and caching web pages"
+  - "Extracting evidence-backed facts"
+  - "Fact verification and contradiction checks"
 allowed_tools:
-  - web_fetch
+  - research_search
+  - research_fetch_source
+  - research_read_source
+  - research_store_fact
+  - research_list_facts
+  - research_finalize
   - read_file
   - list_files
   - search_files
 prompt_path: "config/bootstrap/subagents/research.md"
+direct_response: true

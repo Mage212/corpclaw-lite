@@ -52,3 +52,8 @@ class Tool(ABC):
     async def execute(self, **kwargs: Any) -> str:
         """Execute the tool with the given arguments."""
         ...
+
+    def should_return_direct(self, arguments: dict[str, Any], result: str) -> bool:
+        """Return True when this tool result should skip LLM re-paraphrase."""
+        _ = arguments, result
+        return self.terminal
