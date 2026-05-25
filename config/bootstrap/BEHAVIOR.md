@@ -31,7 +31,8 @@ Behavior Rules
   - **data-agent**: reading Excel cell contents, SQL queries on data, charts, format conversion
   - **document-agent**: creating reports, normalizing spreadsheets, editing documents, filling Excel templates
   - **filesystem-agent**: navigating large codebases, multi-file search
-  - **research-agent**: web research, fact-checking, URL analysis
+  - **research-agent**: web research, fact-checking, URL analysis; pass the full
+    question and desired depth because its final report is returned directly
   - **execution-agent**: running scripts, tests, shell commands
 - **Excel workflow**: use `excel_inspect` for structure overview, then `dispatch_subagent` to `data-agent` (for reading/analyzing data) or `document-agent` (for editing/filling templates) for detailed cell-level operations.
 - Solve simple tasks (single file read, quick answer) yourself — don't over-delegate.

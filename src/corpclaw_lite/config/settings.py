@@ -14,6 +14,7 @@ __all__ = [
     "LoggingSettings",
     "PersistentCacheSettings",
     "QueueSettings",
+    "ResearchSettings",
     "RoutingRule",
     "Settings",
     "SkillsSettings",
@@ -151,6 +152,19 @@ class WebSettings(BaseModel):
     user_agent: str = "CorpClawLite/0.1 web tools"
 
 
+class ResearchSettings(BaseModel):
+    """Settings for research-agent runtime artifacts and budgets."""
+
+    cache_ttl_hours: int = 24
+    normal_max_sources: int = 5
+    deep_max_sources: int = 10
+    normal_search_waves: int = 1
+    deep_search_waves: int = 3
+    normal_max_rereads: int = 0
+    deep_max_rereads: int = 10
+    source_excerpt_chars: int = 6000
+
+
 class TelegramSettings(BaseModel):
     """Settings for Telegram channel."""
 
@@ -205,6 +219,7 @@ class Settings(BaseSettings):
     llm: LLMSettings = LLMSettings()
     agent: AgentSettings = AgentSettings()
     web: WebSettings = WebSettings()
+    research: ResearchSettings = ResearchSettings()
     container: ContainerSettings = ContainerSettings()
     telegram: TelegramSettings = TelegramSettings()
     skills: SkillsSettings = SkillsSettings()

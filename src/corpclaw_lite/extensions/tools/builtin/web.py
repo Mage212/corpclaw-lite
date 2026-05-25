@@ -61,6 +61,7 @@ _BINARY_CONTENT_TYPES = frozenset(
 _WHITESPACE_RE = re.compile(r"[ \t\r\f\v]+")
 _BLANK_LINES_RE = re.compile(r"\n{3,}")
 _DOMAIN_RE = re.compile(r"^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
+_TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 
 
 class _HTMLTextExtractor(HTMLParser):
@@ -205,6 +206,16 @@ def _extract_text_from_html(text: str, content_type: str) -> str:
     return parser.get_text()
 
 
+def _extract_html_title(text: str, content_type: str) -> str:
+    """Return the HTML title when available."""
+    if "html" not in content_type.lower():
+        return ""
+    match = _TITLE_RE.search(text)
+    if not match:
+        return ""
+    return _WHITESPACE_RE.sub(" ", html.unescape(match.group(1))).strip()[:300]
+
+
 async def _read_response_text_limited(response: httpx.Response) -> tuple[str | None, str, int]:
     """Read a text response with a hard byte limit."""
     chunks: list[bytes] = []
@@ -249,7 +260,7 @@ class WebFetchTool(Tool):
             name="format",
             type="string",
             description=(
-                "Output format: raw returns response text, text extracts readable text from HTML"
+                "Output format: text extracts readable text from HTML, raw returns response text"
             ),
             required=False,
             enum=["raw", "text"],
@@ -384,6 +395,7 @@ class WebFetchTool(Tool):
                     if output_format == "text"
                     else full_text
                 )
+                title = _extract_html_title(full_text, content_type)
                 text = body_text[:MAX_TEXT_CHARS]
                 truncated = " (truncated)" if len(full_text) > MAX_TEXT_CHARS else ""
 
@@ -391,6 +403,7 @@ class WebFetchTool(Tool):
                     f"URL: {current_url}\n"
                     f"Status: {response.status_code}\n"
                     f"Content-Type: {content_type}\n"
+                    f"Title: {title}\n"
                     f"Size: {len(full_text)} chars / {byte_count} bytes{truncated}\n"
                     f"---\n"
                 )
@@ -405,7 +418,7 @@ class WebSearchTool(Tool):
     name = "web_search"
     description = (
         "Search the web and return candidate URLs with snippets. "
-        "Use web_fetch to read any result page."
+        "Search snippets are not enough for final answers; use web_fetch to read result pages."
     )
     params = [
         ToolParam(name="query", type="string", description="Search query"),

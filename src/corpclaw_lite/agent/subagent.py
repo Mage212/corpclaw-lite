@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 import uuid
 from typing import TYPE_CHECKING
@@ -30,6 +31,60 @@ logger = logging.getLogger(__name__)
 
 # Subagent timeout derives from max_wall_time_ms so it scales automatically
 # with the model/hardware speed configured in settings.yaml.
+
+_DEEP_RESEARCH_MARKERS = (
+    "deep research",
+    "deep_research",
+    "глубок",
+    "детальн",
+    "подробн",
+    "сравн",
+    "противореч",
+    "опроверг",
+    "уточн",
+    "гипотез",
+    "fact-check",
+    "factcheck",
+    "verify",
+    "cross-check",
+    "compare",
+    "contradict",
+    "hypothesis",
+)
+_URL_RE = re.compile(r"https?://\S+")
+
+
+def _research_mode_for_task(spec: SubagentSpec, task_context: str) -> str | None:
+    if spec.id != "research-agent":
+        return None
+    lowered = task_context.casefold()
+    if any(marker in lowered for marker in _DEEP_RESEARCH_MARKERS):
+        return "deep_research"
+    return "research"
+
+
+def _prepare_research_task_context(spec: SubagentSpec, task_context: str) -> str:
+    mode = _research_mode_for_task(spec, task_context)
+    if mode is None:
+        return task_context
+    return (
+        f"Research mode: {mode}\n"
+        "Use the research-specific tools and finish with research_finalize.\n\n"
+        f"{task_context}"
+    )
+
+
+def _ensure_research_sources_section(result: str) -> str:
+    lowered = result.casefold()
+    has_sources_section = "использованные источники" in lowered or "sources" in lowered
+    urls = sorted({url.rstrip(").,]") for url in _URL_RE.findall(result)})
+    if has_sources_section and urls:
+        return result
+    if urls:
+        sources = "\n".join(f"- {url}" for url in urls)
+    else:
+        sources = "- Источники не были явно указаны в ответе research-agent."
+    return result.rstrip() + "\n\n## Использованные источники\n" + sources
 
 
 class SubagentDispatcher:
@@ -166,15 +221,18 @@ class SubagentDispatcher:
 
         try:
             t0 = time.monotonic()
+            effective_task_context = _prepare_research_task_context(spec, task_context)
             result, _ = await asyncio.wait_for(
                 loop.run(
                     user,
-                    task_context,
+                    effective_task_context,
                     system_prompt=system_prompt,
                     run_id=subagent_run_id,
                 ),
                 timeout=timeout_seconds,
             )
+            if spec.id == "research-agent":
+                result = _ensure_research_sources_section(result)
             elapsed = time.monotonic() - t0
             log_event(
                 "subagent_dispatch_finished",
