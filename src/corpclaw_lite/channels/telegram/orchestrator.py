@@ -71,6 +71,7 @@ class TelegramBotOrchestrator:
         self._agent_activity_logger: AgentLogger | None = None
         self._active_user_requests: set[int] = set()
         self._active_user_requests_lock = asyncio.Lock()
+        self._started = False
 
     async def _try_start_user_request(self, telegram_id: int) -> bool:
         """Return False when the user already has an active workflow."""
@@ -309,6 +310,7 @@ class TelegramBotOrchestrator:
                 "Queue notification loop started (interval=%ds)",
                 self._settings.llm.queue.notify_interval_seconds,
             )
+        self._started = True
 
     async def run_until_shutdown(self) -> None:
         """Block until shutdown signal."""
@@ -368,7 +370,11 @@ class TelegramBotOrchestrator:
                         logger.warning("Could not stop container %s: %s", cname, e)
             except Exception as e:
                 logger.warning("Container cleanup failed: %s", e)
-        logger.info("Telegram bot stopped cleanly.")
+        if self._started:
+            logger.info("Telegram bot stopped cleanly.")
+            self._started = False
+        else:
+            logger.debug("Telegram bot cleanup completed before full startup.")
 
     async def handle_setup(self, telegram_id: int) -> str:
         """Reset and restart onboarding under the shared per-user workflow lock."""

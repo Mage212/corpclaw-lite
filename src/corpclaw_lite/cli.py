@@ -28,7 +28,9 @@ import logging
 import os
 import sys
 import threading
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NoReturn
+
+from corpclaw_lite.exceptions import StartupConfigurationError
 
 if TYPE_CHECKING:
     from corpclaw_lite.extensions.skills.base import Skill
@@ -63,6 +65,14 @@ def _require_env(name: str) -> str:
         print(f"Error: environment variable {name!r} is required but not set.", file=sys.stderr)
         sys.exit(1)
     return value
+
+
+def _exit_with_startup_warning(error: StartupConfigurationError) -> NoReturn:
+    print("WARNING: CorpClaw Lite was not started.", file=sys.stderr)
+    print(f"Reason: {error.message}", file=sys.stderr)
+    if error.hint:
+        print(f"Action: {error.hint}", file=sys.stderr)
+    sys.exit(error.exit_code)
 
 
 def _filter_main_scoped_skills(skills: list[Skill]) -> list[Skill]:
@@ -662,41 +672,44 @@ def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
 
-    if args.command == "chat":
-        cmd_chat(args.telegram_id, setup_mode=args.setup)
-    elif args.command == "telegram":
-        cmd_telegram()
-    elif args.command == "user-list":
-        cmd_user_list()
-    elif args.command == "user-create":
-        cmd_user_create(args.telegram_id, args.department, args.name)
-    elif args.command == "user-allow":
-        cmd_user_allow(args.telegram_id, args.department)
-    elif args.command == "user-deny":
-        cmd_user_deny(args.telegram_id)
-    elif args.command == "user-revoke":
-        cmd_user_revoke(args.telegram_id)
-    elif args.command == "containers":
-        cmd_containers()
-    elif args.command == "prune":
-        cmd_prune()
-    elif args.command == "skill" and args.action == "list":
-        cmd_skill_list()
-    elif args.command == "plugin" and args.action == "list":
-        cmd_plugin_list()
-    elif args.command == "generate":
-        cmd_generate(args.type, args.name)
-    elif args.command == "calibrate":
-        cmd_calibrate(
-            local_provider=args.local_provider,
-            cloud_provider=args.cloud_provider,
-            scenarios=args.scenarios,
-            max_iterations=args.max_iterations,
-            dry_run=args.dry_run,
-            reset=args.reset,
-        )
-    else:
-        parser.print_help()
+    try:
+        if args.command == "chat":
+            cmd_chat(args.telegram_id, setup_mode=args.setup)
+        elif args.command == "telegram":
+            cmd_telegram()
+        elif args.command == "user-list":
+            cmd_user_list()
+        elif args.command == "user-create":
+            cmd_user_create(args.telegram_id, args.department, args.name)
+        elif args.command == "user-allow":
+            cmd_user_allow(args.telegram_id, args.department)
+        elif args.command == "user-deny":
+            cmd_user_deny(args.telegram_id)
+        elif args.command == "user-revoke":
+            cmd_user_revoke(args.telegram_id)
+        elif args.command == "containers":
+            cmd_containers()
+        elif args.command == "prune":
+            cmd_prune()
+        elif args.command == "skill" and args.action == "list":
+            cmd_skill_list()
+        elif args.command == "plugin" and args.action == "list":
+            cmd_plugin_list()
+        elif args.command == "generate":
+            cmd_generate(args.type, args.name)
+        elif args.command == "calibrate":
+            cmd_calibrate(
+                local_provider=args.local_provider,
+                cloud_provider=args.cloud_provider,
+                scenarios=args.scenarios,
+                max_iterations=args.max_iterations,
+                dry_run=args.dry_run,
+                reset=args.reset,
+            )
+        else:
+            parser.print_help()
+    except StartupConfigurationError as e:
+        _exit_with_startup_warning(e)
 
 
 if __name__ == "__main__":
