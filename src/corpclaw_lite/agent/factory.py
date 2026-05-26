@@ -10,7 +10,7 @@ Container isolation (container.enabled=true, default):
       exec_script) are registered as IPCToolProxy — they execute INSIDE the container
     - Host-side tools (web_fetch, memory_*, read_image, send_file, normalize_excel,
       dispatch_subagent) run on the host as usual
-    - If Docker is unavailable with container.enabled=true → RuntimeError at startup
+    - If Docker is unavailable with container.enabled=true → typed startup exception
 
 Dev mode (container.enabled=false):
     - All tools run directly on the host (no isolation)
@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from corpclaw_lite.agent.loop import AgentConfig, AgentLoop
+from corpclaw_lite.exceptions import StartupConfigurationError
 from corpclaw_lite.paths import PROJECT_ROOT
 from corpclaw_lite.users.manager import UserManager
 
@@ -389,10 +390,13 @@ def build_agent_stack(
     workspace_base: Path | None = None
     if container_cfg.enabled:
         if not ContainerManager.is_docker_available():
-            raise RuntimeError(
-                "Container isolation is enabled (container.enabled=true) "
-                "but Docker daemon is not available. "
-                "Start Docker or set container.enabled=false in settings.yaml to use dev mode."
+            raise StartupConfigurationError(
+                "Container isolation is enabled (container.enabled=true), "
+                "but Docker daemon is not available.",
+                hint=(
+                    "Start Docker, or set container.enabled=false in config/settings.yaml "
+                    "for local development without isolation."
+                ),
             )
         from corpclaw_lite.security.ipc_auth import IPCAuth
         from corpclaw_lite.security.network_policy import NetworkPolicy

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 __all__ = [
     "CorpClawError",
+    "StartupConfigurationError",
     "StorageError",
     "ToolExecutionError",
     "ContainerIPCError",
@@ -10,6 +11,17 @@ __all__ = [
 
 class CorpClawError(Exception):
     """Base for all CorpClaw typed exceptions."""
+
+
+class StartupConfigurationError(RuntimeError):
+    """Raised when the app cannot start with the current local environment."""
+
+    def __init__(self, message: str, *, hint: str | None = None, exit_code: int = 1) -> None:
+        self.message = message
+        self.hint = hint
+        self.exit_code = exit_code
+        full_message = message if hint is None else f"{message} {hint}"
+        super().__init__(full_message)
 
 
 class StorageError(CorpClawError):

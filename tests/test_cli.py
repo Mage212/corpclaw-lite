@@ -261,6 +261,35 @@ def test_require_env_fail(
     assert "MISSING_ENV" in captured.err
 
 
+def test_startup_configuration_error_prints_warning(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import sys
+    from unittest.mock import patch
+
+    from corpclaw_lite.exceptions import StartupConfigurationError
+
+    startup_error = StartupConfigurationError(
+        "Container isolation is enabled (container.enabled=true), "
+        "but Docker daemon is not available.",
+        hint="Start Docker, or set container.enabled=false in config/settings.yaml.",
+    )
+
+    with (
+        patch.object(sys, "argv", ["corpclaw-lite", "telegram"]),
+        patch("corpclaw_lite.cli.cmd_telegram", side_effect=startup_error),
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        main()
+
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "WARNING: CorpClaw Lite was not started." in captured.err
+    assert "Container isolation is enabled" in captured.err
+    assert "Start Docker" in captured.err
+    assert "Traceback" not in captured.err
+
+
 @pytest.mark.parametrize(
     "argv,mock_target",
     [
