@@ -22,10 +22,10 @@ def test_tool_definition() -> None:
 
 
 def test_user_memory_key_with_telegram_id() -> None:
-    user = User(id=42, name="Test", department="default", telegram_id=12345)
-    assert user.memory_key() == "12345"
+    user = User(id=900000042, name="Test", department="default", telegram_id=12345)
+    assert user.memory_key() == "900000042"
 
 
 def test_user_memory_key_without_telegram_id() -> None:
-    user = User(id=42, name="Test", department="default")
-    assert user.memory_key() == "42"
+    user = User(id=900000042, name="Test", department="default")
+    assert user.memory_key() == "900000042"

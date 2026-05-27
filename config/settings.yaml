@@ -108,6 +108,15 @@ web:
   timeout_seconds: 20
   user_agent: "CorpClawLite/0.1 web tools"
 
+web_channel:
+  host: "127.0.0.1"
+  port: 8090
+  workspace_base: "workspaces"
+  upload_max_bytes: 20971520
+  rate_limit_per_minute: 10
+  session_ttl_hours: 12
+  cookie_name: "corpclaw_lite_session"
+
 research:
   cache_ttl_hours: 24
   normal_max_sources: 5

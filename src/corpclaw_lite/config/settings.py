@@ -21,6 +21,7 @@ __all__ = [
     "SlotAffinitySettings",
     "TelegramSettings",
     "WebSettings",
+    "WebChannelSettings",
 ]
 
 
@@ -152,6 +153,18 @@ class WebSettings(BaseModel):
     user_agent: str = "CorpClawLite/0.1 web tools"
 
 
+class WebChannelSettings(BaseModel):
+    """Settings for the browser-based user channel."""
+
+    host: str = "127.0.0.1"
+    port: int = 8090
+    workspace_base: Path = Path("workspaces")
+    upload_max_bytes: int = 20 * 1024 * 1024
+    rate_limit_per_minute: int = 10
+    session_ttl_hours: int = 12
+    cookie_name: str = "corpclaw_lite_session"
+
+
 class ResearchSettings(BaseModel):
     """Settings for research-agent runtime artifacts and budgets."""
 
@@ -219,6 +232,7 @@ class Settings(BaseSettings):
     llm: LLMSettings = LLMSettings()
     agent: AgentSettings = AgentSettings()
     web: WebSettings = WebSettings()
+    web_channel: WebChannelSettings = WebChannelSettings()
     research: ResearchSettings = ResearchSettings()
     container: ContainerSettings = ContainerSettings()
     telegram: TelegramSettings = TelegramSettings()

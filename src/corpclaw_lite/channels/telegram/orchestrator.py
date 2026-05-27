@@ -124,6 +124,11 @@ class TelegramBotOrchestrator:
             return False
         return True
 
+    async def _resolve_user_by_telegram_id(self, telegram_id: int) -> User | None:
+        """Return the canonical user row for a Telegram identity."""
+        stack, _, _, _ = self._require_started()
+        return await stack.user_manager.async_get_by_telegram_id(telegram_id)
+
     def _require_started(
         self,
     ) -> tuple[AgentStack, TelegramChannel, RateLimiter, BootstrapLoader]:
@@ -219,6 +224,7 @@ class TelegramBotOrchestrator:
             cache_reset_callback=self._mark_user_cache_reset,
             setup_handler=self.handle_setup,
             access_checker=self.check_channel_access,
+            user_resolver=self._resolve_user_by_telegram_id,
             tg_settings=tg_settings,
         )
 
@@ -382,24 +388,24 @@ class TelegramBotOrchestrator:
         if self._onboarding_engine is None:
             return "⚠️ Настройка недоступна."
 
-        if not await self._try_start_user_request(telegram_id):
+        user_manager = stack.user_manager
+        user = await user_manager.async_get_by_telegram_id(telegram_id)
+        if user is None:
+            dept = user_manager.get_whitelist_department(telegram_id)
+            user = await user_manager.async_create_user(
+                telegram_id=telegram_id,
+                department=dept,
+            )
+
+        if not await self._try_start_user_request(user.id):
             return (
                 "⏳ Предыдущая задача ещё выполняется. "
                 "Дождитесь ответа и отправьте новый запрос после завершения."
             )
 
         try:
-            user_manager = stack.user_manager
-            user = await user_manager.async_get_by_telegram_id(telegram_id)
-            if user is None:
-                dept = user_manager.get_whitelist_department(telegram_id)
-                user = await user_manager.async_create_user(
-                    telegram_id=telegram_id,
-                    department=dept,
-                )
-
-            await self._onboarding_engine.reset(telegram_id)
-            question = await self._onboarding_engine.start(telegram_id, user.department)
+            await self._onboarding_engine.reset(user.id)
+            question = await self._onboarding_engine.start(user.id, user.department)
             if question is None:
                 return "⚠️ Не удалось начать настройку. Попробуйте позже."
 
@@ -409,7 +415,7 @@ class TelegramBotOrchestrator:
             logger.info("User %d started /setup", telegram_id)
             return text
         finally:
-            await self._finish_user_request(telegram_id)
+            await self._finish_user_request(user.id)
 
     async def handle_message(
         self,
@@ -465,9 +471,9 @@ class TelegramBotOrchestrator:
         ):
             queue = agent_loop.provider.queue
             if queue is not None:
-                position = queue.get_position(str(tid))
+                position = queue.get_position(user.memory_key())
                 if position is not None:
-                    est_wait = queue.get_estimated_wait(str(tid))
+                    est_wait = queue.get_estimated_wait(user.memory_key())
                     wait_text = f" ~{int(est_wait)}с." if est_wait is not None else "."
                     await channel.send_message(
                         user,
@@ -476,9 +482,9 @@ class TelegramBotOrchestrator:
 
         # Onboarding intercept
         if self._onboarding_engine is not None and await self._onboarding_engine.needs_onboarding(
-            tid
+            user.id
         ):
-            if not await self._try_start_user_request(tid):
+            if not await self._try_start_user_request(user.id):
                 await channel.send_message(
                     user,
                     "⏳ Предыдущая задача ещё выполняется. "
@@ -486,8 +492,8 @@ class TelegramBotOrchestrator:
                 )
                 return
             try:
-                if not await self._onboarding_engine.is_in_progress(tid):
-                    question = await self._onboarding_engine.start(tid, user.department)
+                if not await self._onboarding_engine.is_in_progress(user.id):
+                    question = await self._onboarding_engine.start(user.id, user.department)
                     if question:
                         text = (
                             "👋 Добро пожаловать! Давай настроим меня под тебя "
@@ -500,7 +506,7 @@ class TelegramBotOrchestrator:
                         return
                 else:
                     next_q = await self._onboarding_engine.submit_answer(
-                        tid, message, user.department
+                        user.id, message, user.department
                     )
                     if next_q:
                         text = next_q.prompt
@@ -509,7 +515,7 @@ class TelegramBotOrchestrator:
                         await channel.send_message(user, text)
                     else:
                         user = await user_manager.async_get_by_telegram_id(tid) or user
-                        answers = await self._onboarding_engine.get_summary(tid)
+                        answers = await self._onboarding_engine.get_summary(user.id)
                         name = answers.get("preferred_name", user.name)
                         await channel.send_message(
                             user,
@@ -519,9 +525,9 @@ class TelegramBotOrchestrator:
                         )
                     return
             finally:
-                await self._finish_user_request(tid)
+                await self._finish_user_request(user.id)
 
-        if not await self._try_start_user_request(tid):
+        if not await self._try_start_user_request(user.id):
             await channel.send_message(
                 user,
                 "⏳ Предыдущая задача ещё выполняется. "
@@ -548,15 +554,15 @@ class TelegramBotOrchestrator:
         # Container isolation guard
         if container_manager is not None:
             try:
-                await container_manager.ensure_running_async(tid)
+                await container_manager.ensure_running_async(user.id)
             except ContainerManagerError as e:
-                logger.error("Container failed for user %d: %s", tid, e)
+                logger.error("Container failed for user %d: %s", user.id, e)
                 await channel.send_message(
                     user,
                     "⚠️ Изолированная рабочая среда временно недоступна.\n"
                     "Пожалуйста, повторите попытку позже или обратитесь к администратору.",
                 )
-                await self._finish_user_request(tid)
+                await self._finish_user_request(user.id)
                 return
 
         # Agent execution
@@ -564,7 +570,7 @@ class TelegramBotOrchestrator:
         try:
             base_prompt = bootstrap.get_system_prompt()
             dept_prompt = bootstrap.get_department_prompt(user.department)
-            user_prompt = bootstrap.get_user_prompt(user.telegram_id) if user.telegram_id else None
+            user_prompt = bootstrap.get_user_prompt(user.id, user.telegram_id)
             user_ctx = f"You are talking to {user.name} from the {user.department} department."
             parts_list = [p for p in [base_prompt, dept_prompt, user_prompt, user_ctx] if p]
             system_prompt: str | None = "\n\n".join(parts_list) if parts_list else None
@@ -630,7 +636,7 @@ class TelegramBotOrchestrator:
         # Structured activity log
         if self._agent_activity_logger is not None:
             self._agent_activity_logger.log_request(
-                user_id=str(tid),
+                user_id=user.memory_key(),
                 department=user.department,
                 message_preview=message[:100],
                 duration_ms=run_stats.duration_ms if run_stats is not None else 0.0,
@@ -665,7 +671,7 @@ class TelegramBotOrchestrator:
         try:
             await channel.send_message(user, reply)
         finally:
-            await self._finish_user_request(tid)
+            await self._finish_user_request(user.id)
 
     async def handle_image(
         self,
@@ -717,7 +723,7 @@ class TelegramBotOrchestrator:
                 prechecked_access=prechecked_access,
             )
             return
-        if not await self._try_start_user_request(tid):
+        if not await self._try_start_user_request(user.id):
             await channel.send_message(
                 user,
                 "⏳ Предыдущая задача ещё выполняется. "
@@ -755,7 +761,7 @@ class TelegramBotOrchestrator:
                 duration_ms=round((time.monotonic() - t0) * 1000, 1),
                 error=error,
             )
-            await self._finish_user_request(int(telegram_id))
+            await self._finish_user_request(user.id)
             raise
 
         # Persist in agent memory — non-critical, don't block user response
@@ -774,7 +780,7 @@ class TelegramBotOrchestrator:
         try:
             await channel.send_message(user, result)
         except Exception:
-            await self._finish_user_request(int(telegram_id))
+            await self._finish_user_request(user.id)
             raise
         duration_ms = (time.monotonic() - t0) * 1000
         log_event(
@@ -786,7 +792,7 @@ class TelegramBotOrchestrator:
         )
         if self._agent_activity_logger is not None:
             self._agent_activity_logger.log_request(
-                user_id=str(telegram_id),
+                user_id=user.memory_key(),
                 department=user.department,
                 message_preview=f"[image] {image_path.name}",
                 duration_ms=duration_ms,
@@ -796,7 +802,7 @@ class TelegramBotOrchestrator:
                 run_id=run_id,
                 channel="telegram",
             )
-        await self._finish_user_request(int(telegram_id))
+        await self._finish_user_request(user.id)
 
     async def send_file_callback(self, path: Path, user: User, caption: str) -> str:
         """File delivery callback for SendFileTool."""

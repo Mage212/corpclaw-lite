@@ -22,6 +22,11 @@ def _validate_boundary(resolved: Path, workspace: Path, original: str) -> None:
         raise PermissionError(f"Path escapes user workspace: {original}")
 
 
+def user_workspace_path(workspace_base: Path, user: User) -> Path:
+    """Return the host workspace path for a user."""
+    return (Path(workspace_base) / f"user_{user.workspace_key()}").resolve()
+
+
 def resolve_container_path(
     path_str: str,
     workspace_base: Path | None,
@@ -42,7 +47,6 @@ def resolve_container_path(
     if (
         workspace_base is not None
         and user is not None
-        and user.telegram_id is not None
         and (
             path_str == _CONTAINER_WS
             or path_str.startswith(_CONTAINER_WS + "/")
@@ -50,18 +54,13 @@ def resolve_container_path(
         )
     ):
         relative = path_str[len(_CONTAINER_WS) :].lstrip("/\\")
-        user_workspace = (Path(workspace_base) / f"user_{user.telegram_id}").resolve()
+        user_workspace = user_workspace_path(Path(workspace_base), user)
         result = (user_workspace / relative).resolve()
         _validate_boundary(result, user_workspace, path_str)
         return result
 
-    if (
-        not Path(path_str).is_absolute()
-        and workspace_base is not None
-        and user is not None
-        and user.telegram_id is not None
-    ):
-        user_workspace = (Path(workspace_base) / f"user_{user.telegram_id}").resolve()
+    if not Path(path_str).is_absolute() and workspace_base is not None and user is not None:
+        user_workspace = user_workspace_path(Path(workspace_base), user)
         result = (user_workspace / path_str).resolve()
         _validate_boundary(result, user_workspace, path_str)
         return result

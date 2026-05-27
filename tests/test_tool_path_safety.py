@@ -86,7 +86,7 @@ def _all_tools_with_path_param() -> list[Tool]:
 
 def _make_workspace(tmp: Path) -> Path:
     """Create a test workspace with sample files including Cyrillic names."""
-    ws = tmp / "workspaces" / "user_12345"
+    ws = tmp / "workspaces" / "user_1"
     ws.mkdir(parents=True, exist_ok=True)
 
     # Normal files
@@ -124,7 +124,7 @@ class TestResolveContainerPath:
         ws_base = tmp_path / "workspaces"
 
         resolved = resolve_container_path("test.txt", ws_base, _TEST_USER)
-        assert resolved == (ws_base / "user_12345" / "test.txt").resolve()
+        assert resolved == (ws_base / "user_1" / "test.txt").resolve()
         assert resolved.exists()
 
     def test_cyrillic_filename(self, tmp_path: Path) -> None:
@@ -162,7 +162,7 @@ class TestResolveContainerPath:
         _make_workspace(tmp_path)
 
         resolved = resolve_container_path("/workspace/test.txt", ws_base, _TEST_USER)
-        assert resolved == (ws_base / "user_12345" / "test.txt").resolve()
+        assert resolved == (ws_base / "user_1" / "test.txt").resolve()
         assert resolved.exists()
 
     def test_container_path_cyrillic(self, tmp_path: Path) -> None:

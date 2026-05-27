@@ -123,7 +123,7 @@ async def test_tool_marker_saved_in_memory(tmp_path):
     ]
 
     mem = SQLiteMemory(str(tmp_path / "marker_test.db"))
-    user = User(id=42, name="Marker Test", department="engineering")
+    user = User(id=900000042, name="Marker Test", department="engineering")
 
     loop = AgentLoop(
         AgentConfig(
