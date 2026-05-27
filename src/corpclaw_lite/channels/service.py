@@ -9,6 +9,7 @@ from pathlib import Path
 from corpclaw_lite.agent.loop import RunStats
 from corpclaw_lite.config.bootstrap import BootstrapLoader
 from corpclaw_lite.container.manager import ContainerManagerError
+from corpclaw_lite.exceptions import LLMBackendUnavailableError
 from corpclaw_lite.extensions.tools.builtin._path_utils import user_workspace_path
 from corpclaw_lite.logging.agent_logger import AgentLogger
 from corpclaw_lite.paths import PROJECT_ROOT
@@ -20,7 +21,45 @@ __all__ = [
     "AgentRequestCallbacks",
     "AgentRequestResult",
     "AgentRequestService",
+    "is_llm_transport_error",
 ]
+
+_LLM_TRANSPORT_ERROR_NAMES = {
+    "APIConnectionError",
+    "APITimeoutError",
+    "ConnectError",
+    "ConnectTimeout",
+    "NetworkError",
+    "PoolTimeout",
+    "ReadError",
+    "ReadTimeout",
+    "RemoteProtocolError",
+    "TimeoutException",
+    "WriteError",
+    "WriteTimeout",
+}
+_LLM_TRANSPORT_MODULE_PREFIXES = ("openai", "httpx", "httpcore", "anyio")
+
+
+def is_llm_transport_error(exc: BaseException) -> bool:
+    """Return True for expected network/transport failures from LLM clients."""
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        cls = type(current)
+        module = cls.__module__
+        name = cls.__name__
+        text = str(current).lower()
+        is_transport_module = module.startswith(_LLM_TRANSPORT_MODULE_PREFIXES)
+        if is_transport_module and (
+            name in _LLM_TRANSPORT_ERROR_NAMES
+            or "connection error" in text
+            or "all connection attempts failed" in text
+        ):
+            return True
+        current = current.__cause__ if current.__cause__ is not None else current.__context__
+    return False
 
 
 @dataclass(slots=True)
@@ -50,6 +89,8 @@ class AgentRequestService:
         bootstrap: BootstrapLoader | None = None,
         workspace_base: Path | None = None,
         activity_logger: AgentLogger | None = None,
+        llm_provider_name: str | None = None,
+        llm_base_url: str | None = None,
     ) -> None:
         from corpclaw_lite.agent.factory import AgentStack
 
@@ -59,6 +100,8 @@ class AgentRequestService:
         self._bootstrap = bootstrap or BootstrapLoader(PROJECT_ROOT / "config" / "bootstrap")
         self._workspace_base = (workspace_base or PROJECT_ROOT / "workspaces").resolve()
         self._activity_logger = activity_logger
+        self._llm_provider_name = llm_provider_name
+        self._llm_base_url = llm_base_url
         self._active_user_requests: set[int] = set()
         self._active_user_requests_lock = asyncio.Lock()
 
@@ -145,6 +188,26 @@ class AgentRequestService:
                 few_shots=stack.few_shots,
                 channel=channel,
             )
+        except Exception as e:
+            if is_llm_transport_error(e):
+                from corpclaw_lite.logging import health
+
+                health.increment("llm_backend_unavailable")
+                logger.warning(
+                    "LLM backend unavailable: channel=%s user_id=%s provider=%s base_url=%s "
+                    "error=%s",
+                    channel,
+                    user.memory_key(),
+                    self._llm_provider_name or "(unknown)",
+                    self._llm_base_url or "(unknown)",
+                    e,
+                )
+                raise LLMBackendUnavailableError(
+                    provider_name=self._llm_provider_name,
+                    base_url=self._llm_base_url,
+                    cause=e,
+                ) from e
+            raise
         finally:
             if run_stats is not None and self._activity_logger is not None:
                 self._activity_logger.log_request(
