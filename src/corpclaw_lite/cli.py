@@ -49,8 +49,16 @@ __all__ = [
     "cmd_user_allow",
     "cmd_user_create",
     "cmd_user_deny",
+    "cmd_user_link_telegram",
+    "cmd_user_link_web",
     "cmd_user_list",
+    "cmd_user_migrate_canonical_ids",
     "cmd_user_revoke",
+    "cmd_web",
+    "cmd_web_user_create",
+    "cmd_web_user_link",
+    "cmd_web_user_merge",
+    "cmd_web_user_password",
     "main",
 ]
 
@@ -104,13 +112,68 @@ def _build_parser() -> argparse.ArgumentParser:
     # telegram
     sub.add_parser("telegram", help="Start the Telegram bot (polling)")
 
+    # web
+    sub.add_parser("web", help="Start the browser-based web channel")
+    web_create_p = sub.add_parser("web-user-create", help="Create a local web user")
+    web_create_p.add_argument("-u", "--username", required=True, help="Local username")
+    web_create_p.add_argument("-p", "--password", required=True, help="Initial password")
+    web_create_p.add_argument("-d", "--department", required=True, help="Department slug")
+    web_create_p.add_argument("-n", "--name", default="", help="Display name")
+    web_create_p.add_argument(
+        "-t",
+        "--telegram-id",
+        type=int,
+        default=None,
+        help="Attach this web login to an existing Telegram user instead of creating web-only",
+    )
+    web_create_p.add_argument("--admin", action="store_true", help="Grant web admin flag")
+
+    web_link_p = sub.add_parser("web-user-link", help="Attach a web login to a Telegram user")
+    web_link_p.add_argument("-t", "--telegram-id", type=int, required=True, help="Telegram user ID")
+    web_link_p.add_argument("-u", "--username", required=True, help="Local username")
+    web_link_p.add_argument("-p", "--password", required=True, help="Initial password")
+    web_link_p.add_argument("--admin", action="store_true", help="Grant web admin flag")
+
+    web_pass_p = sub.add_parser("web-user-password", help="Change a local web user password")
+    web_pass_p.add_argument("-u", "--username", required=True, help="Local username")
+    web_pass_p.add_argument("-p", "--password", required=True, help="New password")
+
+    web_merge_p = sub.add_parser("web-user-merge", help="Merge a duplicate web user into another")
+    web_merge_p.add_argument("--source-user-id", type=int, required=True, help="Duplicate user ID")
+    web_merge_p.add_argument("--target-user-id", type=int, required=True, help="Canonical user ID")
+    web_merge_p.add_argument(
+        "--skip-files",
+        action="store_true",
+        help="Do not move files from the source workspace",
+    )
+    web_merge_p.add_argument(
+        "--skip-memory",
+        action="store_true",
+        help="Do not move source memory rows",
+    )
+
     # user
     sub.add_parser("user-list", help="List all registered users")
 
     create_p = sub.add_parser("user-create", help="Create a new user")
-    create_p.add_argument("-t", "--telegram-id", type=int, required=True, help="Telegram user ID")
+    create_p.add_argument("-t", "--telegram-id", type=int, default=None, help="Telegram user ID")
+    create_p.add_argument("-u", "--username", default=None, help="Local web username")
+    create_p.add_argument("-p", "--password", default=None, help="Initial web password")
     create_p.add_argument("-d", "--department", required=True, help="Department slug")
     create_p.add_argument("-n", "--name", default="", help="Display name")
+    create_p.add_argument("--admin", action="store_true", help="Grant web admin flag")
+
+    link_tg_p = sub.add_parser("user-link-telegram", help="Attach Telegram identity to user")
+    link_tg_p.add_argument("--user-id", type=int, required=True, help="Canonical user ID")
+    link_tg_p.add_argument("-t", "--telegram-id", type=int, required=True, help="Telegram user ID")
+
+    link_web_p = sub.add_parser("user-link-web", help="Attach web login to user")
+    link_web_p.add_argument("--user-id", type=int, required=True, help="Canonical user ID")
+    link_web_p.add_argument("-u", "--username", required=True, help="Local username")
+    link_web_p.add_argument("-p", "--password", required=True, help="Initial password")
+    link_web_p.add_argument("--admin", action="store_true", help="Grant web admin flag")
+
+    sub.add_parser("user-migrate-canonical-ids", help="Move legacy data to users.id keys")
 
     allow_p = sub.add_parser("user-allow", help="Add telegram_id to bot whitelist")
     allow_p.add_argument("-t", "--telegram-id", type=int, required=True, help="Telegram user ID")
@@ -239,8 +302,8 @@ def cmd_chat(telegram_id: int, *, setup_mode: bool = False) -> None:
             )
             return
         print(f"[INFO] Вошёл как: {user.name} (department={user.department})")
-        if _container_manager and user.telegram_id is not None:
-            await _container_manager.ensure_running_async(user.telegram_id)
+        if _container_manager is not None:
+            await _container_manager.ensure_running_async(user.id)
 
         # ── Onboarding ─────────────────────────────────────────────────────────────
         from corpclaw_lite.onboarding.engine import OnboardingEngine
@@ -260,15 +323,15 @@ def cmd_chat(telegram_id: int, *, setup_mode: bool = False) -> None:
             onboarding_engine = OnboardingEngine(onboarding_storage, onboarding_finalizer)
 
         run_onboarding = onboarding_engine is not None and (
-            setup_mode or await onboarding_engine.needs_onboarding(telegram_id)
+            setup_mode or await onboarding_engine.needs_onboarding(user.id)
         )
         if run_onboarding:
             assert onboarding_engine is not None  # guaranteed by run_onboarding guard
             if setup_mode:
-                await onboarding_engine.reset(telegram_id)
+                await onboarding_engine.reset(user.id)
             print("\n🎯 Давай настроим общение!")
             print("   (Напиши 'skip' чтобы пропустить вопрос)\n")
-            question = await onboarding_engine.start(telegram_id, user.department)
+            question = await onboarding_engine.start(user.id, user.department)
             while question is not None:
                 prompt_text = question.prompt
                 if question.hint:
@@ -283,9 +346,7 @@ def cmd_chat(telegram_id: int, *, setup_mode: bool = False) -> None:
                     return
                 if answer.strip().lower() == "skip" and question.skippable:
                     answer = ""
-                question = await onboarding_engine.submit_answer(
-                    telegram_id, answer, user.department
-                )
+                question = await onboarding_engine.submit_answer(user.id, answer, user.department)
             # Refresh user from DB (name may have changed)
             user = standalone_manager.get_by_telegram_id(telegram_id) or user
             print(f"\n✅ Настройка завершена, {user.name}!\n")
@@ -293,7 +354,7 @@ def cmd_chat(telegram_id: int, *, setup_mode: bool = False) -> None:
         # Per-user prompt (static, set once)
         from corpclaw_lite.agent.prompt import build_skill_block
 
-        user_prompt = bootstrap.get_user_prompt(telegram_id)
+        user_prompt = bootstrap.get_user_prompt(user.id, user.telegram_id)
         if user_prompt:
             system_prompt = (system_prompt or "") + "\n\n" + user_prompt
 
@@ -383,7 +444,7 @@ def cmd_chat(telegram_id: int, *, setup_mode: bool = False) -> None:
                         _log = _settings.logging
                         _activity_logger = AgentLogger(log_dir=PROJECT_ROOT / _log.log_dir)
                     _activity_logger.log_request(
-                        user_id=str(telegram_id),
+                        user_id=user.memory_key(),
                         department=user.department,
                         message_preview=msg[:100],
                         duration_ms=run_stats.duration_ms,
@@ -420,9 +481,9 @@ def cmd_chat(telegram_id: int, *, setup_mode: bool = False) -> None:
                     await mcp_manager.disconnect_all()
                 except Exception as e:
                     logger.warning("MCP disconnect failed: %s", e)
-            if _container_manager is not None and user.telegram_id is not None:
+            if _container_manager is not None:
                 try:
-                    await _container_manager.stop_async(user.telegram_id)
+                    await _container_manager.stop_async(user.id)
                 except Exception as e:
                     logger.warning("Container stop failed: %s", e)
             logger.info("CLI chat shut down cleanly for user %d.", telegram_id)
@@ -467,6 +528,113 @@ def cmd_telegram() -> None:
     asyncio.run(run_telegram_bot(token))
 
 
+def cmd_web() -> None:
+    """Start the browser-based web channel."""
+    from corpclaw_lite.config.loader import load_settings
+    from corpclaw_lite.paths import PROJECT_ROOT
+
+    settings = load_settings(PROJECT_ROOT / "config" / "settings.yaml")
+    if settings.container.enabled:
+        _require_env("CORPCLAW_IPC_SECRET")
+
+    from corpclaw_lite.channels.web.runner import run_web_channel
+
+    asyncio.run(run_web_channel())
+
+
+def cmd_web_user_create(
+    username: str,
+    password: str,
+    department: str,
+    name: str,
+    *,
+    is_admin: bool,
+    telegram_id: int | None = None,
+) -> None:
+    """Create a local web user."""
+    from corpclaw_lite.users.manager import UserManager
+
+    manager = UserManager()
+    user = manager.create_web_user(
+        username=username,
+        password=password,
+        department=department,
+        name=name,
+        is_admin=is_admin,
+        telegram_id=telegram_id,
+    )
+    if telegram_id is not None:
+        print(
+            f"Linked web login {user.username!r} to user #{user.id} "
+            f"(telegram_id={user.telegram_id}, workspace=user_{user.workspace_key()})"
+        )
+    else:
+        print(f"Created web-only user #{user.id}: {user.username} ({user.department})")
+
+
+def cmd_web_user_link(
+    telegram_id: int,
+    username: str,
+    password: str,
+    *,
+    is_admin: bool,
+) -> None:
+    """Attach a local web login to an existing Telegram user."""
+    from corpclaw_lite.users.manager import UserManager
+
+    manager = UserManager()
+    user = manager.link_web_user(
+        telegram_id=telegram_id,
+        username=username,
+        password=password,
+        is_admin=is_admin,
+    )
+    print(
+        f"Linked web login {user.username!r} to user #{user.id} "
+        f"(telegram_id={user.telegram_id}, workspace=user_{user.workspace_key()})"
+    )
+
+
+def cmd_web_user_merge(
+    source_user_id: int,
+    target_user_id: int,
+    *,
+    move_files: bool = True,
+    move_memory: bool = True,
+) -> None:
+    """Merge a duplicate web user into a canonical user."""
+    from corpclaw_lite.paths import DATA_DIR, PROJECT_ROOT
+    from corpclaw_lite.users.manager import UserManager
+
+    manager = UserManager()
+    result = manager.merge_web_user(
+        source_user_id=source_user_id,
+        target_user_id=target_user_id,
+        workspace_base=(PROJECT_ROOT / "workspaces") if move_files else None,
+        memory_db_path=(DATA_DIR / "memory.db") if move_memory else None,
+    )
+    print(
+        "Merged web user "
+        f"#{result['source_user_id']} into #{result['target_user_id']} "
+        f"(workspace=user_{result['target_workspace_key']}, "
+        f"files={result['moved_workspace_items']}, "
+        f"messages={result['moved_messages']}, facts={result['moved_facts']}). "
+        "Source user disabled."
+    )
+
+
+def cmd_web_user_password(username: str, password: str) -> None:
+    """Change a local web user's password."""
+    from corpclaw_lite.users.manager import UserManager
+
+    manager = UserManager()
+    changed = manager.set_web_password(username, password)
+    if changed:
+        print(f"✅ Password updated for {username}")
+    else:
+        print(f"⚠️  Web user {username!r} not found")
+
+
 def cmd_user_list() -> None:
     """Print all registered users from the SQLite DB."""
     from corpclaw_lite.users.manager import UserManager
@@ -476,19 +644,95 @@ def cmd_user_list() -> None:
     if not users:
         print("No users registered.")
         return
-    print(f"{'ID':<6} {'Telegram ID':<14} {'Name':<20} {'Department'}")
-    print("-" * 56)
+    print(
+        f"{'ID':<6} {'Telegram ID':<14} {'Username':<18} {'Name':<20} {'Department':<14} {'Status'}"
+    )
+    print("-" * 92)
     for u in users:
-        print(f"{u.id:<6} {str(u.telegram_id):<14} {u.name:<20} {u.department}")
+        status = "disabled" if u.disabled else "active"
+        print(
+            f"{u.id:<6} {str(u.telegram_id):<14} {str(u.username or ''):<18} "
+            f"{u.name:<20} {u.department:<14} {status}"
+        )
 
 
-def cmd_user_create(telegram_id: int, department: str, name: str) -> None:
+def cmd_user_create(
+    telegram_id: int | None,
+    department: str,
+    name: str,
+    username: str | None = None,
+    password: str | None = None,
+    *,
+    is_admin: bool = False,
+) -> None:
     """Register a new user."""
     from corpclaw_lite.users.manager import UserManager
 
+    if telegram_id is None and username is None:
+        raise ValueError("user-create requires --telegram-id and/or --username")
+
     manager = UserManager()
-    user = manager.create_user(telegram_id=telegram_id, department=department, name=name)
-    print(f"Created user #{user.id}: {user.name} ({user.department})")
+    user = manager.create_user(
+        telegram_id=telegram_id,
+        username=username,
+        password=password,
+        department=department,
+        name=name,
+        is_admin=is_admin,
+    )
+    print(
+        f"Created user #{user.id}: {user.name} ({user.department}) "
+        f"telegram_id={user.telegram_id} username={user.username}"
+    )
+
+
+def cmd_user_link_telegram(user_id: int, telegram_id: int) -> None:
+    """Attach a Telegram identity to a canonical user."""
+    from corpclaw_lite.users.manager import UserManager
+
+    manager = UserManager()
+    user = manager.link_telegram_user(user_id=user_id, telegram_id=telegram_id)
+    print(f"Linked telegram_id={telegram_id} to user #{user.id} ({user.name})")
+
+
+def cmd_user_link_web(
+    user_id: int,
+    username: str,
+    password: str,
+    *,
+    is_admin: bool = False,
+) -> None:
+    """Attach a web login to a canonical user."""
+    from corpclaw_lite.users.manager import UserManager
+
+    manager = UserManager()
+    user = manager.link_web_login(
+        user_id=user_id,
+        username=username,
+        password=password,
+        is_admin=is_admin,
+    )
+    print(f"Linked web login {user.username!r} to user #{user.id} ({user.name})")
+
+
+def cmd_user_migrate_canonical_ids() -> None:
+    """Move legacy telegram_id-keyed data to canonical users.id keys."""
+    from corpclaw_lite.paths import DATA_DIR, PROJECT_ROOT
+    from corpclaw_lite.users.manager import UserManager
+
+    manager = UserManager()
+    result = manager.migrate_canonical_ids(
+        workspace_base=PROJECT_ROOT / "workspaces",
+        memory_db_path=DATA_DIR / "memory.db",
+        bootstrap_users_dir=PROJECT_ROOT / "config" / "bootstrap" / "users",
+    )
+    print(
+        "Migrated canonical user IDs: "
+        f"users={result['users']}, workspace_items={result['workspace_items']}, "
+        f"messages={result['messages']}, facts={result['facts']}, "
+        f"onboarding_states={result['onboarding_states']}, "
+        f"bootstrap_files={result['bootstrap_files']}"
+    )
 
 
 def cmd_user_allow(telegram_id: int, department: str) -> None:
@@ -677,10 +921,55 @@ def main() -> None:
             cmd_chat(args.telegram_id, setup_mode=args.setup)
         elif args.command == "telegram":
             cmd_telegram()
+        elif args.command == "web":
+            cmd_web()
+        elif args.command == "web-user-create":
+            cmd_web_user_create(
+                username=args.username,
+                password=args.password,
+                department=args.department,
+                name=args.name,
+                is_admin=args.admin,
+                telegram_id=args.telegram_id,
+            )
+        elif args.command == "web-user-link":
+            cmd_web_user_link(
+                telegram_id=args.telegram_id,
+                username=args.username,
+                password=args.password,
+                is_admin=args.admin,
+            )
+        elif args.command == "web-user-password":
+            cmd_web_user_password(args.username, args.password)
+        elif args.command == "web-user-merge":
+            cmd_web_user_merge(
+                source_user_id=args.source_user_id,
+                target_user_id=args.target_user_id,
+                move_files=not args.skip_files,
+                move_memory=not args.skip_memory,
+            )
         elif args.command == "user-list":
             cmd_user_list()
         elif args.command == "user-create":
-            cmd_user_create(args.telegram_id, args.department, args.name)
+            cmd_user_create(
+                args.telegram_id,
+                args.department,
+                args.name,
+                username=args.username,
+                password=args.password,
+                is_admin=args.admin,
+            )
+        elif args.command == "user-link-telegram":
+            cmd_user_link_telegram(args.user_id, args.telegram_id)
+        elif args.command == "user-link-web":
+            cmd_user_link_web(
+                args.user_id,
+                args.username,
+                args.password,
+                is_admin=args.admin,
+            )
+        elif args.command == "user-migrate-canonical-ids":
+            cmd_user_migrate_canonical_ids()
         elif args.command == "user-allow":
             cmd_user_allow(args.telegram_id, args.department)
         elif args.command == "user-deny":

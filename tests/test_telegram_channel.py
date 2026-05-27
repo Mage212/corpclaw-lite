@@ -129,10 +129,10 @@ class TestTelegramChannel:
     @pytest.mark.asyncio
     async def test_get_user_workspace(self, channel: TelegramChannel, tmp_path: Path) -> None:
         channel._workspace_base = tmp_path
-        user = User(id="999", telegram_id=999, department="it", name="Test User")
+        user = User(id=900000042, telegram_id=999, department="it", name="Test User")
 
         ws = channel.get_user_workspace(user)
-        assert ws.name == "user_999"
+        assert ws.name == "user_900000042"
         assert ws.exists()
         assert ws.is_dir()
 

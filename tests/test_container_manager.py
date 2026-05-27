@@ -263,7 +263,7 @@ async def test_prune_idle_with_ipc_tracking(manager) -> None:
     manager._ipc = mock_ipc
 
     c = _make_mock_container(
-        name="corpclaw_agent_42",
+        name="corpclaw_agent_900000042",
         status="running",
         started_at="2020-01-01T00:00:00Z",  # old container...
     )

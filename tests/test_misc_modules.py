@@ -168,7 +168,7 @@ def test_resolve_container_path_workspace_prefix(tmp_path: Path) -> None:
 
     user = User(id=1, name="test", department="hr", telegram_id=12345)
     result = resolve_container_path("/workspace/file.txt", tmp_path, user)
-    assert "user_12345" in str(result)
+    assert "user_1" in str(result)
     assert "file.txt" in str(result)
 
 
@@ -177,7 +177,7 @@ def test_resolve_container_path_relative(tmp_path: Path) -> None:
 
     user = User(id=1, name="test", department="hr", telegram_id=12345)
     result = resolve_container_path("report.xlsx", tmp_path, user)
-    assert "user_12345" in str(result)
+    assert "user_1" in str(result)
     assert "report.xlsx" in str(result)
 
 

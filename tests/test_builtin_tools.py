@@ -133,7 +133,7 @@ async def test_registry_execute_passes_user_kwarg(monkeypatch: pytest.MonkeyPatc
     r = ToolRegistry()
     r.register(UserCapturingTool())
 
-    user = User(id=42, name="Test", department="qa")
+    user = User(id=900000042, name="Test", department="qa")
     result = await r.execute("capture_user", {}, user=user, run_id="run-tool")
 
     assert result == "ok"

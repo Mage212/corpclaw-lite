@@ -75,7 +75,7 @@ class ResearchRuntime:
 
     def run_dir(self, user: User, run_id: str | None) -> Path:
         self.cleanup_user(user)
-        user_key = str(user.telegram_id or user.id)
+        user_key = user.workspace_key()
         safe_run_id = _SAFE_ID_RE.sub("_", run_id or "unknown")[:80] or "unknown"
         path = self._workspace_base / f"user_{user_key}" / ".research" / safe_run_id
         path.mkdir(parents=True, exist_ok=True)
@@ -85,7 +85,7 @@ class ResearchRuntime:
     def cleanup_user(self, user: User) -> None:
         ttl_seconds = max(1, self._settings.cache_ttl_hours) * 3600
         cutoff = time.time() - ttl_seconds
-        user_key = str(user.telegram_id or user.id)
+        user_key = user.workspace_key()
         root = self._workspace_base / f"user_{user_key}" / ".research"
         if not root.exists() or not root.is_dir():
             return

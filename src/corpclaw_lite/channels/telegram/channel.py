@@ -74,6 +74,7 @@ class TelegramChannel(Channel):
         cache_reset_callback: Callable[[str], Awaitable[None]] | None = None,
         setup_handler: Callable[[int], Awaitable[str]] | None = None,
         access_checker: Callable[[int, str], Awaitable[bool]] | None = None,
+        user_resolver: Callable[[int], Awaitable[User | None]] | None = None,
         tg_settings: TelegramSettings | None = None,
     ) -> None:
         """
@@ -105,6 +106,7 @@ class TelegramChannel(Channel):
         self._cache_reset_callback = cache_reset_callback
         self._setup_handler = setup_handler
         self._access_checker = access_checker
+        self._user_resolver = user_resolver
         self._tg_settings = tg_settings
 
         # Approval system: message_id → (Future[bool], expected_telegram_user_id)
@@ -133,9 +135,21 @@ class TelegramChannel(Channel):
 
     def get_user_workspace(self, user: User) -> Path:
         """Return per-user workspace directory, creating it if needed."""
-        ws = self._workspace_base / f"user_{user.telegram_id}"
+        ws = self._workspace_base / f"user_{user.workspace_key()}"
         ws.mkdir(parents=True, exist_ok=True)
         return ws
+
+    async def _resolve_user(self, telegram_id: int) -> User:
+        if self._user_resolver is not None:
+            user = await self._user_resolver(telegram_id)
+            if user is not None:
+                return user
+        return User(
+            id=telegram_id,
+            name=str(telegram_id),
+            telegram_id=telegram_id,
+            department="default",
+        )
 
     async def _check_access(self, update: Update, action: str) -> bool:
         """Run channel-level access preflight before side effects."""
@@ -544,8 +558,9 @@ class TelegramChannel(Channel):
             await update.effective_chat.send_message("⚠️ Настройка недоступна.")
             return
         tid = update.effective_user.id
-        await self._onboarding_engine.reset(tid)
-        question = await self._onboarding_engine.start(tid, "default")
+        user = await self._resolve_user(tid)
+        await self._onboarding_engine.reset(user.id)
+        question = await self._onboarding_engine.start(user.id, user.department)
         if question:
             text = f"🔄 Перенастройка! Предыдущие настройки будут обновлены.\n\n{question.prompt}"
             if question.hint:
@@ -577,10 +592,11 @@ class TelegramChannel(Channel):
         if not await self._check_access(update, "new"):
             return
         tid = update.effective_user.id
+        user = await self._resolve_user(tid)
         if self._memory:
-            await self._memory.clear(str(tid))
+            await self._memory.clear(user.memory_key())
         if self._cache_reset_callback is not None:
-            await self._cache_reset_callback(str(tid))
+            await self._cache_reset_callback(user.memory_key())
         await update.effective_chat.send_message("🔄 Сессия сброшена. Можете начать заново.")
         logger.info("User %d reset session", tid)
 
@@ -593,9 +609,8 @@ class TelegramChannel(Channel):
 
         from corpclaw_lite.channels.telegram.file_manager import DeleteBrowserHandler
 
-        tid = update.effective_user.id
-        temp_user = User(id=0, name=str(tid), telegram_id=tid, department="default")
-        workspace = self.get_user_workspace(temp_user)
+        user = await self._resolve_user(update.effective_user.id)
+        workspace = self.get_user_workspace(user)
 
         handler = DeleteBrowserHandler(workspace=workspace)
         # Store in context.user_data for thread safety
@@ -709,10 +724,8 @@ class TelegramChannel(Channel):
             return
 
         # Resolve workspace
-        temp_user = User(
-            id=0, name=f"user_{telegram_id}", telegram_id=telegram_id, department="default"
-        )
-        workspace = self.get_user_workspace(temp_user).resolve()
+        user = await self._resolve_user(telegram_id)
+        workspace = self.get_user_workspace(user).resolve()
         target_path = (workspace / safe_name).resolve()
 
         if not target_path.is_relative_to(workspace):

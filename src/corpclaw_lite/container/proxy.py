@@ -76,7 +76,7 @@ class IPCToolProxy(Tool):
         """
         # Extract user injected by registry — not passed to the container
         user: User | None = kwargs.pop("user", None)
-        user_id: int = int(user.telegram_id) if user and user.telegram_id else 0
+        user_id: int = int(user.id) if user else 0
 
         if user_id == 0:
             raise ContainerIPCError(0, "Cannot dispatch to container — user ID unknown")

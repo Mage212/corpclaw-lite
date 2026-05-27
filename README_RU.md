@@ -85,10 +85,10 @@ container:
 
 ```
 workspaces/
-├── user_278278319/     # Данные пользователя (Telegram ID)
+├── user_1/             # Данные пользователя (users.id)
 │   ├── отчёт.xlsx
 │   └── скрипт.py
-├── user_42/
+├── user_900000042/     # Тестовый пользователь
 └── user_9001/
 
 data/
@@ -220,6 +220,39 @@ servers:
   - name: filesystem
     command: ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/workspace"]
 ```
+
+---
+
+## Веб-интерфейс
+
+Веб-канал даёт тот же агентный backend, что Telegram/CLI, но через браузер:
+
+- локальные аккаунты с паролем и HttpOnly session cookie;
+- личный workspace пользователя (`workspaces/user_<users.id>`) общий для Telegram и Web;
+- файловый диспетчер: список, загрузка, скачивание, создание папок, удаление с подтверждением;
+- чат с режимами `execute` и `chat`;
+- WebSocket-статусы выполнения и подтверждения опасных действий.
+
+### Запуск
+
+```bash
+uv run corpclaw-lite web-user-link -t 278278319 -u alice -p '<password>'
+uv run corpclaw-lite web
+```
+
+Если пользователь уже работает через Telegram, используйте `web-user-link`: тогда веб-вход
+получит тот же профиль, память и рабочее пространство по внутреннему `users.id`.
+`web-user-create` оставлен только для явных web-only аккаунтов без Telegram. Для исправления
+случайно созданного дубля есть `web-user-merge --source-user-id <duplicate> --target-user-id
+<canonical>`. Для переноса старых данных из `user_<telegram_id>` в `user_<users.id>` используйте
+`uv run corpclaw-lite user-migrate-canonical-ids`.
+
+По умолчанию сервер слушает `http://127.0.0.1:8090`. Настройки находятся в
+`config/settings.yaml` → `web_channel`.
+
+> Если `container.enabled=true`, для веб-канала также нужен `CORPCLAW_IPC_SECRET`, как и для
+> Telegram. Файловые инструменты агента выполняются в контейнере, а операции веб-диспетчера
+> дополнительно проверяют границы личного workspace на host-side.
 
 ---
 

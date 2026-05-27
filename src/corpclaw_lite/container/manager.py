@@ -95,6 +95,12 @@ class ContainerManager:
         ws.mkdir(parents=True, exist_ok=True)
         return ws
 
+    def get_workspace_by_key(self, workspace_key: str) -> Path:
+        """Return the host-side workspace path for a stable channel user key."""
+        ws = self._workspace_base / f"user_{workspace_key}"
+        ws.mkdir(parents=True, exist_ok=True)
+        return ws
+
     def is_available(self) -> bool:
         """Check if docker SDK is available and daemon is reachable."""
         if not self._client:

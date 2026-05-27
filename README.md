@@ -7,7 +7,7 @@ A corporate AI agent for on-premise environments — a Telegram bot that execute
 ## Architecture
 
 ```
-User → Channel (Telegram / CLI) → AgentLoop (ReAct)
+User → Channel (Web / Telegram / CLI) → AgentLoop (ReAct)
                                       │
                                       ▼
                               LLM Router ──→ Ollama / vLLM / Anthropic
@@ -51,6 +51,7 @@ cp .env.example .env
 ```bash
 uv run corpclaw-lite chat       # Interactive CLI (dev mode)
 uv run corpclaw-lite telegram   # Start Telegram bot
+uv run corpclaw-lite web        # Start browser UI
 ```
 
 ## Features
@@ -66,8 +67,8 @@ uv run corpclaw-lite telegram   # Start Telegram bot
 | ToolGuard | 20+ YAML security rules with LLM-based Smart Approvals |
 | 4 Skills / Plugins / 5 Subagents | Markdown skills with scope filtering, subprocess plugins, isolated subagents |
 | TF-IDF Matching | Bilingual (RU+EN) semantic skill selection |
-| Interactive Telegram Bot | File manager, progress indicators, approval buttons, rate limiting |
-| Workspace Isolation | Per-user data dirs, backup-friendly, separate from app code |
+| Web + Telegram Channels | Browser UI, Telegram bot, file manager, progress, approvals, rate limiting |
+| Workspace Isolation | Unified per-human workspace across linked Telegram and web logins |
 | Auto-Calibration | Adapt prompts for specific local models |
 | RBAC | 10 departments with per-department permissions |
 | Closed-Loop Ready | Local LLMs, no internet required, all data stored locally |

@@ -12,6 +12,22 @@ llama-server.
 
 ### Added
 
+#### Browser web channel
+- Добавлен веб-канал `uv run corpclaw-lite web` на `aiohttp`: локальный login, HttpOnly session
+  cookie, WebSocket-чат, статусы выполнения, approvals и минимальный server-rendered UI.
+- Добавлены локальные веб-аккаунты в `UserManager`: `web-user-create`, `web-user-password`,
+  PBKDF2-хэширование пароля и SQLite-сессии с CSRF token.
+- Добавлена привязка web-логина к существующему Telegram-профилю: `web-user-link`,
+  `web-user-create --telegram-id` и безопасное слияние дублей через `web-user-merge`, чтобы
+  веб-канал использовал ту же память и workspace.
+- Внутренний ключ пользователя унифицирован на `users.id`: контейнеры, workspace, memory,
+  onboarding и user bootstrap больше не используют `telegram_id` как технический идентификатор.
+  Добавлена миграция `user-migrate-canonical-ids` для старых данных.
+- Добавлен личный файловый веб-диспетчер: list/upload/download/delete/mkdir с проверкой границ
+  workspace, лимитом размера и переиспользованием правил безопасных расширений.
+- Вынесен `AgentRequestService` для channel-neutral запуска agent workflow: сборка prompt,
+  skill matching, container preflight, approval callback и structured activity logging.
+
 #### Host-side web search
 - Добавлен инструмент `web_search` через `ddgs` с явным backend DuckDuckGo, лимитами
   конкурентности и безопасным контрактом `query -> URL/snippet`.

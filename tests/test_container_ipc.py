@@ -63,7 +63,7 @@ def test_from_env() -> None:
 
 
 def test_container_name() -> None:
-    assert ContainerIPC.container_name(42) == "corpclaw_agent_42"
+    assert ContainerIPC.container_name(900000042) == "corpclaw_agent_900000042"
     assert ContainerIPC.container_name(0) == "corpclaw_agent_0"
 
 
@@ -207,9 +207,9 @@ async def test_get_last_used_after_call(ipc, auth) -> None:
     proc = _mock_process(stdout=stdout, returncode=0)
 
     with patch("asyncio.create_subprocess_exec", return_value=proc):
-        await ipc.send_tool_call(user_id=42, tool_name="read_file", args={})
+        await ipc.send_tool_call(user_id=900000042, tool_name="read_file", args={})
 
-    ts = ipc.get_last_used(42)
+    ts = ipc.get_last_used(900000042)
     assert ts is not None
     assert isinstance(ts, float)
 
