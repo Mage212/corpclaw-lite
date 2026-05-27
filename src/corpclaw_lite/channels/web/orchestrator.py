@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import secrets
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +25,7 @@ from corpclaw_lite.channels.web.files import (
 )
 from corpclaw_lite.config.bootstrap import BootstrapLoader
 from corpclaw_lite.config.settings import Settings, WebChannelSettings
+from corpclaw_lite.exceptions import LLMBackendUnavailableError
 from corpclaw_lite.extensions.tools.builtin.send_file import SendFileTool
 from corpclaw_lite.logging.agent_logger import AgentLogger, setup_logging
 from corpclaw_lite.paths import PROJECT_ROOT
@@ -74,11 +76,14 @@ class WebChannelOrchestrator:
         stack = build_agent_stack(self._settings)
         self._stack = stack
         workspace_base = (PROJECT_ROOT / self._web_settings.workspace_base).resolve()
+        llm_provider_name, llm_base_url = _default_llm_endpoint(self._settings)
         self._service = AgentRequestService(
             stack=stack,
             bootstrap=BootstrapLoader(PROJECT_ROOT / "config" / "bootstrap"),
             workspace_base=workspace_base,
             activity_logger=AgentLogger(log_dir=PROJECT_ROOT / log_cfg.log_dir),
+            llm_provider_name=llm_provider_name,
+            llm_base_url=llm_base_url,
         )
 
         stack.tool_registry.register(
@@ -300,6 +305,8 @@ class WebChannelOrchestrator:
         def send_task(payload: dict[str, object]) -> None:
             asyncio.create_task(send(payload))
 
+        await send({"type": "llm_status", "status": "unknown"})
+
         async def approval_cb(action: str, details: str) -> bool:
             approval_id = secrets.token_urlsafe(12)
             future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
@@ -342,6 +349,15 @@ class WebChannelOrchestrator:
                     ),
                 )
                 await send({"type": "assistant_message", "message": result.reply})
+            except LLMBackendUnavailableError as e:
+                await send(
+                    {
+                        "type": "warning",
+                        "kind": "llm_unavailable",
+                        "llm_status": "unavailable",
+                        "message": e.user_message(),
+                    }
+                )
             except Exception as e:
                 logger.exception("Web agent request failed for user %s", user.id)
                 await send({"type": "error", "message": f"Ошибка: {e}"})
@@ -407,6 +423,21 @@ class WebChannelOrchestrator:
                 logger.info("Pruned %d expired web sessions", removed)
 
 
+def _default_llm_endpoint(settings: Settings) -> tuple[str | None, str | None]:
+    """Return default provider name and configured base URL without exposing secrets."""
+    provider_name = None
+    for rule in settings.llm.routing:
+        if rule.task_kind == "default":
+            provider_name = rule.provider
+            break
+    if provider_name is None and settings.llm.routing:
+        provider_name = settings.llm.routing[0].provider
+    if provider_name is None:
+        return None, None
+    env_name = f"PROVIDER_{provider_name.upper()}__BASE_URL"
+    return provider_name, os.environ.get(env_name)
+
+
 _LOGIN_HTML = """<!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><title>CorpClaw Lite Login</title>
 <style>body{font-family:system-ui;margin:0;display:grid;place-items:center;min-height:100vh;background:#f5f5f2;color:#1f2933}form{width:320px;background:white;border:1px solid #ddd;padding:24px}input,button{width:100%;box-sizing:border-box;margin-top:10px;padding:10px}button{background:#1f6feb;color:white;border:0}.error{color:#b42318}</style>
@@ -423,7 +454,7 @@ const messages=document.getElementById("messages"); const fileList=document.getE
 function add(text, cls="msg"){const d=document.createElement("div");d.className=cls;d.textContent=text;messages.appendChild(d);messages.scrollTop=messages.scrollHeight;}
 function api(path, opts={}){opts.headers=Object.assign({"X-CSRF-Token":csrf},opts.headers||{});return fetch(path,opts);}
 async function loadFiles(path=""){cwd=path;const r=await fetch(`/api/files?path=${encodeURIComponent(path)}`);const j=await r.json();fileList.innerHTML=""; if(j.path){const up=document.createElement("button");up.textContent="..";up.onclick=()=>loadFiles(j.path.split("/").slice(0,-1).join("/"));fileList.appendChild(up);} for(const e of j.entries){const row=document.createElement("div");row.className="file";const open=document.createElement("button");open.textContent=e.is_dir?`[${e.name}]`:e.name;open.onclick=()=>e.is_dir?loadFiles(e.path):window.open(`/api/files/download?path=${encodeURIComponent(e.path)}`,"_blank");const del=document.createElement("button");del.textContent="Удалить";del.onclick=async()=>{if(confirm(`Удалить ${e.name}?`)){await api(`/api/files?path=${encodeURIComponent(e.path)}`,{method:"DELETE"});loadFiles(cwd)}};row.append(open,del);fileList.appendChild(row);}}
-ws.onmessage=(ev)=>{const e=JSON.parse(ev.data); if(e.type==="assistant_message")add(e.message); else if(e.type==="status")add(`Статус: ${e.stage}`,"msg status"); else if(e.type==="error")add(e.message,"msg status"); else if(e.type==="file_ready")add(`Файл готов: ${e.name} ${e.url}`); else if(e.type==="approval_required"){const d=document.createElement("div");d.className="msg approval";d.textContent=`Подтверждение: ${e.action}\n${e.details}`;const a=document.createElement("button");a.textContent="Approve";a.onclick=()=>ws.send(JSON.stringify({type:"approve",approval_id:e.approval_id}));const n=document.createElement("button");n.textContent="Deny";n.onclick=()=>ws.send(JSON.stringify({type:"deny",approval_id:e.approval_id}));d.append(a,n);messages.appendChild(d);}};
+ws.onmessage=(ev)=>{const e=JSON.parse(ev.data); if(e.type==="assistant_message")add(e.message); else if(e.type==="status")add(`Статус: ${e.stage}`,"msg status"); else if(e.type==="warning")add(`Предупреждение: ${e.message}`,"msg status"); else if(e.type==="error")add(e.message,"msg status"); else if(e.type==="file_ready")add(`Файл готов: ${e.name} ${e.url}`); else if(e.type==="approval_required"){const d=document.createElement("div");d.className="msg approval";d.textContent=`Подтверждение: ${e.action}\n${e.details}`;const a=document.createElement("button");a.textContent="Approve";a.onclick=()=>ws.send(JSON.stringify({type:"approve",approval_id:e.approval_id}));const n=document.createElement("button");n.textContent="Deny";n.onclick=()=>ws.send(JSON.stringify({type:"deny",approval_id:e.approval_id}));d.append(a,n);messages.appendChild(d);}};
 document.getElementById("send").onclick=()=>{const i=document.getElementById("input");const text=i.value.trim();if(text){add(text,"msg user");ws.send(JSON.stringify({type:"message",message:text}));i.value="";}};
 document.getElementById("mode").onchange=(e)=>ws.send(JSON.stringify({type:"mode_change",mode:e.target.value}));
 document.getElementById("upload").onchange=async(e)=>{const f=e.target.files[0];if(!f)return;const fd=new FormData();fd.append("file",f);await api(`/api/files/upload?path=${encodeURIComponent(cwd)}`,{method:"POST",body:fd,headers:{"X-CSRF-Token":csrf}});e.target.value="";loadFiles(cwd);};
