@@ -10,6 +10,7 @@ wheels/
 .pytest-temp/
 .ruff_cache/
 .ipynb_checkpoints/
+node_modules/
 .coverage
 *_coverage*.txt
 htmlcov/

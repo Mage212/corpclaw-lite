@@ -9,7 +9,7 @@
 ## Архитектура
 
 ```
-Пользователь → Канал (Telegram / CLI) → AgentLoop (ReAct)
+Пользователь → Канал (Web / Telegram / CLI) → AgentLoop (ReAct)
                                             │
                                             ▼
                                     LLM Router ──→ Ollama / vLLM / Anthropic
@@ -45,6 +45,7 @@
 
 - Python 3.12+
 - Менеджер пакетов [uv](https://docs.astral.sh/uv/)
+- Node.js 20+ и npm (для сборки браузерного интерфейса)
 - Docker (опционально, для режима песочницы)
 - Запущенный LLM (Ollama, vLLM или LM Studio)
 
@@ -55,19 +56,53 @@ git clone https://github.com/Mage212/corpclaw-lite.git
 cd corpclaw-lite
 uv sync
 cp .env.example .env
-# Заполните .env — укажите TELEGRAM_BOT_TOKEN, CORPCLAW_IPC_SECRET, OPENAI_BASE_URL
+# Заполните .env — укажите TELEGRAM_BOT_TOKEN, CORPCLAW_IPC_SECRET
+# и хотя бы один LLM-провайдер через PROVIDER_<NAME>__*
 ```
 
 ### Запуск
 
+Если пользователя ещё нет в базе, сначала создайте его:
+
 ```bash
-# Интерактивный CLI-чат (режим разработки, Docker не нужен)
-uv run corpclaw-lite chat
+uv run corpclaw-lite user-create -t <telegram_id> -d engineering
+```
 
-# Запуск Telegram-бота
+CLI-чат запускается от имени существующего пользователя:
+
+```bash
+uv run corpclaw-lite chat --telegram-id <telegram_id>
+```
+
+Telegram-канал:
+
+```bash
 uv run corpclaw-lite telegram
+```
 
-# Сборка Docker-образа песочницы (для продакшена)
+Web-канал в обычном локальном режиме:
+
+```bash
+uv run corpclaw-lite web-user-link -t <telegram_id> -u <username> -p '<password>'
+
+cd frontend/web
+npm ci
+npm run build
+cd ../..
+
+uv run corpclaw-lite web
+```
+
+Откройте `http://127.0.0.1:8090`.
+
+`web-user-link` — основной сценарий для уже существующего Telegram-пользователя. Команда
+добавляет логин/пароль к тому же внутреннему `users.id`, поэтому Web, Telegram, память,
+workspace и контейнер продолжают работать с одним человеческим профилем. `web-user-create`
+используйте только для отдельного web-only аккаунта.
+
+Если включена контейнеризация, Docker должен быть запущен. Образ песочницы можно собрать так:
+
+```bash
 docker build -f docker/Dockerfile -t corpclaw-agent-base:latest .
 ```
 
@@ -105,11 +140,11 @@ data/
 
 | Переменная | Обязательна | Описание |
 |------------|-------------|----------|
-| `TELEGRAM_BOT_TOKEN` | Да | Токен бота от @BotFather |
-| `CORPCLAW_IPC_SECRET` | Да | Случайная строка ≥32 символа (HMAC-ключ для IPC) |
-| `OPENAI_BASE_URL` | Да | URL провайдера (напр. `http://localhost:11434/v1` для Ollama) |
-| `ANTHROPIC_API_KEY` | Нет | Для Claude fallback/маршрутизации |
-| `OPENAI_API_KEY` | Нет | Если провайдер требует авторизацию (напр. OpenRouter) |
+| `TELEGRAM_BOT_TOKEN` | Для Telegram | Токен бота от @BotFather |
+| `CORPCLAW_IPC_SECRET` | Да | Случайная строка ≥32 символа, HMAC-ключ для IPC host↔container |
+| `PROVIDER_<NAME>__TYPE` | Да | Тип провайдера: `openai` или `anthropic` |
+| `PROVIDER_<NAME>__BASE_URL` | Да для OpenAI-compatible | URL провайдера, например `http://localhost:8080/v1` для llama.cpp |
+| `PROVIDER_<NAME>__API_KEY` | Если нужен провайдеру | Ключ доступа или техническое значение вроде `llamacpp`/`ollama` |
 
 ---
 
@@ -129,6 +164,7 @@ data/
 | **Скиллы** | Markdown-инструкции с TF-IDF семантическим матчем + горячая перезагрузка |
 | **Плагины** | Расширения в subprocess-песочнице через manifest.yaml |
 | **MCP-интеграция** | Model Context Protocol серверы через stdio JSON-RPC |
+| **Web-канал** | Браузерный чат, единая statusline выполнения, личный файловый диспетчер и общая идентичность с Telegram |
 | **Онбординг** | Гибридный детерминированный Q&A + LLM-финализация профиля |
 | **Автокалибровка** | Адаптация промптов/описаний инструментов/few-shots под конкретную локальную модель |
 | **RBAC** | 10 департаментов с инструментальными разрешениями и бюджетами |
@@ -229,16 +265,54 @@ servers:
 
 - локальные аккаунты с паролем и HttpOnly session cookie;
 - личный workspace пользователя (`workspaces/user_<users.id>`) общий для Telegram и Web;
-- файловый диспетчер: список, загрузка, скачивание, создание папок, удаление с подтверждением;
+- современный React/Vite UI с отдельной production-сборкой;
+- сворачиваемый файловый диспетчер: дерево папок, поиск, предпросмотр, drag-and-drop,
+  загрузка, скачивание, переименование, перемещение, копирование и удаление с подтверждением;
 - чат с режимами `execute` и `chat`;
-- WebSocket-статусы выполнения и подтверждения опасных действий.
+- единая statusline выполнения: WebSocket обновляет текущий статус модели в одной строке,
+  не засоряя историю чата отдельными служебными сообщениями;
+- подтверждения опасных действий через интерактивный UI.
 
-### Запуск
+### Production-like запуск
 
 ```bash
-uv run corpclaw-lite web-user-link -t 278278319 -u alice -p '<password>'
+uv run corpclaw-lite web-user-link -t <telegram_id> -u <username> -p '<password>'
+
+cd frontend/web
+npm ci
+npm run build
+cd ../..
+
 uv run corpclaw-lite web
 ```
+
+По умолчанию сервер слушает `http://127.0.0.1:8090`. Настройки находятся в
+`config/settings.yaml` → `web_channel`.
+Веб-интерфейс собирается отдельным React/Vite приложением в `frontend/web/dist`; если сборки нет,
+backend покажет явное предупреждение вместо пустого интерфейса.
+
+### Frontend-разработка
+
+Для работы над UI удобнее держать backend и frontend dev server в разных терминалах.
+
+Терминал 1 — backend и API:
+
+```bash
+uv run corpclaw-lite web
+```
+
+Терминал 2 — Vite dev server:
+
+```bash
+cd frontend/web
+npm ci
+npm run dev
+```
+
+Откройте `http://127.0.0.1:5173`. Vite проксирует `/api` и `/ws` в backend на
+`http://127.0.0.1:8090`, поэтому frontend можно менять без пересборки `dist`.
+
+### Пользователи и workspace
 
 Если пользователь уже работает через Telegram, используйте `web-user-link`: тогда веб-вход
 получит тот же профиль, память и рабочее пространство по внутреннему `users.id`.
@@ -247,12 +321,13 @@ uv run corpclaw-lite web
 <canonical>`. Для переноса старых данных из `user_<telegram_id>` в `user_<users.id>` используйте
 `uv run corpclaw-lite user-migrate-canonical-ids`.
 
-По умолчанию сервер слушает `http://127.0.0.1:8090`. Настройки находятся в
-`config/settings.yaml` → `web_channel`.
+Это важно архитектурно: контейнер, память и директория `workspaces/user_<id>` теперь привязаны к
+внутреннему `users.id`, а не к Telegram ID и не к web-логину. Один человек должен иметь один
+профиль, к которому могут быть привязаны разные способы входа.
 
 > Если `container.enabled=true`, для веб-канала также нужен `CORPCLAW_IPC_SECRET`, как и для
 > Telegram. Файловые инструменты агента выполняются в контейнере, а операции веб-диспетчера
-> дополнительно проверяют границы личного workspace на host-side.
+> дополнительно проверяют границы личного workspace на стороне хоста.
 
 ---
 
@@ -304,6 +379,9 @@ uv run corpclaw-lite web
 - «📊 Обрабатываю таблицу...» — normalize_excel
 - «🤖 Делегирую субагенту...» — dispatch_subagent
 - И другие для каждого инструмента
+
+В веб-интерфейсе используется тот же словарь статусов, но отображение другое: текущий статус
+обновляется в одной statusline над чатом, а не добавляется в историю отдельными сообщениями.
 
 ### Smart Approvals
 
@@ -440,11 +518,18 @@ uv run corpclaw-lite calibrate --cloud-provider cloud --max-iterations 5
 
 ```bash
 # Чат
-uv run corpclaw-lite chat                                       # Интерактивный CLI
-uv run corpclaw-lite chat --setup                               # Онбординг пользователя
+uv run corpclaw-lite chat --telegram-id <tg_id>                 # Интерактивный CLI
+uv run corpclaw-lite chat --telegram-id <tg_id> --setup         # Онбординг пользователя
 
 # Telegram
 uv run corpclaw-lite telegram                                   # Запуск бота
+
+# Web
+uv run corpclaw-lite web                                        # Запуск backend + собранного UI
+uv run corpclaw-lite web-user-link -t <tg_id> -u <login> -p '<password>'
+uv run corpclaw-lite web-user-create -u <login> -p '<password>' -d <department>
+uv run corpclaw-lite web-user-password -u <login> -p '<new_password>'
+uv run corpclaw-lite web-user-merge --source-user-id <id> --target-user-id <id>
 
 # Управление пользователями
 uv run corpclaw-lite user-list

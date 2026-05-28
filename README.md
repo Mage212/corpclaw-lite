@@ -33,6 +33,7 @@ User → Channel (Web / Telegram / CLI) → AgentLoop (ReAct)
 
 - Python 3.12+
 - [uv](https://docs.astral.sh/uv/) package manager
+- Node.js 20+ and npm (for building the browser UI)
 - Docker (optional, for sandbox mode)
 - A running LLM (Ollama, vLLM, or LM Studio)
 
@@ -43,16 +44,57 @@ git clone https://github.com/Mage212/corpclaw-lite.git
 cd corpclaw-lite
 uv sync
 cp .env.example .env
-# Edit .env — set TELEGRAM_BOT_TOKEN, CORPCLAW_IPC_SECRET, OPENAI_BASE_URL
+# Edit .env — set TELEGRAM_BOT_TOKEN, CORPCLAW_IPC_SECRET,
+# and at least one PROVIDER_<NAME>__* LLM provider.
 ```
 
 ### Running
 
+CLI chat uses an existing CorpClaw user, identified by Telegram ID:
+
 ```bash
-uv run corpclaw-lite chat       # Interactive CLI (dev mode)
-uv run corpclaw-lite telegram   # Start Telegram bot
-uv run corpclaw-lite web        # Start browser UI
+uv run corpclaw-lite chat --telegram-id <telegram_id>
 ```
+
+Telegram bot:
+
+```bash
+uv run corpclaw-lite telegram
+```
+
+Browser UI, production-like local mode:
+
+```bash
+uv run corpclaw-lite web-user-link -t <telegram_id> -u <username> -p '<password>'
+
+cd frontend/web
+npm ci
+npm run build
+cd ../..
+
+uv run corpclaw-lite web
+```
+
+Open `http://127.0.0.1:8090`.
+
+Use `web-user-link` for users who already work through Telegram. It attaches a browser login to
+the same internal `users.id`, so the web UI, Telegram bot, memory, workspace, and per-user
+container all point at the same human profile.
+
+For frontend development, run the backend and Vite dev server separately:
+
+```bash
+uv run corpclaw-lite web
+
+cd frontend/web
+npm ci
+npm run dev
+```
+
+Open `http://127.0.0.1:5173`; Vite proxies `/api` and `/ws` to the backend on port `8090`.
+
+If `container.enabled=true`, Docker must be running and `CORPCLAW_IPC_SECRET` must be set. If the
+React build is missing, the backend returns an explicit warning page instead of a blank UI.
 
 ## Features
 
@@ -67,7 +109,7 @@ uv run corpclaw-lite web        # Start browser UI
 | ToolGuard | 20+ YAML security rules with LLM-based Smart Approvals |
 | 4 Skills / Plugins / 5 Subagents | Markdown skills with scope filtering, subprocess plugins, isolated subagents |
 | TF-IDF Matching | Bilingual (RU+EN) semantic skill selection |
-| Web + Telegram Channels | Browser UI, Telegram bot, file manager, progress, approvals, rate limiting |
+| Web + Telegram Channels | Browser chat, collapsible file manager, single statusline, approvals, rate limiting |
 | Workspace Isolation | Unified per-human workspace across linked Telegram and web logins |
 | Auto-Calibration | Adapt prompts for specific local models |
 | RBAC | 10 departments with per-department permissions |
