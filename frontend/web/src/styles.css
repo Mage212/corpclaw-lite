@@ -177,6 +177,11 @@ a {
   --preview-handle: 6px;
 }
 
+.workspace.files-expanded {
+  --files-track: 0px;
+  --files-handle: 0px;
+}
+
 .file-explorer,
 .main-pane,
 .preview-drawer {
@@ -232,6 +237,20 @@ a {
   overflow: hidden;
 }
 
+.file-explorer.expanded {
+  position: fixed;
+  inset: 18px;
+  z-index: 30;
+  grid-column: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+}
+
+.file-explorer.expanded .file-manager-body {
+  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+}
+
 .file-explorer.drop-active::after {
   content: "Отпустите файлы для загрузки";
   position: absolute;
@@ -262,6 +281,12 @@ a {
   min-width: 0;
   display: grid;
   gap: 2px;
+}
+
+.files-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .files-header span,
@@ -661,7 +686,18 @@ a {
 }
 
 .topbar {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 14px;
   background: var(--surface);
+}
+
+.topbar-center {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
 }
 
 .topbar-actions {
@@ -669,6 +705,42 @@ a {
   align-items: center;
   gap: 10px;
   min-width: 0;
+}
+
+.context-meter {
+  min-width: 176px;
+  display: grid;
+  grid-template-columns: auto auto auto minmax(48px, 92px);
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.context-meter strong {
+  color: var(--text);
+  font-weight: 700;
+}
+
+.context-meter i {
+  height: 5px;
+  overflow: hidden;
+  background: var(--surface-2);
+  border-radius: 999px;
+}
+
+.context-meter b {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+
+.context-meter.warning b {
+  background: var(--warning);
+}
+
+.context-meter.danger b {
+  background: var(--danger);
 }
 
 .segmented {
@@ -1096,7 +1168,8 @@ a {
   .workspace,
   .workspace.files-open,
   .workspace.files-closed,
-  .workspace.preview-open {
+  .workspace.preview-open,
+  .workspace.files-expanded {
     --files-track: 0px;
     --files-handle: 0px;
     --preview-track: 0px;
@@ -1115,6 +1188,12 @@ a {
     width: min(94vw, 520px);
     z-index: 12;
     box-shadow: var(--shadow);
+  }
+
+  .file-explorer.expanded {
+    inset: 10px;
+    width: auto;
+    z-index: 30;
   }
 
   .preview-drawer {
@@ -1154,8 +1233,18 @@ a {
   }
 
   .topbar-title span,
+  .context-meter span,
   .user-pill {
     display: none;
+  }
+
+  .topbar-center {
+    justify-content: start;
+  }
+
+  .context-meter {
+    min-width: 96px;
+    grid-template-columns: auto auto minmax(42px, 1fr);
   }
 
   .segmented button {

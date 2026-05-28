@@ -70,6 +70,16 @@ export type UploadItem = {
 export type ViewMode = "list" | "grid" | "details";
 export type AgentMode = "execute" | "chat";
 export type PreviewMode = "side" | "expanded";
+export type FileExplorerMode = "side" | "expanded";
+
+export type ContextUsage = {
+  latest_total_tokens: number;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  context_limit_tokens: number;
+  context_ratio: number;
+};
 
 export type PanelLayoutState = {
   filesWidth: number;

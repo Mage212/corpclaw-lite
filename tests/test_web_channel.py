@@ -36,6 +36,13 @@ class APIConnectionError(Exception):
 APIConnectionError.__module__ = "openai"
 
 
+class InternalServerError(Exception):
+    pass
+
+
+InternalServerError.__module__ = "openai"
+
+
 def test_resolve_workspace_path_blocks_escape(tmp_path: Path) -> None:
     workspace = tmp_path / "ws"
     workspace.mkdir()
@@ -138,14 +145,35 @@ async def test_web_upload_rejects_bad_extension(tmp_path: Path) -> None:
 
 def test_llm_transport_error_detection() -> None:
     assert is_llm_transport_error(APIConnectionError("Connection error.")) is True
+    assert (
+        is_llm_transport_error(
+            InternalServerError(
+                "Error code: 502 - "
+                "{'error': {'message': 'Connection refused', 'type': 'upstream_error'}}"
+            )
+        )
+        is True
+    )
     assert is_llm_transport_error(ValueError("ordinary bug")) is False
 
 
 @pytest.mark.asyncio
-async def test_agent_request_service_converts_llm_connection_error(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "error",
+    [
+        APIConnectionError("Connection error."),
+        InternalServerError(
+            "Error code: 502 - "
+            "{'error': {'message': 'Connection refused', 'type': 'upstream_error'}}"
+        ),
+    ],
+)
+async def test_agent_request_service_converts_llm_connection_error(
+    tmp_path: Path, error: Exception
+) -> None:
     class FailingLoop:
         async def run(self, *_args: Any, **_kwargs: Any) -> tuple[str, Any]:
-            raise APIConnectionError("Connection error.")
+            raise error
 
     stack = AgentStack(
         loop=FailingLoop(),  # type: ignore[arg-type]
@@ -173,6 +201,133 @@ async def test_agent_request_service_converts_llm_connection_error(tmp_path: Pat
     assert exc_info.value.provider_name == "llamacpp"
     assert exc_info.value.base_url == "http://127.0.0.1:4000/v1"
     assert "LLM backend недоступен" in exc_info.value.user_message()
+
+
+@pytest.mark.asyncio
+async def test_agent_request_service_resets_user_context(tmp_path: Path) -> None:
+    class FakeMemory:
+        def __init__(self) -> None:
+            self.cleared: list[str] = []
+
+        async def clear(self, user_id: str) -> None:
+            self.cleared.append(user_id)
+
+    class FakeLoop:
+        def __init__(self) -> None:
+            self.memory = FakeMemory()
+            self.provider = object()
+
+    loop = FakeLoop()
+    stack = AgentStack(
+        loop=loop,  # type: ignore[arg-type]
+        user_manager=UserManager(db_path=str(tmp_path / "users.db")),
+        tool_registry=None,  # type: ignore[arg-type]
+        full_tool_registry=None,
+        mcp_manager=None,
+        container_manager=None,
+        skill_registry=None,
+        plugin_registry=None,
+        skill_matcher=None,
+    )
+    service = AgentRequestService(
+        stack=stack,
+        bootstrap=BootstrapLoader(tmp_path / "bootstrap"),
+        workspace_base=tmp_path / "workspaces",
+    )
+    user = User(id=7, name="Vadim", department="engineering")
+
+    await service.reset_user_context(user)
+
+    assert loop.memory.cleared == [user.memory_key()]
+
+
+def test_web_context_usage_payload_uses_latest_total_tokens() -> None:
+    from corpclaw_lite.agent.loop import RunStats
+
+    settings = Settings()
+    settings.agent.compression.max_context_tokens = 1000
+    stats = RunStats()
+    stats.input_tokens = 800
+    stats.output_tokens = 50
+    stats.total_tokens = 1700
+    stats.latest_total_tokens = 850
+
+    payload = WebChannelOrchestrator(settings)._context_usage_payload(stats)
+
+    assert payload["latest_total_tokens"] == 850
+    assert payload["total_tokens"] == 1700
+    assert payload["context_limit_tokens"] == 1000
+    assert payload["context_ratio"] == 0.85
+
+
+@pytest.mark.asyncio
+async def test_web_reset_context_respects_active_request_lock() -> None:
+    class FakeService:
+        def __init__(self) -> None:
+            self.active = True
+            self.reset_calls = 0
+            self.finished: list[int] = []
+
+        async def try_start_user_request(self, _user_id: int) -> bool:
+            return not self.active
+
+        async def finish_user_request(self, user_id: int) -> None:
+            self.finished.append(user_id)
+
+        async def reset_user_context(self, _user: User) -> None:
+            self.reset_calls += 1
+
+    service = FakeService()
+    orchestrator = WebChannelOrchestrator(Settings())
+    orchestrator._service = service  # type: ignore[assignment]
+    user = User(id=7, name="Vadim", department="engineering")
+
+    ok, message, usage = await orchestrator._reset_context_for_user(user)
+
+    assert ok is False
+    assert "Предыдущая задача" in message
+    assert usage["latest_total_tokens"] == 0
+    assert service.reset_calls == 0
+    assert service.finished == []
+
+
+@pytest.mark.asyncio
+async def test_web_reset_context_clears_usage_snapshot() -> None:
+    class FakeService:
+        def __init__(self) -> None:
+            self.reset_calls = 0
+            self.finished: list[int] = []
+
+        async def try_start_user_request(self, _user_id: int) -> bool:
+            return True
+
+        async def finish_user_request(self, user_id: int) -> None:
+            self.finished.append(user_id)
+
+        async def reset_user_context(self, _user: User) -> None:
+            self.reset_calls += 1
+
+    service = FakeService()
+    orchestrator = WebChannelOrchestrator(Settings())
+    orchestrator._service = service  # type: ignore[assignment]
+    orchestrator._context_usage[7] = {
+        "latest_total_tokens": 100,
+        "input_tokens": 100,
+        "output_tokens": 0,
+        "total_tokens": 100,
+        "context_limit_tokens": 1000,
+        "context_ratio": 0.1,
+    }
+    user = User(id=7, name="Vadim", department="engineering")
+
+    ok, message, usage = await orchestrator._reset_context_for_user(user)
+
+    assert ok is True
+    assert "Сессия сброшена" in message
+    assert usage["latest_total_tokens"] == 0
+    assert orchestrator._context_usage[7]["latest_total_tokens"] == 0
+    assert service.reset_calls == 1
+    assert service.finished == [7]
 
 
 @pytest.mark.asyncio

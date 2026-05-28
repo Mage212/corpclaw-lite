@@ -7,7 +7,9 @@ import {
   FolderPlus,
   Grid3X3,
   List,
+  Maximize2,
   MoreVertical,
+  Minimize2,
   MoveRight,
   RefreshCw,
   Search,
@@ -34,6 +36,7 @@ import { Modal } from "../components/Modal";
 import type {
   DirectoryPayload,
   FileEntry,
+  FileExplorerMode,
   PreviewPayload,
   TreeNode,
   UploadItem,
@@ -44,6 +47,8 @@ import { fileIcon, flattenFolders, formatSize, parentPath, pathAncestors } from 
 type FileExplorerProps = {
   csrf: string;
   open: boolean;
+  mode: FileExplorerMode;
+  onModeChange: (mode: FileExplorerMode) => void;
   onPreview: (preview: PreviewPayload) => void;
 };
 
@@ -58,7 +63,7 @@ function id(prefix: string): string {
   return `${prefix}_${Math.random().toString(36).slice(2)}_${Date.now()}`;
 }
 
-export function FileExplorer({ csrf, open, onPreview }: FileExplorerProps) {
+export function FileExplorer({ csrf, open, mode, onModeChange, onPreview }: FileExplorerProps) {
   const [cwd, setCwd] = useState("");
   const [directory, setDirectory] = useState<DirectoryPayload>({ path: "", entries: [] });
   const [tree, setTree] = useState<TreeNode | null>(null);
@@ -226,7 +231,9 @@ export function FileExplorer({ csrf, open, onPreview }: FileExplorerProps) {
 
   return (
     <aside
-      className={`file-explorer ${dropActive ? "drop-active" : ""}`}
+      className={`file-explorer ${mode === "expanded" ? "expanded" : ""} ${
+        dropActive ? "drop-active" : ""
+      }`}
       onDragOver={(event) => {
         event.preventDefault();
         setDropActive(true);
@@ -238,6 +245,15 @@ export function FileExplorer({ csrf, open, onPreview }: FileExplorerProps) {
         <div>
           <strong>Workspace</strong>
           <span title={cwd || "root"}>{cwd || "root"}</span>
+        </div>
+        <div className="files-header-actions">
+          <button
+            className="icon-button"
+            onClick={() => onModeChange(mode === "side" ? "expanded" : "side")}
+            title={mode === "side" ? "Открыть на весь экран" : "Вернуть сбоку"}
+          >
+            {mode === "side" ? <Maximize2 size={18} /> : <Minimize2 size={18} />}
+          </button>
         </div>
       </header>
 

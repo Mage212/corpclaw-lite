@@ -39,6 +39,14 @@ _LLM_TRANSPORT_ERROR_NAMES = {
     "WriteTimeout",
 }
 _LLM_TRANSPORT_MODULE_PREFIXES = ("openai", "httpx", "httpcore", "anyio")
+_LLM_UPSTREAM_UNAVAILABLE_MARKERS = (
+    "connection refused",
+    "upstream_error",
+    "bad gateway",
+    "error code: 502",
+    "service unavailable",
+    "error code: 503",
+)
 
 
 def is_llm_transport_error(exc: BaseException) -> bool:
@@ -56,6 +64,7 @@ def is_llm_transport_error(exc: BaseException) -> bool:
             name in _LLM_TRANSPORT_ERROR_NAMES
             or "connection error" in text
             or "all connection attempts failed" in text
+            or any(marker in text for marker in _LLM_UPSTREAM_UNAVAILABLE_MARKERS)
         ):
             return True
         current = current.__cause__ if current.__cause__ is not None else current.__context__
@@ -123,6 +132,18 @@ class AgentRequestService:
         """Mark a user's active workflow as finished."""
         async with self._active_user_requests_lock:
             self._active_user_requests.discard(user_id)
+
+    async def reset_user_context(self, user: User) -> None:
+        """Clear conversation memory and invalidate LLM cache state for a user."""
+        memory = self._stack.loop.memory
+        if memory is not None:
+            await memory.clear(user.memory_key())
+
+        from corpclaw_lite.llm.router import LLMRouter
+
+        provider = self._stack.loop.provider
+        if isinstance(provider, LLMRouter):
+            await provider.mark_user_cache_reset(user.memory_key())
 
     async def run(
         self,

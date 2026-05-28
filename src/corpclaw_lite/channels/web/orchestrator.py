@@ -15,6 +15,7 @@ from urllib.parse import quote
 from aiohttp import WSMsgType, web
 
 from corpclaw_lite.agent.factory import build_agent_stack
+from corpclaw_lite.agent.loop import RunStats
 from corpclaw_lite.channels.service import AgentRequestCallbacks, AgentRequestService
 from corpclaw_lite.channels.status import (
     INITIAL_STATUS_TEXT,
@@ -77,6 +78,7 @@ class WebChannelOrchestrator:
         self._rate_limiter = RateLimiter(self._web_settings.rate_limit_per_minute)
         self._clients: dict[int, web.WebSocketResponse] = {}
         self._download_grants: dict[str, _DownloadGrant] = {}
+        self._context_usage: dict[int, dict[str, object]] = {}
         self._cleanup_task: asyncio.Task[None] | None = None
         self._request_tasks: set[asyncio.Task[None]] = set()
         self._started = False
@@ -404,6 +406,45 @@ class WebChannelOrchestrator:
             raise web.HTTPServiceUnavailable()
         return self._service.get_user_workspace(user)
 
+    def _context_usage_payload(self, stats: RunStats | None = None) -> dict[str, object]:
+        limit = max(1, int(self._settings.agent.compression.max_context_tokens))
+        latest_total = 0
+        input_tokens = 0
+        output_tokens = 0
+        total_tokens = 0
+        if stats is not None:
+            latest_total = int(stats.latest_total_tokens or stats.total_tokens or 0)
+            input_tokens = int(stats.input_tokens)
+            output_tokens = int(stats.output_tokens)
+            total_tokens = int(stats.total_tokens)
+        ratio = min(1.0, max(0.0, latest_total / limit))
+        return {
+            "latest_total_tokens": latest_total,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
+            "context_limit_tokens": limit,
+            "context_ratio": ratio,
+        }
+
+    async def _reset_context_for_user(self, user: User) -> tuple[bool, str, dict[str, object]]:
+        if self._service is None:
+            raise web.HTTPServiceUnavailable()
+        if not await self._service.try_start_user_request(user.id):
+            return (
+                False,
+                "Предыдущая задача ещё выполняется. Дождитесь ответа перед сбросом контекста.",
+                self._context_usage.get(user.id, self._context_usage_payload()),
+            )
+        try:
+            await self._service.reset_user_context(user)
+            usage = self._context_usage_payload()
+            self._context_usage[user.id] = usage
+            logger.info("Web user %s reset session", user.id)
+            return True, "Сессия сброшена. Можно начать заново.", usage
+        finally:
+            await self._service.finish_user_request(user.id)
+
     async def _handle_list_files(self, request: web.Request) -> web.Response:
         user = self._require_user(request)
         result = await list_directory(
@@ -572,6 +613,12 @@ class WebChannelOrchestrator:
             asyncio.create_task(send(payload))
 
         await send({"type": "llm_status", "status": "unknown"})
+        await send(
+            {
+                "type": "context_usage",
+                "usage": self._context_usage.get(user.id, self._context_usage_payload()),
+            }
+        )
 
         def send_status(
             *,
@@ -666,8 +713,10 @@ class WebChannelOrchestrator:
                         "request_id": request_id,
                         "status": "ok",
                         "label": READY_STATUS_TEXT,
+                        "usage": self._context_usage_payload(result.stats),
                     }
                 )
+                self._context_usage[user.id] = self._context_usage_payload(result.stats)
             except LLMBackendUnavailableError as e:
                 await send(
                     {
@@ -685,6 +734,9 @@ class WebChannelOrchestrator:
                             "request_id": request_id,
                             "status": "warning",
                             "label": "⚠️ Требуется внимание",
+                            "usage": self._context_usage.get(
+                                user.id, self._context_usage_payload()
+                            ),
                         }
                     )
             except Exception as e:
@@ -697,6 +749,9 @@ class WebChannelOrchestrator:
                             "request_id": request_id,
                             "status": "error",
                             "label": "Ошибка выполнения",
+                            "usage": self._context_usage.get(
+                                user.id, self._context_usage_payload()
+                            ),
                         }
                     )
             finally:
@@ -721,6 +776,15 @@ class WebChannelOrchestrator:
                     if requested in {"chat", "execute"}:
                         mode = str(requested)
                         await send({"type": "mode", "mode": mode})
+                elif event_type == "reset_context":
+                    ok, message, usage = await self._reset_context_for_user(user)
+                    await send(
+                        {
+                            "type": "context_reset" if ok else "error",
+                            "message": message,
+                            "usage": usage,
+                        }
+                    )
                 elif event_type == "approve" or event_type == "deny":
                     approval_id = str(payload.get("approval_id", ""))
                     future = approvals.get(approval_id)
@@ -732,6 +796,16 @@ class WebChannelOrchestrator:
                         await send({"type": "error", "message": "Сообщение слишком длинное."})
                         continue
                     if text:
+                        if text.lower() == "/new":
+                            ok, message, usage = await self._reset_context_for_user(user)
+                            await send(
+                                {
+                                    "type": "context_reset" if ok else "error",
+                                    "message": message,
+                                    "usage": usage,
+                                }
+                            )
+                            continue
                         task = asyncio.create_task(run_message(text))
                         self._request_tasks.add(task)
                         task.add_done_callback(self._request_tasks.discard)

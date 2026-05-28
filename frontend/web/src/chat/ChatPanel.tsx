@@ -5,6 +5,7 @@ import type {
   AgentMode,
   ApprovalRequest,
   ChatMessage,
+  ContextUsage,
   StatusLine,
   User
 } from "../types";
@@ -25,7 +26,34 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-export function ChatPanel({ csrf, mode, user }: { csrf: string; mode: AgentMode; user: User }) {
+function parseContextUsage(value: unknown): ContextUsage | null {
+  if (!isRecord(value)) return null;
+  const latest = Number(value.latest_total_tokens || 0);
+  const limit = Number(value.context_limit_tokens || 0);
+  const ratio = Number(value.context_ratio || (limit > 0 ? latest / limit : 0));
+  return {
+    latest_total_tokens: latest,
+    input_tokens: Number(value.input_tokens || 0),
+    output_tokens: Number(value.output_tokens || 0),
+    total_tokens: Number(value.total_tokens || 0),
+    context_limit_tokens: limit,
+    context_ratio: Math.max(0, Math.min(1, ratio))
+  };
+}
+
+export function ChatPanel({
+  csrf,
+  mode,
+  resetSignal,
+  user,
+  onContextUsage
+}: {
+  csrf: string;
+  mode: AgentMode;
+  resetSignal: number;
+  user: User;
+  onContextUsage: (usage: ContextUsage) => void;
+}) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [status, setStatus] = useState<StatusLine>(emptyStatus);
   const [approvals, setApprovals] = useState<ApprovalRequest[]>([]);
@@ -33,6 +61,7 @@ export function ChatPanel({ csrf, mode, user }: { csrf: string; mode: AgentMode;
   const [connected, setConnected] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const messagesRef = useRef<HTMLDivElement | null>(null);
+  const resetSignalRef = useRef(resetSignal);
 
   const addMessage = useCallback((message: ChatMessage) => {
     setMessages((items) => [...items, message]);
@@ -59,16 +88,31 @@ export function ChatPanel({ csrf, mode, user }: { csrf: string; mode: AgentMode;
     ws.onmessage = (event) => {
       const parsed = JSON.parse(event.data) as unknown;
       if (!isRecord(parsed)) return;
-      handleWsEvent(parsed, addMessage, setStatus, setApprovals);
+      handleWsEvent(parsed, addMessage, setMessages, setStatus, setApprovals, onContextUsage);
     };
     return () => ws.close();
-  }, [addMessage, csrf]);
+  }, [addMessage, csrf, onContextUsage]);
 
   useEffect(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: "mode_change", mode }));
     }
   }, [mode]);
+
+  useEffect(() => {
+    if (resetSignal === resetSignalRef.current) return;
+    resetSignalRef.current = resetSignal;
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "reset_context" }));
+    } else {
+      addMessage({
+        id: id("reset_warning"),
+        role: "system",
+        text: "Нет соединения с web-каналом. Контекст не сброшен.",
+        tone: "warning"
+      });
+    }
+  }, [addMessage, resetSignal]);
 
   useEffect(() => {
     messagesRef.current?.scrollTo({ top: messagesRef.current.scrollHeight });
@@ -158,8 +202,10 @@ function MessageBubble({ message }: { message: ChatMessage }) {
 function handleWsEvent(
   event: Record<string, unknown>,
   addMessage: (message: ChatMessage) => void,
+  setMessages: Dispatch<SetStateAction<ChatMessage[]>>,
   setStatus: Dispatch<SetStateAction<StatusLine>>,
-  setApprovals: Dispatch<SetStateAction<ApprovalRequest[]>>
+  setApprovals: Dispatch<SetStateAction<ApprovalRequest[]>>,
+  onContextUsage: (usage: ContextUsage) => void
 ) {
   const type = event.type;
   if (type === "request_started") {
@@ -194,6 +240,10 @@ function handleWsEvent(
     });
   } else if (type === "request_finished") {
     const tone = event.status === "error" ? "error" : event.status === "warning" ? "warning" : "done";
+    const usage = parseContextUsage(event.usage);
+    if (usage) {
+      onContextUsage(usage);
+    }
     setStatus({
       active: true,
       requestId: String(event.request_id || ""),
@@ -202,6 +252,26 @@ function handleWsEvent(
       tone
     });
     window.setTimeout(() => setStatus(emptyStatus), 1400);
+  } else if (type === "context_usage") {
+    const usage = parseContextUsage(event.usage);
+    if (usage) {
+      onContextUsage(usage);
+    }
+  } else if (type === "context_reset") {
+    const usage = parseContextUsage(event.usage);
+    if (usage) {
+      onContextUsage(usage);
+    }
+    setMessages([]);
+    setApprovals([]);
+    setStatus({
+      active: true,
+      requestId: null,
+      label: String(event.message || "Сессия сброшена"),
+      phase: "done",
+      tone: "done"
+    });
+    window.setTimeout(() => setStatus(emptyStatus), 1600);
   } else if (type === "warning") {
     addMessage({
       id: id("warning"),
@@ -217,6 +287,10 @@ function handleWsEvent(
       tone: "warning"
     });
   } else if (type === "error") {
+    const usage = parseContextUsage(event.usage);
+    if (usage) {
+      onContextUsage(usage);
+    }
     addMessage({
       id: id("error"),
       role: "system",
