@@ -846,6 +846,31 @@ a {
   white-space: pre-wrap;
 }
 
+.file-message {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.file-message div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.file-message strong,
+.file-message span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-message span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .approval-card {
   max-width: 720px;
   display: grid;
