@@ -26,6 +26,11 @@ from corpclaw_lite.channels.status import (
     format_tool_status,
 )
 from corpclaw_lite.channels.telegram.rate_limit import RateLimiter
+from corpclaw_lite.channels.web.chat_store import (
+    WebChatFile,
+    WebChatMessage,
+    WebChatStore,
+)
 from corpclaw_lite.channels.web.files import (
     build_tree,
     copy_paths,
@@ -71,6 +76,16 @@ class _DownloadGrant:
     expires_at: float
 
 
+@dataclass(slots=True)
+class _PendingApproval:
+    user_id: int
+    approval_id: str
+    action: str
+    details: str
+    future: asyncio.Future[bool]
+    created_at: float
+
+
 class WebChannelOrchestrator:
     """Aiohttp-based web channel with local auth, files and agent chat."""
 
@@ -82,9 +97,12 @@ class WebChannelOrchestrator:
         self._runner: web.AppRunner | None = None
         self._shutdown_event = asyncio.Event()
         self._rate_limiter = RateLimiter(self._web_settings.rate_limit_per_minute)
-        self._clients: dict[int, web.WebSocketResponse] = {}
+        self._clients: dict[int, set[web.WebSocketResponse]] = {}
         self._download_grants: dict[str, _DownloadGrant] = {}
         self._context_usage: dict[int, dict[str, object]] = {}
+        self._active_request_state: dict[int, dict[str, object]] = {}
+        self._pending_approvals: dict[str, _PendingApproval] = {}
+        self._chat_store: WebChatStore | None = None
         self._cleanup_task: asyncio.Task[None] | None = None
         self._request_tasks: set[asyncio.Task[None]] = set()
         self._started = False
@@ -112,6 +130,9 @@ class WebChannelOrchestrator:
             llm_provider_name=llm_provider_name,
             llm_base_url=llm_base_url,
         )
+        memory = stack.loop.memory
+        memory_db_path = getattr(memory, "db_path", PROJECT_ROOT / "data" / "memory.db")
+        self._chat_store = WebChatStore(memory_db_path)
 
         stack.tool_registry.register(
             SendFileTool(self._send_file_callback, workspace_base=workspace_base),
@@ -145,8 +166,9 @@ class WebChannelOrchestrator:
     async def stop(self) -> None:
         if self._cleanup_task is not None:
             self._cleanup_task.cancel()
-        for ws in list(self._clients.values()):
-            await ws.close()
+        for sockets in list(self._clients.values()):
+            for ws in list(sockets):
+                await ws.close()
         for task in list(self._request_tasks):
             task.cancel()
         if self._request_tasks:
@@ -434,6 +456,28 @@ class WebChannelOrchestrator:
             "context_ratio": ratio,
         }
 
+    def _normalize_context_usage_payload(self, usage: dict[str, Any]) -> dict[str, object]:
+        limit = max(
+            1,
+            int(
+                usage.get("context_limit_tokens")
+                or self._settings.agent.compression.max_context_tokens
+            ),
+        )
+        latest_total = int(usage.get("latest_total_tokens") or usage.get("total_tokens") or 0)
+        input_tokens = int(usage.get("input_tokens") or 0)
+        output_tokens = int(usage.get("output_tokens") or 0)
+        total_tokens = int(usage.get("total_tokens") or 0)
+        ratio = min(1.0, max(0.0, float(usage.get("context_ratio") or latest_total / limit)))
+        return {
+            "latest_total_tokens": latest_total,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
+            "context_limit_tokens": limit,
+            "context_ratio": ratio,
+        }
+
     async def _reset_context_for_user(self, user: User) -> tuple[bool, str, dict[str, object]]:
         if self._service is None:
             raise web.HTTPServiceUnavailable()
@@ -445,8 +489,11 @@ class WebChannelOrchestrator:
             )
         try:
             await self._service.reset_user_context(user)
+            if self._chat_store is not None:
+                await self._chat_store.reset_session(user.memory_key(), reason="/new")
             usage = self._context_usage_payload()
             self._context_usage[user.id] = usage
+            self._active_request_state.pop(user.id, None)
             logger.info("Web user %s reset session", user.id)
             return True, "Сессия сброшена. Можно начать заново.", usage
         finally:
@@ -625,6 +672,100 @@ class WebChannelOrchestrator:
             raise web.HTTPNotFound()
         return _file_response(grant.path, disposition="attachment", filename=grant.filename)
 
+    async def _send_ws(self, ws: web.WebSocketResponse, payload: dict[str, object]) -> None:
+        if not ws.closed:
+            await ws.send_str(json.dumps(payload, ensure_ascii=False))
+
+    async def _broadcast_to_user(self, user_id: int, payload: dict[str, object]) -> None:
+        sockets = self._clients.get(user_id)
+        if not sockets:
+            return
+        for ws in list(sockets):
+            if ws.closed:
+                sockets.discard(ws)
+                continue
+            try:
+                await self._send_ws(ws, payload)
+            except Exception as e:
+                logger.debug("WebSocket send failed; dropping client: %s", e)
+                sockets.discard(ws)
+        if not sockets:
+            self._clients.pop(user_id, None)
+
+    def _create_download_grant(
+        self,
+        *,
+        user: User,
+        path: Path,
+        filename: str,
+        caption: str,
+    ) -> str:
+        self._prune_download_grants()
+        token = secrets.token_urlsafe(18)
+        self._download_grants[token] = _DownloadGrant(
+            user_id=user.id,
+            path=path,
+            filename=filename,
+            caption=caption,
+            expires_at=time.time() + _DOWNLOAD_GRANT_TTL_SECONDS,
+        )
+        return f"/api/download/{token}"
+
+    async def _chat_message_payload(self, message: WebChatMessage, user: User) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "id": f"db_{message.id}",
+            "db_id": message.id,
+            "session_id": message.session_id,
+            "role": message.role,
+            "text": message.content,
+            "created_at": message.created_at,
+        }
+        if message.tone:
+            payload["tone"] = message.tone
+        if message.request_id:
+            payload["request_id"] = message.request_id
+        if message.file is not None:
+            file_payload: dict[str, object] = {
+                "name": message.file.name,
+                "caption": message.file.caption,
+                "available": False,
+            }
+            if message.file.path:
+                try:
+                    resolved = resolve_workspace_path(self._workspace_for(user), message.file.path)
+                    if resolved.exists() and resolved.is_file():
+                        file_payload["url"] = self._create_download_grant(
+                            user=user,
+                            path=resolved,
+                            filename=message.file.name,
+                            caption=message.file.caption,
+                        )
+                        file_payload["available"] = True
+                except Exception as e:
+                    logger.debug("Web chat file payload unavailable: %s", e)
+            payload["file"] = file_payload
+        return payload
+
+    async def _chat_messages_payload(
+        self, messages: list[WebChatMessage], user: User
+    ) -> list[dict[str, object]]:
+        return [await self._chat_message_payload(message, user) for message in messages]
+
+    async def _context_usage_for_user(self, user: User) -> dict[str, object]:
+        cached = self._context_usage.get(user.id)
+        if cached is not None:
+            return cached
+        if self._chat_store is not None:
+            try:
+                latest = await self._chat_store.latest_usage(user.memory_key())
+                if latest is not None:
+                    usage = self._normalize_context_usage_payload(latest)
+                    self._context_usage[user.id] = usage
+                    return usage
+            except Exception as e:
+                logger.warning("Failed to restore web context usage for user %s: %s", user.id, e)
+        return self._context_usage_payload()
+
     async def _handle_chat_ws(self, request: web.Request) -> web.WebSocketResponse:
         user = self._require_user(request)
         csrf_token = request.query.get("csrf", "")
@@ -632,24 +773,50 @@ class WebChannelOrchestrator:
             raise web.HTTPForbidden(text="CSRF validation failed")
         ws = web.WebSocketResponse(heartbeat=30)
         await ws.prepare(request)
-        self._clients[user.id] = ws
+        self._clients.setdefault(user.id, set()).add(ws)
         mode = "execute"
-        approvals: dict[str, asyncio.Future[bool]] = {}
 
         async def send(payload: dict[str, object]) -> None:
-            if not ws.closed:
-                await ws.send_str(json.dumps(payload, ensure_ascii=False))
+            await self._send_ws(ws, payload)
 
-        def send_task(payload: dict[str, object]) -> None:
-            asyncio.create_task(send(payload))
+        def broadcast_task(payload: dict[str, object]) -> None:
+            asyncio.create_task(self._broadcast_to_user(user.id, payload))
+
+        if self._chat_store is not None:
+            try:
+                await self._chat_store.backfill_from_memory(user.memory_key(), limit=100)
+                page = await self._chat_store.list_recent(user.memory_key(), limit=100)
+                await send(
+                    {
+                        "type": "chat_history",
+                        "session_id": page.session_id,
+                        "messages": await self._chat_messages_payload(page.messages, user),
+                        "has_more": page.has_more,
+                    }
+                )
+            except Exception as e:
+                logger.warning("Failed to load web chat history for user %s: %s", user.id, e)
 
         await send({"type": "llm_status", "status": "unknown"})
         await send(
             {
                 "type": "context_usage",
-                "usage": self._context_usage.get(user.id, self._context_usage_payload()),
+                "usage": await self._context_usage_for_user(user),
             }
         )
+        active_state = self._active_request_state.get(user.id)
+        if active_state is not None:
+            await send({"type": "request_state", **active_state})
+        for approval in self._pending_approvals.values():
+            if approval.user_id == user.id and not approval.future.done():
+                await send(
+                    {
+                        "type": "approval_required",
+                        "approval_id": approval.approval_id,
+                        "action": approval.action,
+                        "details": approval.details,
+                    }
+                )
 
         def send_status(
             *,
@@ -658,7 +825,13 @@ class WebChannelOrchestrator:
             key: str,
             label: str,
         ) -> None:
-            send_task(
+            self._active_request_state[user.id] = {
+                "request_id": request_id,
+                "phase": phase,
+                "key": key,
+                "label": label,
+            }
+            broadcast_task(
                 {
                     "type": "status_update",
                     "request_id": request_id,
@@ -671,21 +844,62 @@ class WebChannelOrchestrator:
         async def approval_cb(action: str, details: str) -> bool:
             approval_id = secrets.token_urlsafe(12)
             future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
-            approvals[approval_id] = future
-            await send(
+            self._pending_approvals[approval_id] = _PendingApproval(
+                user_id=user.id,
+                approval_id=approval_id,
+                action=action,
+                details=details,
+                future=future,
+                created_at=time.time(),
+            )
+            await self._broadcast_to_user(
+                user.id,
                 {
                     "type": "approval_required",
                     "approval_id": approval_id,
                     "action": action,
                     "details": details,
-                }
+                },
             )
             try:
                 return await asyncio.wait_for(future, timeout=300)
             except TimeoutError:
                 return False
             finally:
-                approvals.pop(approval_id, None)
+                self._pending_approvals.pop(approval_id, None)
+
+        async def persist_and_broadcast(
+            *,
+            role: str,
+            content: str,
+            request_id: str | None = None,
+            tone: str | None = None,
+            metadata: dict[str, Any] | None = None,
+            file: WebChatFile | None = None,
+        ) -> WebChatMessage | None:
+            if self._chat_store is None:
+                return None
+            try:
+                message = await self._chat_store.append_message(
+                    user_id=user.memory_key(),
+                    role=role,
+                    content=content,
+                    tone=tone,
+                    request_id=request_id,
+                    metadata=metadata,
+                    file=file,
+                )
+                await self._broadcast_to_user(
+                    user.id,
+                    {
+                        "type": "chat_message",
+                        "message": await self._chat_message_payload(message, user),
+                    },
+                )
+                return message
+            except Exception as e:
+                logger.warning("Failed to persist web chat message for user %s: %s", user.id, e)
+                return None
 
         async def run_message(text: str) -> None:
             request_id = secrets.token_urlsafe(10)
@@ -702,13 +916,20 @@ class WebChannelOrchestrator:
                 return
             request_acquired = True
             try:
+                await persist_and_broadcast(role="user", content=text, request_id=request_id)
                 request_started = True
-                await send(
+                self._active_request_state[user.id] = {
+                    "request_id": request_id,
+                    "phase": "request",
+                    "label": INITIAL_STATUS_TEXT,
+                }
+                await self._broadcast_to_user(
+                    user.id,
                     {
                         "type": "request_started",
                         "request_id": request_id,
                         "label": INITIAL_STATUS_TEXT,
-                    }
+                    },
                 )
                 result = await self._service.run(
                     user=user,
@@ -731,35 +952,50 @@ class WebChannelOrchestrator:
                         ),
                     ),
                 )
-                await send(
-                    {
-                        "type": "assistant_message",
-                        "request_id": request_id,
-                        "message": result.reply,
-                    }
+                usage = self._context_usage_payload(result.stats)
+                self._context_usage[user.id] = usage
+                await persist_and_broadcast(
+                    role="assistant",
+                    content=result.reply,
+                    request_id=request_id,
+                    metadata={
+                        "usage": usage,
+                        "status": result.stats.status,
+                        "tools_used": result.stats.tools_used,
+                    },
                 )
-                await send(
+                await self._broadcast_to_user(
+                    user.id,
                     {
                         "type": "request_finished",
                         "request_id": request_id,
                         "status": "ok",
                         "label": READY_STATUS_TEXT,
-                        "usage": self._context_usage_payload(result.stats),
-                    }
+                        "usage": usage,
+                    },
                 )
-                self._context_usage[user.id] = self._context_usage_payload(result.stats)
             except LLMBackendUnavailableError as e:
-                await send(
+                warning = e.user_message()
+                await persist_and_broadcast(
+                    role="system",
+                    content=warning,
+                    request_id=request_id,
+                    tone="warning",
+                    metadata={"kind": "llm_unavailable"},
+                )
+                await self._broadcast_to_user(
+                    user.id,
                     {
                         "type": "warning",
                         "request_id": request_id,
                         "kind": "llm_unavailable",
                         "llm_status": "unavailable",
-                        "message": e.user_message(),
-                    }
+                        "message": warning,
+                    },
                 )
                 if request_started:
-                    await send(
+                    await self._broadcast_to_user(
+                        user.id,
                         {
                             "type": "request_finished",
                             "request_id": request_id,
@@ -768,13 +1004,24 @@ class WebChannelOrchestrator:
                             "usage": self._context_usage.get(
                                 user.id, self._context_usage_payload()
                             ),
-                        }
+                        },
                     )
             except Exception as e:
                 logger.exception("Web agent request failed for user %s", user.id)
-                await send({"type": "error", "request_id": request_id, "message": f"Ошибка: {e}"})
+                error_message = f"Ошибка: {e}"
+                await persist_and_broadcast(
+                    role="system",
+                    content=error_message,
+                    request_id=request_id,
+                    tone="error",
+                )
+                await self._broadcast_to_user(
+                    user.id,
+                    {"type": "error", "request_id": request_id, "message": error_message},
+                )
                 if request_started:
-                    await send(
+                    await self._broadcast_to_user(
+                        user.id,
                         {
                             "type": "request_finished",
                             "request_id": request_id,
@@ -783,9 +1030,10 @@ class WebChannelOrchestrator:
                             "usage": self._context_usage.get(
                                 user.id, self._context_usage_payload()
                             ),
-                        }
+                        },
                     )
             finally:
+                self._active_request_state.pop(user.id, None)
                 if request_acquired:
                     await self._service.finish_user_request(user.id)
 
@@ -807,20 +1055,54 @@ class WebChannelOrchestrator:
                     if requested in {"chat", "execute"}:
                         mode = str(requested)
                         await send({"type": "mode", "mode": mode})
-                elif event_type == "reset_context":
-                    ok, message, usage = await self._reset_context_for_user(user)
+                elif event_type == "load_history_before":
+                    if self._chat_store is None:
+                        await send({"type": "error", "message": "История чата недоступна."})
+                        continue
+                    try:
+                        before_id = int(payload.get("before_id") or 0)
+                        limit = int(payload.get("limit") or 100)
+                    except (TypeError, ValueError):
+                        await send({"type": "error", "message": "Invalid history cursor"})
+                        continue
+                    if before_id <= 0:
+                        await send({"type": "error", "message": "Invalid history cursor"})
+                        continue
+                    page = await self._chat_store.list_before(
+                        user.memory_key(), before_id=before_id, limit=limit
+                    )
                     await send(
                         {
-                            "type": "context_reset" if ok else "error",
-                            "message": message,
-                            "usage": usage,
+                            "type": "history_page",
+                            "session_id": page.session_id,
+                            "messages": await self._chat_messages_payload(page.messages, user),
+                            "has_more": page.has_more,
                         }
                     )
+                elif event_type == "reset_context":
+                    ok, message, usage = await self._reset_context_for_user(user)
+                    payload_out: dict[str, object] = {
+                        "type": "context_reset" if ok else "error",
+                        "message": message,
+                        "usage": usage,
+                    }
+                    if ok:
+                        await self._broadcast_to_user(user.id, payload_out)
+                    else:
+                        await send(payload_out)
                 elif event_type == "approve" or event_type == "deny":
                     approval_id = str(payload.get("approval_id", ""))
-                    future = approvals.get(approval_id)
-                    if future is not None and not future.done():
-                        future.set_result(event_type == "approve")
+                    approval = self._pending_approvals.get(approval_id)
+                    if (
+                        approval is not None
+                        and approval.user_id == user.id
+                        and not approval.future.done()
+                    ):
+                        approval.future.set_result(event_type == "approve")
+                        await self._broadcast_to_user(
+                            user.id,
+                            {"type": "approval_resolved", "approval_id": approval_id},
+                        )
                 elif event_type == "message":
                     text = str(payload.get("message", "")).strip()
                     if len(text) > _MAX_WS_MESSAGE_CHARS:
@@ -829,47 +1111,66 @@ class WebChannelOrchestrator:
                     if text:
                         if text.lower() == "/new":
                             ok, message, usage = await self._reset_context_for_user(user)
-                            await send(
-                                {
-                                    "type": "context_reset" if ok else "error",
-                                    "message": message,
-                                    "usage": usage,
-                                }
-                            )
+                            payload_out: dict[str, object] = {
+                                "type": "context_reset" if ok else "error",
+                                "message": message,
+                                "usage": usage,
+                            }
+                            if ok:
+                                await self._broadcast_to_user(user.id, payload_out)
+                            else:
+                                await send(payload_out)
                             continue
                         task = asyncio.create_task(run_message(text))
                         self._request_tasks.add(task)
                         task.add_done_callback(self._request_tasks.discard)
         finally:
-            self._clients.pop(user.id, None)
-            for future in approvals.values():
-                if not future.done():
-                    future.set_result(False)
+            sockets = self._clients.get(user.id)
+            if sockets is not None:
+                sockets.discard(ws)
+                if not sockets:
+                    self._clients.pop(user.id, None)
         return ws
 
     async def _send_file_callback(self, path: Path, user: User, caption: str) -> str:
-        self._prune_download_grants()
-        token = secrets.token_urlsafe(18)
-        self._download_grants[token] = _DownloadGrant(
-            user_id=user.id,
-            path=path,
-            filename=path.name,
-            caption=caption,
-            expires_at=time.time() + _DOWNLOAD_GRANT_TTL_SECONDS,
-        )
-        ws = self._clients.get(user.id)
-        if ws is not None and not ws.closed:
-            await ws.send_str(
-                json.dumps(
-                    {
-                        "type": "file_ready",
-                        "name": path.name,
-                        "caption": caption,
-                        "url": f"/api/download/{token}",
-                    },
-                    ensure_ascii=False,
+        rel_path: str | None = None
+        try:
+            workspace = self._workspace_for(user)
+            if _is_path_inside(path, workspace):
+                rel_path = path.resolve().relative_to(workspace.resolve()).as_posix()
+        except Exception as e:
+            logger.debug("Web send_file path is not in workspace: %s", e)
+
+        if self._chat_store is not None:
+            try:
+                message = await self._chat_store.append_message(
+                    user_id=user.memory_key(),
+                    role="system",
+                    content="Файл готов к скачиванию.",
+                    tone="file",
+                    file=WebChatFile(name=path.name, path=rel_path, caption=caption),
                 )
-            )
+                await self._broadcast_to_user(
+                    user.id,
+                    {
+                        "type": "chat_message",
+                        "message": await self._chat_message_payload(message, user),
+                    },
+                )
+                return f"File '{path.name}' is ready for download."
+            except Exception as e:
+                logger.warning("Failed to persist web file message for user %s: %s", user.id, e)
+
+        url = self._create_download_grant(user=user, path=path, filename=path.name, caption=caption)
+        await self._broadcast_to_user(
+            user.id,
+            {
+                "type": "file_ready",
+                "name": path.name,
+                "caption": caption,
+                "url": url,
+            },
+        )
         return f"File '{path.name}' is ready for download."
 
     def _prune_download_grants(self) -> int:

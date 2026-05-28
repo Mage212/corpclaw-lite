@@ -178,12 +178,43 @@ def test_merge_web_user_moves_credentials_workspace_and_memory(tmp_path) -> None
             """
         )
         conn.execute(
+            """
+            CREATE TABLE web_chat_sessions (
+                id INTEGER PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                ended_at DATETIME
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE web_chat_messages (
+                id INTEGER PRIMARY KEY,
+                session_id INTEGER NOT NULL,
+                user_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
             "INSERT INTO messages (user_id, role, content) VALUES (?, ?, ?)",
             (str(source.id), "user", "hello"),
         )
         conn.execute(
             "INSERT INTO memory_facts (user_id, key, value) VALUES (?, ?, ?)",
             (str(source.id), "source_fact", "yes"),
+        )
+        conn.execute(
+            "INSERT INTO web_chat_sessions (id, user_id) VALUES (?, ?)",
+            (1, str(source.id)),
+        )
+        conn.execute(
+            """
+            INSERT INTO web_chat_messages (session_id, user_id, role, content)
+            VALUES (?, ?, ?, ?)
+            """,
+            (1, str(source.id), "user", "web hello"),
         )
 
     result = mgr.merge_web_user(
@@ -216,8 +247,12 @@ def test_merge_web_user_moves_credentials_workspace_and_memory(tmp_path) -> None
     with sqlite3.connect(memory_db) as conn:
         message_user_ids = conn.execute("SELECT user_id FROM messages").fetchall()
         fact_user_ids = conn.execute("SELECT user_id FROM memory_facts").fetchall()
+        web_session_user_ids = conn.execute("SELECT user_id FROM web_chat_sessions").fetchall()
+        web_message_user_ids = conn.execute("SELECT user_id FROM web_chat_messages").fetchall()
     assert message_user_ids == [(str(target.id),)]
     assert fact_user_ids == [(str(target.id),)]
+    assert web_session_user_ids == [(str(target.id),)]
+    assert web_message_user_ids == [(str(target.id),)]
 
 
 def test_migrate_canonical_ids_moves_legacy_telegram_data(tmp_path) -> None:

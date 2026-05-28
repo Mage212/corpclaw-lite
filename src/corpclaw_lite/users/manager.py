@@ -657,6 +657,36 @@ class UserManager:
             )
             moved_facts = int(cur.rowcount or 0)
             conn.execute("DELETE FROM memory_facts WHERE user_id = ?", (source_key,))
+            try:
+                target_active = conn.execute(
+                    """
+                    SELECT 1 FROM web_chat_sessions
+                    WHERE user_id = ? AND ended_at IS NULL
+                    LIMIT 1
+                    """,
+                    (target_key,),
+                ).fetchone()
+                if target_active is not None:
+                    conn.execute(
+                        """
+                        UPDATE web_chat_sessions
+                        SET ended_at = CURRENT_TIMESTAMP,
+                            reset_reason = ?
+                        WHERE user_id = ? AND ended_at IS NULL
+                        """,
+                        (f"merged_into_user_{target_key}", source_key),
+                    )
+                conn.execute(
+                    "UPDATE web_chat_sessions SET user_id = ? WHERE user_id = ?",
+                    (target_key, source_key),
+                )
+                conn.execute(
+                    "UPDATE web_chat_messages SET user_id = ? WHERE user_id = ?",
+                    (target_key, source_key),
+                )
+            except sqlite3.OperationalError as e:
+                if "no such table" not in str(e).lower():
+                    raise
         return moved_messages, moved_facts
 
     def _migrate_onboarding_state(self, *, legacy_user_id: int, canonical_user_id: int) -> int:

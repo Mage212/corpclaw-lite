@@ -40,13 +40,18 @@ export type PreviewPayload =
 
 export type ChatMessage = {
   id: string;
+  db_id?: number;
+  session_id?: number;
   role: "user" | "assistant" | "system";
   text: string;
+  created_at?: string;
+  request_id?: string;
   tone?: "normal" | "warning" | "error" | "file";
   file?: {
     name: string;
-    url: string;
+    url?: string;
     caption?: string;
+    available?: boolean;
   };
 };
 
