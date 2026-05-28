@@ -11,11 +11,13 @@ import {
   MoreVertical,
   Minimize2,
   MoveRight,
+  PanelLeftOpen,
   RefreshCw,
   Search,
   TableProperties,
   Trash2,
-  Upload
+  Upload,
+  X
 } from "lucide-react";
 import type { DragEvent, FormEvent, MouseEvent } from "react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -78,6 +80,7 @@ export function FileExplorer({ csrf, open, mode, onModeChange, onPreview }: File
   const [searchResults, setSearchResults] = useState<FileEntry[]>([]);
   const [busy, setBusy] = useState(false);
   const [dropActive, setDropActive] = useState(false);
+  const [foldersDrawerOpen, setFoldersDrawerOpen] = useState(false);
   const [context, setContext] = useState<{ x: number; y: number; entry: FileEntry } | null>(null);
   const [action, setAction] = useState<FileAction | null>(null);
   const entries = query.trim() ? searchResults : directory.entries;
@@ -100,6 +103,19 @@ export function FileExplorer({ csrf, open, mode, onModeChange, onPreview }: File
   useEffect(() => {
     setExpanded((current) => new Set([...current, "", ...pathAncestors(cwd)]));
   }, [cwd]);
+
+  useEffect(() => {
+    if (!foldersDrawerOpen) return;
+
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setFoldersDrawerOpen(false);
+      }
+    }
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [foldersDrawerOpen]);
 
   useEffect(() => {
     const value = query.trim();
@@ -160,9 +176,7 @@ export function FileExplorer({ csrf, open, mode, onModeChange, onPreview }: File
 
   async function openEntry(entry: FileEntry) {
     if (entry.is_dir) {
-      setCwd(entry.path);
-      setSelected(new Set());
-      setQuery("");
+      navigate(entry.path);
       return;
     }
     await openFilePreview(entry, "side");
@@ -177,6 +191,13 @@ export function FileExplorer({ csrf, open, mode, onModeChange, onPreview }: File
     if (entry && selected.size === 0) return [entry.path];
     if (entry && !selected.has(entry.path)) return [entry.path];
     return Array.from(selected);
+  }
+
+  function navigate(path: string) {
+    setCwd(path);
+    setSelected(new Set());
+    setQuery("");
+    setFoldersDrawerOpen(false);
   }
 
   function toggleSelected(entry: FileEntry, multi: boolean) {
@@ -280,6 +301,14 @@ export function FileExplorer({ csrf, open, mode, onModeChange, onPreview }: File
             onChange={(event) => event.target.files && upload(event.target.files)}
           />
         </label>
+        <button
+          className="folder-tree-toggle"
+          onClick={() => setFoldersDrawerOpen(true)}
+          title="Папки"
+        >
+          <PanelLeftOpen size={17} />
+          <span>Папки</span>
+        </button>
         <ViewModeButtons mode={viewMode} onModeChange={setViewMode} />
       </div>
 
@@ -292,7 +321,7 @@ export function FileExplorer({ csrf, open, mode, onModeChange, onPreview }: File
         />
       </div>
 
-      <Breadcrumbs path={cwd} onNavigate={setCwd} />
+      <Breadcrumbs path={cwd} onNavigate={navigate} />
 
       <div className="file-manager-body">
         <FileTree
@@ -307,11 +336,7 @@ export function FileExplorer({ csrf, open, mode, onModeChange, onPreview }: File
               return next;
             })
           }
-          onNavigate={(path) => {
-            setCwd(path);
-            setSelected(new Set());
-            setQuery("");
-          }}
+          onNavigate={navigate}
           onDropToFolder={moveDragged}
         />
         <div className="file-main">
@@ -327,7 +352,7 @@ export function FileExplorer({ csrf, open, mode, onModeChange, onPreview }: File
             query={query}
             mode={viewMode}
             selected={selected}
-            onNavigateUp={() => setCwd(parentPath(cwd))}
+            onNavigateUp={() => navigate(parentPath(cwd))}
             onOpen={openEntry}
             onSelect={toggleSelected}
             onContext={openContext}
@@ -336,6 +361,43 @@ export function FileExplorer({ csrf, open, mode, onModeChange, onPreview }: File
           />
         </div>
       </div>
+
+      {foldersDrawerOpen && (
+        <div className="folders-drawer" role="dialog" aria-label="Папки">
+          <button
+            className="folders-drawer-backdrop"
+            onClick={() => setFoldersDrawerOpen(false)}
+            aria-label="Закрыть папки"
+          />
+          <div className="folders-drawer-panel">
+            <header className="folders-drawer-header">
+              <strong>Папки</strong>
+              <button
+                className="icon-button"
+                onClick={() => setFoldersDrawerOpen(false)}
+                title="Закрыть"
+              >
+                <X size={17} />
+              </button>
+            </header>
+            <FileTree
+              node={tree}
+              current={cwd}
+              expanded={expanded}
+              onToggleExpanded={(path) =>
+                setExpanded((current) => {
+                  const next = new Set(current);
+                  if (next.has(path)) next.delete(path);
+                  else next.add(path);
+                  return next;
+                })
+              }
+              onNavigate={navigate}
+              onDropToFolder={moveDragged}
+            />
+          </div>
+        </div>
+      )}
 
       <UploadQueue uploads={uploads} />
 
@@ -535,13 +597,13 @@ function SelectionBar({
       {selectedCount > 0 && (
         <div>
           <button onClick={onCopy}>
-            <Copy size={14} /> Копировать
+            <Copy size={14} /> <span className="action-label">Копировать</span>
           </button>
           <button onClick={onMove}>
-            <MoveRight size={14} /> Переместить
+            <MoveRight size={14} /> <span className="action-label">Переместить</span>
           </button>
           <button onClick={onDelete}>
-            <Trash2 size={14} /> Удалить
+            <Trash2 size={14} /> <span className="action-label">Удалить</span>
           </button>
         </div>
       )}
@@ -626,6 +688,10 @@ function FileRow({
   onDragPaths: (entry?: FileEntry) => string[];
   onDropToFolder: (event: DragEvent, targetDir: string) => void | Promise<void>;
 }) {
+  const compactMeta = `${entry.is_dir ? "Папка" : formatSize(entry.size_bytes)} · ${
+    entry.modified_at
+  }`;
+
   return (
     <div
       className={`file-row ${selected ? "selected" : ""}`}
@@ -650,6 +716,7 @@ function FileRow({
       </span>
       <span className="file-meta">{entry.is_dir ? "folder" : formatSize(entry.size_bytes)}</span>
       <span className="file-date">{entry.modified_at}</span>
+      <span className="file-compact-meta">{compactMeta}</span>
       <button className="row-menu" onClick={(event) => onContext(event, entry)} title="Действия">
         <MoreVertical size={16} />
       </button>
