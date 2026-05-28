@@ -37,6 +37,7 @@ import type {
   DirectoryPayload,
   FileEntry,
   FileExplorerMode,
+  PreviewMode,
   PreviewPayload,
   TreeNode,
   UploadItem,
@@ -49,7 +50,7 @@ type FileExplorerProps = {
   open: boolean;
   mode: FileExplorerMode;
   onModeChange: (mode: FileExplorerMode) => void;
-  onPreview: (preview: PreviewPayload) => void;
+  onPreview: (preview: PreviewPayload, mode: PreviewMode) => void;
 };
 
 type FileAction =
@@ -164,7 +165,12 @@ export function FileExplorer({ csrf, open, mode, onModeChange, onPreview }: File
       setQuery("");
       return;
     }
-    onPreview(await previewFile(entry.path));
+    await openFilePreview(entry, "side");
+  }
+
+  async function openFilePreview(entry: FileEntry, nextMode: PreviewMode) {
+    if (entry.is_dir) return;
+    onPreview(await previewFile(entry.path), nextMode);
   }
 
   function selectedPaths(entry?: FileEntry): string[] {
@@ -338,6 +344,8 @@ export function FileExplorer({ csrf, open, mode, onModeChange, onPreview }: File
           context={context}
           onClose={() => setContext(null)}
           onOpen={() => openEntry(context.entry)}
+          onPreview={() => openFilePreview(context.entry, "side")}
+          onFullPreview={() => openFilePreview(context.entry, "expanded")}
           onRename={() => setAction({ type: "rename", entry: context.entry })}
           onCopy={() => setAction({ type: "copy", paths: selectedPaths(context.entry) })}
           onMove={() => setAction({ type: "move", paths: selectedPaths(context.entry) })}
@@ -653,6 +661,8 @@ function ContextMenu({
   context,
   onClose,
   onOpen,
+  onPreview,
+  onFullPreview,
   onRename,
   onCopy,
   onMove,
@@ -661,6 +671,8 @@ function ContextMenu({
   context: { x: number; y: number; entry: FileEntry };
   onClose: () => void;
   onOpen: () => void;
+  onPreview: () => void;
+  onFullPreview: () => void;
   onRename: () => void;
   onCopy: () => void;
   onMove: () => void;
@@ -696,14 +708,35 @@ function ContextMenu({
 
   return (
     <div ref={menuRef} className="context-menu" style={{ left: position.x, top: position.y }}>
-      <button
-        onClick={() => {
-          onOpen();
-          onClose();
-        }}
-      >
-        {context.entry.is_dir ? "Открыть" : "Предпросмотр"}
-      </button>
+      {context.entry.is_dir ? (
+        <button
+          onClick={() => {
+            onOpen();
+            onClose();
+          }}
+        >
+          Открыть
+        </button>
+      ) : (
+        <>
+          <button
+            onClick={() => {
+              onFullPreview();
+              onClose();
+            }}
+          >
+            Просмотр в полном окне
+          </button>
+          <button
+            onClick={() => {
+              onPreview();
+              onClose();
+            }}
+          >
+            Предпросмотр
+          </button>
+        </>
+      )}
       {!context.entry.is_dir && (
         <a href={downloadUrl(context.entry.path)} download={context.entry.name} onClick={onClose}>
           Скачать

@@ -115,7 +115,7 @@ function Workspace({
   const [previewMode, setPreviewMode] = useState<PreviewMode>("side");
   const [contextUsage, setContextUsage] = useState<ContextUsage | null>(null);
   const [resetSignal, setResetSignal] = useState(0);
-  const { cssVars, startResize } = useResizablePanels();
+  const { cssVars, prepareSidePreview, startResize } = useResizablePanels();
   const user = session.user;
 
   if (!user) {
@@ -127,9 +127,12 @@ function Workspace({
     onSessionChange({ authenticated: false, user: null, csrf_token: "" });
   }
 
-  function openPreview(next: PreviewPayload) {
+  function openPreview(next: PreviewPayload, nextMode: PreviewMode = "side") {
+    if (nextMode === "side") {
+      prepareSidePreview(filesOpen && filesMode === "side");
+    }
     setPreview(next);
-    setPreviewMode("side");
+    setPreviewMode(nextMode);
   }
 
   function toggleFiles() {
@@ -158,14 +161,19 @@ function Workspace({
       {filesOpen && filesMode === "side" && (
         <div
           className="resize-handle files-resize"
-          onPointerDown={(event) => startResize("files", event)}
+          onPointerDown={(event) =>
+            startResize("files", event, {
+              filesOpen: true,
+              previewOpen: Boolean(preview && previewMode === "side")
+            })
+          }
           role="separator"
           aria-orientation="vertical"
         />
       )}
       <section className="main-pane">
         <header className="topbar">
-          <button className="icon-button" onClick={toggleFiles} title="Файлы">
+          <button className="icon-button topbar-files-toggle" onClick={toggleFiles} title="Файлы">
             {filesOpen ? <PanelLeftClose size={18} /> : <PanelLeftOpen size={18} />}
           </button>
           <div className="topbar-center">
@@ -175,8 +183,10 @@ function Workspace({
             </div>
             <ContextMeter usage={contextUsage} />
           </div>
-          <div className="topbar-actions">
+          <div className="topbar-mode">
             <SegmentedMode mode={mode} onModeChange={setMode} />
+          </div>
+          <div className="topbar-actions">
             <button
               className="icon-button"
               onClick={() => setResetSignal((value) => value + 1)}
@@ -202,7 +212,12 @@ function Workspace({
         <>
           <div
             className="resize-handle preview-resize"
-            onPointerDown={(event) => startResize("preview", event)}
+            onPointerDown={(event) =>
+              startResize("preview", event, {
+                filesOpen: filesOpen && filesMode === "side",
+                previewOpen: true
+              })
+            }
             role="separator"
             aria-orientation="vertical"
           />
