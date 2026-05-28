@@ -10,18 +10,32 @@ import secrets
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from aiohttp import WSMsgType, web
 
 from corpclaw_lite.agent.factory import build_agent_stack
 from corpclaw_lite.channels.service import AgentRequestCallbacks, AgentRequestService
+from corpclaw_lite.channels.status import (
+    INITIAL_STATUS_TEXT,
+    READY_STATUS_TEXT,
+    format_llm_stage_status,
+    format_tool_status,
+)
 from corpclaw_lite.channels.telegram.rate_limit import RateLimiter
 from corpclaw_lite.channels.web.files import (
+    build_tree,
+    copy_paths,
     delete_path,
+    delete_paths,
     list_directory,
     make_directory,
+    move_paths,
+    preview_file,
+    rename_path,
     resolve_workspace_path,
-    save_upload,
+    save_upload_stream,
+    search_files,
 )
 from corpclaw_lite.config.bootstrap import BootstrapLoader
 from corpclaw_lite.config.settings import Settings, WebChannelSettings
@@ -37,6 +51,10 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+_MAX_WS_MESSAGE_CHARS = 20_000
+_MAX_BATCH_PATHS = 100
+_FRONTEND_DIST = PROJECT_ROOT / "frontend" / "web" / "dist"
 
 
 @dataclass(slots=True)
@@ -131,19 +149,52 @@ class WebChannelOrchestrator:
             logger.debug("Web channel cleanup completed before full startup.")
 
     def _build_app(self) -> web.Application:
-        app = web.Application(middlewares=[self._auth_middleware])
+        app = web.Application(middlewares=[self._error_middleware, self._auth_middleware])
         app.router.add_get("/", self._handle_index)
+        app.router.add_get("/favicon.svg", self._handle_favicon)
         app.router.add_get("/login", self._handle_login_page)
         app.router.add_post("/login", self._handle_login)
         app.router.add_post("/logout", self._handle_logout)
+        app.router.add_get("/api/session", self._handle_session)
+        app.router.add_post("/api/login", self._handle_api_login)
+        app.router.add_post("/api/logout", self._handle_api_logout)
         app.router.add_get("/ws/chat", self._handle_chat_ws)
         app.router.add_get("/api/files", self._handle_list_files)
+        app.router.add_get("/api/files/tree", self._handle_tree_files)
+        app.router.add_get("/api/files/search", self._handle_search_files)
+        app.router.add_get("/api/files/preview", self._handle_preview_file)
         app.router.add_post("/api/files/upload", self._handle_upload)
         app.router.add_post("/api/files/mkdir", self._handle_mkdir)
+        app.router.add_post("/api/files/rename", self._handle_rename)
+        app.router.add_post("/api/files/move", self._handle_move)
+        app.router.add_post("/api/files/copy", self._handle_copy)
+        app.router.add_post("/api/files/delete", self._handle_delete_batch)
         app.router.add_delete("/api/files", self._handle_delete)
         app.router.add_get("/api/files/download", self._handle_download_file)
         app.router.add_get("/api/download/{token}", self._handle_download_grant)
+        assets_dir = _FRONTEND_DIST / "assets"
+        if assets_dir.exists():
+            app.router.add_static("/assets", assets_dir, show_index=False)
         return app
+
+    @web.middleware
+    async def _error_middleware(self, request: web.Request, handler: Any) -> web.StreamResponse:
+        try:
+            return await handler(request)
+        except web.HTTPException:
+            raise
+        except PermissionError as e:
+            if request.path.startswith("/api/"):
+                return web.json_response({"error": str(e)}, status=403)
+            raise web.HTTPForbidden(text=str(e)) from e
+        except FileNotFoundError as e:
+            if request.path.startswith("/api/"):
+                return web.json_response({"error": str(e)}, status=404)
+            raise web.HTTPNotFound(text=str(e)) from e
+        except (FileExistsError, ValueError) as e:
+            if request.path.startswith("/api/"):
+                return web.json_response({"error": str(e)}, status=400)
+            raise web.HTTPBadRequest(text=str(e)) from e
 
     @web.middleware
     async def _auth_middleware(self, request: web.Request, handler: Any) -> web.StreamResponse:
@@ -158,6 +209,8 @@ class WebChannelOrchestrator:
                 request["csrf_token"] = csrf_token
 
         if request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.path not in {
+            "/api/login",
+            "/api/logout",
             "/login",
             "/logout",
         }:
@@ -173,28 +226,46 @@ class WebChannelOrchestrator:
     def _redirect(location: str) -> web.HTTPFound:
         return web.HTTPFound(location=location)
 
-    async def _handle_login_page(self, request: web.Request) -> web.Response:
-        if isinstance(request.get("user"), User):
-            raise self._redirect("/")
-        return web.Response(text=_LOGIN_HTML.replace("{{error}}", ""), content_type="text/html")
+    @staticmethod
+    def _user_payload(user: User) -> dict[str, object]:
+        return {
+            "id": user.id,
+            "name": user.name,
+            "username": user.username,
+            "department": user.department,
+            "is_admin": user.is_admin,
+        }
 
-    async def _handle_login(self, request: web.Request) -> web.Response:
-        if self._stack is None:
-            raise web.HTTPServiceUnavailable()
-        data = await request.post()
-        username = str(data.get("username", ""))
-        password = str(data.get("password", ""))
-        user = self._stack.user_manager.authenticate_web_user(username, password)
-        if user is None:
-            return web.Response(
-                text=_LOGIN_HTML.replace("{{error}}", "Неверный логин или пароль"),
-                content_type="text/html",
-                status=401,
-            )
-        token, _csrf = self._stack.user_manager.create_web_session(
-            user.id, ttl_hours=self._web_settings.session_ttl_hours
-        )
-        response = self._redirect("/")
+    @staticmethod
+    async def _json_payload(request: web.Request) -> dict[str, object]:
+        try:
+            payload = await request.json()
+        except Exception as e:
+            raise web.HTTPBadRequest(text="Invalid JSON payload") from e
+        if not isinstance(payload, dict):
+            raise web.HTTPBadRequest(text="JSON object expected")
+        return payload
+
+    @staticmethod
+    def _paths_from_payload(payload: dict[str, object]) -> list[str]:
+        raw_paths = payload.get("paths")
+        if raw_paths is None:
+            raw_path = payload.get("path")
+            raw_paths = [raw_path] if raw_path is not None else []
+        if not isinstance(raw_paths, list):
+            raise web.HTTPBadRequest(text="paths must be a list")
+        if len(raw_paths) > _MAX_BATCH_PATHS:
+            raise web.HTTPBadRequest(text="Too many paths")
+        paths: list[str] = []
+        for raw_path in raw_paths:
+            if not isinstance(raw_path, str) or not raw_path.strip():
+                raise web.HTTPBadRequest(text="Invalid path")
+            paths.append(raw_path)
+        if not paths:
+            raise web.HTTPBadRequest(text="Missing path")
+        return paths
+
+    def _set_session_cookie(self, response: web.StreamResponse, token: str) -> None:
         response.set_cookie(
             self._web_settings.cookie_name,
             token,
@@ -202,6 +273,55 @@ class WebChannelOrchestrator:
             samesite="Strict",
             max_age=self._web_settings.session_ttl_hours * 3600,
         )
+
+    def _clear_session_cookie(self, response: web.StreamResponse) -> None:
+        response.del_cookie(self._web_settings.cookie_name)
+
+    def _authenticate(self, username: str, password: str) -> User | None:
+        if self._stack is None:
+            raise web.HTTPServiceUnavailable()
+        return self._stack.user_manager.authenticate_web_user(username, password)
+
+    def _create_session_response(self, user: User) -> tuple[str, str]:
+        if self._stack is None:
+            raise web.HTTPServiceUnavailable()
+        return self._stack.user_manager.create_web_session(
+            user.id, ttl_hours=self._web_settings.session_ttl_hours
+        )
+
+    def _frontend_ready(self) -> bool:
+        return (_FRONTEND_DIST / "index.html").exists()
+
+    def _frontend_response(self) -> web.FileResponse:
+        return web.FileResponse(_FRONTEND_DIST / "index.html")
+
+    async def _handle_favicon(self, _request: web.Request) -> web.StreamResponse:
+        favicon = _FRONTEND_DIST / "favicon.svg"
+        if not favicon.exists():
+            raise web.HTTPNotFound()
+        return web.FileResponse(favicon)
+
+    async def _handle_login_page(self, request: web.Request) -> web.StreamResponse:
+        if isinstance(request.get("user"), User):
+            raise self._redirect("/")
+        if self._frontend_ready():
+            return self._frontend_response()
+        return web.Response(text=_LOGIN_HTML.replace("{{error}}", ""), content_type="text/html")
+
+    async def _handle_login(self, request: web.Request) -> web.Response:
+        data = await request.post()
+        username = str(data.get("username", ""))
+        password = str(data.get("password", ""))
+        user = self._authenticate(username, password)
+        if user is None:
+            return web.Response(
+                text=_LOGIN_HTML.replace("{{error}}", "Неверный логин или пароль"),
+                content_type="text/html",
+                status=401,
+            )
+        token, _csrf = self._create_session_response(user)
+        response = self._redirect("/")
+        self._set_session_cookie(response, token)
         return response
 
     async def _handle_logout(self, request: web.Request) -> web.Response:
@@ -210,17 +330,57 @@ class WebChannelOrchestrator:
             if token:
                 self._stack.user_manager.delete_web_session(token)
         response = self._redirect("/login")
-        response.del_cookie(self._web_settings.cookie_name)
+        self._clear_session_cookie(response)
         return response
 
-    async def _handle_index(self, request: web.Request) -> web.Response:
+    async def _handle_session(self, request: web.Request) -> web.Response:
+        user = request.get("user")
+        if not isinstance(user, User):
+            return web.json_response({"authenticated": False, "user": None, "csrf_token": ""})
+        return web.json_response(
+            {
+                "authenticated": True,
+                "user": self._user_payload(user),
+                "csrf_token": str(request.get("csrf_token", "")),
+            }
+        )
+
+    async def _handle_api_login(self, request: web.Request) -> web.Response:
+        payload = await self._json_payload(request)
+        username = payload.get("username")
+        password = payload.get("password")
+        if not isinstance(username, str) or not isinstance(password, str):
+            raise web.HTTPBadRequest(text="username and password are required")
+        user = self._authenticate(username, password)
+        if user is None:
+            return web.json_response({"error": "Неверный логин или пароль"}, status=401)
+        token, csrf_token = self._create_session_response(user)
+        response = web.json_response(
+            {
+                "authenticated": True,
+                "user": self._user_payload(user),
+                "csrf_token": csrf_token,
+            }
+        )
+        self._set_session_cookie(response, token)
+        return response
+
+    async def _handle_api_logout(self, request: web.Request) -> web.Response:
+        if self._stack is not None:
+            token = request.cookies.get(self._web_settings.cookie_name)
+            if token:
+                self._stack.user_manager.delete_web_session(token)
+        response = web.json_response({"ok": True})
+        self._clear_session_cookie(response)
+        return response
+
+    async def _handle_index(self, request: web.Request) -> web.StreamResponse:
         user = request.get("user")
         if not isinstance(user, User):
             raise self._redirect("/login")
-        html = _APP_HTML.replace("{{csrf}}", str(request.get("csrf_token", ""))).replace(
-            "{{name}}", user.name
-        )
-        return web.Response(text=html, content_type="text/html")
+        if not self._frontend_ready():
+            return web.Response(text=_BUILD_MISSING_HTML, content_type="text/html", status=503)
+        return self._frontend_response()
 
     def _require_user(self, request: web.Request) -> User:
         user = request.get("user")
@@ -235,42 +395,134 @@ class WebChannelOrchestrator:
 
     async def _handle_list_files(self, request: web.Request) -> web.Response:
         user = self._require_user(request)
-        result = await list_directory(self._workspace_for(user), request.query.get("path"))
+        result = await list_directory(
+            self._workspace_for(user),
+            request.query.get("path"),
+            sort=request.query.get("sort", "name"),
+            order=request.query.get("order", "asc"),
+        )
+        return web.json_response(result)
+
+    async def _handle_tree_files(self, request: web.Request) -> web.Response:
+        user = self._require_user(request)
+        raw_depth = request.query.get("depth", "3")
+        try:
+            depth = int(raw_depth)
+        except ValueError as e:
+            raise web.HTTPBadRequest(text="Invalid depth") from e
+        result = await build_tree(self._workspace_for(user), depth=depth)
+        return web.json_response(result)
+
+    async def _handle_search_files(self, request: web.Request) -> web.Response:
+        user = self._require_user(request)
+        raw_limit = request.query.get("limit", "100")
+        try:
+            limit = int(raw_limit)
+        except ValueError as e:
+            raise web.HTTPBadRequest(text="Invalid limit") from e
+        result = await search_files(
+            self._workspace_for(user),
+            request.query.get("query"),
+            limit=limit,
+        )
+        return web.json_response(result)
+
+    async def _handle_preview_file(self, request: web.Request) -> web.Response:
+        user = self._require_user(request)
+        path = request.query.get("path")
+        if not path:
+            raise web.HTTPBadRequest(text="Missing path")
+        result = await preview_file(self._workspace_for(user), path)
+        if result.get("type") == "image":
+            result["url"] = f"/api/files/download?path={quote(path)}"
         return web.json_response(result)
 
     async def _handle_upload(self, request: web.Request) -> web.Response:
         user = self._require_user(request)
         reader = await request.multipart()
-        field: Any = await reader.next()
-        if field is None or not field.filename:
-            raise web.HTTPBadRequest(text="Missing file")
-        data = await field.read(decode=False)
         target_dir = request.query.get("path")
-        rel = await save_upload(
-            workspace=self._workspace_for(user),
-            filename=field.filename,
-            data=data,
-            max_bytes=self._web_settings.upload_max_bytes,
-            target_dir=target_dir,
-        )
-        return web.json_response({"path": rel})
+        uploaded: list[dict[str, str]] = []
+        while True:
+            field: Any = await reader.next()
+            if field is None:
+                break
+            filename = getattr(field, "filename", None)
+            if not filename:
+                continue
+            rel = await save_upload_stream(
+                workspace=self._workspace_for(user),
+                filename=str(filename),
+                field=field,
+                max_bytes=self._web_settings.upload_max_bytes,
+                target_dir=target_dir,
+            )
+            uploaded.append({"name": Path(rel).name, "path": rel})
+        if not uploaded:
+            raise web.HTTPBadRequest(text="Missing file")
+        return web.json_response({"uploaded": uploaded, "path": uploaded[0]["path"]})
 
     async def _handle_mkdir(self, request: web.Request) -> web.Response:
         user = self._require_user(request)
-        payload = await request.json()
+        payload = await self._json_payload(request)
+        raw_parent = payload.get("path")
+        raw_name = payload.get("name")
+        if raw_parent is not None and not isinstance(raw_parent, str):
+            raise web.HTTPBadRequest(text="path must be a string")
+        if not isinstance(raw_name, str):
+            raise web.HTTPBadRequest(text="name is required")
         rel = await make_directory(
             self._workspace_for(user),
-            str(payload.get("path", "")),
-            str(payload.get("name", "")),
+            raw_parent or "",
+            raw_name,
         )
         return web.json_response({"path": rel})
+
+    async def _handle_rename(self, request: web.Request) -> web.Response:
+        user = self._require_user(request)
+        payload = await self._json_payload(request)
+        path = payload.get("path")
+        new_name = payload.get("new_name")
+        if not isinstance(path, str) or not isinstance(new_name, str):
+            raise web.HTTPBadRequest(text="path and new_name are required")
+        rel = await rename_path(self._workspace_for(user), path, new_name)
+        return web.json_response({"path": rel})
+
+    async def _handle_move(self, request: web.Request) -> web.Response:
+        user = self._require_user(request)
+        payload = await self._json_payload(request)
+        target_dir = payload.get("target_dir")
+        if target_dir is not None and not isinstance(target_dir, str):
+            raise web.HTTPBadRequest(text="target_dir must be a string")
+        paths = self._paths_from_payload(payload)
+        moved = await move_paths(self._workspace_for(user), paths, target_dir)
+        return web.json_response({"paths": moved})
+
+    async def _handle_copy(self, request: web.Request) -> web.Response:
+        user = self._require_user(request)
+        payload = await self._json_payload(request)
+        target_dir = payload.get("target_dir")
+        if target_dir is not None and not isinstance(target_dir, str):
+            raise web.HTTPBadRequest(text="target_dir must be a string")
+        paths = self._paths_from_payload(payload)
+        copied = await copy_paths(self._workspace_for(user), paths, target_dir)
+        return web.json_response({"paths": copied})
+
+    async def _handle_delete_batch(self, request: web.Request) -> web.Response:
+        user = self._require_user(request)
+        payload = await self._json_payload(request)
+        paths = self._paths_from_payload(payload)
+        recursive = payload.get("recursive")
+        if not isinstance(recursive, bool):
+            raise web.HTTPBadRequest(text="recursive confirmation is required")
+        deleted = await delete_paths(self._workspace_for(user), paths, recursive=recursive)
+        return web.json_response({"paths": deleted})
 
     async def _handle_delete(self, request: web.Request) -> web.Response:
         user = self._require_user(request)
         path = request.query.get("path")
         if not path:
             raise web.HTTPBadRequest(text="Missing path")
-        await delete_path(self._workspace_for(user), path)
+        await delete_path(self._workspace_for(user), path, recursive=True)
         return web.json_response({"ok": True})
 
     async def _handle_download_file(self, request: web.Request) -> web.FileResponse:
@@ -292,6 +544,9 @@ class WebChannelOrchestrator:
 
     async def _handle_chat_ws(self, request: web.Request) -> web.WebSocketResponse:
         user = self._require_user(request)
+        csrf_token = request.query.get("csrf", "")
+        if not csrf_token or csrf_token != request.get("csrf_token"):
+            raise web.HTTPForbidden(text="CSRF validation failed")
         ws = web.WebSocketResponse(heartbeat=30)
         await ws.prepare(request)
         self._clients[user.id] = ws
@@ -306,6 +561,23 @@ class WebChannelOrchestrator:
             asyncio.create_task(send(payload))
 
         await send({"type": "llm_status", "status": "unknown"})
+
+        def send_status(
+            *,
+            request_id: str,
+            phase: str,
+            key: str,
+            label: str,
+        ) -> None:
+            send_task(
+                {
+                    "type": "status_update",
+                    "request_id": request_id,
+                    "phase": phase,
+                    "key": key,
+                    "label": label,
+                }
+            )
 
         async def approval_cb(action: str, details: str) -> bool:
             approval_id = secrets.token_urlsafe(12)
@@ -327,6 +599,9 @@ class WebChannelOrchestrator:
                 approvals.pop(approval_id, None)
 
         async def run_message(text: str) -> None:
+            request_id = secrets.token_urlsafe(10)
+            request_started = False
+            request_acquired = False
             if self._service is None:
                 await send({"type": "error", "message": "Service is not ready"})
                 return
@@ -336,7 +611,16 @@ class WebChannelOrchestrator:
             if not await self._service.try_start_user_request(user.id):
                 await send({"type": "error", "message": "Предыдущая задача ещё выполняется."})
                 return
+            request_acquired = True
             try:
+                request_started = True
+                await send(
+                    {
+                        "type": "request_started",
+                        "request_id": request_id,
+                        "label": INITIAL_STATUS_TEXT,
+                    }
+                )
                 result = await self._service.run(
                     user=user,
                     message=text,
@@ -344,25 +628,69 @@ class WebChannelOrchestrator:
                     channel="web",
                     callbacks=AgentRequestCallbacks(
                         request_approval=approval_cb,
-                        on_tool_start=lambda tool: send_task({"type": "status", "stage": tool}),
-                        on_llm_stage=lambda stage: send_task({"type": "status", "stage": stage}),
+                        on_tool_start=lambda tool: send_status(
+                            request_id=request_id,
+                            phase="tool",
+                            key=tool,
+                            label=format_tool_status(tool),
+                        ),
+                        on_llm_stage=lambda stage: send_status(
+                            request_id=request_id,
+                            phase="llm",
+                            key=stage,
+                            label=format_llm_stage_status(stage) or INITIAL_STATUS_TEXT,
+                        ),
                     ),
                 )
-                await send({"type": "assistant_message", "message": result.reply})
+                await send(
+                    {
+                        "type": "assistant_message",
+                        "request_id": request_id,
+                        "message": result.reply,
+                    }
+                )
+                await send(
+                    {
+                        "type": "request_finished",
+                        "request_id": request_id,
+                        "status": "ok",
+                        "label": READY_STATUS_TEXT,
+                    }
+                )
             except LLMBackendUnavailableError as e:
                 await send(
                     {
                         "type": "warning",
+                        "request_id": request_id,
                         "kind": "llm_unavailable",
                         "llm_status": "unavailable",
                         "message": e.user_message(),
                     }
                 )
+                if request_started:
+                    await send(
+                        {
+                            "type": "request_finished",
+                            "request_id": request_id,
+                            "status": "warning",
+                            "label": "⚠️ Требуется внимание",
+                        }
+                    )
             except Exception as e:
                 logger.exception("Web agent request failed for user %s", user.id)
-                await send({"type": "error", "message": f"Ошибка: {e}"})
+                await send({"type": "error", "request_id": request_id, "message": f"Ошибка: {e}"})
+                if request_started:
+                    await send(
+                        {
+                            "type": "request_finished",
+                            "request_id": request_id,
+                            "status": "error",
+                            "label": "Ошибка выполнения",
+                        }
+                    )
             finally:
-                await self._service.finish_user_request(user.id)
+                if request_acquired:
+                    await self._service.finish_user_request(user.id)
 
         try:
             async for msg in ws:
@@ -371,6 +699,9 @@ class WebChannelOrchestrator:
                 try:
                     payload = json.loads(msg.data)
                 except json.JSONDecodeError:
+                    await send({"type": "error", "message": "Invalid JSON"})
+                    continue
+                if not isinstance(payload, dict):
                     await send({"type": "error", "message": "Invalid JSON"})
                     continue
                 event_type = payload.get("type")
@@ -386,6 +717,9 @@ class WebChannelOrchestrator:
                         future.set_result(event_type == "approve")
                 elif event_type == "message":
                     text = str(payload.get("message", "")).strip()
+                    if len(text) > _MAX_WS_MESSAGE_CHARS:
+                        await send({"type": "error", "message": "Сообщение слишком длинное."})
+                        continue
                     if text:
                         asyncio.create_task(run_message(text))
         finally:
@@ -443,21 +777,7 @@ _LOGIN_HTML = """<!doctype html>
 <style>body{font-family:system-ui;margin:0;display:grid;place-items:center;min-height:100vh;background:#f5f5f2;color:#1f2933}form{width:320px;background:white;border:1px solid #ddd;padding:24px}input,button{width:100%;box-sizing:border-box;margin-top:10px;padding:10px}button{background:#1f6feb;color:white;border:0}.error{color:#b42318}</style>
 </head><body><form method="post" action="/login"><h1>CorpClaw Lite</h1><p class="error">{{error}}</p><input name="username" placeholder="Username" autocomplete="username"><input name="password" type="password" placeholder="Password" autocomplete="current-password"><button>Войти</button></form></body></html>"""
 
-_APP_HTML = """<!doctype html>
+_BUILD_MISSING_HTML = """<!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><title>CorpClaw Lite</title>
-<style>
-body{margin:0;font-family:system-ui;background:#f7f7f4;color:#17202a}.app{height:100vh;display:grid;grid-template-columns:320px 1fr}.files{border-right:1px solid #d8d8d2;background:#fff;padding:14px;overflow:auto}.chat{display:grid;grid-template-rows:auto 1fr auto;height:100vh}.top{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid #d8d8d2;background:#fff}.messages{padding:18px;overflow:auto}.msg{max-width:840px;margin:0 0 12px;padding:10px 12px;background:#fff;border:1px solid #ddd}.user{background:#e8f1ff}.composer{display:flex;gap:8px;padding:12px;background:#fff;border-top:1px solid #d8d8d2}textarea{flex:1;min-height:54px}button,input,select{padding:8px}.file{display:flex;justify-content:space-between;gap:8px;border-bottom:1px solid #eee;padding:7px 0}.status{color:#59636e;font-size:13px}.approval{border-color:#d29922;background:#fff8c5}
-</style></head><body><div class="app"><aside class="files"><h2>Файлы</h2><input id="upload" type="file"><button id="mkdir">Папка</button><div id="fileList"></div></aside><main class="chat"><div class="top"><div>CorpClaw Lite — {{name}}</div><div><select id="mode"><option value="execute">execute</option><option value="chat">chat</option></select><form method="post" action="/logout" style="display:inline"><input type="hidden" name="_csrf" value="{{csrf}}"><button>Выйти</button></form></div></div><div id="messages" class="messages"></div><div class="composer"><textarea id="input" placeholder="Введите сообщение"></textarea><button id="send">Отправить</button></div></main></div>
-<script>
-const csrf="{{csrf}}"; let cwd=""; const ws=new WebSocket(`${location.protocol==="https:"?"wss":"ws"}://${location.host}/ws/chat`);
-const messages=document.getElementById("messages"); const fileList=document.getElementById("fileList");
-function add(text, cls="msg"){const d=document.createElement("div");d.className=cls;d.textContent=text;messages.appendChild(d);messages.scrollTop=messages.scrollHeight;}
-function api(path, opts={}){opts.headers=Object.assign({"X-CSRF-Token":csrf},opts.headers||{});return fetch(path,opts);}
-async function loadFiles(path=""){cwd=path;const r=await fetch(`/api/files?path=${encodeURIComponent(path)}`);const j=await r.json();fileList.innerHTML=""; if(j.path){const up=document.createElement("button");up.textContent="..";up.onclick=()=>loadFiles(j.path.split("/").slice(0,-1).join("/"));fileList.appendChild(up);} for(const e of j.entries){const row=document.createElement("div");row.className="file";const open=document.createElement("button");open.textContent=e.is_dir?`[${e.name}]`:e.name;open.onclick=()=>e.is_dir?loadFiles(e.path):window.open(`/api/files/download?path=${encodeURIComponent(e.path)}`,"_blank");const del=document.createElement("button");del.textContent="Удалить";del.onclick=async()=>{if(confirm(`Удалить ${e.name}?`)){await api(`/api/files?path=${encodeURIComponent(e.path)}`,{method:"DELETE"});loadFiles(cwd)}};row.append(open,del);fileList.appendChild(row);}}
-ws.onmessage=(ev)=>{const e=JSON.parse(ev.data); if(e.type==="assistant_message")add(e.message); else if(e.type==="status")add(`Статус: ${e.stage}`,"msg status"); else if(e.type==="warning")add(`Предупреждение: ${e.message}`,"msg status"); else if(e.type==="error")add(e.message,"msg status"); else if(e.type==="file_ready")add(`Файл готов: ${e.name} ${e.url}`); else if(e.type==="approval_required"){const d=document.createElement("div");d.className="msg approval";d.textContent=`Подтверждение: ${e.action}\n${e.details}`;const a=document.createElement("button");a.textContent="Approve";a.onclick=()=>ws.send(JSON.stringify({type:"approve",approval_id:e.approval_id}));const n=document.createElement("button");n.textContent="Deny";n.onclick=()=>ws.send(JSON.stringify({type:"deny",approval_id:e.approval_id}));d.append(a,n);messages.appendChild(d);}};
-document.getElementById("send").onclick=()=>{const i=document.getElementById("input");const text=i.value.trim();if(text){add(text,"msg user");ws.send(JSON.stringify({type:"message",message:text}));i.value="";}};
-document.getElementById("mode").onchange=(e)=>ws.send(JSON.stringify({type:"mode_change",mode:e.target.value}));
-document.getElementById("upload").onchange=async(e)=>{const f=e.target.files[0];if(!f)return;const fd=new FormData();fd.append("file",f);await api(`/api/files/upload?path=${encodeURIComponent(cwd)}`,{method:"POST",body:fd,headers:{"X-CSRF-Token":csrf}});e.target.value="";loadFiles(cwd);};
-document.getElementById("mkdir").onclick=async()=>{const name=prompt("Имя папки");if(name){await api("/api/files/mkdir",{method:"POST",headers:{"Content-Type":"application/json","X-CSRF-Token":csrf},body:JSON.stringify({path:cwd,name})});loadFiles(cwd);}};
-loadFiles();
-</script></body></html>"""
+<style>body{margin:0;font-family:system-ui;background:#f6f7f8;color:#17202a;display:grid;place-items:center;min-height:100vh}.box{max-width:560px;background:#fff;border:1px solid #d8dee4;padding:28px;box-shadow:0 18px 50px rgba(27,31,36,.08)}code{background:#f0f3f6;padding:2px 5px;border-radius:4px}</style>
+</head><body><main class="box"><h1>Web UI не собран</h1><p>Backend web-канала запущен, но React/Vite сборка не найдена в <code>frontend/web/dist</code>.</p><p>Соберите интерфейс командой <code>cd frontend/web && npm install && npm run build</code>, затем перезапустите <code>uv run corpclaw-lite web</code>.</p></main></body></html>"""
