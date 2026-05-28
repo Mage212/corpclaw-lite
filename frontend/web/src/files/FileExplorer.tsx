@@ -705,7 +705,7 @@ function ContextMenu({
         {context.entry.is_dir ? "Открыть" : "Предпросмотр"}
       </button>
       {!context.entry.is_dir && (
-        <a href={downloadUrl(context.entry.path)} onClick={onClose}>
+        <a href={downloadUrl(context.entry.path)} download={context.entry.name} onClick={onClose}>
           Скачать
         </a>
       )}

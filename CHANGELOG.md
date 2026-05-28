@@ -25,6 +25,8 @@ llama-server.
   контекста и индикатором заполненности контекста по backend-reported token usage.
 - Контекстное меню файлового менеджера теперь автоматически остаётся внутри видимой области окна,
   включая fullscreen-режим и клики по файлам у правого/нижнего края.
+- Web download приведён к явному режиму загрузки: файлы отдаются с исходным именем, image preview
+  использует отдельный inline endpoint, а ссылки на файлы от агента получили TTL и user-boundary.
 - Web-канал теперь распознаёт `502 upstream_error / Connection refused` от OpenAI-compatible
   LLM gateway как ожидаемую недоступность backend-модели и отдаёт пользователю warning без
   traceback в обычном сценарии.

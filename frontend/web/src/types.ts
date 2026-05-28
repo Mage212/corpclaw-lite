@@ -43,6 +43,11 @@ export type ChatMessage = {
   role: "user" | "assistant" | "system";
   text: string;
   tone?: "normal" | "warning" | "error" | "file";
+  file?: {
+    name: string;
+    url: string;
+    caption?: string;
+  };
 };
 
 export type StatusLine = {

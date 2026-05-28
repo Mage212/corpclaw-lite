@@ -7,12 +7,14 @@ import json
 import logging
 import os
 import secrets
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from aiohttp import WSMsgType, web
+from aiohttp import WSMsgType, hdrs, web
+from aiohttp.helpers import content_disposition_header
 
 from corpclaw_lite.agent.factory import build_agent_stack
 from corpclaw_lite.agent.loop import RunStats
@@ -55,6 +57,8 @@ logger = logging.getLogger(__name__)
 
 _MAX_WS_MESSAGE_CHARS = 20_000
 _MAX_BATCH_PATHS = 100
+_DOWNLOAD_GRANT_TTL_SECONDS = 24 * 60 * 60
+_INLINE_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 _FRONTEND_DIST = PROJECT_ROOT / "frontend" / "web" / "dist"
 
 
@@ -62,7 +66,9 @@ _FRONTEND_DIST = PROJECT_ROOT / "frontend" / "web" / "dist"
 class _DownloadGrant:
     user_id: int
     path: Path
+    filename: str
     caption: str
+    expires_at: float
 
 
 class WebChannelOrchestrator:
@@ -184,6 +190,7 @@ class WebChannelOrchestrator:
         app.router.add_post("/api/files/delete", self._handle_delete_batch)
         app.router.add_delete("/api/files", self._handle_delete)
         app.router.add_get("/api/files/download", self._handle_download_file)
+        app.router.add_get("/api/files/inline", self._handle_inline_file)
         app.router.add_get("/api/download/{token}", self._handle_download_grant)
         assets_dir = _FRONTEND_DIST / "assets"
         if assets_dir.exists():
@@ -486,7 +493,7 @@ class WebChannelOrchestrator:
             raise web.HTTPBadRequest(text="Missing path")
         result = await preview_file(self._workspace_for(user), path)
         if result.get("type") == "image":
-            result["url"] = f"/api/files/download?path={quote(path)}"
+            result["url"] = f"/api/files/inline?path={quote(path)}"
         return web.json_response(result)
 
     async def _handle_upload(self, request: web.Request) -> web.Response:
@@ -585,14 +592,38 @@ class WebChannelOrchestrator:
         resolved = resolve_workspace_path(self._workspace_for(user), path)
         if not resolved.exists() or not resolved.is_file():
             raise web.HTTPNotFound()
-        return web.FileResponse(resolved)
+        return _file_response(resolved, disposition="attachment")
+
+    async def _handle_inline_file(self, request: web.Request) -> web.FileResponse:
+        user = self._require_user(request)
+        path = request.query.get("path")
+        if not path:
+            raise web.HTTPBadRequest(text="Missing path")
+        resolved = resolve_workspace_path(self._workspace_for(user), path)
+        if not resolved.exists() or not resolved.is_file():
+            raise web.HTTPNotFound()
+        if resolved.suffix.lower() not in _INLINE_IMAGE_EXTENSIONS:
+            raise web.HTTPNotFound()
+        return _file_response(resolved, disposition="inline")
 
     async def _handle_download_grant(self, request: web.Request) -> web.FileResponse:
         user = self._require_user(request)
-        grant = self._download_grants.get(request.match_info["token"])
-        if grant is None or grant.user_id != user.id:
+        self._prune_download_grants()
+        token = request.match_info["token"]
+        grant = self._download_grants.get(token)
+        if grant is None:
             raise web.HTTPNotFound()
-        return web.FileResponse(grant.path)
+        if grant.expires_at <= time.time():
+            self._download_grants.pop(token, None)
+            raise web.HTTPNotFound()
+        if grant.user_id != user.id:
+            raise web.HTTPNotFound()
+        if not grant.path.exists() or not grant.path.is_file():
+            self._download_grants.pop(token, None)
+            raise web.HTTPNotFound()
+        if not _is_path_inside(grant.path, self._workspace_for(user)):
+            raise web.HTTPNotFound()
+        return _file_response(grant.path, disposition="attachment", filename=grant.filename)
 
     async def _handle_chat_ws(self, request: web.Request) -> web.WebSocketResponse:
         user = self._require_user(request)
@@ -817,8 +848,15 @@ class WebChannelOrchestrator:
         return ws
 
     async def _send_file_callback(self, path: Path, user: User, caption: str) -> str:
+        self._prune_download_grants()
         token = secrets.token_urlsafe(18)
-        self._download_grants[token] = _DownloadGrant(user_id=user.id, path=path, caption=caption)
+        self._download_grants[token] = _DownloadGrant(
+            user_id=user.id,
+            path=path,
+            filename=path.name,
+            caption=caption,
+            expires_at=time.time() + _DOWNLOAD_GRANT_TTL_SECONDS,
+        )
         ws = self._clients.get(user.id)
         if ws is not None and not ws.closed:
             await ws.send_str(
@@ -834,14 +872,26 @@ class WebChannelOrchestrator:
             )
         return f"File '{path.name}' is ready for download."
 
+    def _prune_download_grants(self) -> int:
+        now = time.time()
+        expired = [
+            token for token, grant in self._download_grants.items() if grant.expires_at <= now
+        ]
+        for token in expired:
+            self._download_grants.pop(token, None)
+        return len(expired)
+
     async def _session_cleanup_loop(self) -> None:
         if self._stack is None:
             return
         while True:
             await asyncio.sleep(3600)
             removed = self._stack.user_manager.prune_expired_web_sessions()
+            grants_removed = self._prune_download_grants()
             if removed:
                 logger.info("Pruned %d expired web sessions", removed)
+            if grants_removed:
+                logger.info("Pruned %d expired web download grants", grants_removed)
 
 
 def _default_llm_endpoint(settings: Settings) -> tuple[str | None, str | None]:
@@ -857,6 +907,50 @@ def _default_llm_endpoint(settings: Settings) -> tuple[str | None, str | None]:
         return None, None
     env_name = f"PROVIDER_{provider_name.upper()}__BASE_URL"
     return provider_name, os.environ.get(env_name)
+
+
+def _safe_ascii_filename(filename: str) -> str:
+    source = (Path(filename).name or "file").replace("/", "_").replace("\\", "_")
+    path = Path(source)
+    stem = "".join(
+        char if 32 <= ord(char) < 127 and char not in {'"', "\\", ";"} else "_"
+        for char in path.stem
+    ).strip(" ._")
+    suffix = "".join(
+        char if 32 <= ord(char) < 127 and char not in {'"', "\\", ";"} else "_"
+        for char in path.suffix
+    ).strip(" ")
+    return f"{stem or 'file'}{suffix}"
+
+
+def _content_disposition(disposition: str, filename: str) -> str:
+    safe_name = (Path(filename).name or "file").replace("/", "_").replace("\\", "_")
+    fallback = _safe_ascii_filename(safe_name)
+    header = content_disposition_header(disposition, filename=fallback)
+    if safe_name != fallback:
+        header = f"{header}; filename*=UTF-8''{quote(safe_name, safe='')}"
+    return header
+
+
+def _is_path_inside(path: Path, workspace: Path) -> bool:
+    resolved = path.resolve()
+    ws = workspace.resolve()
+    return resolved == ws or ws in resolved.parents
+
+
+def _file_response(
+    path: Path,
+    *,
+    disposition: str,
+    filename: str | None = None,
+) -> web.FileResponse:
+    return web.FileResponse(
+        path,
+        headers={
+            hdrs.CONTENT_DISPOSITION: _content_disposition(disposition, filename or path.name),
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 _LOGIN_HTML = """<!doctype html>

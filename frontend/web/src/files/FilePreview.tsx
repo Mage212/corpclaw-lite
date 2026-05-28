@@ -44,7 +44,12 @@ export function FilePreview({ preview, mode, onModeChange, onClose }: FilePrevie
               <Copy size={18} />
             </button>
           )}
-          <a className="icon-button" href={downloadUrl(preview.entry.path)} title="Скачать">
+          <a
+            className="icon-button"
+            href={downloadUrl(preview.entry.path)}
+            download={preview.entry.name}
+            title="Скачать"
+          >
             <Download size={18} />
           </a>
           <button
@@ -108,7 +113,11 @@ function PreviewContent({
           <dd>{preview.entry.path}</dd>
         </div>
       </dl>
-      <a className="primary link-button" href={downloadUrl(preview.entry.path)}>
+      <a
+        className="primary link-button"
+        href={downloadUrl(preview.entry.path)}
+        download={preview.entry.name}
+      >
         <Download size={16} /> Скачать
       </a>
     </div>

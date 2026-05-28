@@ -1,4 +1,4 @@
-import { Bot, CheckCircle2, CircleAlert, Send, Sparkles } from "lucide-react";
+import { Bot, CheckCircle2, CircleAlert, Download, Send, Sparkles } from "lucide-react";
 import type { Dispatch, SetStateAction } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
@@ -194,7 +194,19 @@ function MessageBubble({ message }: { message: ChatMessage }) {
   return (
     <article className={`message ${message.role} ${message.tone || "normal"}`}>
       <div className="message-role">{roleLabel}</div>
-      <div className="message-text">{message.text}</div>
+      {message.file ? (
+        <div className="file-message">
+          <div>
+            <strong title={message.file.name}>{message.file.name}</strong>
+            <span>{message.file.caption || message.text}</span>
+          </div>
+          <a className="primary link-button" href={message.file.url} download={message.file.name}>
+            <Download size={16} /> Скачать
+          </a>
+        </div>
+      ) : (
+        <div className="message-text">{message.text}</div>
+      )}
     </article>
   );
 }
@@ -299,11 +311,18 @@ function handleWsEvent(
     });
   } else if (type === "file_ready") {
     const url = String(event.url || "");
+    const name = String(event.name || "file");
+    const caption = String(event.caption || "");
     addMessage({
       id: id("file"),
       role: "system",
-      text: `Файл готов: ${String(event.name || "download")} ${url}`,
-      tone: "file"
+      text: "Файл готов к скачиванию.",
+      tone: "file",
+      file: {
+        name,
+        url,
+        caption
+      }
     });
   } else if (type === "approval_required") {
     setApprovals((items) => [

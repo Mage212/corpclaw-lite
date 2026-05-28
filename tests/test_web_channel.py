@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import pytest
+from aiohttp import hdrs, web
+from aiohttp.test_utils import make_mocked_request
 
 from corpclaw_lite.agent.factory import AgentStack
 from corpclaw_lite.channels.service import AgentRequestService, is_llm_transport_error
@@ -21,7 +25,7 @@ from corpclaw_lite.channels.web.files import (
     save_upload,
     search_files,
 )
-from corpclaw_lite.channels.web.orchestrator import WebChannelOrchestrator
+from corpclaw_lite.channels.web.orchestrator import WebChannelOrchestrator, _DownloadGrant
 from corpclaw_lite.config.bootstrap import BootstrapLoader
 from corpclaw_lite.config.settings import Settings
 from corpclaw_lite.exceptions import LLMBackendUnavailableError
@@ -41,6 +45,26 @@ class InternalServerError(Exception):
 
 
 InternalServerError.__module__ = "openai"
+
+
+class FakeWorkspaceService:
+    def __init__(self, workspace: Path) -> None:
+        self.workspace = workspace
+
+    def get_user_workspace(self, _user: User) -> Path:
+        return self.workspace
+
+
+def web_request(
+    method: str,
+    path: str,
+    user: User,
+    *,
+    match_info: dict[str, str] | None = None,
+) -> web.Request:
+    request = make_mocked_request(method, path, match_info=match_info or {})
+    request["user"] = user
+    return request
 
 
 def test_resolve_workspace_path_blocks_escape(tmp_path: Path) -> None:
@@ -141,6 +165,109 @@ async def test_web_upload_rejects_bad_extension(tmp_path: Path) -> None:
             data=b"x",
             max_bytes=100,
         )
+
+
+@pytest.mark.asyncio
+async def test_web_download_forces_attachment_with_original_filename(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    filename = "отчет май.txt"
+    (workspace / filename).write_text("hello", encoding="utf-8")
+    user = User(id=1, name="Vadim", department="engineering")
+    orchestrator = WebChannelOrchestrator(Settings())
+    orchestrator._service = FakeWorkspaceService(workspace)  # type: ignore[assignment]
+
+    response = await orchestrator._handle_download_file(
+        web_request("GET", f"/api/files/download?path={quote(filename)}", user)
+    )
+
+    disposition = response.headers[hdrs.CONTENT_DISPOSITION]
+    assert disposition.startswith("attachment;")
+    assert "download" not in disposition
+    assert "filename*=UTF-8''" in disposition
+    assert quote(filename, safe="") in disposition
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+
+
+@pytest.mark.asyncio
+async def test_web_inline_endpoint_allows_only_images(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "image.jpg").write_bytes(b"jpg")
+    (workspace / "note.txt").write_text("hello", encoding="utf-8")
+    user = User(id=1, name="Vadim", department="engineering")
+    orchestrator = WebChannelOrchestrator(Settings())
+    orchestrator._service = FakeWorkspaceService(workspace)  # type: ignore[assignment]
+
+    response = await orchestrator._handle_inline_file(
+        web_request("GET", "/api/files/inline?path=image.jpg", user)
+    )
+
+    assert response.headers[hdrs.CONTENT_DISPOSITION].startswith("inline;")
+    with pytest.raises(web.HTTPNotFound):
+        await orchestrator._handle_inline_file(
+            web_request("GET", "/api/files/inline?path=note.txt", user)
+        )
+
+
+@pytest.mark.asyncio
+async def test_web_image_preview_uses_inline_endpoint(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "image.jpg").write_bytes(b"jpg")
+    user = User(id=1, name="Vadim", department="engineering")
+    orchestrator = WebChannelOrchestrator(Settings())
+    orchestrator._service = FakeWorkspaceService(workspace)  # type: ignore[assignment]
+
+    response = await orchestrator._handle_preview_file(
+        web_request("GET", "/api/files/preview?path=image.jpg", user)
+    )
+    payload = response.text
+
+    assert payload is not None
+    assert "/api/files/inline?path=image.jpg" in payload
+    assert "/api/files/download" not in payload
+
+
+@pytest.mark.asyncio
+async def test_web_download_grant_is_owner_scoped_and_expires(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    target = workspace / "report.pdf"
+    target.write_bytes(b"pdf")
+    owner = User(id=1, name="Vadim", department="engineering")
+    other = User(id=2, name="Guest", department="engineering")
+    orchestrator = WebChannelOrchestrator(Settings())
+    orchestrator._service = FakeWorkspaceService(workspace)  # type: ignore[assignment]
+    orchestrator._download_grants["valid"] = _DownloadGrant(
+        user_id=owner.id,
+        path=target,
+        filename=target.name,
+        caption="",
+        expires_at=time.time() + 60,
+    )
+    orchestrator._download_grants["expired"] = _DownloadGrant(
+        user_id=owner.id,
+        path=target,
+        filename=target.name,
+        caption="",
+        expires_at=time.time() - 1,
+    )
+
+    response = await orchestrator._handle_download_grant(
+        web_request("GET", "/api/download/valid", owner, match_info={"token": "valid"})
+    )
+
+    assert response.headers[hdrs.CONTENT_DISPOSITION] == 'attachment; filename="report.pdf"'
+    with pytest.raises(web.HTTPNotFound):
+        await orchestrator._handle_download_grant(
+            web_request("GET", "/api/download/valid", other, match_info={"token": "valid"})
+        )
+    with pytest.raises(web.HTTPNotFound):
+        await orchestrator._handle_download_grant(
+            web_request("GET", "/api/download/expired", owner, match_info={"token": "expired"})
+        )
+    assert "expired" not in orchestrator._download_grants
 
 
 def test_llm_transport_error_detection() -> None:
