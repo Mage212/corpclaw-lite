@@ -5,20 +5,41 @@ import type {
   SessionPayload,
   TreeNode
 } from "./types";
+import {
+  errorMessageFromPayload,
+  parseDirectoryPayload,
+  parseOkPayload,
+  parsePathPayload,
+  parsePathsPayload,
+  parsePreviewPayload,
+  parseSearchPayload,
+  parseSessionPayload,
+  parseTreeNode,
+  parseUploadPayload
+} from "./contracts";
+import type { UploadPayload } from "./contracts";
 
 type ApiOptions = RequestInit & {
   csrf?: string;
 };
 
-async function parseJson<T>(response: Response): Promise<T> {
-  const payload = (await response.json().catch(() => ({}))) as T & { error?: string };
-  if (!response.ok) {
-    throw new Error(payload.error || response.statusText || "Request failed");
-  }
-  return payload;
+async function readJson(response: Response): Promise<unknown> {
+  return response.json().catch(() => ({}));
 }
 
-export function apiFetch<T>(path: string, options: ApiOptions = {}): Promise<T> {
+async function parseJson<T>(response: Response, parser: (value: unknown) => T): Promise<T> {
+  const payload = await readJson(response);
+  if (!response.ok) {
+    throw new Error(errorMessageFromPayload(payload) || response.statusText || "Request failed");
+  }
+  return parser(payload);
+}
+
+export function apiFetch<T>(
+  path: string,
+  parser: (value: unknown) => T,
+  options: ApiOptions = {}
+): Promise<T> {
   const headers = new Headers(options.headers);
   if (options.csrf) {
     headers.set("X-CSRF-Token", options.csrf);
@@ -29,22 +50,22 @@ export function apiFetch<T>(path: string, options: ApiOptions = {}): Promise<T> 
   return fetch(path, {
     ...options,
     headers
-  }).then(parseJson<T>);
+  }).then((response) => parseJson(response, parser));
 }
 
 export function getSession(): Promise<SessionPayload> {
-  return apiFetch<SessionPayload>("/api/session");
+  return apiFetch("/api/session", parseSessionPayload);
 }
 
 export function login(username: string, password: string): Promise<SessionPayload> {
-  return apiFetch<SessionPayload>("/api/login", {
+  return apiFetch("/api/login", parseSessionPayload, {
     method: "POST",
     body: JSON.stringify({ username, password })
   });
 }
 
 export function logout(csrf: string): Promise<{ ok: boolean }> {
-  return apiFetch<{ ok: boolean }>("/api/logout", {
+  return apiFetch("/api/logout", parseOkPayload, {
     method: "POST",
     csrf
   });
@@ -56,24 +77,24 @@ export function listFiles(
   order = "asc"
 ): Promise<DirectoryPayload> {
   const params = new URLSearchParams({ path, sort, order });
-  return apiFetch<DirectoryPayload>(`/api/files?${params.toString()}`);
+  return apiFetch(`/api/files?${params.toString()}`, parseDirectoryPayload);
 }
 
 export function searchFiles(query: string): Promise<{ query: string; entries: FileEntry[] }> {
   const params = new URLSearchParams({ query, limit: "200" });
-  return apiFetch<{ query: string; entries: FileEntry[] }>(`/api/files/search?${params}`);
+  return apiFetch(`/api/files/search?${params}`, parseSearchPayload);
 }
 
 export function loadTree(): Promise<TreeNode> {
-  return apiFetch<TreeNode>("/api/files/tree?depth=4");
+  return apiFetch("/api/files/tree?depth=4", parseTreeNode);
 }
 
 export function previewFile(path: string): Promise<PreviewPayload> {
-  return apiFetch<PreviewPayload>(`/api/files/preview?path=${encodeURIComponent(path)}`);
+  return apiFetch(`/api/files/preview?path=${encodeURIComponent(path)}`, parsePreviewPayload);
 }
 
 export function makeDirectory(csrf: string, path: string, name: string): Promise<{ path: string }> {
-  return apiFetch<{ path: string }>("/api/files/mkdir", {
+  return apiFetch("/api/files/mkdir", parsePathPayload, {
     method: "POST",
     csrf,
     body: JSON.stringify({ path, name })
@@ -85,7 +106,7 @@ export function renameFile(
   path: string,
   newName: string
 ): Promise<{ path: string }> {
-  return apiFetch<{ path: string }>("/api/files/rename", {
+  return apiFetch("/api/files/rename", parsePathPayload, {
     method: "POST",
     csrf,
     body: JSON.stringify({ path, new_name: newName })
@@ -97,7 +118,7 @@ export function moveFiles(
   paths: string[],
   targetDir: string
 ): Promise<{ paths: string[] }> {
-  return apiFetch<{ paths: string[] }>("/api/files/move", {
+  return apiFetch("/api/files/move", parsePathsPayload, {
     method: "POST",
     csrf,
     body: JSON.stringify({ paths, target_dir: targetDir })
@@ -109,7 +130,7 @@ export function copyFiles(
   paths: string[],
   targetDir: string
 ): Promise<{ paths: string[] }> {
-  return apiFetch<{ paths: string[] }>("/api/files/copy", {
+  return apiFetch("/api/files/copy", parsePathsPayload, {
     method: "POST",
     csrf,
     body: JSON.stringify({ paths, target_dir: targetDir })
@@ -121,7 +142,7 @@ export function deleteFiles(
   paths: string[],
   recursive: boolean
 ): Promise<{ paths: string[] }> {
-  return apiFetch<{ paths: string[] }>("/api/files/delete", {
+  return apiFetch("/api/files/delete", parsePathsPayload, {
     method: "POST",
     csrf,
     body: JSON.stringify({ paths, recursive })
@@ -137,7 +158,7 @@ export function uploadFiles(
   path: string,
   files: File[],
   onProgress: (fileName: string, progress: number) => void
-): Promise<{ uploaded: { name: string; path: string }[] }> {
+): Promise<UploadPayload> {
   const form = new FormData();
   for (const file of files) {
     form.append("file", file);
@@ -157,15 +178,12 @@ export function uploadFiles(
     };
     xhr.onload = () => {
       try {
-        const payload = JSON.parse(xhr.responseText || "{}") as {
-          uploaded?: { name: string; path: string }[];
-          error?: string;
-        };
-        if (xhr.status >= 200 && xhr.status < 300 && payload.uploaded) {
-          resolve({ uploaded: payload.uploaded });
+        const payload: unknown = JSON.parse(xhr.responseText || "{}");
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(parseUploadPayload(payload));
           return;
         }
-        reject(new Error(payload.error || xhr.statusText || "Upload failed"));
+        reject(new Error(errorMessageFromPayload(payload) || xhr.statusText || "Upload failed"));
       } catch (error) {
         reject(error instanceof Error ? error : new Error("Upload failed"));
       }

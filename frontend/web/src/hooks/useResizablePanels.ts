@@ -1,5 +1,6 @@
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import { useMemo, useState } from "react";
+import { parsePanelLayoutState } from "../contracts";
 import type { PanelLayoutState } from "../types";
 
 const STORAGE_KEY = "corpclaw.web.panelLayout";
@@ -22,11 +23,13 @@ function loadLayout(): PanelLayoutState {
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (!raw) return DEFAULT_LAYOUT;
-    const parsed = JSON.parse(raw) as Partial<PanelLayoutState>;
+    const parsed: unknown = JSON.parse(raw);
+    const layout = parsePanelLayoutState(parsed);
+    if (!layout) return DEFAULT_LAYOUT;
     return {
-      filesWidth: clamp(Number(parsed.filesWidth) || DEFAULT_LAYOUT.filesWidth, FILES_MIN, FILES_MAX),
+      filesWidth: clamp(layout.filesWidth, FILES_MIN, FILES_MAX),
       previewWidth: clamp(
-        Number(parsed.previewWidth) || DEFAULT_LAYOUT.previewWidth,
+        layout.previewWidth,
         PREVIEW_MIN,
         PREVIEW_MAX
       )

@@ -39,6 +39,8 @@ llama-server.
 - Web-чат получил persistent transcript в SQLite: история текущей сессии переживает refresh,
   logout/login и reconnect, `/new` открывает новую пустую сессию, а долгие запросы больше не
   привязаны к одному старому WebSocket-соединению.
+- Web frontend получил runtime-проверку REST/WebSocket JSON-контрактов без новых зависимостей,
+  а TypeScript-проверка усилена `noUncheckedIndexedAccess` и `exactOptionalPropertyTypes`.
 - Web-канал теперь распознаёт `502 upstream_error / Connection refused` от OpenAI-compatible
   LLM gateway как ожидаемую недоступность backend-модели и отдаёт пользователю warning без
   traceback в обычном сценарии.

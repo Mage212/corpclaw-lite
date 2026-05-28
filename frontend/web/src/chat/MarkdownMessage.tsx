@@ -66,8 +66,9 @@ const markdownComponents: Components = {
   },
   code({ children, className, node: _node, ...props }) {
     const match = /language-([\w-]+)/.exec(className || "");
-    if (match) {
-      return <CodeBlock language={match[1]}>{children}</CodeBlock>;
+    const language = match?.[1];
+    if (language) {
+      return <CodeBlock language={language}>{children}</CodeBlock>;
     }
     return (
       <code className="markdown-inline-code" {...props}>
