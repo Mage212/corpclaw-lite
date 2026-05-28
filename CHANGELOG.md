@@ -18,6 +18,9 @@ llama-server.
 - Веб-интерфейс вынесен в React/Vite приложение: добавлены рабочий chat shell, единый statusline
   вместо потока статусных сообщений, collapsible file explorer, preview drawer, drag-and-drop
   upload/move и batch file operations.
+- Web UI получил второй слой production-polish: resizeable файловая панель и preview, сохранение
+  ширин в браузере, полноценный проводник с деревом папок, режимами list/grid/details,
+  нормальными диалогами операций и expanded preview вместо узких фиксированных областей.
 - Web file API расширен операциями tree/search/preview/rename/move/copy/batch delete; все операции
   сохраняют host-side boundary checks личного workspace.
 - Web shutdown теперь явно останавливает контейнеры пользователей, которые поднимались или
