@@ -1,9 +1,11 @@
 import {
+  Activity,
   Bot,
   LogOut,
   MessageSquare,
   PanelLeftClose,
-  PanelLeftOpen
+  PanelLeftOpen,
+  RotateCcw
 } from "lucide-react";
 import type { FormEvent } from "react";
 import { useEffect, useState } from "react";
@@ -12,7 +14,14 @@ import { ChatPanel } from "./chat/ChatPanel";
 import { FileExplorer } from "./files/FileExplorer";
 import { FilePreview } from "./files/FilePreview";
 import { useResizablePanels } from "./hooks/useResizablePanels";
-import type { AgentMode, PreviewMode, PreviewPayload, SessionPayload } from "./types";
+import type {
+  AgentMode,
+  ContextUsage,
+  FileExplorerMode,
+  PreviewMode,
+  PreviewPayload,
+  SessionPayload
+} from "./types";
 
 export function App() {
   const [session, setSession] = useState<SessionPayload | null>(null);
@@ -101,8 +110,11 @@ function Workspace({
 }) {
   const [mode, setMode] = useState<AgentMode>("execute");
   const [filesOpen, setFilesOpen] = useState(true);
+  const [filesMode, setFilesMode] = useState<FileExplorerMode>("side");
   const [preview, setPreview] = useState<PreviewPayload | null>(null);
   const [previewMode, setPreviewMode] = useState<PreviewMode>("side");
+  const [contextUsage, setContextUsage] = useState<ContextUsage | null>(null);
+  const [resetSignal, setResetSignal] = useState(0);
   const { cssVars, startResize } = useResizablePanels();
   const user = session.user;
 
@@ -120,19 +132,30 @@ function Workspace({
     setPreviewMode("side");
   }
 
+  function toggleFiles() {
+    setFilesOpen((value) => {
+      if (value) {
+        setFilesMode("side");
+      }
+      return !value;
+    });
+  }
+
   return (
     <div
       className={`workspace ${filesOpen ? "files-open" : "files-closed"} ${
         preview && previewMode === "side" ? "preview-open" : ""
-      }`}
+      } ${filesMode === "expanded" ? "files-expanded" : ""}`}
       style={cssVars}
     >
       <FileExplorer
         csrf={session.csrf_token}
         open={filesOpen}
+        mode={filesMode}
+        onModeChange={setFilesMode}
         onPreview={openPreview}
       />
-      {filesOpen && (
+      {filesOpen && filesMode === "side" && (
         <div
           className="resize-handle files-resize"
           onPointerDown={(event) => startResize("files", event)}
@@ -142,22 +165,38 @@ function Workspace({
       )}
       <section className="main-pane">
         <header className="topbar">
-          <button className="icon-button" onClick={() => setFilesOpen((value) => !value)}>
+          <button className="icon-button" onClick={toggleFiles} title="Файлы">
             {filesOpen ? <PanelLeftClose size={18} /> : <PanelLeftOpen size={18} />}
           </button>
-          <div className="topbar-title">
-            <MessageSquare size={18} />
-            <span>CorpClaw Lite</span>
+          <div className="topbar-center">
+            <div className="topbar-title">
+              <MessageSquare size={18} />
+              <span>CorpClaw Lite</span>
+            </div>
+            <ContextMeter usage={contextUsage} />
           </div>
           <div className="topbar-actions">
             <SegmentedMode mode={mode} onModeChange={setMode} />
+            <button
+              className="icon-button"
+              onClick={() => setResetSignal((value) => value + 1)}
+              title="Новая сессия"
+            >
+              <RotateCcw size={17} />
+            </button>
             <span className="user-pill">{user.name}</span>
             <button className="icon-button" onClick={doLogout} title="Выйти">
               <LogOut size={18} />
             </button>
           </div>
         </header>
-        <ChatPanel csrf={session.csrf_token} mode={mode} user={user} />
+        <ChatPanel
+          csrf={session.csrf_token}
+          mode={mode}
+          resetSignal={resetSignal}
+          user={user}
+          onContextUsage={setContextUsage}
+        />
       </section>
       {preview && previewMode === "side" && (
         <>
@@ -183,6 +222,33 @@ function Workspace({
           onClose={() => setPreview(null)}
         />
       )}
+    </div>
+  );
+}
+
+function formatTokenCount(value: number): string {
+  if (value >= 1000) {
+    return `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}k`;
+  }
+  return String(value);
+}
+
+function ContextMeter({ usage }: { usage: ContextUsage | null }) {
+  const latest = usage?.latest_total_tokens ?? 0;
+  const limit = usage?.context_limit_tokens ?? 0;
+  const ratio = usage?.context_ratio ?? 0;
+  const tone = ratio >= 0.8 ? "danger" : ratio >= 0.6 ? "warning" : "normal";
+  const percent = Math.round(ratio * 100);
+  const label = limit ? `${formatTokenCount(latest)} / ${formatTokenCount(limit)}` : "—";
+
+  return (
+    <div className={`context-meter ${tone}`} title={`Контекст: ${percent}%`}>
+      <Activity size={15} />
+      <span>Контекст</span>
+      <strong>{label}</strong>
+      <i>
+        <b style={{ width: `${Math.min(100, Math.max(0, percent))}%` }} />
+      </i>
     </div>
   );
 }

@@ -21,6 +21,11 @@ llama-server.
 - Web UI получил второй слой production-polish: resizeable файловая панель и preview, сохранение
   ширин в браузере, полноценный проводник с деревом папок, режимами list/grid/details,
   нормальными диалогами операций и expanded preview вместо узких фиксированных областей.
+- Web UI расширен fullscreen-режимом файлового менеджера, кнопкой/командой `/new` для сброса
+  контекста и индикатором заполненности контекста по backend-reported token usage.
+- Web-канал теперь распознаёт `502 upstream_error / Connection refused` от OpenAI-compatible
+  LLM gateway как ожидаемую недоступность backend-модели и отдаёт пользователю warning без
+  traceback в обычном сценарии.
 - Web file API расширен операциями tree/search/preview/rename/move/copy/batch delete; все операции
   сохраняют host-side boundary checks личного workspace.
 - Web shutdown теперь явно останавливает контейнеры пользователей, которые поднимались или
