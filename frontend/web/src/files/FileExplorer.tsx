@@ -18,7 +18,7 @@ import {
   Upload
 } from "lucide-react";
 import type { DragEvent, FormEvent, MouseEvent } from "react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   copyFiles,
   deleteFiles,
@@ -62,6 +62,8 @@ type FileAction =
 function id(prefix: string): string {
   return `${prefix}_${Math.random().toString(36).slice(2)}_${Date.now()}`;
 }
+
+const CONTEXT_MENU_VIEWPORT_MARGIN = 8;
 
 export function FileExplorer({ csrf, open, mode, onModeChange, onPreview }: FileExplorerProps) {
   const [cwd, setCwd] = useState("");
@@ -664,8 +666,36 @@ function ContextMenu({
   onMove: () => void;
   onDelete: () => void;
 }) {
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [position, setPosition] = useState({ x: context.x, y: context.y });
+
+  const fitToViewport = useCallback(() => {
+    const menu = menuRef.current;
+    if (!menu) return;
+
+    const rect = menu.getBoundingClientRect();
+    const margin = CONTEXT_MENU_VIEWPORT_MARGIN;
+    const maxX = Math.max(margin, window.innerWidth - rect.width - margin);
+    const maxY = Math.max(margin, window.innerHeight - rect.height - margin);
+
+    setPosition({
+      x: Math.min(Math.max(context.x, margin), maxX),
+      y: Math.min(Math.max(context.y, margin), maxY)
+    });
+  }, [context.x, context.y]);
+
+  useLayoutEffect(() => {
+    setPosition({ x: context.x, y: context.y });
+    fitToViewport();
+  }, [context.entry.path, context.entry.is_dir, context.x, context.y, fitToViewport]);
+
+  useEffect(() => {
+    window.addEventListener("resize", fitToViewport);
+    return () => window.removeEventListener("resize", fitToViewport);
+  }, [fitToViewport]);
+
   return (
-    <div className="context-menu" style={{ left: context.x, top: context.y }}>
+    <div ref={menuRef} className="context-menu" style={{ left: position.x, top: position.y }}>
       <button
         onClick={() => {
           onOpen();
