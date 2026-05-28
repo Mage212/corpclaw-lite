@@ -9,6 +9,7 @@ import type {
   StatusLine,
   User
 } from "../types";
+import { MarkdownMessage } from "./MarkdownMessage";
 
 const emptyStatus: StatusLine = {
   active: false,
@@ -204,6 +205,8 @@ function MessageBubble({ message }: { message: ChatMessage }) {
             <Download size={16} /> Скачать
           </a>
         </div>
+      ) : message.role === "assistant" ? (
+        <MarkdownMessage text={message.text} />
       ) : (
         <div className="message-text">{message.text}</div>
       )}

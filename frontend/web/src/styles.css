@@ -1078,12 +1078,17 @@ a {
 
 .message {
   max-width: min(880px, 92%);
+  min-width: 0;
   margin: 0 0 12px;
   padding: 11px 13px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface);
   line-height: 1.45;
+}
+
+.message.assistant {
+  max-width: min(980px, 96%);
 }
 
 .message.user {
@@ -1115,7 +1120,193 @@ a {
 }
 
 .message-text {
+  overflow-wrap: anywhere;
   white-space: pre-wrap;
+}
+
+.markdown-message {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.markdown-message > :first-child {
+  margin-top: 0;
+}
+
+.markdown-message > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown-message p,
+.markdown-message ul,
+.markdown-message ol,
+.markdown-message blockquote,
+.markdown-message .markdown-table-wrap,
+.markdown-message .code-block {
+  margin: 0 0 11px;
+}
+
+.markdown-message h1,
+.markdown-message h2,
+.markdown-message h3,
+.markdown-message h4 {
+  margin: 14px 0 8px;
+  color: var(--text);
+  line-height: 1.25;
+}
+
+.markdown-message h1 {
+  font-size: 19px;
+}
+
+.markdown-message h2 {
+  font-size: 17px;
+}
+
+.markdown-message h3,
+.markdown-message h4 {
+  font-size: 15px;
+}
+
+.markdown-message ul,
+.markdown-message ol {
+  padding-left: 22px;
+}
+
+.markdown-message li + li {
+  margin-top: 4px;
+}
+
+.markdown-message input[type="checkbox"] {
+  margin-right: 6px;
+}
+
+.markdown-message blockquote {
+  padding: 8px 11px;
+  border-left: 3px solid var(--accent);
+  border-radius: 0 6px 6px 0;
+  background: var(--surface-2);
+  color: var(--muted);
+}
+
+.markdown-message blockquote > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown-message a {
+  color: var(--accent-2);
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.markdown-inline-code {
+  padding: 2px 5px;
+  border: 1px solid rgba(101, 114, 129, 0.2);
+  border-radius: 5px;
+  background: var(--surface-2);
+  color: #2d4458;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.92em;
+}
+
+.markdown-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.markdown-table-wrap table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.markdown-table-wrap th,
+.markdown-table-wrap td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  border-right: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+.markdown-table-wrap th {
+  background: var(--surface-2);
+  color: var(--text);
+  font-weight: 700;
+}
+
+.markdown-table-wrap tr:last-child td {
+  border-bottom: 0;
+}
+
+.markdown-table-wrap th:last-child,
+.markdown-table-wrap td:last-child {
+  border-right: 0;
+}
+
+.code-block {
+  max-width: 100%;
+  overflow: hidden;
+  border: 1px solid #263544;
+  border-radius: 8px;
+  background: #101820;
+  color: #e8eef5;
+}
+
+.code-block-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 9px 7px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.code-block-header > span {
+  min-width: 0;
+  overflow: hidden;
+  color: #b8c5d0;
+  font-size: 12px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.code-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 7px;
+  border-color: rgba(255, 255, 255, 0.14);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  color: #d8e2ec;
+  font-size: 12px;
+}
+
+.code-copy:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.code-block pre {
+  margin: 0;
+  overflow-x: auto;
+  padding: 12px 14px;
+}
+
+.code-block code {
+  display: block;
+  color: inherit;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre;
 }
 
 .file-message {
