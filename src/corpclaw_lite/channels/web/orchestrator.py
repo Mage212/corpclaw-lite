@@ -78,6 +78,7 @@ class WebChannelOrchestrator:
         self._clients: dict[int, web.WebSocketResponse] = {}
         self._download_grants: dict[str, _DownloadGrant] = {}
         self._cleanup_task: asyncio.Task[None] | None = None
+        self._request_tasks: set[asyncio.Task[None]] = set()
         self._started = False
 
     async def start(self) -> None:
@@ -138,10 +139,20 @@ class WebChannelOrchestrator:
             self._cleanup_task.cancel()
         for ws in list(self._clients.values()):
             await ws.close()
+        for task in list(self._request_tasks):
+            task.cancel()
+        if self._request_tasks:
+            await asyncio.gather(*self._request_tasks, return_exceptions=True)
         if self._runner is not None:
             await self._runner.cleanup()
         if self._stack is not None and self._stack.mcp_manager is not None:
             await self._stack.mcp_manager.disconnect_all()
+        if self._stack is not None and self._stack.container_manager is not None:
+            try:
+                await self._stack.container_manager.stop_managed_async()
+                logger.info("Web channel containers stopped.")
+            except Exception as e:
+                logger.warning("Web container cleanup failed: %s", e)
         if self._started:
             logger.info("Web channel stopped cleanly.")
             self._started = False
@@ -721,7 +732,9 @@ class WebChannelOrchestrator:
                         await send({"type": "error", "message": "Сообщение слишком длинное."})
                         continue
                     if text:
-                        asyncio.create_task(run_message(text))
+                        task = asyncio.create_task(run_message(text))
+                        self._request_tasks.add(task)
+                        task.add_done_callback(self._request_tasks.discard)
         finally:
             self._clients.pop(user.id, None)
             for future in approvals.values():
@@ -780,4 +793,4 @@ _LOGIN_HTML = """<!doctype html>
 _BUILD_MISSING_HTML = """<!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><title>CorpClaw Lite</title>
 <style>body{margin:0;font-family:system-ui;background:#f6f7f8;color:#17202a;display:grid;place-items:center;min-height:100vh}.box{max-width:560px;background:#fff;border:1px solid #d8dee4;padding:28px;box-shadow:0 18px 50px rgba(27,31,36,.08)}code{background:#f0f3f6;padding:2px 5px;border-radius:4px}</style>
-</head><body><main class="box"><h1>Web UI не собран</h1><p>Backend web-канала запущен, но React/Vite сборка не найдена в <code>frontend/web/dist</code>.</p><p>Соберите интерфейс командой <code>cd frontend/web && npm install && npm run build</code>, затем перезапустите <code>uv run corpclaw-lite web</code>.</p></main></body></html>"""
+</head><body><main class="box"><h1>Web UI не собран</h1><p>Backend web-канала запущен, но React/Vite сборка не найдена в <code>frontend/web/dist</code>.</p><p>Соберите интерфейс командой <code>cd frontend/web && npm ci && npm run build</code>, затем перезапустите <code>uv run corpclaw-lite web</code>.</p></main></body></html>"""

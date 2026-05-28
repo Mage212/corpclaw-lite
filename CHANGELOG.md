@@ -20,6 +20,8 @@ llama-server.
   upload/move и batch file operations.
 - Web file API расширен операциями tree/search/preview/rename/move/copy/batch delete; все операции
   сохраняют host-side boundary checks личного workspace.
+- Web shutdown теперь явно останавливает контейнеры пользователей, которые поднимались или
+  переиспользовались текущим web-процессом.
 - Добавлены локальные веб-аккаунты в `UserManager`: `web-user-create`, `web-user-password`,
   PBKDF2-хэширование пароля и SQLite-сессии с CSRF token.
 - Добавлена привязка web-логина к существующему Telegram-профилю: `web-user-link`,

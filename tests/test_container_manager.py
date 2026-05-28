@@ -113,6 +113,7 @@ def test_ensure_running_already_running(manager) -> None:
     name = manager.ensure_running(user_id=10)
     assert name == "corpclaw_agent_10"
     container.restart.assert_not_called()
+    assert manager.managed_container_names() == ["corpclaw_agent_10"]
 
 
 # ── Test 18: ensure_running stopped → restart ─────────────────────────────────
@@ -125,6 +126,7 @@ def test_ensure_running_stopped_restarts(manager) -> None:
     name = manager.ensure_running(user_id=10)
     assert name == "corpclaw_agent_10"
     container.restart.assert_called_once()
+    assert manager.managed_container_names() == ["corpclaw_agent_10"]
 
 
 # ── Test 19: ensure_running non-NotFound error ────────────────────────────────
@@ -148,6 +150,30 @@ def test_ensure_running_run_fails(manager, mock_docker) -> None:
 
     with pytest.raises(ContainerManagerError, match="Could not start container"):
         manager.ensure_running(user_id=1)
+    assert manager.managed_container_names() == []
+
+
+def test_ensure_running_new_container_is_tracked(manager, mock_docker) -> None:
+    manager._client.containers.get.side_effect = FakeNotFound("404")
+
+    name = manager.ensure_running(user_id=11)
+
+    assert name == "corpclaw_agent_11"
+    assert manager.managed_container_names() == ["corpclaw_agent_11"]
+
+
+def test_stop_managed_stops_only_tracked_containers(manager) -> None:
+    manager._managed_user_ids.update({2, 1})
+    manager.stop_by_name = MagicMock()
+
+    manager.stop_managed()
+
+    assert manager.stop_by_name.call_count == 2
+    assert [call.args[0] for call in manager.stop_by_name.call_args_list] == [
+        "corpclaw_agent_1",
+        "corpclaw_agent_2",
+    ]
+    assert manager.managed_container_names() == []
 
 
 # ── Test 21: stop not found is silent ─────────────────────────────────────────
