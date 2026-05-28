@@ -25,7 +25,7 @@ class DepartmentConfig:
         self.allowed_tools: list[str] = data.get("allowed_tools", ["*"])
         self.allowed_skills: list[str] = data.get("allowed_skills", ["*"])
         self.allowed_plugins: list[str] = data.get("allowed_plugins", ["*"])
-        self.allowed_subagents: list[str] = data.get("allowed_subagents", ["*"])
+        self.allowed_subagents: list[str] = data.get("allowed_subagents", [])
         self.allowed_mcp: list[str] = data.get("allowed_mcp", ["*"])
 
         budget_data = data.get("budget", {})

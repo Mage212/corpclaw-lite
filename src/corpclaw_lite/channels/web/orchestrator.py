@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 from aiohttp import WSMsgType, hdrs, web
 from aiohttp.helpers import content_disposition_header
@@ -77,6 +77,18 @@ class _DownloadGrant:
 
 
 @dataclass(slots=True)
+class _WebSocketTicket:
+    user_id: int
+    expires_at: float
+
+
+@dataclass(slots=True)
+class _LoginAttemptState:
+    failures: list[float]
+    lockout_until: float = 0.0
+
+
+@dataclass(slots=True)
 class _PendingApproval:
     user_id: int
     approval_id: str
@@ -99,6 +111,8 @@ class WebChannelOrchestrator:
         self._rate_limiter = RateLimiter(self._web_settings.rate_limit_per_minute)
         self._clients: dict[int, set[web.WebSocketResponse]] = {}
         self._download_grants: dict[str, _DownloadGrant] = {}
+        self._ws_tickets: dict[str, _WebSocketTicket] = {}
+        self._login_attempts: dict[str, _LoginAttemptState] = {}
         self._context_usage: dict[int, dict[str, object]] = {}
         self._active_request_state: dict[int, dict[str, object]] = {}
         self._pending_approvals: dict[str, _PendingApproval] = {}
@@ -132,7 +146,10 @@ class WebChannelOrchestrator:
         )
         memory = stack.loop.memory
         memory_db_path = getattr(memory, "db_path", PROJECT_ROOT / "data" / "memory.db")
-        self._chat_store = WebChatStore(memory_db_path)
+        self._chat_store = WebChatStore(
+            memory_db_path,
+            active_max_messages=self._web_settings.chat_active_max_messages,
+        )
 
         stack.tool_registry.register(
             SendFileTool(self._send_file_callback, workspace_base=workspace_base),
@@ -199,6 +216,7 @@ class WebChannelOrchestrator:
         app.router.add_get("/api/session", self._handle_session)
         app.router.add_post("/api/login", self._handle_api_login)
         app.router.add_post("/api/logout", self._handle_api_logout)
+        app.router.add_post("/api/ws-ticket", self._handle_ws_ticket)
         app.router.add_get("/ws/chat", self._handle_chat_ws)
         app.router.add_get("/api/files", self._handle_list_files)
         app.router.add_get("/api/files/tree", self._handle_tree_files)
@@ -331,6 +349,91 @@ class WebChannelOrchestrator:
             user.id, ttl_hours=self._web_settings.session_ttl_hours
         )
 
+    def _login_attempt_key(self, request: web.Request, username: str) -> str:
+        clean_username = username.strip().lower()
+        remote = request.remote or "unknown"
+        return f"{remote}:{clean_username}"
+
+    def _login_retry_after(self, key: str) -> int:
+        state = self._login_attempts.get(key)
+        if state is None:
+            return 0
+        now = time.time()
+        if state.lockout_until > now:
+            return max(1, int(state.lockout_until - now))
+        window_start = now - 60
+        state.failures = [ts for ts in state.failures if ts >= window_start]
+        if len(state.failures) >= self._web_settings.login_rate_limit_per_minute:
+            state.lockout_until = now + self._web_settings.login_lockout_seconds
+            return self._web_settings.login_lockout_seconds
+        return 0
+
+    def _record_login_failure(self, key: str) -> int:
+        now = time.time()
+        window_start = now - 60
+        state = self._login_attempts.setdefault(key, _LoginAttemptState(failures=[]))
+        state.failures = [ts for ts in state.failures if ts >= window_start]
+        state.failures.append(now)
+        if (
+            len(state.failures) >= self._web_settings.login_lockout_threshold
+            or len(state.failures) >= self._web_settings.login_rate_limit_per_minute
+        ):
+            state.lockout_until = now + self._web_settings.login_lockout_seconds
+            return self._web_settings.login_lockout_seconds
+        return 0
+
+    def _record_login_success(self, key: str) -> None:
+        self._login_attempts.pop(key, None)
+
+    def _login_failure_json(self, retry_after: int = 0) -> web.Response:
+        status = 429 if retry_after > 0 else 401
+        response = web.json_response({"error": "Неверный логин или пароль"}, status=status)
+        if retry_after > 0:
+            response.headers["Retry-After"] = str(retry_after)
+        return response
+
+    def _login_failure_html(self, retry_after: int = 0) -> web.Response:
+        status = 429 if retry_after > 0 else 401
+        response = web.Response(
+            text=_LOGIN_HTML.replace("{{error}}", "Неверный логин или пароль"),
+            content_type="text/html",
+            status=status,
+        )
+        if retry_after > 0:
+            response.headers["Retry-After"] = str(retry_after)
+        return response
+
+    def _create_ws_ticket(self, user: User) -> tuple[str, int]:
+        self._prune_ws_tickets()
+        token = secrets.token_urlsafe(24)
+        ttl = max(1, int(self._web_settings.ws_ticket_ttl_seconds))
+        self._ws_tickets[token] = _WebSocketTicket(
+            user_id=user.id,
+            expires_at=time.time() + ttl,
+        )
+        return token, ttl
+
+    def _consume_ws_ticket(self, token: str, user: User) -> bool:
+        ticket = self._ws_tickets.pop(token, None)
+        if ticket is None:
+            return False
+        return ticket.user_id == user.id and ticket.expires_at > time.time()
+
+    def _prune_ws_tickets(self) -> int:
+        now = time.time()
+        expired = [token for token, ticket in self._ws_tickets.items() if ticket.expires_at <= now]
+        for token in expired:
+            self._ws_tickets.pop(token, None)
+        return len(expired)
+
+    @staticmethod
+    def _origin_matches_request(request: web.Request) -> bool:
+        origin = request.headers.get("Origin")
+        if not origin:
+            return True
+        parsed = urlparse(origin)
+        return bool(parsed.scheme and parsed.netloc and parsed.netloc == request.host)
+
     def _frontend_ready(self) -> bool:
         return (_FRONTEND_DIST / "index.html").exists()
 
@@ -354,13 +457,14 @@ class WebChannelOrchestrator:
         data = await request.post()
         username = str(data.get("username", ""))
         password = str(data.get("password", ""))
+        attempt_key = self._login_attempt_key(request, username)
+        retry_after = self._login_retry_after(attempt_key)
+        if retry_after > 0:
+            return self._login_failure_html(retry_after)
         user = self._authenticate(username, password)
         if user is None:
-            return web.Response(
-                text=_LOGIN_HTML.replace("{{error}}", "Неверный логин или пароль"),
-                content_type="text/html",
-                status=401,
-            )
+            return self._login_failure_html(self._record_login_failure(attempt_key))
+        self._record_login_success(attempt_key)
         token, _csrf = self._create_session_response(user)
         response = self._redirect("/")
         self._set_session_cookie(response, token)
@@ -393,9 +497,14 @@ class WebChannelOrchestrator:
         password = payload.get("password")
         if not isinstance(username, str) or not isinstance(password, str):
             raise web.HTTPBadRequest(text="username and password are required")
+        attempt_key = self._login_attempt_key(request, username)
+        retry_after = self._login_retry_after(attempt_key)
+        if retry_after > 0:
+            return self._login_failure_json(retry_after)
         user = self._authenticate(username, password)
         if user is None:
-            return web.json_response({"error": "Неверный логин или пароль"}, status=401)
+            return self._login_failure_json(self._record_login_failure(attempt_key))
+        self._record_login_success(attempt_key)
         token, csrf_token = self._create_session_response(user)
         response = web.json_response(
             {
@@ -415,6 +524,11 @@ class WebChannelOrchestrator:
         response = web.json_response({"ok": True})
         self._clear_session_cookie(response)
         return response
+
+    async def _handle_ws_ticket(self, request: web.Request) -> web.Response:
+        user = self._require_user(request)
+        ticket, ttl = self._create_ws_ticket(user)
+        return web.json_response({"ticket": ticket, "expires_in_seconds": ttl})
 
     async def _handle_index(self, request: web.Request) -> web.StreamResponse:
         user = request.get("user")
@@ -768,9 +882,11 @@ class WebChannelOrchestrator:
 
     async def _handle_chat_ws(self, request: web.Request) -> web.WebSocketResponse:
         user = self._require_user(request)
-        csrf_token = request.query.get("csrf", "")
-        if not csrf_token or csrf_token != request.get("csrf_token"):
-            raise web.HTTPForbidden(text="CSRF validation failed")
+        if not self._origin_matches_request(request):
+            raise web.HTTPForbidden(text="Origin validation failed")
+        ticket = request.query.get("ticket", "")
+        if not ticket or not self._consume_ws_ticket(ticket, user):
+            raise web.HTTPForbidden(text="WebSocket ticket validation failed")
         ws = web.WebSocketResponse(heartbeat=30)
         await ws.prepare(request)
         self._clients.setdefault(user.id, set()).add(ws)
@@ -1006,9 +1122,13 @@ class WebChannelOrchestrator:
                             ),
                         },
                     )
-            except Exception as e:
-                logger.exception("Web agent request failed for user %s", user.id)
-                error_message = f"Ошибка: {e}"
+            except Exception:
+                logger.exception(
+                    "Web agent request failed for user %s request_id=%s",
+                    user.id,
+                    request_id,
+                )
+                error_message = f"Задача завершилась ошибкой. ID: {request_id}"
                 await persist_and_broadcast(
                     role="system",
                     content=error_message,
@@ -1189,10 +1309,26 @@ class WebChannelOrchestrator:
             await asyncio.sleep(3600)
             removed = self._stack.user_manager.prune_expired_web_sessions()
             grants_removed = self._prune_download_grants()
+            tickets_removed = self._prune_ws_tickets()
+            chat_removed = 0
+            if self._chat_store is not None:
+                try:
+                    chat_removed = await self._chat_store.prune_retention(
+                        archived_session_ttl_days=self._web_settings.chat_archived_session_ttl_days,
+                        max_archived_sessions_per_user=(
+                            self._web_settings.chat_max_archived_sessions_per_user
+                        ),
+                    )
+                except Exception as e:
+                    logger.warning("Failed to prune web chat transcripts: %s", e)
             if removed:
                 logger.info("Pruned %d expired web sessions", removed)
             if grants_removed:
                 logger.info("Pruned %d expired web download grants", grants_removed)
+            if tickets_removed:
+                logger.info("Pruned %d expired web socket tickets", tickets_removed)
+            if chat_removed:
+                logger.info("Pruned %d archived web chat session(s)", chat_removed)
 
 
 def _default_llm_endpoint(settings: Settings) -> tuple[str | None, str | None]:

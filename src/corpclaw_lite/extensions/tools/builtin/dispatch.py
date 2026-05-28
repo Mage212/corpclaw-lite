@@ -52,6 +52,16 @@ class DispatchSubagentTool(Tool):
         self._subagent_registry = subagent_registry
         self._permission_checker = permission_checker
 
+    def _available_subagent_ids(self, user: User) -> list[str]:
+        return [
+            spec.id
+            for spec in self._subagent_registry.get_allowed_subagents(user)
+            if (
+                self._permission_checker is None
+                or self._permission_checker.can_dispatch_subagent(user, spec.id)
+            )
+        ]
+
     async def execute(self, *, user: User | None = None, **kwargs: Any) -> str:
         subagent_id = kwargs.get("subagent_id")
         task = kwargs.get("task")
@@ -73,7 +83,7 @@ class DispatchSubagentTool(Tool):
 
         spec = self._subagent_registry.get_spec(subagent_id)
         if not spec:
-            available = [s.id for s in self._subagent_registry.get_allowed_subagents(user)]
+            available = self._available_subagent_ids(user)
             logger.warning(
                 "Subagent not found: requested=%s user=%s available=%s",
                 subagent_id,

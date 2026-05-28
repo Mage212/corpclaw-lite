@@ -72,6 +72,19 @@ def test_can_dispatch_subagent() -> None:
     assert not checker.can_dispatch_subagent(user, "other")
 
 
+def test_department_without_allowed_subagents_denies_dispatch() -> None:
+    mgr = DepartmentManager()
+    mgr._departments["default"] = DepartmentConfig(
+        {
+            "description": "Default",
+            "allowed_tools": ["dispatch_subagent"],
+        }
+    )
+    checker = PermissionChecker(mgr)
+
+    assert not checker.can_dispatch_subagent(_make_user("default"), "research-agent")
+
+
 def test_can_use_mcp() -> None:
     checker = _make_checker_with_dept(mcp=["server_a"])
     user = _make_user()

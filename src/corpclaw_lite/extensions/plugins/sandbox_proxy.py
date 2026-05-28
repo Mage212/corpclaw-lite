@@ -64,11 +64,13 @@ def introspect_tool(tool_path: Path) -> dict[str, Any] | None:
 
 
 class PluginToolProxy(Tool):
-    """Proxy tool that delegates execution to a sandboxed subprocess.
+    """Proxy tool that delegates execution to a trusted-code subprocess.
 
     The subprocess is lazily started on first execute() call and reused
     for subsequent calls. An asyncio.Lock serializes concurrent requests
-    through the single subprocess stdin/stdout channel.
+    through the single subprocess stdin/stdout channel. This isolates crashes
+    and blocking calls, but it is not a security sandbox for untrusted plugin
+    code.
     """
 
     name: str

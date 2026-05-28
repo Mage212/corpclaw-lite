@@ -107,7 +107,7 @@ React build is missing, the backend returns an explicit warning page instead of 
 | 18 Built-in Tools | File ops, SQL queries, charts, PDF, Excel, web fetch, and more |
 | Docker Sandbox | Per-user containers with resource limits and network deny-by-default |
 | ToolGuard | 20+ YAML security rules with LLM-based Smart Approvals |
-| 4 Skills / Plugins / 5 Subagents | Markdown skills with scope filtering, subprocess plugins, isolated subagents |
+| 4 Skills / Plugins / 5 Subagents | Markdown skills with scope filtering, trusted subprocess plugins, isolated subagents |
 | TF-IDF Matching | Bilingual (RU+EN) semantic skill selection |
 | Web + Telegram Channels | Browser chat, collapsible file manager, single statusline, approvals, rate limiting |
 | Workspace Isolation | Unified per-human workspace across linked Telegram and web logins |

@@ -15,7 +15,8 @@ import {
   parseSearchPayload,
   parseSessionPayload,
   parseTreeNode,
-  parseUploadPayload
+  parseUploadPayload,
+  parseWebSocketTicketPayload
 } from "./contracts";
 import type { UploadPayload } from "./contracts";
 
@@ -66,6 +67,15 @@ export function login(username: string, password: string): Promise<SessionPayloa
 
 export function logout(csrf: string): Promise<{ ok: boolean }> {
   return apiFetch("/api/logout", parseOkPayload, {
+    method: "POST",
+    csrf
+  });
+}
+
+export function createWebSocketTicket(
+  csrf: string
+): Promise<{ ticket: string; expires_in_seconds: number }> {
+  return apiFetch("/api/ws-ticket", parseWebSocketTicketPayload, {
     method: "POST",
     csrf
   });

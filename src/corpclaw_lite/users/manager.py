@@ -23,6 +23,8 @@ __all__ = [
 logger = logging.getLogger(__name__)
 _PASSWORD_ITERATIONS = 200_000
 _SESSION_TOKEN_BYTES = 32
+_PASSWORD_MIN_LENGTH = 12
+_PASSWORD_MAX_LENGTH = 256
 
 
 class UserManager:
@@ -31,9 +33,17 @@ class UserManager:
     Users are stored in the same DB as memory (data/memory.db by default).
     """
 
-    def __init__(self, db_path: str = "data/users.db") -> None:
+    def __init__(
+        self,
+        db_path: str = "data/users.db",
+        *,
+        password_min_length: int = _PASSWORD_MIN_LENGTH,
+        password_max_length: int = _PASSWORD_MAX_LENGTH,
+    ) -> None:
         self._db = Path(db_path)
         self._db.parent.mkdir(parents=True, exist_ok=True)
+        self._password_min_length = max(1, password_min_length)
+        self._password_max_length = max(self._password_min_length, password_max_length)
         self._init_db()
         self._whitelist_path = self._db.parent / "whitelist.json"
         self._revoked_path = self._db.parent / "revoked_sessions.json"
@@ -586,10 +596,15 @@ class UserManager:
             1,
         ).hex()
 
-    @staticmethod
-    def _validate_password(password: str) -> None:
+    def _validate_password(self, password: str) -> None:
         if not password:
             raise ValueError("password is required")
+        if len(password) < self._password_min_length:
+            raise ValueError(
+                f"password must be at least {self._password_min_length} characters"
+            )
+        if len(password) > self._password_max_length:
+            raise ValueError(f"password must be at most {self._password_max_length} characters")
 
     @staticmethod
     def _merge_workspace(
