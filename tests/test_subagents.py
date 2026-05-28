@@ -420,6 +420,45 @@ async def test_dispatch_subagent_tool_enforces_department_subagent_rbac() -> Non
     dispatcher.dispatch.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_dispatch_subagent_available_list_respects_department_rbac() -> None:
+    """Unknown-subagent errors must not list subagents the department cannot dispatch."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from corpclaw_lite.departments.manager import DepartmentConfig, DepartmentManager
+    from corpclaw_lite.departments.permissions import PermissionChecker
+    from corpclaw_lite.extensions.subagents.base import SubagentSpec
+    from corpclaw_lite.extensions.subagents.registry import SubagentRegistry
+    from corpclaw_lite.extensions.tools.builtin.dispatch import DispatchSubagentTool
+
+    registry = SubagentRegistry()
+    registry.register(
+        SubagentSpec(id="research-agent", name="Research", description="desc")
+    )
+    registry.register(
+        SubagentSpec(id="execution-agent", name="Execution", description="desc")
+    )
+    manager = DepartmentManager()
+    manager._departments["default"] = DepartmentConfig(
+        {
+            "description": "Default",
+            "allowed_tools": ["dispatch_subagent"],
+            "allowed_subagents": ["research-agent"],
+        }
+    )
+    checker = PermissionChecker(manager)
+    dispatcher = MagicMock()
+    dispatcher.dispatch = AsyncMock(return_value="subagent result")
+    tool = DispatchSubagentTool(dispatcher, registry, permission_checker=checker)
+    user = User(id=1, name="U", department="default")
+
+    result = await tool.execute(subagent_id="missing-agent", task="work", user=user)
+
+    assert "research-agent" in result
+    assert "execution-agent" not in result
+    dispatcher.dispatch.assert_not_called()
+
+
 # ── Department filtering tests ───────────────────────────────────────────────
 
 

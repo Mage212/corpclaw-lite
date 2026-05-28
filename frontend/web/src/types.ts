@@ -12,6 +12,11 @@ export type SessionPayload = {
   csrf_token: string;
 };
 
+export type WebSocketTicketPayload = {
+  ticket: string;
+  expires_in_seconds: number;
+};
+
 export type FileEntry = {
   name: string;
   path: string;

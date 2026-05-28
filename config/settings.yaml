@@ -114,8 +114,17 @@ web_channel:
   workspace_base: "workspaces"
   upload_max_bytes: 20971520
   rate_limit_per_minute: 10
+  login_rate_limit_per_minute: 5
+  login_lockout_threshold: 5
+  login_lockout_seconds: 300
+  password_min_length: 12
+  password_max_length: 256
   session_ttl_hours: 12
   cookie_name: "corpclaw_lite_session"
+  ws_ticket_ttl_seconds: 30
+  chat_active_max_messages: 2000
+  chat_archived_session_ttl_days: 30
+  chat_max_archived_sessions_per_user: 20
 
 research:
   cache_ttl_hours: 24

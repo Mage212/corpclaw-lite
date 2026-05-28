@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from pathlib import Path
@@ -431,6 +432,42 @@ async def test_web_chat_store_reset_archives_current_session(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_web_chat_store_prunes_active_messages_by_quota(tmp_path: Path) -> None:
+    store = WebChatStore(tmp_path / "memory.db", active_max_messages=2)
+    user_id = "7"
+
+    await store.append_message(user_id=user_id, role="user", content="one")
+    await store.append_message(user_id=user_id, role="assistant", content="two")
+    await store.append_message(user_id=user_id, role="user", content="three")
+
+    page = await store.list_recent(user_id, limit=10)
+    assert [message.content for message in page.messages] == ["two", "three"]
+
+
+@pytest.mark.asyncio
+async def test_web_chat_store_prunes_archived_sessions_by_quota(tmp_path: Path) -> None:
+    store = WebChatStore(tmp_path / "memory.db")
+    user_id = "7"
+
+    for idx in range(3):
+        await store.append_message(user_id=user_id, role="user", content=f"session {idx}")
+        await store.reset_session(user_id)
+
+    removed = await store.prune_retention(
+        archived_session_ttl_days=30,
+        max_archived_sessions_per_user=1,
+    )
+
+    assert removed == 2
+    with sqlite3.connect(tmp_path / "memory.db") as conn:
+        archived_count = conn.execute(
+            "SELECT COUNT(*) FROM web_chat_sessions WHERE user_id = ? AND ended_at IS NOT NULL",
+            (user_id,),
+        ).fetchone()[0]
+    assert archived_count == 1
+
+
+@pytest.mark.asyncio
 async def test_web_chat_store_backfills_visible_agent_memory(tmp_path: Path) -> None:
     db_path = tmp_path / "memory.db"
     store = WebChatStore(db_path)
@@ -483,6 +520,39 @@ def test_web_context_usage_payload_uses_latest_total_tokens() -> None:
     assert payload["total_tokens"] == 1700
     assert payload["context_limit_tokens"] == 1000
     assert payload["context_ratio"] == 0.85
+
+
+def test_web_login_failures_lock_out_key() -> None:
+    orchestrator = WebChannelOrchestrator(Settings())
+    request = make_mocked_request("POST", "/api/login", headers={"Host": "localhost"})
+    key = orchestrator._login_attempt_key(request, "Alice")
+
+    retry_after = 0
+    for _ in range(orchestrator._web_settings.login_lockout_threshold):
+        retry_after = orchestrator._record_login_failure(key)
+
+    assert retry_after == orchestrator._web_settings.login_lockout_seconds
+    assert orchestrator._login_retry_after(key) > 0
+    orchestrator._record_login_success(key)
+    assert orchestrator._login_retry_after(key) == 0
+
+
+@pytest.mark.asyncio
+async def test_websocket_ticket_is_single_use_and_owner_scoped() -> None:
+    owner = User(id=1, name="Vadim", department="engineering")
+    other = User(id=2, name="Guest", department="engineering")
+    orchestrator = WebChannelOrchestrator(Settings())
+
+    response = await orchestrator._handle_ws_ticket(web_request("POST", "/api/ws-ticket", owner))
+    payload = json.loads(response.text or "{}")
+    ticket = payload["ticket"]
+
+    assert orchestrator._consume_ws_ticket(ticket, other) is False
+    assert orchestrator._consume_ws_ticket(ticket, owner) is False
+
+    ticket, _ttl = orchestrator._create_ws_ticket(owner)
+    assert orchestrator._consume_ws_ticket(ticket, owner) is True
+    assert orchestrator._consume_ws_ticket(ticket, owner) is False
 
 
 @pytest.mark.asyncio

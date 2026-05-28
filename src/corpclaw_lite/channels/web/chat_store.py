@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 _MAX_PERSISTED_CONTENT_CHARS = 200_000
 _DEFAULT_HISTORY_LIMIT = 100
+_DEFAULT_ACTIVE_MAX_MESSAGES = 2000
 
 
 def _empty_metadata() -> dict[str, Any]:
@@ -71,8 +72,14 @@ class WebChatStore:
     this transcript remains a stable UI history for refresh/reconnect/login.
     """
 
-    def __init__(self, db_path: str | Path = DATA_DIR / "memory.db") -> None:
+    def __init__(
+        self,
+        db_path: str | Path = DATA_DIR / "memory.db",
+        *,
+        active_max_messages: int = _DEFAULT_ACTIVE_MAX_MESSAGES,
+    ) -> None:
         self.db_path = Path(db_path)
+        self._active_max_messages = max(1, active_max_messages)
         self._init_db()
 
     def _init_db(self) -> None:
@@ -203,6 +210,47 @@ class WebChatStore:
             raise StorageError(f"Failed to create active web chat session for user {user_id}")
         return int(row[0])
 
+    @staticmethod
+    def _sync_delete_sessions(conn: sqlite3.Connection, session_ids: list[int]) -> int:
+        if not session_ids:
+            return 0
+        placeholders = ",".join("?" for _ in session_ids)
+        conn.execute(
+            f"DELETE FROM web_chat_messages WHERE session_id IN ({placeholders})",  # noqa: S608
+            session_ids,
+        )
+        cursor = conn.execute(
+            f"DELETE FROM web_chat_sessions WHERE id IN ({placeholders})",  # noqa: S608
+            session_ids,
+        )
+        return int(cursor.rowcount or 0)
+
+    @staticmethod
+    def _sync_prune_active_messages(
+        conn: sqlite3.Connection,
+        *,
+        session_id: int,
+        max_messages: int,
+    ) -> int:
+        rows = conn.execute(
+            """
+            SELECT id FROM web_chat_messages
+            WHERE session_id = ?
+            ORDER BY id DESC
+            LIMIT -1 OFFSET ?
+            """,
+            (session_id, max(1, max_messages)),
+        ).fetchall()
+        ids = [int(row[0]) for row in rows]
+        if not ids:
+            return 0
+        placeholders = ",".join("?" for _ in ids)
+        cursor = conn.execute(
+            f"DELETE FROM web_chat_messages WHERE id IN ({placeholders})",  # noqa: S608
+            ids,
+        )
+        return int(cursor.rowcount or 0)
+
     def _sync_ensure_active_session(self, user_id: str) -> int:
         try:
             with db_connect(self.db_path) as conn:
@@ -283,6 +331,11 @@ class WebChatStore:
                 if cursor.lastrowid is None:
                     raise StorageError("Failed to get inserted web chat message id")
                 message_id = int(cursor.lastrowid)
+                self._sync_prune_active_messages(
+                    conn,
+                    session_id=session_id,
+                    max_messages=self._active_max_messages,
+                )
                 row = conn.execute(
                     "SELECT * FROM web_chat_messages WHERE id = ?",
                     (message_id,),
@@ -460,3 +513,59 @@ class WebChatStore:
     async def latest_usage(self, user_id: str) -> dict[str, Any] | None:
         """Return the most recent context usage snapshot stored in the transcript."""
         return await run_in_thread(self._sync_latest_usage, str(user_id))
+
+    def _sync_prune_retention(
+        self,
+        *,
+        archived_session_ttl_days: int,
+        max_archived_sessions_per_user: int,
+    ) -> int:
+        ttl_days = max(0, archived_session_ttl_days)
+        max_archived = max(0, max_archived_sessions_per_user)
+        try:
+            with db_connect(self.db_path) as conn:
+                rows = conn.execute(
+                    """
+                    SELECT id FROM web_chat_sessions
+                    WHERE ended_at IS NOT NULL
+                      AND ended_at < datetime('now', ?)
+                    """,
+                    (f"-{ttl_days} days",),
+                ).fetchall()
+                session_ids = [int(row[0]) for row in rows]
+
+                user_rows = conn.execute(
+                    """
+                    SELECT DISTINCT user_id FROM web_chat_sessions
+                    WHERE ended_at IS NOT NULL
+                    """
+                ).fetchall()
+                for user_row in user_rows:
+                    archived = conn.execute(
+                        """
+                        SELECT id FROM web_chat_sessions
+                        WHERE user_id = ? AND ended_at IS NOT NULL
+                        ORDER BY id DESC
+                        LIMIT -1 OFFSET ?
+                        """,
+                        (str(user_row[0]), max_archived),
+                    ).fetchall()
+                    session_ids.extend(int(row[0]) for row in archived)
+
+                unique_ids = sorted(set(session_ids))
+                return self._sync_delete_sessions(conn, unique_ids)
+        except Exception as e:
+            raise StorageError(f"Failed to prune web chat retention: {e}") from e
+
+    async def prune_retention(
+        self,
+        *,
+        archived_session_ttl_days: int,
+        max_archived_sessions_per_user: int,
+    ) -> int:
+        """Prune archived web transcript sessions by age and per-user quota."""
+        return await run_in_thread(
+            self._sync_prune_retention,
+            archived_session_ttl_days=archived_session_ttl_days,
+            max_archived_sessions_per_user=max_archived_sessions_per_user,
+        )

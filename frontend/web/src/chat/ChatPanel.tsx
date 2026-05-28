@@ -9,6 +9,7 @@ import type {
   StatusLine,
   User
 } from "../types";
+import { createWebSocketTicket } from "../api";
 import { parseServerWsEvent } from "../contracts";
 import type { ServerWsEvent } from "../contracts";
 import { MarkdownMessage } from "./MarkdownMessage";
@@ -69,6 +70,7 @@ export function ChatPanel({
   const wsRef = useRef<WebSocket | null>(null);
   const messagesRef = useRef<HTMLDivElement | null>(null);
   const resetSignalRef = useRef(resetSignal);
+  const modeRef = useRef(mode);
   const preserveScrollRef = useRef<{ height: number; top: number } | null>(null);
 
   const addMessage = useCallback((message: ChatMessage) => {
@@ -76,51 +78,81 @@ export function ChatPanel({
   }, []);
 
   useEffect(() => {
-    const proto = window.location.protocol === "https:" ? "wss" : "ws";
-    const ws = new WebSocket(
-      `${proto}://${window.location.host}/ws/chat?csrf=${encodeURIComponent(csrf)}`
-    );
-    wsRef.current = ws;
-    ws.onopen = () => {
-      setConnected(true);
-      ws.send(JSON.stringify({ type: "mode_change", mode }));
-    };
-    ws.onclose = () => {
-      setConnected(false);
-      setStatus((current) =>
-        current.active
-          ? { ...current, tone: "warning", label: "Соединение с web-каналом закрыто" }
-          : current
-      );
-    };
-    ws.onmessage = (event) => {
-      if (typeof event.data !== "string") {
-        console.warn("Ignored non-text WebSocket event");
-        return;
-      }
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(event.data);
-      } catch (error) {
-        console.warn("Ignored invalid WebSocket JSON", error);
-        return;
-      }
-      const wsEvent = parseServerWsEvent(parsed);
-      if (wsEvent === null) {
-        console.warn("Ignored unknown WebSocket event", parsed);
-        return;
-      }
-      handleWsEvent(wsEvent, {
-        addMessage,
-        setMessages,
-        setStatus,
-        setApprovals,
-        onContextUsage,
-        setHistoryHasMore,
-        setLoadingHistory
+    modeRef.current = mode;
+  }, [mode]);
+
+  useEffect(() => {
+    let ws: WebSocket | null = null;
+    let cancelled = false;
+
+    createWebSocketTicket(csrf)
+      .then(({ ticket }) => {
+        if (cancelled) return;
+        const proto = window.location.protocol === "https:" ? "wss" : "ws";
+        ws = new WebSocket(
+          `${proto}://${window.location.host}/ws/chat?ticket=${encodeURIComponent(ticket)}`
+        );
+        wsRef.current = ws;
+        ws.onopen = () => {
+          setConnected(true);
+          ws?.send(JSON.stringify({ type: "mode_change", mode: modeRef.current }));
+        };
+        ws.onclose = () => {
+          setConnected(false);
+          setStatus((current) =>
+            current.active
+              ? { ...current, tone: "warning", label: "Соединение с web-каналом закрыто" }
+              : current
+          );
+        };
+        ws.onmessage = (event) => {
+          if (typeof event.data !== "string") {
+            console.warn("Ignored non-text WebSocket event");
+            return;
+          }
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(event.data);
+          } catch (error) {
+            console.warn("Ignored invalid WebSocket JSON", error);
+            return;
+          }
+          const wsEvent = parseServerWsEvent(parsed);
+          if (wsEvent === null) {
+            console.warn("Ignored unknown WebSocket event", parsed);
+            return;
+          }
+          handleWsEvent(wsEvent, {
+            addMessage,
+            setMessages,
+            setStatus,
+            setApprovals,
+            onContextUsage,
+            setHistoryHasMore,
+            setLoadingHistory
+          });
+        };
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        console.warn("Failed to create WebSocket ticket", error);
+        setConnected(false);
+        setStatus({
+          active: false,
+          requestId: null,
+          phase: "ws",
+          tone: "warning",
+          label: "Не удалось открыть web-канал"
+        });
       });
+
+    return () => {
+      cancelled = true;
+      ws?.close();
+      if (wsRef.current === ws) {
+        wsRef.current = null;
+      }
     };
-    return () => ws.close();
   }, [addMessage, csrf, onContextUsage]);
 
   useEffect(() => {

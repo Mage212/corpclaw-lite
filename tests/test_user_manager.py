@@ -6,6 +6,8 @@ import sqlite3
 
 from corpclaw_lite.users.manager import UserManager
 
+PASSWORD = "secret-password-123"
+
 
 def test_create_and_get_user(tmp_path) -> None:
     db = str(tmp_path / "users.db")
@@ -56,7 +58,7 @@ def test_web_user_auth_and_session(tmp_path) -> None:
 
     user = mgr.create_web_user(
         username="Alice",
-        password="secret",
+        password=PASSWORD,
         department="engineering",
         name="Alice Web",
         is_admin=True,
@@ -67,7 +69,7 @@ def test_web_user_auth_and_session(tmp_path) -> None:
     assert user.workspace_key() == str(user.id)
     assert mgr.authenticate_web_user("alice", "wrong") is None
 
-    authenticated = mgr.authenticate_web_user("alice", "secret")
+    authenticated = mgr.authenticate_web_user("alice", PASSWORD)
     assert authenticated is not None
     assert authenticated.is_admin is True
 
@@ -82,6 +84,18 @@ def test_web_user_auth_and_session(tmp_path) -> None:
     assert mgr.get_user_by_session(token) is None
 
 
+def test_web_password_policy_rejects_short_password(tmp_path) -> None:
+    db = str(tmp_path / "users.db")
+    mgr = UserManager(db_path=db)
+
+    try:
+        mgr.create_web_user(username="alice", password="short", department="engineering")
+    except ValueError as e:
+        assert "at least 12" in str(e)
+    else:
+        raise AssertionError("short web password was accepted")
+
+
 def test_link_web_user_to_existing_telegram_profile(tmp_path) -> None:
     db = str(tmp_path / "users.db")
     mgr = UserManager(db_path=db)
@@ -90,7 +104,7 @@ def test_link_web_user_to_existing_telegram_profile(tmp_path) -> None:
     linked = mgr.link_web_user(
         telegram_id=278278319,
         username="Vadim",
-        password="secret",
+        password=PASSWORD,
         is_admin=True,
     )
 
@@ -100,7 +114,7 @@ def test_link_web_user_to_existing_telegram_profile(tmp_path) -> None:
     assert linked.workspace_key() == str(telegram_user.id)
     assert linked.memory_key() == str(telegram_user.id)
 
-    authenticated = mgr.authenticate_web_user("vadim", "secret")
+    authenticated = mgr.authenticate_web_user("vadim", PASSWORD)
     assert authenticated is not None
     assert authenticated.id == telegram_user.id
     assert authenticated.telegram_id == 278278319
@@ -115,7 +129,7 @@ def test_create_web_user_with_telegram_id_links_existing_profile(tmp_path) -> No
 
     linked = mgr.create_web_user(
         username="alice",
-        password="secret",
+        password=PASSWORD,
         department="ignored",
         telegram_id=123,
     )
@@ -130,10 +144,10 @@ def test_link_web_user_rejects_duplicate_username(tmp_path) -> None:
     db = str(tmp_path / "users.db")
     mgr = UserManager(db_path=db)
     mgr.create_user(telegram_id=1, department="engineering")
-    mgr.create_web_user(username="vadim", password="secret", department="engineering")
+    mgr.create_web_user(username="vadim", password=PASSWORD, department="engineering")
 
     try:
-        mgr.link_web_user(telegram_id=1, username="vadim", password="secret")
+        mgr.link_web_user(telegram_id=1, username="vadim", password=PASSWORD)
     except ValueError as e:
         assert "already belongs" in str(e)
     else:
@@ -146,7 +160,7 @@ def test_merge_web_user_moves_credentials_workspace_and_memory(tmp_path) -> None
     workspace_base = tmp_path / "workspaces"
     mgr = UserManager(db_path=str(db))
     target = mgr.create_user(telegram_id=278278319, department="engineering", name="Vadim")
-    source = mgr.create_web_user(username="vadim", password="secret", department="engineering")
+    source = mgr.create_web_user(username="vadim", password=PASSWORD, department="engineering")
 
     source_ws = workspace_base / f"user_{source.id}"
     target_ws = workspace_base / f"user_{target.id}"
@@ -228,7 +242,7 @@ def test_merge_web_user_moves_credentials_workspace_and_memory(tmp_path) -> None
     assert result["moved_messages"] == 1
     assert result["moved_facts"] == 1
 
-    merged = mgr.authenticate_web_user("vadim", "secret")
+    merged = mgr.authenticate_web_user("vadim", PASSWORD)
     assert merged is not None
     assert merged.id == target.id
     assert merged.telegram_id == 278278319
@@ -359,9 +373,9 @@ def test_migrate_canonical_ids_moves_legacy_telegram_data(tmp_path) -> None:
 def test_set_web_password(tmp_path) -> None:
     db = str(tmp_path / "users.db")
     mgr = UserManager(db_path=db)
-    mgr.create_web_user(username="bob", password="old", department="it")
+    mgr.create_web_user(username="bob", password="old-password-123", department="it")
 
-    assert mgr.set_web_password("bob", "new") is True
-    assert mgr.authenticate_web_user("bob", "old") is None
-    assert mgr.authenticate_web_user("bob", "new") is not None
-    assert mgr.set_web_password("missing", "new") is False
+    assert mgr.set_web_password("bob", "new-password-123") is True
+    assert mgr.authenticate_web_user("bob", "old-password-123") is None
+    assert mgr.authenticate_web_user("bob", "new-password-123") is not None
+    assert mgr.set_web_password("missing", "new-password-123") is False

@@ -8,7 +8,8 @@ import type {
   PreviewPayload,
   SessionPayload,
   TreeNode,
-  User
+  User,
+  WebSocketTicketPayload
 } from "./types";
 
 export type UploadPayload = {
@@ -153,6 +154,14 @@ export function parseSessionPayload(value: unknown): SessionPayload {
     authenticated,
     user: userValue === null ? null : parseUser(userValue),
     csrf_token: requiredString(source, "csrf_token", "session")
+  };
+}
+
+export function parseWebSocketTicketPayload(value: unknown): WebSocketTicketPayload {
+  const source = record(value, "websocket ticket");
+  return {
+    ticket: requiredString(source, "ticket", "websocket ticket"),
+    expires_in_seconds: requiredNumber(source, "expires_in_seconds", "websocket ticket")
   };
 }
 

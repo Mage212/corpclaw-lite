@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import concurrent.futures
+import getpass
 import logging
 import os
 import sys
@@ -34,6 +35,7 @@ from corpclaw_lite.exceptions import StartupConfigurationError
 
 if TYPE_CHECKING:
     from corpclaw_lite.extensions.skills.base import Skill
+    from corpclaw_lite.users.manager import UserManager
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +75,38 @@ def _require_env(name: str) -> str:
         print(f"Error: environment variable {name!r} is required but not set.", file=sys.stderr)
         sys.exit(1)
     return value
+
+
+def _resolve_password(
+    *,
+    password: str | None,
+    password_env: str | None,
+    prompt: str = "Password",
+) -> str:
+    if password is not None:
+        return password
+    if password_env:
+        value = os.environ.get(password_env)
+        if value is None:
+            raise ValueError(f"environment variable {password_env!r} is not set")
+        return value
+    first = getpass.getpass(f"{prompt}: ")
+    second = getpass.getpass("Confirm password: ")
+    if first != second:
+        raise ValueError("password confirmation does not match")
+    return first
+
+
+def _web_password_user_manager() -> UserManager:
+    from corpclaw_lite.config.loader import load_settings
+    from corpclaw_lite.paths import PROJECT_ROOT
+    from corpclaw_lite.users.manager import UserManager
+
+    settings = load_settings(PROJECT_ROOT / "config" / "settings.yaml")
+    return UserManager(
+        password_min_length=settings.web_channel.password_min_length,
+        password_max_length=settings.web_channel.password_max_length,
+    )
 
 
 def _exit_with_startup_warning(error: StartupConfigurationError) -> NoReturn:
@@ -116,7 +150,13 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("web", help="Start the browser-based web channel")
     web_create_p = sub.add_parser("web-user-create", help="Create a local web user")
     web_create_p.add_argument("-u", "--username", required=True, help="Local username")
-    web_create_p.add_argument("-p", "--password", required=True, help="Initial password")
+    web_create_p.add_argument(
+        "-p",
+        "--password",
+        default=None,
+        help="Initial password (less secure: visible in shell history/process args)",
+    )
+    web_create_p.add_argument("--password-env", default=None, help="Read password from env var")
     web_create_p.add_argument("-d", "--department", required=True, help="Department slug")
     web_create_p.add_argument("-n", "--name", default="", help="Display name")
     web_create_p.add_argument(
@@ -131,12 +171,24 @@ def _build_parser() -> argparse.ArgumentParser:
     web_link_p = sub.add_parser("web-user-link", help="Attach a web login to a Telegram user")
     web_link_p.add_argument("-t", "--telegram-id", type=int, required=True, help="Telegram user ID")
     web_link_p.add_argument("-u", "--username", required=True, help="Local username")
-    web_link_p.add_argument("-p", "--password", required=True, help="Initial password")
+    web_link_p.add_argument(
+        "-p",
+        "--password",
+        default=None,
+        help="Initial password (less secure: visible in shell history/process args)",
+    )
+    web_link_p.add_argument("--password-env", default=None, help="Read password from env var")
     web_link_p.add_argument("--admin", action="store_true", help="Grant web admin flag")
 
     web_pass_p = sub.add_parser("web-user-password", help="Change a local web user password")
     web_pass_p.add_argument("-u", "--username", required=True, help="Local username")
-    web_pass_p.add_argument("-p", "--password", required=True, help="New password")
+    web_pass_p.add_argument(
+        "-p",
+        "--password",
+        default=None,
+        help="New password (less secure: visible in shell history/process args)",
+    )
+    web_pass_p.add_argument("--password-env", default=None, help="Read password from env var")
 
     web_merge_p = sub.add_parser("web-user-merge", help="Merge a duplicate web user into another")
     web_merge_p.add_argument("--source-user-id", type=int, required=True, help="Duplicate user ID")
@@ -158,7 +210,13 @@ def _build_parser() -> argparse.ArgumentParser:
     create_p = sub.add_parser("user-create", help="Create a new user")
     create_p.add_argument("-t", "--telegram-id", type=int, default=None, help="Telegram user ID")
     create_p.add_argument("-u", "--username", default=None, help="Local web username")
-    create_p.add_argument("-p", "--password", default=None, help="Initial web password")
+    create_p.add_argument(
+        "-p",
+        "--password",
+        default=None,
+        help="Initial web password (less secure: visible in shell history/process args)",
+    )
+    create_p.add_argument("--password-env", default=None, help="Read password from env var")
     create_p.add_argument("-d", "--department", required=True, help="Department slug")
     create_p.add_argument("-n", "--name", default="", help="Display name")
     create_p.add_argument("--admin", action="store_true", help="Grant web admin flag")
@@ -170,7 +228,13 @@ def _build_parser() -> argparse.ArgumentParser:
     link_web_p = sub.add_parser("user-link-web", help="Attach web login to user")
     link_web_p.add_argument("--user-id", type=int, required=True, help="Canonical user ID")
     link_web_p.add_argument("-u", "--username", required=True, help="Local username")
-    link_web_p.add_argument("-p", "--password", required=True, help="Initial password")
+    link_web_p.add_argument(
+        "-p",
+        "--password",
+        default=None,
+        help="Initial password (less secure: visible in shell history/process args)",
+    )
+    link_web_p.add_argument("--password-env", default=None, help="Read password from env var")
     link_web_p.add_argument("--admin", action="store_true", help="Grant web admin flag")
 
     sub.add_parser("user-migrate-canonical-ids", help="Move legacy data to users.id keys")
@@ -552,9 +616,7 @@ def cmd_web_user_create(
     telegram_id: int | None = None,
 ) -> None:
     """Create a local web user."""
-    from corpclaw_lite.users.manager import UserManager
-
-    manager = UserManager()
+    manager = _web_password_user_manager()
     user = manager.create_web_user(
         username=username,
         password=password,
@@ -580,9 +642,7 @@ def cmd_web_user_link(
     is_admin: bool,
 ) -> None:
     """Attach a local web login to an existing Telegram user."""
-    from corpclaw_lite.users.manager import UserManager
-
-    manager = UserManager()
+    manager = _web_password_user_manager()
     user = manager.link_web_user(
         telegram_id=telegram_id,
         username=username,
@@ -625,9 +685,7 @@ def cmd_web_user_merge(
 
 def cmd_web_user_password(username: str, password: str) -> None:
     """Change a local web user's password."""
-    from corpclaw_lite.users.manager import UserManager
-
-    manager = UserManager()
+    manager = _web_password_user_manager()
     changed = manager.set_web_password(username, password)
     if changed:
         print(f"✅ Password updated for {username}")
@@ -666,12 +724,15 @@ def cmd_user_create(
     is_admin: bool = False,
 ) -> None:
     """Register a new user."""
-    from corpclaw_lite.users.manager import UserManager
-
     if telegram_id is None and username is None:
         raise ValueError("user-create requires --telegram-id and/or --username")
 
-    manager = UserManager()
+    if username is None:
+        from corpclaw_lite.users.manager import UserManager
+
+        manager = UserManager()
+    else:
+        manager = _web_password_user_manager()
     user = manager.create_user(
         telegram_id=telegram_id,
         username=username,
@@ -703,9 +764,7 @@ def cmd_user_link_web(
     is_admin: bool = False,
 ) -> None:
     """Attach a web login to a canonical user."""
-    from corpclaw_lite.users.manager import UserManager
-
-    manager = UserManager()
+    manager = _web_password_user_manager()
     user = manager.link_web_login(
         user_id=user_id,
         username=username,
@@ -926,7 +985,11 @@ def main() -> None:
         elif args.command == "web-user-create":
             cmd_web_user_create(
                 username=args.username,
-                password=args.password,
+                password=_resolve_password(
+                    password=args.password,
+                    password_env=args.password_env,
+                    prompt="Initial password",
+                ),
                 department=args.department,
                 name=args.name,
                 is_admin=args.admin,
@@ -936,11 +999,22 @@ def main() -> None:
             cmd_web_user_link(
                 telegram_id=args.telegram_id,
                 username=args.username,
-                password=args.password,
+                password=_resolve_password(
+                    password=args.password,
+                    password_env=args.password_env,
+                    prompt="Initial password",
+                ),
                 is_admin=args.admin,
             )
         elif args.command == "web-user-password":
-            cmd_web_user_password(args.username, args.password)
+            cmd_web_user_password(
+                args.username,
+                _resolve_password(
+                    password=args.password,
+                    password_env=args.password_env,
+                    prompt="New password",
+                ),
+            )
         elif args.command == "web-user-merge":
             cmd_web_user_merge(
                 source_user_id=args.source_user_id,
@@ -956,7 +1030,15 @@ def main() -> None:
                 args.department,
                 args.name,
                 username=args.username,
-                password=args.password,
+                password=(
+                    _resolve_password(
+                        password=args.password,
+                        password_env=args.password_env,
+                        prompt="Initial password",
+                    )
+                    if args.username is not None
+                    else None
+                ),
                 is_admin=args.admin,
             )
         elif args.command == "user-link-telegram":
@@ -965,7 +1047,11 @@ def main() -> None:
             cmd_user_link_web(
                 args.user_id,
                 args.username,
-                args.password,
+                _resolve_password(
+                    password=args.password,
+                    password_env=args.password_env,
+                    prompt="Initial password",
+                ),
                 is_admin=args.admin,
             )
         elif args.command == "user-migrate-canonical-ids":

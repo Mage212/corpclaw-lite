@@ -31,6 +31,8 @@ departments:
       - web_fetch
       - web_search
       - send_file
+    allowed_subagents:
+      - research-agent
     budget:
       max_iterations: 10
       max_tool_calls: 20
@@ -39,6 +41,12 @@ departments:
     description: "Software engineering and IT teams"
     allowed_tools:
       - "*"
+    allowed_subagents:
+      - filesystem-agent
+      - execution-agent
+      - document-agent
+      - data-agent
+      - research-agent
     budget:
       max_iterations: 20
       max_tool_calls: 50
@@ -57,6 +65,10 @@ departments:
       - web_fetch
       - web_search
       - send_file
+    allowed_subagents:
+      - filesystem-agent
+      - document-agent
+      - research-agent
     budget:
       max_iterations: 15
       max_tool_calls: 30
@@ -75,6 +87,9 @@ departments:
       - read_image
       - dispatch_subagent
       - excel_inspect
+    allowed_subagents:
+      - document-agent
+      - research-agent
     budget:
       max_iterations: 10
       max_tool_calls: 20
@@ -93,6 +108,10 @@ departments:
       - excel_inspect
       - web_fetch
       - web_search
+    allowed_subagents:
+      - data-agent
+      - document-agent
+      - research-agent
     budget:
       max_iterations: 10
       max_tool_calls: 20
@@ -111,6 +130,9 @@ departments:
       - excel_inspect
       - web_fetch
       - web_search
+    allowed_subagents:
+      - document-agent
+      - research-agent
     budget:
       max_iterations: 10
       max_tool_calls: 20
@@ -129,6 +151,10 @@ departments:
       - read_image
       - dispatch_subagent
       - excel_inspect
+    allowed_subagents:
+      - data-agent
+      - document-agent
+      - research-agent
     budget:
       max_iterations: 15
       max_tool_calls: 30
@@ -147,6 +173,9 @@ departments:
       - dispatch_subagent
       - excel_inspect
       - send_file
+    allowed_subagents:
+      - document-agent
+      - research-agent
     budget:
       max_iterations: 10
       max_tool_calls: 20
@@ -155,6 +184,12 @@ departments:
     description: "System administrators — full access"
     allowed_tools:
       - "*"
+    allowed_subagents:
+      - filesystem-agent
+      - execution-agent
+      - document-agent
+      - data-agent
+      - research-agent
     budget:
       max_iterations: 25
       max_tool_calls: 60
@@ -163,6 +198,12 @@ departments:
     description: "Software development team"
     allowed_tools:
       - "*"
+    allowed_subagents:
+      - filesystem-agent
+      - execution-agent
+      - document-agent
+      - data-agent
+      - research-agent
     budget:
       max_iterations: 20
       max_tool_calls: 50

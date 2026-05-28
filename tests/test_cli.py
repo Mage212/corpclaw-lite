@@ -8,6 +8,7 @@ import pytest
 
 from corpclaw_lite.cli import (
     _filter_main_scoped_skills,
+    _resolve_password,
     cmd_generate,
     cmd_plugin_list,
     cmd_skill_list,
@@ -288,6 +289,31 @@ def test_startup_configuration_error_prints_warning(
     assert "Container isolation is enabled" in captured.err
     assert "Start Docker" in captured.err
     assert "Traceback" not in captured.err
+
+
+def test_resolve_password_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WEB_PASSWORD", "secret-password-123")
+
+    assert (
+        _resolve_password(password=None, password_env="WEB_PASSWORD", prompt="Password")
+        == "secret-password-123"
+    )
+
+
+def test_resolve_password_prompts_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    prompts: list[str] = []
+
+    def fake_getpass(prompt: str) -> str:
+        prompts.append(prompt)
+        return "secret-password-123"
+
+    monkeypatch.setattr("corpclaw_lite.cli.getpass.getpass", fake_getpass)
+
+    assert (
+        _resolve_password(password=None, password_env=None, prompt="Initial password")
+        == "secret-password-123"
+    )
+    assert prompts == ["Initial password: ", "Confirm password: "]
 
 
 @pytest.mark.parametrize(

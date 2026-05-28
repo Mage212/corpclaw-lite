@@ -161,8 +161,17 @@ class WebChannelSettings(BaseModel):
     workspace_base: Path = Path("workspaces")
     upload_max_bytes: int = 20 * 1024 * 1024
     rate_limit_per_minute: int = 10
+    login_rate_limit_per_minute: int = 5
+    login_lockout_threshold: int = 5
+    login_lockout_seconds: int = 300
+    password_min_length: int = 12
+    password_max_length: int = 256
     session_ttl_hours: int = 12
     cookie_name: str = "corpclaw_lite_session"
+    ws_ticket_ttl_seconds: int = 30
+    chat_active_max_messages: int = 2000
+    chat_archived_session_ttl_days: int = 30
+    chat_max_archived_sessions_per_user: int = 20
 
 
 class ResearchSettings(BaseModel):
