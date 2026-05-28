@@ -67,5 +67,11 @@ export type UploadItem = {
   error?: string;
 };
 
-export type ViewMode = "list" | "grid";
+export type ViewMode = "list" | "grid" | "details";
 export type AgentMode = "execute" | "chat";
+export type PreviewMode = "side" | "expanded";
+
+export type PanelLayoutState = {
+  filesWidth: number;
+  previewWidth: number;
+};
