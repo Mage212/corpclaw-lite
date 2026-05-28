@@ -35,6 +35,7 @@ import {
   uploadFiles
 } from "../api";
 import { Modal } from "../components/Modal";
+import { parseDraggedPaths } from "../contracts";
 import type {
   DirectoryPayload,
   FileEntry,
@@ -220,7 +221,8 @@ export function FileExplorer({ csrf, open, mode, onModeChange, onPreview }: File
     setDropActive(false);
     const dragged = event.dataTransfer.getData("application/x-corpclaw-paths");
     if (dragged) {
-      const paths = JSON.parse(dragged) as string[];
+      const paths = parseDraggedPaths(dragged);
+      if (!paths.length) return;
       await moveFiles(csrf, paths, targetDir);
       setSelected(new Set());
       await refresh();

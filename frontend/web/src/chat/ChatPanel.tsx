@@ -9,6 +9,8 @@ import type {
   StatusLine,
   User
 } from "../types";
+import { parseServerWsEvent } from "../contracts";
+import type { ServerWsEvent } from "../contracts";
 import { MarkdownMessage } from "./MarkdownMessage";
 
 const emptyStatus: StatusLine = {
@@ -21,63 +23,6 @@ const emptyStatus: StatusLine = {
 
 function id(prefix: string): string {
   return `${prefix}_${Math.random().toString(36).slice(2)}_${Date.now()}`;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-function parseContextUsage(value: unknown): ContextUsage | null {
-  if (!isRecord(value)) return null;
-  const latest = Number(value.latest_total_tokens || 0);
-  const limit = Number(value.context_limit_tokens || 0);
-  const ratio = Number(value.context_ratio || (limit > 0 ? latest / limit : 0));
-  return {
-    latest_total_tokens: latest,
-    input_tokens: Number(value.input_tokens || 0),
-    output_tokens: Number(value.output_tokens || 0),
-    total_tokens: Number(value.total_tokens || 0),
-    context_limit_tokens: limit,
-    context_ratio: Math.max(0, Math.min(1, ratio))
-  };
-}
-
-function parseChatMessage(value: unknown): ChatMessage | null {
-  if (!isRecord(value)) return null;
-  const role = value.role;
-  if (role !== "user" && role !== "assistant" && role !== "system") return null;
-  const dbId = typeof value.db_id === "number" ? value.db_id : undefined;
-  const tone = value.tone;
-  const fileValue = value.file;
-  let file: ChatMessage["file"];
-  if (isRecord(fileValue)) {
-    const name = String(fileValue.name || "file");
-    file = {
-      name,
-      url: typeof fileValue.url === "string" ? fileValue.url : undefined,
-      caption: typeof fileValue.caption === "string" ? fileValue.caption : undefined,
-      available: fileValue.available === true
-    };
-  }
-  return {
-    id: String(value.id || (dbId ? `db_${dbId}` : id("msg"))),
-    db_id: dbId,
-    session_id: typeof value.session_id === "number" ? value.session_id : undefined,
-    role,
-    text: String(value.text || ""),
-    created_at: typeof value.created_at === "string" ? value.created_at : undefined,
-    request_id: typeof value.request_id === "string" ? value.request_id : undefined,
-    tone:
-      tone === "warning" || tone === "error" || tone === "file" || tone === "normal"
-        ? tone
-        : undefined,
-    file
-  };
-}
-
-function parseChatMessages(value: unknown): ChatMessage[] {
-  if (!Array.isArray(value)) return [];
-  return value.map(parseChatMessage).filter((item): item is ChatMessage => item !== null);
 }
 
 function appendUnique(messages: ChatMessage[], message: ChatMessage): ChatMessage[] {
@@ -149,9 +94,23 @@ export function ChatPanel({
       );
     };
     ws.onmessage = (event) => {
-      const parsed = JSON.parse(event.data) as unknown;
-      if (!isRecord(parsed)) return;
-      handleWsEvent(parsed, {
+      if (typeof event.data !== "string") {
+        console.warn("Ignored non-text WebSocket event");
+        return;
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(event.data);
+      } catch (error) {
+        console.warn("Ignored invalid WebSocket JSON", error);
+        return;
+      }
+      const wsEvent = parseServerWsEvent(parsed);
+      if (wsEvent === null) {
+        console.warn("Ignored unknown WebSocket event", parsed);
+        return;
+      }
+      handleWsEvent(wsEvent, {
         addMessage,
         setMessages,
         setStatus,
@@ -326,7 +285,7 @@ type WsEventHandlers = {
   setLoadingHistory: Dispatch<SetStateAction<boolean>>;
 };
 
-function handleWsEvent(event: Record<string, unknown>, handlers: WsEventHandlers) {
+function handleWsEvent(event: ServerWsEvent, handlers: WsEventHandlers) {
   const {
     addMessage,
     setMessages,
@@ -336,74 +295,64 @@ function handleWsEvent(event: Record<string, unknown>, handlers: WsEventHandlers
     setHistoryHasMore,
     setLoadingHistory
   } = handlers;
-  const type = event.type;
-  if (type === "chat_history") {
-    setMessages(parseChatMessages(event.messages));
-    setHistoryHasMore(event.has_more === true);
+  if (event.type === "chat_history") {
+    setMessages(event.messages);
+    setHistoryHasMore(event.has_more);
     setLoadingHistory(false);
-  } else if (type === "history_page") {
-    const older = parseChatMessages(event.messages);
-    setMessages((items) => prependUnique(items, older));
-    setHistoryHasMore(event.has_more === true);
+  } else if (event.type === "history_page") {
+    setMessages((items) => prependUnique(items, event.messages));
+    setHistoryHasMore(event.has_more);
     setLoadingHistory(false);
-  } else if (type === "chat_message") {
-    const message = parseChatMessage(event.message);
-    if (message) {
-      addMessage(message);
-    }
-  } else if (type === "request_started" || type === "request_state") {
+  } else if (event.type === "chat_message") {
+    addMessage(event.message);
+  } else if (event.type === "request_started" || event.type === "request_state") {
     setStatus({
       active: true,
-      requestId: String(event.request_id || ""),
-      label: String(event.label || "В обработке..."),
+      requestId: event.request_id,
+      label: event.label,
       phase: "request",
       tone: "running"
     });
-  } else if (type === "status_update") {
+  } else if (event.type === "status_update") {
     setStatus({
       active: true,
-      requestId: String(event.request_id || ""),
-      label: String(event.label || event.key || "В обработке..."),
-      phase: String(event.phase || "status"),
+      requestId: event.request_id,
+      label: event.label,
+      phase: event.phase,
       tone: "running"
     });
-  } else if (type === "status") {
+  } else if (event.type === "status") {
     setStatus({
       active: true,
       requestId: null,
-      label: `Статус: ${String(event.stage || "")}`,
+      label: `Статус: ${event.stage}`,
       phase: "legacy",
       tone: "running"
     });
-  } else if (type === "assistant_message") {
+  } else if (event.type === "assistant_message") {
     addMessage({
       id: id("assistant"),
       role: "assistant",
-      text: String(event.message || "")
+      text: event.message
     });
-  } else if (type === "request_finished") {
+  } else if (event.type === "request_finished") {
     const tone = event.status === "error" ? "error" : event.status === "warning" ? "warning" : "done";
-    const usage = parseContextUsage(event.usage);
-    if (usage) {
-      onContextUsage(usage);
+    if (event.usage) {
+      onContextUsage(event.usage);
     }
     setStatus({
       active: true,
-      requestId: String(event.request_id || ""),
-      label: String(event.label || "Готово"),
+      requestId: event.request_id,
+      label: event.label,
       phase: "done",
       tone
     });
     window.setTimeout(() => setStatus(emptyStatus), 1400);
-  } else if (type === "context_usage") {
-    const usage = parseContextUsage(event.usage);
-    if (usage) {
-      onContextUsage(usage);
-    }
-  } else if (type === "context_reset") {
-    const usage = parseContextUsage(event.usage);
-    if (usage) {
-      onContextUsage(usage);
+  } else if (event.type === "context_usage") {
+    onContextUsage(event.usage);
+  } else if (event.type === "context_reset") {
+    if (event.usage) {
+      onContextUsage(event.usage);
     }
     setMessages([]);
     setApprovals([]);
@@ -412,70 +361,61 @@ function handleWsEvent(event: Record<string, unknown>, handlers: WsEventHandlers
     setStatus({
       active: true,
       requestId: null,
-      label: String(event.message || "Сессия сброшена"),
+      label: event.message,
       phase: "done",
       tone: "done"
     });
     window.setTimeout(() => setStatus(emptyStatus), 1600);
-  } else if (type === "warning") {
+  } else if (event.type === "warning") {
     if (!event.request_id) {
       addMessage({
         id: id("warning"),
         role: "system",
-        text: String(event.message || "Предупреждение"),
+        text: event.message,
         tone: "warning"
       });
     }
     setStatus({
       active: true,
-      requestId: String(event.request_id || ""),
+      requestId: event.request_id ?? "",
       label: "Требуется внимание",
       phase: "warning",
       tone: "warning"
     });
-  } else if (type === "error") {
+  } else if (event.type === "error") {
     setLoadingHistory(false);
-    const usage = parseContextUsage(event.usage);
-    if (usage) {
-      onContextUsage(usage);
+    if (event.usage) {
+      onContextUsage(event.usage);
     }
     if (!event.request_id) {
       addMessage({
         id: id("error"),
         role: "system",
-        text: String(event.message || "Ошибка"),
+        text: event.message,
         tone: "error"
       });
     }
-  } else if (type === "file_ready") {
-    const url = String(event.url || "");
-    const name = String(event.name || "file");
-    const caption = String(event.caption || "");
+  } else if (event.type === "file_ready") {
     addMessage({
       id: id("file"),
       role: "system",
       text: "Файл готов к скачиванию.",
       tone: "file",
       file: {
-        name,
-        url,
-        caption
+        name: event.name,
+        url: event.url,
+        caption: event.caption
       }
     });
-  } else if (type === "approval_required") {
-    const approval = {
-      approval_id: String(event.approval_id || ""),
-      action: String(event.action || "Подтверждение"),
-      details: String(event.details || "")
-    };
+  } else if (event.type === "approval_required") {
+    const approval = event;
     setApprovals((items) =>
       items.some((item) => item.approval_id === approval.approval_id)
         ? items.map((item) => (item.approval_id === approval.approval_id ? approval : item))
         : [...items, approval]
     );
-  } else if (type === "approval_resolved") {
-    const approvalId = String(event.approval_id || "");
-    setApprovals((items) => items.filter((item) => item.approval_id !== approvalId));
+  } else if (event.type === "approval_resolved") {
+    setApprovals((items) => items.filter((item) => item.approval_id !== event.approval_id));
   }
 }
 
