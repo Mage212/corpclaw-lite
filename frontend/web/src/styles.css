@@ -1062,6 +1062,19 @@ a {
   padding: 22px;
 }
 
+.history-loader {
+  display: flex;
+  justify-content: center;
+  margin: 0 0 14px;
+}
+
+.history-loader button {
+  padding: 6px 10px;
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .empty-chat {
   height: 100%;
   display: grid;
@@ -1330,6 +1343,18 @@ a {
 }
 
 .file-message span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.file-unavailable {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-2);
   color: var(--muted);
   font-size: 13px;
 }

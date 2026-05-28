@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import time
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,7 @@ from aiohttp.test_utils import make_mocked_request
 
 from corpclaw_lite.agent.factory import AgentStack
 from corpclaw_lite.channels.service import AgentRequestService, is_llm_transport_error
+from corpclaw_lite.channels.web.chat_store import WebChatFile, WebChatStore
 from corpclaw_lite.channels.web.files import (
     build_tree,
     copy_paths,
@@ -368,6 +370,102 @@ async def test_agent_request_service_resets_user_context(tmp_path: Path) -> None
     assert loop.memory.cleared == [user.memory_key()]
 
 
+@pytest.mark.asyncio
+async def test_web_chat_store_persists_and_pages_history(tmp_path: Path) -> None:
+    store = WebChatStore(tmp_path / "memory.db")
+    user_id = "7"
+
+    first = await store.append_message(user_id=user_id, role="user", content="hello")
+    second = await store.append_message(
+        user_id=user_id,
+        role="assistant",
+        content="hi",
+        request_id="req1",
+        metadata={
+            "usage": {
+                "latest_total_tokens": 10,
+                "input_tokens": 7,
+                "output_tokens": 3,
+                "total_tokens": 10,
+                "context_limit_tokens": 100,
+                "context_ratio": 0.1,
+            }
+        },
+    )
+    await store.append_message(
+        user_id=user_id,
+        role="system",
+        content="Файл готов к скачиванию.",
+        tone="file",
+        file=WebChatFile(name="report.pdf", path="report.pdf", caption="done"),
+    )
+
+    page = await store.list_recent(user_id, limit=2)
+    assert page.has_more is True
+    assert [message.content for message in page.messages] == ["hi", "Файл готов к скачиванию."]
+    assert page.messages[-1].file is not None
+    assert page.messages[-1].file.name == "report.pdf"
+
+    older = await store.list_before(user_id, before_id=second.id, limit=10)
+    assert older.has_more is False
+    assert [message.id for message in older.messages] == [first.id]
+
+    usage = await store.latest_usage(user_id)
+    assert usage is not None
+    assert usage["latest_total_tokens"] == 10
+
+
+@pytest.mark.asyncio
+async def test_web_chat_store_reset_archives_current_session(tmp_path: Path) -> None:
+    store = WebChatStore(tmp_path / "memory.db")
+    user_id = "7"
+    first_session = await store.ensure_active_session(user_id)
+    await store.append_message(user_id=user_id, role="user", content="old")
+
+    second_session = await store.reset_session(user_id)
+    page = await store.list_recent(user_id, limit=10)
+
+    assert second_session != first_session
+    assert page.session_id == second_session
+    assert page.messages == []
+
+
+@pytest.mark.asyncio
+async def test_web_chat_store_backfills_visible_agent_memory(tmp_path: Path) -> None:
+    db_path = tmp_path / "memory.db"
+    store = WebChatStore(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO messages (user_id, role, content)
+            VALUES
+                ('7', 'user', 'old question'),
+                ('7', 'system', 'Tools called in this turn: none'),
+                ('7', 'assistant', '[Conversation summary]: compacted'),
+                ('7', 'assistant', 'old answer')
+            """
+        )
+
+    inserted = await store.backfill_from_memory("7")
+    page = await store.list_recent("7", limit=10)
+
+    assert inserted == 2
+    assert [(message.role, message.content) for message in page.messages] == [
+        ("user", "old question"),
+        ("assistant", "old answer"),
+    ]
+
+
 def test_web_context_usage_payload_uses_latest_total_tokens() -> None:
     from corpclaw_lite.agent.loop import RunStats
 
@@ -455,6 +553,60 @@ async def test_web_reset_context_clears_usage_snapshot() -> None:
     assert orchestrator._context_usage[7]["latest_total_tokens"] == 0
     assert service.reset_calls == 1
     assert service.finished == [7]
+
+
+@pytest.mark.asyncio
+async def test_web_reset_context_archives_web_chat_session(tmp_path: Path) -> None:
+    class FakeService:
+        async def try_start_user_request(self, _user_id: int) -> bool:
+            return True
+
+        async def finish_user_request(self, _user_id: int) -> None:
+            return None
+
+        async def reset_user_context(self, _user: User) -> None:
+            return None
+
+    store = WebChatStore(tmp_path / "memory.db")
+    await store.append_message(user_id="7", role="user", content="old")
+    orchestrator = WebChannelOrchestrator(Settings())
+    orchestrator._service = FakeService()  # type: ignore[assignment]
+    orchestrator._chat_store = store
+    user = User(id=7, name="Vadim", department="engineering")
+
+    ok, _message, _usage = await orchestrator._reset_context_for_user(user)
+    page = await store.list_recent(user.memory_key(), limit=10)
+
+    assert ok is True
+    assert page.messages == []
+
+
+@pytest.mark.asyncio
+async def test_web_context_usage_restored_from_chat_store(tmp_path: Path) -> None:
+    store = WebChatStore(tmp_path / "memory.db")
+    await store.append_message(
+        user_id="7",
+        role="assistant",
+        content="answer",
+        metadata={
+            "usage": {
+                "latest_total_tokens": 55,
+                "input_tokens": 40,
+                "output_tokens": 15,
+                "total_tokens": 55,
+                "context_limit_tokens": 1000,
+                "context_ratio": 0.055,
+            }
+        },
+    )
+    orchestrator = WebChannelOrchestrator(Settings())
+    orchestrator._chat_store = store
+    user = User(id=7, name="Vadim", department="engineering")
+
+    usage = await orchestrator._context_usage_for_user(user)
+
+    assert usage["latest_total_tokens"] == 55
+    assert usage["context_ratio"] == 0.055
 
 
 @pytest.mark.asyncio

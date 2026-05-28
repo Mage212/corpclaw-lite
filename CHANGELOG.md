@@ -36,6 +36,9 @@ llama-server.
 - Web-чат получил безопасный Markdown/GFM-рендер ответов модели: списки, таблицы, ссылки,
   inline-code и code blocks с кнопкой копирования теперь отображаются как полноценный ответ, а не
   как сырой текст.
+- Web-чат получил persistent transcript в SQLite: история текущей сессии переживает refresh,
+  logout/login и reconnect, `/new` открывает новую пустую сессию, а долгие запросы больше не
+  привязаны к одному старому WebSocket-соединению.
 - Web-канал теперь распознаёт `502 upstream_error / Connection refused` от OpenAI-compatible
   LLM gateway как ожидаемую недоступность backend-модели и отдаёт пользователю warning без
   traceback в обычном сценарии.
