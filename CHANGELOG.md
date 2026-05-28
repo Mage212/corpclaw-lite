@@ -27,6 +27,9 @@ llama-server.
   включая fullscreen-режим и клики по файлам у правого/нижнего края.
 - Web download приведён к явному режиму загрузки: файлы отдаются с исходным именем, image preview
   использует отдельный inline endpoint, а ссылки на файлы от агента получили TTL и user-boundary.
+- Web layout получил защиту от схлопывания центральной панели: файловый preview теперь открывается
+  явно как side preview или fullscreen preview, resize учитывает минимальную ширину чата, а topbar
+  переносит элементы в compact-режиме.
 - Web-канал теперь распознаёт `502 upstream_error / Connection refused` от OpenAI-compatible
   LLM gateway как ожидаемую недоступность backend-модели и отдаёт пользователю warning без
   traceback в обычном сценарии.
