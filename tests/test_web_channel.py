@@ -21,7 +21,9 @@ from corpclaw_lite.channels.web.files import (
     save_upload,
     search_files,
 )
+from corpclaw_lite.channels.web.orchestrator import WebChannelOrchestrator
 from corpclaw_lite.config.bootstrap import BootstrapLoader
+from corpclaw_lite.config.settings import Settings
 from corpclaw_lite.exceptions import LLMBackendUnavailableError
 from corpclaw_lite.users.manager import UserManager
 from corpclaw_lite.users.models import User
@@ -171,3 +173,26 @@ async def test_agent_request_service_converts_llm_connection_error(tmp_path: Pat
     assert exc_info.value.provider_name == "llamacpp"
     assert exc_info.value.base_url == "http://127.0.0.1:4000/v1"
     assert "LLM backend недоступен" in exc_info.value.user_message()
+
+
+@pytest.mark.asyncio
+async def test_web_orchestrator_stop_cleans_managed_containers() -> None:
+    class FakeContainerManager:
+        def __init__(self) -> None:
+            self.stopped = False
+
+        async def stop_managed_async(self) -> None:
+            self.stopped = True
+
+    class FakeStack:
+        def __init__(self, container_manager: FakeContainerManager) -> None:
+            self.mcp_manager = None
+            self.container_manager = container_manager
+
+    container_manager = FakeContainerManager()
+    orchestrator = WebChannelOrchestrator(Settings())
+    orchestrator._stack = FakeStack(container_manager)
+
+    await orchestrator.stop()
+
+    assert container_manager.stopped is True
