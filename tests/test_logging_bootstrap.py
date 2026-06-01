@@ -139,6 +139,24 @@ def test_agent_logger_error_field(tmp_path):
     assert record["error"] == "Budget exceeded"
 
 
+def test_agent_logger_scrubs_message_preview_and_error(tmp_path):
+    logger = AgentLogger(log_dir=tmp_path)
+    fake_key = "sk-" + "a" * 25
+    logger.log_request(
+        user_id="u3",
+        department="IT",
+        message_preview=f"Use key {fake_key}",
+        duration_ms=0.0,
+        tools_used=[],
+        status="error",
+        error=f"Auth failed for {fake_key}",
+    )
+
+    text = (tmp_path / "agent_activity.jsonl").read_text()
+    assert fake_key not in text
+    assert "***REDACTED***" in text
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # SkillHotReloader
 # ──────────────────────────────────────────────────────────────────────────────

@@ -141,6 +141,7 @@ class AgentSettings(BaseModel):
     llm_stream_max_reasoning_chars: int = 12000
     llm_stream_status_updates: bool = True
     max_facts_recall: int = 20
+    vision_max_image_bytes: int = 10 * 1024 * 1024
 
 
 class WebSettings(BaseModel):
@@ -168,6 +169,7 @@ class WebChannelSettings(BaseModel):
     password_max_length: int = 256
     session_ttl_hours: int = 12
     cookie_name: str = "corpclaw_lite_session"
+    cookie_secure: Literal["auto"] | bool = "auto"
     ws_ticket_ttl_seconds: int = 30
     chat_active_max_messages: int = 2000
     chat_archived_session_ttl_days: int = 30

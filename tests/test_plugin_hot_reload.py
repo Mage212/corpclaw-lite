@@ -136,6 +136,39 @@ async def test_unregister_plugin_removes_skill(tmp_path: Path) -> None:
     assert skill_registry.get_skill("skill_with_skill") is None
 
 
+@pytest.mark.asyncio
+async def test_scan_registers_tool_with_plugin_scope(tmp_path: Path) -> None:
+    plugin_dir = tmp_path / "scoped_plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "manifest.yaml").write_text(
+        "name: scoped_plugin\nversion: '1.0'\ntype: plugin\ndescription: Scoped\n"
+        "allowed_departments: [hr]\ncomponents:\n  tool: tool.py\n",
+        encoding="utf-8",
+    )
+    (plugin_dir / "tool.py").write_text(
+        "from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam\n"
+        "class HotTool(Tool):\n"
+        "    name='hot_tool'\n"
+        "    description='hot'\n"
+        "    params: list[ToolParam] = []\n"
+        "    risk_level = RiskLevel.LOW\n"
+        "    async def execute(self, **kwargs): return 'ok'\n",
+        encoding="utf-8",
+    )
+    tool_registry = ToolRegistry()
+    skill_registry = SkillRegistry()
+    plugin_registry = PluginRegistry()
+
+    reloader = PluginHotReloader(tmp_path, plugin_registry, tool_registry, skill_registry)
+    await reloader._scan()
+
+    tool = tool_registry.get("hot_tool")
+    assert tool is not None
+    assert tool.source_kind == "plugin"
+    assert tool.source_name == "scoped_plugin"
+    assert tool.allowed_departments == ["hr"]
+
+
 def test_force_reload_with_subprocess_isolation(tmp_path: Path) -> None:
     """load_plugin loads tool via subprocess introspection (no sys.modules pollution)."""
     from corpclaw_lite.extensions.plugins.loader import PluginLoader

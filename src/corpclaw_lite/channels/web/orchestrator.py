@@ -325,13 +325,24 @@ class WebChannelOrchestrator:
             raise web.HTTPBadRequest(text="Missing path")
         return paths
 
-    def _set_session_cookie(self, response: web.StreamResponse, token: str) -> None:
+    def _session_cookie_secure(self, request: web.Request) -> bool:
+        setting = self._web_settings.cookie_secure
+        if isinstance(setting, bool):
+            return setting
+        forwarded_proto = request.headers.get("X-Forwarded-Proto", "")
+        first_proto = forwarded_proto.split(",", 1)[0].strip().lower()
+        return request.secure or first_proto == "https"
+
+    def _set_session_cookie(
+        self, request: web.Request, response: web.StreamResponse, token: str
+    ) -> None:
         response.set_cookie(
             self._web_settings.cookie_name,
             token,
             httponly=True,
             samesite="Strict",
             max_age=self._web_settings.session_ttl_hours * 3600,
+            secure=self._session_cookie_secure(request),
         )
 
     def _clear_session_cookie(self, response: web.StreamResponse) -> None:
@@ -467,7 +478,7 @@ class WebChannelOrchestrator:
         self._record_login_success(attempt_key)
         token, _csrf = self._create_session_response(user)
         response = self._redirect("/")
-        self._set_session_cookie(response, token)
+        self._set_session_cookie(request, response, token)
         return response
 
     async def _handle_logout(self, request: web.Request) -> web.Response:
@@ -513,7 +524,7 @@ class WebChannelOrchestrator:
                 "csrf_token": csrf_token,
             }
         )
-        self._set_session_cookie(response, token)
+        self._set_session_cookie(request, response, token)
         return response
 
     async def _handle_api_logout(self, request: web.Request) -> web.Response:

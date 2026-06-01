@@ -278,7 +278,10 @@ def _build_extensions_stack(
 
     web_fetch_tool = WebFetchTool(web_settings)
     web_search_tool = WebSearchTool(web_settings)
-    read_image_tool = ReadImageTool(VisionProcessor(provider), workspace_base=workspace_base)
+    read_image_tool = ReadImageTool(
+        VisionProcessor(provider, max_image_bytes=agent_settings.vision_max_image_bytes),
+        workspace_base=workspace_base,
+    )
     research_runtime = ResearchRuntime(research_settings, workspace_base=workspace_base)
     research_tools = build_research_tools(research_runtime, web_search_tool, web_fetch_tool)
 
