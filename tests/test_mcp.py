@@ -7,10 +7,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from corpclaw_lite.departments.manager import DepartmentConfig, DepartmentManager
+from corpclaw_lite.departments.permissions import PermissionChecker
 from corpclaw_lite.extensions.mcp.adapter import MCPToolAdapter
 from corpclaw_lite.extensions.mcp.client import MCPClient, MCPToolDef
 from corpclaw_lite.extensions.mcp.manager import MCPManager
 from corpclaw_lite.extensions.tools.registry import ToolRegistry
+from corpclaw_lite.users.models import User
 
 
 def _make_tool_def(name: str = "test_tool", description: str = "A test tool") -> MCPToolDef:
@@ -37,6 +40,8 @@ def test_mcp_adapter_name_and_description() -> None:
 
     assert adapter.name == "read_file"
     assert adapter.description == "Reads a file"
+    assert adapter.source_kind == "mcp"
+    assert adapter.source_name == "unknown"
 
 
 def test_mcp_adapter_params_from_schema() -> None:
@@ -110,7 +115,69 @@ async def test_mcp_manager_registers_tools(tmp_path: Any) -> None:
         count = await manager.connect_all(registry)
 
     assert count == 1
-    assert registry.get("mcp_read") is not None
+    tool = registry.get("mcp_read")
+    assert tool is not None
+    assert tool.source_kind == "mcp"
+    assert tool.source_name == "test-server"
 
     await manager.disconnect_all()
     mock_client.disconnect.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_scope_filters_schema_and_execution(tmp_path: Any) -> None:
+    config = tmp_path / "mcp_servers.yaml"
+    config.write_text(
+        "servers:\n  - name: server_a\n    command: ['echo', 'mcp']\n", encoding="utf-8"
+    )
+    mock_client = MagicMock(spec=MCPClient)
+    mock_client.connect = AsyncMock()
+    mock_client.list_tools = AsyncMock(return_value=[_make_tool_def("mcp_read", "Read via MCP")])
+    mock_client.call_tool = AsyncMock(return_value="mcp result")
+    mock_client.disconnect = AsyncMock()
+    registry = ToolRegistry()
+
+    with patch("corpclaw_lite.extensions.mcp.manager.MCPClient", return_value=mock_client):
+        manager = MCPManager(config_path=config)
+        await manager.connect_all(registry)
+
+    mgr = DepartmentManager()
+    mgr._departments["engineering"] = DepartmentConfig(
+        {
+            "description": "Engineering",
+            "allowed_tools": ["*"],
+            "allowed_mcp": ["server_b"],
+        }
+    )
+    mgr._departments["it"] = DepartmentConfig(
+        {
+            "description": "IT",
+            "allowed_tools": ["*"],
+            "allowed_mcp": ["server_a"],
+        }
+    )
+    checker = PermissionChecker(mgr)
+    engineering = User(id=1, name="Eng", department="engineering")
+    it = User(id=2, name="IT", department="it")
+
+    assert registry.to_schemas_for_user(checker, engineering) == []
+    assert len(registry.to_schemas_for_user(checker, it)) == 1
+
+    denied = await registry.execute(
+        "mcp_read",
+        {"path": "/tmp/a"},
+        user=engineering,
+        permission_checker=checker,
+    )
+    assert "Permission denied" in denied
+    assert (
+        await registry.execute(
+            "mcp_read",
+            {"path": "/tmp/a"},
+            user=it,
+            permission_checker=checker,
+        )
+        == "mcp result"
+    )
+
+    await manager.disconnect_all()

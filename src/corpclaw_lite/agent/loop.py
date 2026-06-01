@@ -496,8 +496,12 @@ class AgentLoop:
         progress = SimpleProgressGuard()
         tools_schema = None
         if tools_enabled:
-            if self._enforce_tool_permissions:
-                tools_schema = self._registry.to_schemas_for_user(self._permission_checker, user)
+            if self._permission_checker:
+                tools_schema = self._registry.to_schemas_for_user(
+                    self._permission_checker,
+                    user,
+                    enforce_tool_allowlist=self._enforce_tool_permissions,
+                )
             else:
                 tools_schema = self._registry.to_schemas()
         health.increment("requests")
@@ -952,11 +956,19 @@ class AgentLoop:
             args_preview=_json_preview(tc.arguments),
             args_hash=_payload_hash(tc.arguments),
         )
-        if (
-            self._enforce_tool_permissions
-            and self._permission_checker
-            and not self._permission_checker.can_use_tool(user, tc.name)
-        ):
+        permission_tool = self._registry.get(tc.name)
+        permission_denied = False
+        if self._permission_checker:
+            if permission_tool is not None:
+                permission_denied = not self._permission_checker.can_use_registered_tool(
+                    user,
+                    permission_tool,
+                    enforce_tool_allowlist=self._enforce_tool_permissions,
+                )
+            elif self._enforce_tool_permissions:
+                permission_denied = not self._permission_checker.can_use_tool(user, tc.name)
+
+        if permission_denied:
             result = (
                 f"Error: Permission denied. Your department ({user.department})"
                 f" cannot use tool '{tc.name}'."
@@ -1019,6 +1031,8 @@ class AgentLoop:
                 tc.arguments,
                 user=user,
                 run_id=run_id,
+                permission_checker=self._permission_checker,
+                enforce_tool_allowlist=self._enforce_tool_permissions,
             )
             status = "error" if result.startswith("Error") else "ok"
             if status == "error":
@@ -1053,6 +1067,8 @@ class AgentLoop:
                         tc.arguments,
                         user=user,
                         run_id=run_id,
+                        permission_checker=self._permission_checker,
+                        enforce_tool_allowlist=self._enforce_tool_permissions,
                     )
                     status = "ok"
                 else:

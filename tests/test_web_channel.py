@@ -537,6 +537,37 @@ def test_web_login_failures_lock_out_key() -> None:
     assert orchestrator._login_retry_after(key) == 0
 
 
+def test_web_session_cookie_auto_secure_local_http() -> None:
+    settings = Settings()
+    settings.web_channel.cookie_secure = "auto"
+    orchestrator = WebChannelOrchestrator(settings)
+    request = make_mocked_request("GET", "/", headers={"Host": "127.0.0.1"})
+    response = web.Response()
+
+    orchestrator._set_session_cookie(request, response, "token")
+
+    cookie_header = response.cookies.output(header="")
+    assert "HttpOnly" in cookie_header
+    assert "SameSite=Strict" in cookie_header
+    assert "Secure" not in cookie_header
+
+
+def test_web_session_cookie_auto_secure_forwarded_https() -> None:
+    settings = Settings()
+    settings.web_channel.cookie_secure = "auto"
+    orchestrator = WebChannelOrchestrator(settings)
+    request = make_mocked_request(
+        "GET",
+        "/",
+        headers={"Host": "corpclaw.example", "X-Forwarded-Proto": "https"},
+    )
+    response = web.Response()
+
+    orchestrator._set_session_cookie(request, response, "token")
+
+    assert "Secure" in response.cookies.output(header="")
+
+
 @pytest.mark.asyncio
 async def test_websocket_ticket_is_single_use_and_owner_scoped() -> None:
     owner = User(id=1, name="Vadim", department="engineering")

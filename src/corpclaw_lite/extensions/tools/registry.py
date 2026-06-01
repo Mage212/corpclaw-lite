@@ -83,6 +83,8 @@ class ToolRegistry:
         arguments: dict[str, Any],
         user: User | None = None,
         run_id: str | None = None,
+        permission_checker: Any | None = None,
+        enforce_tool_allowlist: bool = True,
     ) -> str:
         """Execute a tool by name with arguments.
 
@@ -98,6 +100,20 @@ class ToolRegistry:
         tool = self.get(name)
         if not tool:
             return f"Error: Tool '{name}' not found."
+
+        if (
+            permission_checker is not None
+            and user is not None
+            and not permission_checker.can_use_registered_tool(
+                user,
+                tool,
+                enforce_tool_allowlist=enforce_tool_allowlist,
+            )
+        ):
+            return (
+                f"Error: Permission denied. Your department ({user.department})"
+                f" cannot use tool '{name}'."
+            )
 
         try:
             tool_kwargs = dict(arguments)
@@ -165,6 +181,8 @@ class ToolRegistry:
         self,
         permission_checker: Any,
         user: Any,
+        *,
+        enforce_tool_allowlist: bool = True,
     ) -> list[dict[str, Any]]:
         """Like to_schemas(), but excludes tools the user cannot use.
 
@@ -177,5 +195,9 @@ class ToolRegistry:
         return [
             self._build_schema(tool)
             for tool in self._tools.values()
-            if permission_checker.can_use_tool(user, tool.name)
+            if permission_checker.can_use_registered_tool(
+                user,
+                tool,
+                enforce_tool_allowlist=enforce_tool_allowlist,
+            )
         ]

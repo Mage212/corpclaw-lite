@@ -27,6 +27,7 @@ from corpclaw_lite.extensions.plugins.loader import PluginLoader
 from corpclaw_lite.extensions.plugins.registry import PluginRegistry
 from corpclaw_lite.extensions.skills.registry import SkillRegistry
 from corpclaw_lite.extensions.tools.registry import ToolRegistry
+from corpclaw_lite.extensions.tools.scoped import ScopedTool
 
 __all__ = [
     "PluginHotReloader",
@@ -168,19 +169,25 @@ class PluginHotReloader:
         registered_tools: list[str] = []
 
         for tool in plugin.tools:
+            scoped_tool = ScopedTool(
+                tool,
+                source_kind="plugin",
+                source_name=plugin_name,
+                allowed_departments=plugin.manifest.allowed_departments,
+            )
             try:
-                self._tool_registry.register(tool, allow_replace=True)
-                registered_tools.append(tool.name)
+                self._tool_registry.register(scoped_tool, allow_replace=True)
+                registered_tools.append(scoped_tool.name)
                 logger.info(
                     "PluginHotReloader: plugin '%s' registered tool '%s'",
                     plugin_name,
-                    tool.name,
+                    scoped_tool.name,
                 )
             except Exception as e:
                 logger.warning(
                     "PluginHotReloader: plugin '%s' tool '%s' failed to register: %s",
                     plugin_name,
-                    tool.name,
+                    scoped_tool.name,
                     e,
                 )
 

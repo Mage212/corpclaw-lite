@@ -87,6 +87,8 @@ class AgentLogger:
     """
 
     def __init__(self, log_dir: Path | str = "logs") -> None:
+        from corpclaw_lite.security.credential_scrubber import CredentialScrubber
+
         self._path = Path(log_dir) / "agent_activity.jsonl"
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._handler = RotatingFileHandler(
@@ -95,6 +97,7 @@ class AgentLogger:
             backupCount=5,
             encoding="utf-8",
         )
+        self._handler.addFilter(CredentialScrubber())
         self._logger = logging.getLogger("agent_activity")
         self._logger.addHandler(self._handler)
         self._logger.setLevel(logging.INFO)
@@ -122,11 +125,13 @@ class AgentLogger:
         stream_stats: dict[str, Any] | None = None,
     ) -> None:
         """Write a single structured JSON record to agent_activity.jsonl."""
+        from corpclaw_lite.security.credential_scrubber import scrub_text
+
         record: dict[str, Any] = {
             "ts": time.time(),
             "user_id": user_id,
             "department": department,
-            "message_preview": message_preview[:100],
+            "message_preview": scrub_text(message_preview)[:100],
             "duration_ms": round(duration_ms, 1),
             "tool_count": len(tools_used),
             "tools_used": tools_used,
@@ -152,6 +157,6 @@ class AgentLogger:
         if stream_stats is not None:
             record["stream"] = stream_stats
         if error:
-            record["error"] = error
+            record["error"] = scrub_text(error)
 
         self._logger.info(json.dumps(record, ensure_ascii=False))

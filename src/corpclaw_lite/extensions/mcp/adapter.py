@@ -25,9 +25,16 @@ class MCPToolAdapter(Tool):
 
     risk_level = RiskLevel.MEDIUM
 
-    def __init__(self, tool_def: MCPToolDef, client: MCPClient) -> None:
+    def __init__(
+        self,
+        tool_def: MCPToolDef,
+        client: MCPClient,
+        server_name: str = "unknown",
+    ) -> None:
         self._tool_def = tool_def
         self._client = client
+        self.source_kind = "mcp"
+        self.source_name = server_name
 
     @property
     def name(self) -> str:  # type: ignore[override]
