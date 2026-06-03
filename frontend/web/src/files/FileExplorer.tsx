@@ -54,6 +54,7 @@ type FileExplorerProps = {
   mode: FileExplorerMode;
   onModeChange: (mode: FileExplorerMode) => void;
   onPreview: (preview: PreviewPayload, mode: PreviewMode) => void;
+  onWorkspaceChanged?: () => void;
 };
 
 type FileAction =
@@ -69,7 +70,14 @@ function id(prefix: string): string {
 
 const CONTEXT_MENU_VIEWPORT_MARGIN = 8;
 
-export function FileExplorer({ csrf, open, mode, onModeChange, onPreview }: FileExplorerProps) {
+export function FileExplorer({
+  csrf,
+  open,
+  mode,
+  onModeChange,
+  onPreview,
+  onWorkspaceChanged
+}: FileExplorerProps) {
   const [cwd, setCwd] = useState("");
   const [directory, setDirectory] = useState<DirectoryPayload>({ path: "", entries: [] });
   const [tree, setTree] = useState<TreeNode | null>(null);
@@ -163,6 +171,7 @@ export function FileExplorer({ csrf, open, mode, onModeChange, onPreview }: File
         )
       );
       await refresh();
+      onWorkspaceChanged?.();
     } catch (error) {
       const message = error instanceof Error ? error.message : "Upload failed";
       setUploads((items) =>
@@ -226,6 +235,7 @@ export function FileExplorer({ csrf, open, mode, onModeChange, onPreview }: File
       await moveFiles(csrf, paths, targetDir);
       setSelected(new Set());
       await refresh();
+      onWorkspaceChanged?.();
     } else if (event.dataTransfer.files.length) {
       await upload(event.dataTransfer.files, targetDir);
     }
@@ -254,6 +264,7 @@ export function FileExplorer({ csrf, open, mode, onModeChange, onPreview }: File
     }
     setAction(null);
     await refresh();
+    onWorkspaceChanged?.();
   }
 
   if (!open) {

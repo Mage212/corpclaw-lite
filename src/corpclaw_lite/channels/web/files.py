@@ -20,6 +20,7 @@ __all__ = [
     "delete_path",
     "delete_paths",
     "list_directory",
+    "list_recent_files",
     "make_directory",
     "move_paths",
     "preview_file",
@@ -34,6 +35,7 @@ _MAX_PATH_CHARS = 1024
 _MAX_SEARCH_CHARS = 120
 _MAX_TREE_DEPTH = 6
 _MAX_PREVIEW_BYTES = 256 * 1024
+_MAX_RECENT_SCAN = 5000
 _TEXT_EXTENSIONS = {
     ".csv",
     ".json",
@@ -172,6 +174,29 @@ async def list_directory(
     entries = await anyio.to_thread.run_sync(_list)
     current = _relative(workspace, path) if path != workspace.resolve() else ""
     return {"path": current, "entries": [entry.to_dict() for entry in entries]}
+
+
+async def list_recent_files(workspace: Path, *, limit: int = 8) -> list[dict[str, object]]:
+    """Return recently modified files in a user workspace."""
+    safe_limit = max(1, min(limit, 20))
+
+    def _list_recent() -> list[WebFileEntry]:
+        entries: list[WebFileEntry] = []
+        scanned = 0
+        for child in workspace.rglob("*"):
+            scanned += 1
+            if scanned > _MAX_RECENT_SCAN:
+                break
+            try:
+                child.resolve().relative_to(workspace.resolve())
+            except ValueError:
+                continue
+            if child.is_file():
+                entries.append(_build_entry(workspace, child))
+        return sorted(entries, key=lambda entry: entry.modified_at, reverse=True)[:safe_limit]
+
+    entries = await anyio.to_thread.run_sync(_list_recent)
+    return [entry.to_dict() for entry in entries]
 
 
 async def make_directory(workspace: Path, raw_parent: str | None, name: str) -> str:

@@ -514,6 +514,35 @@ class WebChatStore:
         """Return the most recent context usage snapshot stored in the transcript."""
         return await run_in_thread(self._sync_latest_usage, str(user_id))
 
+    def _sync_latest_file_messages(self, user_id: str, limit: int) -> list[WebChatMessage]:
+        limit = max(1, min(limit, 20))
+        try:
+            with db_connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                session_id = self._sync_ensure_active_session_id(conn, user_id)
+                rows = conn.execute(
+                    """
+                    SELECT * FROM web_chat_messages
+                    WHERE session_id = ? AND file_name IS NOT NULL
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (session_id, limit),
+                ).fetchall()
+                return [self._message_from_row(row) for row in rows]
+        except Exception as e:
+            raise StorageError(
+                f"Failed to load latest web file messages for user {user_id}: {e}"
+            ) from e
+
+    async def latest_file_messages(
+        self,
+        user_id: str,
+        limit: int = 8,
+    ) -> list[WebChatMessage]:
+        """Return recent user-visible file artifacts from the active transcript."""
+        return await run_in_thread(self._sync_latest_file_messages, str(user_id), limit)
+
     def _sync_prune_retention(
         self,
         *,

@@ -9,11 +9,16 @@ type FilePreviewProps = {
   mode: PreviewMode;
   onModeChange: (mode: PreviewMode) => void;
   onClose: () => void;
+  embedded?: boolean;
 };
 
-export function FilePreview({ preview, mode, onModeChange, onClose }: FilePreviewProps) {
+export function FilePreview({ preview, mode, onModeChange, onClose, embedded = false }: FilePreviewProps) {
   const [imageFit, setImageFit] = useState<"fit" | "original">("fit");
-  const shellClass = mode === "expanded" ? "preview-drawer expanded" : "preview-drawer";
+  const shellClass = embedded
+    ? "preview-drawer embedded"
+    : mode === "expanded"
+      ? "preview-drawer expanded"
+      : "preview-drawer";
   const canCopy = preview.type === "text" && !preview.error;
 
   async function copyText() {
