@@ -7,6 +7,7 @@ import {
   Eye,
   FileText,
   FolderOpen,
+  PanelRightClose,
   RotateCw,
   ShieldCheck,
   Wrench,
@@ -80,8 +81,13 @@ export function InspectorPanel({
           >
             <RotateCw size={17} />
           </button>
-          <button className="icon-button" onClick={onClose} title="Скрыть операционный центр">
-            <X size={17} />
+          <button
+            className="inspector-collapse-button"
+            onClick={onClose}
+            title="Скрыть операционный центр"
+          >
+            <PanelRightClose size={16} />
+            <span>Скрыть</span>
           </button>
         </div>
       </header>

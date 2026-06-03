@@ -1,17 +1,16 @@
 import {
   Activity,
   Bot,
+  ChevronDown,
   LogOut,
   MessageSquare,
+  MessageSquarePlus,
   PanelLeftClose,
   PanelLeftOpen,
-  PanelRightClose,
-  PanelRightOpen,
-  RefreshCw,
-  RotateCcw
+  PanelRightOpen
 } from "lucide-react";
 import type { FormEvent } from "react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { getSession, getWorkspaceOverview, login, logout, previewFile } from "./api";
 import { ChatPanel } from "./chat/ChatPanel";
 import { useWebChatSession } from "./chat/useWebChatSession";
@@ -127,6 +126,8 @@ function Workspace({
   const [overview, setOverview] = useState<WorkspaceOverviewPayload | null>(null);
   const [overviewLoading, setOverviewLoading] = useState(false);
   const [resetSignal, setResetSignal] = useState(0);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const userMenuRef = useRef<HTMLDivElement | null>(null);
   const { cssVars, prepareSidePreview, startResize } = useResizablePanels();
   const user = session.user;
 
@@ -150,6 +151,30 @@ function Workspace({
     refreshOverview();
   }, [refreshOverview]);
 
+  useEffect(() => {
+    if (!userMenuOpen) return;
+
+    function onPointerDown(event: PointerEvent) {
+      const node = userMenuRef.current;
+      if (node && !node.contains(event.target as Node)) {
+        setUserMenuOpen(false);
+      }
+    }
+
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setUserMenuOpen(false);
+      }
+    }
+
+    window.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [userMenuOpen]);
+
   if (!user) {
     return <LoginView onLogin={onSessionChange} />;
   }
@@ -157,6 +182,13 @@ function Workspace({
   async function doLogout() {
     await logout(session.csrf_token);
     onSessionChange({ authenticated: false, user: null, csrf_token: "" });
+  }
+
+  function startNewSession() {
+    if (!window.confirm("Сбросить контекст и начать новую сессию?")) {
+      return;
+    }
+    setResetSignal((value) => value + 1);
   }
 
   function openPreview(next: PreviewPayload, nextMode: PreviewMode = "side") {
@@ -228,31 +260,43 @@ function Workspace({
           </div>
           <div className="topbar-actions">
             <button
-              className="icon-button"
-              onClick={() => setInspectorOpen((value) => !value)}
-              title={inspectorOpen ? "Скрыть операционный центр" : "Показать операционный центр"}
+              className="new-session-button"
+              onClick={startNewSession}
+              title="Сбросить контекст и начать новую сессию"
             >
-              {inspectorOpen ? <PanelRightClose size={17} /> : <PanelRightOpen size={17} />}
+              <MessageSquarePlus size={16} />
+              <span>Новая сессия</span>
             </button>
-            <button
-              className="icon-button"
-              onClick={refreshOverview}
-              disabled={overviewLoading}
-              title="Обновить обзор"
-            >
-              <RefreshCw size={17} />
-            </button>
-            <button
-              className="icon-button"
-              onClick={() => setResetSignal((value) => value + 1)}
-              title="Новая сессия"
-            >
-              <RotateCcw size={17} />
-            </button>
-            <span className="user-pill">{user.name}</span>
-            <button className="icon-button" onClick={doLogout} title="Выйти">
-              <LogOut size={18} />
-            </button>
+            <div className="user-menu" ref={userMenuRef}>
+              <button
+                className="user-pill"
+                onClick={() => setUserMenuOpen((value) => !value)}
+                aria-expanded={userMenuOpen}
+                aria-haspopup="menu"
+              >
+                <span>{user.name}</span>
+                <ChevronDown size={14} />
+              </button>
+              {userMenuOpen && (
+                <div className="user-menu-popover" role="menu">
+                  <div className="user-menu-header">
+                    <strong>{user.name}</strong>
+                    <span>{user.department}</span>
+                  </div>
+                  <button
+                    className="user-menu-item danger"
+                    onClick={() => {
+                      setUserMenuOpen(false);
+                      void doLogout();
+                    }}
+                    role="menuitem"
+                  >
+                    <LogOut size={16} />
+                    <span>Выйти</span>
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         </header>
         <ChatPanel
@@ -261,6 +305,16 @@ function Workspace({
           onPreviewFile={openPreviewPath}
         />
       </section>
+      {!inspectorOpen && (
+        <button
+          className="operation-center-rail"
+          onClick={() => setInspectorOpen(true)}
+          title="Показать операционный центр"
+        >
+          <PanelRightOpen size={17} />
+          <span>Операционный центр</span>
+        </button>
+      )}
       {inspectorOpen && (
         <div
           className="resize-handle preview-resize"
