@@ -7,12 +7,12 @@ const STORAGE_KEY = "corpclaw.web.panelLayout";
 const HANDLE_WIDTH = 6;
 const FILES_MIN = 280;
 const FILES_MAX = 680;
-const PREVIEW_MIN = 360;
+const PREVIEW_MIN = 340;
 const PREVIEW_MAX = 900;
 const MAIN_MIN = 560;
 const DEFAULT_LAYOUT: PanelLayoutState = {
   filesWidth: 420,
-  previewWidth: 560
+  previewWidth: 380
 };
 
 function clamp(value: number, min: number, max: number): number {
@@ -26,13 +26,14 @@ function loadLayout(): PanelLayoutState {
     const parsed: unknown = JSON.parse(raw);
     const layout = parsePanelLayoutState(parsed);
     if (!layout) return DEFAULT_LAYOUT;
+    const filesWidth = clamp(layout.filesWidth, FILES_MIN, FILES_MAX);
+    const previewMax = Math.max(
+      PREVIEW_MIN,
+      Math.min(PREVIEW_MAX, window.innerWidth - filesWidth - MAIN_MIN - HANDLE_WIDTH * 2)
+    );
     return {
-      filesWidth: clamp(layout.filesWidth, FILES_MIN, FILES_MAX),
-      previewWidth: clamp(
-        layout.previewWidth,
-        PREVIEW_MIN,
-        PREVIEW_MAX
-      )
+      filesWidth,
+      previewWidth: clamp(layout.previewWidth, PREVIEW_MIN, previewMax)
     };
   } catch {
     return DEFAULT_LAYOUT;

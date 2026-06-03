@@ -54,6 +54,7 @@ export type ChatMessage = {
   tone?: "normal" | "warning" | "error" | "file";
   file?: {
     name: string;
+    path?: string | null;
     url?: string;
     caption?: string;
     available?: boolean;
@@ -74,6 +75,35 @@ export type ApprovalRequest = {
   details: string;
 };
 
+export type WorkspaceOutputSummary = {
+  name: string;
+  path: string | null;
+  url: string | null;
+  caption: string;
+  available: boolean;
+  created_at: string;
+};
+
+export type WorkspaceOverviewPayload = {
+  user: User;
+  llm: {
+    provider: string | null;
+    model: string | null;
+  };
+  recent_files: FileEntry[];
+  recent_outputs: WorkspaceOutputSummary[];
+};
+
+export type RunTimelineEvent = {
+  id: string;
+  requestId: string | null;
+  type: "request" | "llm" | "tool" | "approval" | "file" | "warning" | "error" | "done" | "reset";
+  label: string;
+  detail?: string | undefined;
+  tone: "idle" | "running" | "warning" | "error" | "done";
+  createdAt: string;
+};
+
 export type UploadItem = {
   id: string;
   name: string;
@@ -86,6 +116,7 @@ export type ViewMode = "list" | "grid" | "details";
 export type AgentMode = "execute" | "chat";
 export type PreviewMode = "side" | "expanded";
 export type FileExplorerMode = "side" | "expanded";
+export type InspectorTab = "overview" | "run" | "preview";
 
 export type ContextUsage = {
   latest_total_tokens: number;

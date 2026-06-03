@@ -3,7 +3,8 @@ import type {
   FileEntry,
   PreviewPayload,
   SessionPayload,
-  TreeNode
+  TreeNode,
+  WorkspaceOverviewPayload
 } from "./types";
 import {
   errorMessageFromPayload,
@@ -16,7 +17,8 @@ import {
   parseSessionPayload,
   parseTreeNode,
   parseUploadPayload,
-  parseWebSocketTicketPayload
+  parseWebSocketTicketPayload,
+  parseWorkspaceOverviewPayload
 } from "./contracts";
 import type { UploadPayload } from "./contracts";
 
@@ -79,6 +81,10 @@ export function createWebSocketTicket(
     method: "POST",
     csrf
   });
+}
+
+export function getWorkspaceOverview(): Promise<WorkspaceOverviewPayload> {
+  return apiFetch("/api/workspace/overview", parseWorkspaceOverviewPayload);
 }
 
 export function listFiles(

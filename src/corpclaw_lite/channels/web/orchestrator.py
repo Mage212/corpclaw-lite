@@ -37,6 +37,7 @@ from corpclaw_lite.channels.web.files import (
     delete_path,
     delete_paths,
     list_directory,
+    list_recent_files,
     make_directory,
     move_paths,
     preview_file,
@@ -214,6 +215,7 @@ class WebChannelOrchestrator:
         app.router.add_post("/login", self._handle_login)
         app.router.add_post("/logout", self._handle_logout)
         app.router.add_get("/api/session", self._handle_session)
+        app.router.add_get("/api/workspace/overview", self._handle_workspace_overview)
         app.router.add_post("/api/login", self._handle_api_login)
         app.router.add_post("/api/logout", self._handle_api_logout)
         app.router.add_post("/api/ws-ticket", self._handle_ws_ticket)
@@ -859,6 +861,7 @@ class WebChannelOrchestrator:
                 try:
                     resolved = resolve_workspace_path(self._workspace_for(user), message.file.path)
                     if resolved.exists() and resolved.is_file():
+                        file_payload["path"] = message.file.path
                         file_payload["url"] = self._create_download_grant(
                             user=user,
                             path=resolved,
@@ -870,6 +873,53 @@ class WebChannelOrchestrator:
                     logger.debug("Web chat file payload unavailable: %s", e)
             payload["file"] = file_payload
         return payload
+
+    def _llm_summary_payload(self) -> dict[str, object]:
+        rule = next(
+            (item for item in self._settings.llm.routing if item.task_kind == "default"),
+            self._settings.llm.routing[0] if self._settings.llm.routing else None,
+        )
+        if rule is None:
+            return {"provider": None, "model": None}
+        return {"provider": rule.provider, "model": rule.model}
+
+    async def _recent_outputs_payload(
+        self,
+        user: User,
+        *,
+        limit: int = 8,
+    ) -> list[dict[str, object]]:
+        if self._chat_store is None:
+            return []
+        messages = await self._chat_store.latest_file_messages(user.memory_key(), limit=limit)
+        outputs: list[dict[str, object]] = []
+        for message in messages:
+            payload = await self._chat_message_payload(message, user)
+            raw_file = payload.get("file")
+            if not isinstance(raw_file, dict):
+                continue
+            outputs.append(
+                {
+                    "name": raw_file.get("name", "file"),
+                    "path": raw_file.get("path"),
+                    "url": raw_file.get("url"),
+                    "caption": raw_file.get("caption", ""),
+                    "available": raw_file.get("available", False),
+                    "created_at": message.created_at,
+                }
+            )
+        return outputs
+
+    async def _handle_workspace_overview(self, request: web.Request) -> web.Response:
+        user = self._require_user(request)
+        workspace = self._workspace_for(user)
+        payload = {
+            "user": self._user_payload(user),
+            "llm": self._llm_summary_payload(),
+            "recent_files": await list_recent_files(workspace, limit=8),
+            "recent_outputs": await self._recent_outputs_payload(user, limit=8),
+        }
+        return web.json_response(payload)
 
     async def _chat_messages_payload(
         self, messages: list[WebChatMessage], user: User
@@ -1300,6 +1350,7 @@ class WebChannelOrchestrator:
                 "name": path.name,
                 "caption": caption,
                 "url": url,
+                "path": rel_path,
             },
         )
         return f"File '{path.name}' is ready for download."

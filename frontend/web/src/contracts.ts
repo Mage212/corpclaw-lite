@@ -9,7 +9,9 @@ import type {
   SessionPayload,
   TreeNode,
   User,
-  WebSocketTicketPayload
+  WebSocketTicketPayload,
+  WorkspaceOutputSummary,
+  WorkspaceOverviewPayload
 } from "./types";
 
 export type UploadPayload = {
@@ -36,7 +38,7 @@ export type ServerWsEvent =
   | { type: "context_reset"; message: string; usage?: ContextUsage }
   | { type: "warning"; message: string; request_id?: string }
   | { type: "error"; message: string; request_id?: string; usage?: ContextUsage }
-  | { type: "file_ready"; name: string; url: string; caption: string }
+  | { type: "file_ready"; name: string; url: string; caption: string; path?: string | null }
   | { type: "approval_required"; approval_id: string; action: string; details: string }
   | { type: "approval_resolved"; approval_id: string }
   | { type: "llm_status"; status: string }
@@ -177,6 +179,36 @@ export function parseFileEntry(value: unknown): FileEntry {
     extension: requiredString(source, "extension", "file entry"),
     mime_type: nullableString(source, "mime_type", "file entry"),
     protected: requiredBoolean(source, "protected", "file entry")
+  };
+}
+
+function parseWorkspaceOutput(value: unknown): WorkspaceOutputSummary {
+  const source = record(value, "workspace output");
+  return {
+    name: stringValue(source.name, "file"),
+    path: source.path === null ? null : optionalString(source.path) ?? null,
+    url: source.url === null ? null : optionalString(source.url) ?? null,
+    caption: stringValue(source.caption, ""),
+    available: typeof source.available === "boolean" ? source.available : false,
+    created_at: stringValue(source.created_at, "")
+  };
+}
+
+export function parseWorkspaceOverviewPayload(value: unknown): WorkspaceOverviewPayload {
+  const source = record(value, "workspace overview");
+  const llm = record(source.llm, "workspace overview.llm");
+  return {
+    user: parseUser(source.user),
+    llm: {
+      provider: llm.provider === null ? null : optionalString(llm.provider) ?? null,
+      model: llm.model === null ? null : optionalString(llm.model) ?? null
+    },
+    recent_files: parseArray(source.recent_files, parseFileEntry, "workspace overview.recent_files"),
+    recent_outputs: parseArray(
+      source.recent_outputs,
+      parseWorkspaceOutput,
+      "workspace overview.recent_outputs"
+    )
   };
 }
 
@@ -324,8 +356,12 @@ export function parseChatMessage(value: unknown): ChatMessage | null {
       name: stringValue(value.file.name, "file")
     };
     const url = optionalString(value.file.url);
+    const path = value.file.path === null ? null : optionalString(value.file.path);
     const caption = optionalString(value.file.caption);
     const available = typeof value.file.available === "boolean" ? value.file.available : undefined;
+    if (path !== undefined) {
+      file.path = path;
+    }
     if (url !== undefined) {
       file.url = url;
     }
@@ -462,13 +498,23 @@ export function parseServerWsEvent(value: unknown): ServerWsEvent | null {
       }
       return event;
     }
-    case "file_ready":
-      return {
+    case "file_ready": {
+      const event: Extract<ServerWsEvent, { type: "file_ready" }> = {
         type: "file_ready",
         name: stringValue(value.name, "file"),
         url: stringValue(value.url, ""),
         caption: stringValue(value.caption, "")
       };
+      if (value.path === null) {
+        event.path = null;
+      } else {
+        const path = optionalString(value.path);
+        if (path !== undefined) {
+          event.path = path;
+        }
+      }
+      return event;
+    }
     case "approval_required":
       return {
         type: "approval_required",

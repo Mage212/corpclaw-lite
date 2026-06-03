@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -20,6 +21,7 @@ from corpclaw_lite.channels.web.files import (
     delete_path,
     delete_paths,
     list_directory,
+    list_recent_files,
     make_directory,
     move_paths,
     preview_file,
@@ -30,7 +32,7 @@ from corpclaw_lite.channels.web.files import (
 )
 from corpclaw_lite.channels.web.orchestrator import WebChannelOrchestrator, _DownloadGrant
 from corpclaw_lite.config.bootstrap import BootstrapLoader
-from corpclaw_lite.config.settings import Settings
+from corpclaw_lite.config.settings import RoutingRule, Settings
 from corpclaw_lite.exceptions import LLMBackendUnavailableError
 from corpclaw_lite.users.manager import UserManager
 from corpclaw_lite.users.models import User
@@ -157,6 +159,24 @@ async def test_web_file_manager_operations(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_web_recent_files_are_workspace_relative_and_recent_first(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "archive").mkdir()
+    older = workspace / "archive" / "older.txt"
+    newer = workspace / "newer.txt"
+    older.write_text("old", encoding="utf-8")
+    newer.write_text("new", encoding="utf-8")
+    os.utime(older, (1_700_000_000, 1_700_000_000))
+    os.utime(newer, (1_700_010_000, 1_700_010_000))
+
+    recent = await list_recent_files(workspace, limit=2)
+
+    assert [entry["path"] for entry in recent] == ["newer.txt", "archive/older.txt"]
+    assert all(entry["is_dir"] is False for entry in recent)
+
+
+@pytest.mark.asyncio
 async def test_web_upload_rejects_bad_extension(tmp_path: Path) -> None:
     workspace = tmp_path / "ws"
     workspace.mkdir()
@@ -230,6 +250,77 @@ async def test_web_image_preview_uses_inline_endpoint(tmp_path: Path) -> None:
     assert payload is not None
     assert "/api/files/inline?path=image.jpg" in payload
     assert "/api/files/download" not in payload
+
+
+@pytest.mark.asyncio
+async def test_web_chat_file_payload_includes_path_only_for_available_workspace_file(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "report.txt").write_text("hello", encoding="utf-8")
+    user = User(id=7, name="Vadim", department="engineering")
+    orchestrator = WebChannelOrchestrator(Settings())
+    orchestrator._service = FakeWorkspaceService(workspace)  # type: ignore[assignment]
+    store = WebChatStore(tmp_path / "memory.db")
+    available = await store.append_message(
+        user_id=user.memory_key(),
+        role="system",
+        content="Файл готов к скачиванию.",
+        tone="file",
+        file=WebChatFile(name="report.txt", path="report.txt", caption="done"),
+    )
+    missing = await store.append_message(
+        user_id=user.memory_key(),
+        role="system",
+        content="Файл готов к скачиванию.",
+        tone="file",
+        file=WebChatFile(name="missing.txt", path="missing.txt", caption="missing"),
+    )
+
+    available_payload = await orchestrator._chat_message_payload(available, user)
+    missing_payload = await orchestrator._chat_message_payload(missing, user)
+
+    assert available_payload["file"]["path"] == "report.txt"  # type: ignore[index]
+    assert available_payload["file"]["available"] is True  # type: ignore[index]
+    assert str(available_payload["file"]["url"]).startswith("/api/download/")  # type: ignore[index]
+    assert "path" not in missing_payload["file"]  # type: ignore[operator]
+    assert missing_payload["file"]["available"] is False  # type: ignore[index]
+
+
+@pytest.mark.asyncio
+async def test_web_workspace_overview_returns_safe_operational_summary(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "report.txt").write_text("hello", encoding="utf-8")
+    user = User(id=7, name="Vadim", department="engineering")
+    settings = Settings()
+    settings.llm.routing = [
+        RoutingRule(task_kind="default", provider="llamacpp", model="qwen-local")
+    ]
+    orchestrator = WebChannelOrchestrator(settings)
+    orchestrator._service = FakeWorkspaceService(workspace)  # type: ignore[assignment]
+    store = WebChatStore(tmp_path / "memory.db")
+    orchestrator._chat_store = store
+    await store.append_message(
+        user_id=user.memory_key(),
+        role="system",
+        content="Файл готов к скачиванию.",
+        tone="file",
+        file=WebChatFile(name="report.txt", path="report.txt", caption="done"),
+    )
+
+    response = await orchestrator._handle_workspace_overview(
+        web_request("GET", "/api/workspace/overview", user)
+    )
+    payload = json.loads(response.text or "{}")
+
+    assert payload["user"]["id"] == user.id
+    assert payload["llm"] == {"provider": "llamacpp", "model": "qwen-local"}
+    assert payload["recent_files"][0]["path"] == "report.txt"
+    assert payload["recent_outputs"][0]["path"] == "report.txt"
+    assert payload["recent_outputs"][0]["available"] is True
+    assert payload["recent_outputs"][0]["url"].startswith("/api/download/")
 
 
 @pytest.mark.asyncio
@@ -414,6 +505,9 @@ async def test_web_chat_store_persists_and_pages_history(tmp_path: Path) -> None
     usage = await store.latest_usage(user_id)
     assert usage is not None
     assert usage["latest_total_tokens"] == 10
+
+    files = await store.latest_file_messages(user_id)
+    assert [message.file.name for message in files if message.file is not None] == ["report.pdf"]
 
 
 @pytest.mark.asyncio
