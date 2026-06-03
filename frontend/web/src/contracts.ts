@@ -56,7 +56,7 @@ export function errorMessageFromPayload(value: unknown): string | null {
 }
 
 function invalid(label: string): Error {
-  return new Error(`Invalid ${label}`);
+  return new Error(`Некорректный ответ сервера: ${label}`);
 }
 
 function record(value: unknown, label: string): JsonRecord {
@@ -185,7 +185,7 @@ export function parseFileEntry(value: unknown): FileEntry {
 function parseWorkspaceOutput(value: unknown): WorkspaceOutputSummary {
   const source = record(value, "workspace output");
   return {
-    name: stringValue(source.name, "file"),
+    name: stringValue(source.name, "файл"),
     path: source.path === null ? null : optionalString(source.path) ?? null,
     url: source.url === null ? null : optionalString(source.url) ?? null,
     caption: stringValue(source.caption, ""),
@@ -353,7 +353,7 @@ export function parseChatMessage(value: unknown): ChatMessage | null {
   }
   if (isRecord(value.file)) {
     const file: NonNullable<ChatMessage["file"]> = {
-      name: stringValue(value.file.name, "file")
+      name: stringValue(value.file.name, "файл")
     };
     const url = optionalString(value.file.url);
     const path = value.file.path === null ? null : optionalString(value.file.path);
@@ -501,7 +501,7 @@ export function parseServerWsEvent(value: unknown): ServerWsEvent | null {
     case "file_ready": {
       const event: Extract<ServerWsEvent, { type: "file_ready" }> = {
         type: "file_ready",
-        name: stringValue(value.name, "file"),
+        name: stringValue(value.name, "файл"),
         url: stringValue(value.url, ""),
         caption: stringValue(value.caption, "")
       };

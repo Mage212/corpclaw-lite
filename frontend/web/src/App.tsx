@@ -16,6 +16,7 @@ import { useWebChatSession } from "./chat/useWebChatSession";
 import { FileExplorer } from "./files/FileExplorer";
 import { FilePreview } from "./files/FilePreview";
 import { useResizablePanels } from "./hooks/useResizablePanels";
+import { agentModeLabel } from "./i18n/ru";
 import { InspectorPanel } from "./inspector/InspectorPanel";
 import type {
   AgentMode,
@@ -294,7 +295,7 @@ function Workspace({
 
 function formatTokenCount(value: number): string {
   if (value >= 1000) {
-    return `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}k`;
+    return `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)} тыс.`;
   }
   return String(value);
 }
@@ -329,10 +330,10 @@ function SegmentedMode({
   return (
     <div className="segmented">
       <button className={mode === "execute" ? "active" : ""} onClick={() => onModeChange("execute")}>
-        execute
+        {agentModeLabel("execute")}
       </button>
       <button className={mode === "chat" ? "active" : ""} onClick={() => onModeChange("chat")}>
-        chat
+        {agentModeLabel("chat")}
       </button>
     </div>
   );

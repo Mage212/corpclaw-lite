@@ -36,6 +36,7 @@ import {
 } from "../api";
 import { Modal } from "../components/Modal";
 import { parseDraggedPaths } from "../contracts";
+import { displayPath, fileEntryKindLabel, ROOT_LABEL, UPLOAD_FAILED_LABEL } from "../i18n/ru";
 import type {
   DirectoryPayload,
   FileEntry,
@@ -173,7 +174,7 @@ export function FileExplorer({
       await refresh();
       onWorkspaceChanged?.();
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Upload failed";
+      const message = error instanceof Error ? error.message : UPLOAD_FAILED_LABEL;
       setUploads((items) =>
         items.map((item) =>
           files.some((file) => file.name === item.name)
@@ -285,8 +286,8 @@ export function FileExplorer({
     >
       <header className="files-header">
         <div>
-          <strong>Workspace</strong>
-          <span title={cwd || "root"}>{cwd || "root"}</span>
+          <strong>Рабочая область</strong>
+          <span title={displayPath(cwd)}>{displayPath(cwd)}</span>
         </div>
         <div className="files-header-actions">
           <button
@@ -483,7 +484,7 @@ function Breadcrumbs({ path, onNavigate }: { path: string; onNavigate: (path: st
   }));
   return (
     <nav className="breadcrumbs">
-      <button onClick={() => onNavigate("")}>root</button>
+      <button onClick={() => onNavigate("")}>{ROOT_LABEL}</button>
       {crumbs.map((crumb) => (
         <button key={crumb.path} onClick={() => onNavigate(crumb.path)} title={crumb.path}>
           / {crumb.label}
@@ -571,9 +572,13 @@ function TreeRow({
             <span />
           )}
         </button>
-        <button className="tree-label" onClick={() => onNavigate(node.path)} title={node.path || "root"}>
+        <button
+          className="tree-label"
+          onClick={() => onNavigate(node.path)}
+          title={displayPath(node.path)}
+        >
           <Folder size={14} />
-          <span>{node.path ? node.name : "root"}</span>
+          <span>{node.path ? node.name : ROOT_LABEL}</span>
         </button>
       </div>
       {isExpanded &&
@@ -725,9 +730,11 @@ function FileRow({
       <span className="file-icon">{fileIcon(entry)}</span>
       <span className="file-name">
         <span className="file-name-main">{entry.name}</span>
-        <span className="file-name-path">{entry.path || "root"}</span>
+        <span className="file-name-path">{displayPath(entry.path)}</span>
       </span>
-      <span className="file-meta">{entry.is_dir ? "folder" : formatSize(entry.size_bytes)}</span>
+      <span className="file-meta">
+        {entry.is_dir ? fileEntryKindLabel(entry) : formatSize(entry.size_bytes)}
+      </span>
       <span className="file-date">{entry.modified_at}</span>
       <span className="file-compact-meta">{compactMeta}</span>
       <button className="row-menu" onClick={(event) => onContext(event, entry)} title="Действия">
@@ -947,7 +954,7 @@ function FileActionDialog({
                 onClick={() => setTarget(folder.path)}
               >
                 <Folder size={14} />
-                <span>{folder.path || "root"}</span>
+                <span>{displayPath(folder.path)}</span>
               </button>
             ))}
           </div>
