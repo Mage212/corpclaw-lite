@@ -39,6 +39,7 @@ type InspectorPanelProps = {
   preview: PreviewPayload | null;
   previewMode: PreviewMode;
   onPreviewModeChange: (mode: PreviewMode) => void;
+  onClose: () => void;
   onClosePreview: () => void;
   onRefreshOverview: () => void;
   onPreviewPath: (path: string) => void;
@@ -57,6 +58,7 @@ export function InspectorPanel({
   preview,
   previewMode,
   onPreviewModeChange,
+  onClose,
   onClosePreview,
   onRefreshOverview,
   onPreviewPath,
@@ -65,18 +67,23 @@ export function InspectorPanel({
   return (
     <aside className="inspector-panel">
       <header className="inspector-header">
-        <div>
+        <div className="inspector-header-main">
           <strong>Операционный центр</strong>
           <span>{status.active ? status.label : "Операционный обзор"}</span>
         </div>
-        <button
-          className="icon-button"
-          onClick={onRefreshOverview}
-          disabled={overviewLoading}
-          title="Обновить"
-        >
-          <RotateCw size={17} />
-        </button>
+        <div className="inspector-header-actions">
+          <button
+            className="icon-button"
+            onClick={onRefreshOverview}
+            disabled={overviewLoading}
+            title="Обновить"
+          >
+            <RotateCw size={17} />
+          </button>
+          <button className="icon-button" onClick={onClose} title="Скрыть операционный центр">
+            <X size={17} />
+          </button>
+        </div>
       </header>
       <div className="inspector-tabs" role="tablist">
         <button
