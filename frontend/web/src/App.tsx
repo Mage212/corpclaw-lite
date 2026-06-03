@@ -5,6 +5,8 @@ import {
   MessageSquare,
   PanelLeftClose,
   PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
   RefreshCw,
   RotateCcw
 } from "lucide-react";
@@ -120,6 +122,7 @@ function Workspace({
   const [preview, setPreview] = useState<PreviewPayload | null>(null);
   const [previewMode, setPreviewMode] = useState<PreviewMode>("side");
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("overview");
+  const [inspectorOpen, setInspectorOpen] = useState(true);
   const [contextUsage, setContextUsage] = useState<ContextUsage | null>(null);
   const [overview, setOverview] = useState<WorkspaceOverviewPayload | null>(null);
   const [overviewLoading, setOverviewLoading] = useState(false);
@@ -163,6 +166,7 @@ function Workspace({
     setPreview(next);
     setPreviewMode(nextMode);
     setInspectorTab("preview");
+    setInspectorOpen(true);
   }
 
   async function openPreviewPath(path: string) {
@@ -181,9 +185,9 @@ function Workspace({
 
   return (
     <div
-      className={`workspace ${filesOpen ? "files-open" : "files-closed"} inspector-open ${
-        filesMode === "expanded" ? "files-expanded" : ""
-      }`}
+      className={`workspace ${filesOpen ? "files-open" : "files-closed"} ${
+        inspectorOpen ? "inspector-open" : "inspector-closed"
+      } ${filesMode === "expanded" ? "files-expanded" : ""}`}
       style={cssVars}
     >
       <FileExplorer
@@ -200,7 +204,7 @@ function Workspace({
           onPointerDown={(event) =>
             startResize("files", event, {
               filesOpen: true,
-              previewOpen: true
+              previewOpen: inspectorOpen
             })
           }
           role="separator"
@@ -223,6 +227,13 @@ function Workspace({
             <SegmentedMode mode={mode} onModeChange={setMode} />
           </div>
           <div className="topbar-actions">
+            <button
+              className="icon-button"
+              onClick={() => setInspectorOpen((value) => !value)}
+              title={inspectorOpen ? "Скрыть операционный центр" : "Показать операционный центр"}
+            >
+              {inspectorOpen ? <PanelRightClose size={17} /> : <PanelRightOpen size={17} />}
+            </button>
             <button
               className="icon-button"
               onClick={refreshOverview}
@@ -250,37 +261,42 @@ function Workspace({
           onPreviewFile={openPreviewPath}
         />
       </section>
-      <div
-        className="resize-handle preview-resize"
-        onPointerDown={(event) =>
-          startResize("preview", event, {
-            filesOpen: filesOpen && filesMode === "side",
-            previewOpen: true
-          })
-        }
-        role="separator"
-        aria-orientation="vertical"
-      />
-      <InspectorPanel
-        activeTab={inspectorTab}
-        onTabChange={setInspectorTab}
-        overview={overview}
-        overviewLoading={overviewLoading}
-        status={chatSession.status}
-        runEvents={chatSession.runEvents}
-        approvals={chatSession.approvals}
-        contextUsage={contextUsage}
-        preview={preview}
-        previewMode={previewMode}
-        onPreviewModeChange={setPreviewMode}
-        onClosePreview={() => {
-          setPreview(null);
-          setInspectorTab("overview");
-        }}
-        onRefreshOverview={refreshOverview}
-        onPreviewPath={openPreviewPath}
-        onAnswerApproval={chatSession.answerApproval}
-      />
+      {inspectorOpen && (
+        <div
+          className="resize-handle preview-resize"
+          onPointerDown={(event) =>
+            startResize("preview", event, {
+              filesOpen: filesOpen && filesMode === "side",
+              previewOpen: true
+            })
+          }
+          role="separator"
+          aria-orientation="vertical"
+        />
+      )}
+      {inspectorOpen && (
+        <InspectorPanel
+          activeTab={inspectorTab}
+          onTabChange={setInspectorTab}
+          overview={overview}
+          overviewLoading={overviewLoading}
+          status={chatSession.status}
+          runEvents={chatSession.runEvents}
+          approvals={chatSession.approvals}
+          contextUsage={contextUsage}
+          preview={preview}
+          previewMode={previewMode}
+          onPreviewModeChange={setPreviewMode}
+          onClose={() => setInspectorOpen(false)}
+          onClosePreview={() => {
+            setPreview(null);
+            setInspectorTab("overview");
+          }}
+          onRefreshOverview={refreshOverview}
+          onPreviewPath={openPreviewPath}
+          onAnswerApproval={chatSession.answerApproval}
+        />
+      )}
       {preview && previewMode === "expanded" && (
         <FilePreview
           preview={preview}
