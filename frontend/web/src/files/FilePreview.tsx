@@ -1,6 +1,7 @@
 import { Copy, Download, Maximize2, Minimize2, X, ZoomIn } from "lucide-react";
 import { useState } from "react";
 import { downloadUrl } from "../api";
+import { fileEntryKindLabel } from "../i18n/ru";
 import type { PreviewMode, PreviewPayload } from "../types";
 import { formatSize } from "./fileUtils";
 
@@ -92,7 +93,9 @@ function PreviewContent({
   if (preview.type === "text") {
     return (
       <div className="text-preview">
-        {preview.truncated && <div className="preview-warning">Файл слишком большой для preview.</div>}
+        {preview.truncated && (
+          <div className="preview-warning">Файл слишком большой для предпросмотра.</div>
+        )}
         <pre>{preview.error ? preview.error : preview.content}</pre>
       </div>
     );
@@ -103,7 +106,7 @@ function PreviewContent({
       <dl>
         <div>
           <dt>Тип</dt>
-          <dd>{preview.entry.kind}</dd>
+          <dd>{fileEntryKindLabel(preview.entry)}</dd>
         </div>
         <div>
           <dt>Размер</dt>

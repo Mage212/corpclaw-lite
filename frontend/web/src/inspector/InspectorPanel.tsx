@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { FilePreview } from "../files/FilePreview";
 import { fileIcon, formatSize } from "../files/fileUtils";
+import { fileEntryKindLabel, NO_DATA_LABEL, statusPhaseLabel } from "../i18n/ru";
 import type {
   ApprovalRequest,
   ContextUsage,
@@ -65,7 +66,7 @@ export function InspectorPanel({
     <aside className="inspector-panel">
       <header className="inspector-header">
         <div>
-          <strong>Workspace Intelligence</strong>
+          <strong>Операционный центр</strong>
           <span>{status.active ? status.label : "Операционный обзор"}</span>
         </div>
         <button
@@ -82,20 +83,20 @@ export function InspectorPanel({
           className={activeTab === "overview" ? "active" : ""}
           onClick={() => onTabChange("overview")}
         >
-          Overview
+          Обзор
         </button>
         <button
           className={activeTab === "run" ? "active" : ""}
           onClick={() => onTabChange("run")}
         >
-          Run
+          Выполнение
         </button>
         <button
           className={activeTab === "preview" ? "active" : ""}
           onClick={() => onTabChange("preview")}
           disabled={!preview}
         >
-          Preview
+          Файл
         </button>
       </div>
       <div className="inspector-body">
@@ -151,20 +152,20 @@ function OverviewTab({
           </span>
           <div>
             <strong>{overview?.user.name || "CorpClaw Lite"}</strong>
-            <span>{overview?.user.department || "workspace"}</span>
+            <span>{overview?.user.department || "рабочая область"}</span>
           </div>
         </div>
         <div className="summary-grid">
           <Metric label="LLM" value={overview?.llm.model || "не выбран"} />
-          <Metric label="Provider" value={overview?.llm.provider || "нет данных"} />
-          <Metric label="Context" value={limit ? `${latest} / ${limit}` : "нет данных"} />
-          <Metric label="Load" value={limit ? `${percent}%` : "нет данных"} />
+          <Metric label="Провайдер" value={overview?.llm.provider || NO_DATA_LABEL} />
+          <Metric label="Контекст" value={limit ? `${latest} / ${limit}` : NO_DATA_LABEL} />
+          <Metric label="Заполнение" value={limit ? `${percent}%` : NO_DATA_LABEL} />
         </div>
       </section>
 
       <section className="inspector-section">
         <div className="section-heading">
-          <span>Recent outputs</span>
+          <span>Последние результаты</span>
           {loading && <small>обновляю</small>}
         </div>
         {overview?.recent_outputs.length ? (
@@ -200,7 +201,7 @@ function OverviewTab({
 
       <section className="inspector-section">
         <div className="section-heading">
-          <span>Recent files</span>
+          <span>Последние файлы</span>
         </div>
         {overview?.recent_files.length ? (
           <div className="recent-file-list">
@@ -209,7 +210,7 @@ function OverviewTab({
             ))}
           </div>
         ) : (
-          <EmptyLine label="В workspace пока нет файлов." />
+          <EmptyLine label="В рабочей области пока нет файлов." />
         )}
       </section>
     </div>
@@ -238,7 +239,8 @@ function RecentFile({
       <div>
         <strong>{entry.name}</strong>
         <small>
-          {formatSize(entry.size_bytes)} · {entry.modified_at}
+          {entry.is_dir ? fileEntryKindLabel(entry) : formatSize(entry.size_bytes)} ·{" "}
+          {entry.modified_at}
         </small>
       </div>
     </button>
@@ -263,13 +265,13 @@ function RunTab({
           <Activity size={18} />
           <strong>{status.active ? status.label : "Готов к задаче"}</strong>
         </div>
-        <span>{status.active ? status.phase : "idle"}</span>
+        <span>{statusPhaseLabel(status.active ? status.phase : "idle")}</span>
       </section>
 
       {approvals.length > 0 && (
         <section className="inspector-section">
           <div className="section-heading">
-            <span>Approvals</span>
+            <span>Подтверждения</span>
           </div>
           {approvals.map((approval) => (
             <div className="approval-inline" key={approval.approval_id}>
@@ -293,7 +295,7 @@ function RunTab({
 
       <section className="inspector-section">
         <div className="section-heading">
-          <span>Run timeline</span>
+          <span>Ход выполнения</span>
         </div>
         {runEvents.length ? (
           <div className="run-timeline">
@@ -350,14 +352,14 @@ function PreviewTab({
       <div className="preview-empty">
         <FileText size={28} />
         <strong>Файл не выбран</strong>
-        <span>Откройте файл из Workspace или карточки артефакта.</span>
+        <span>Откройте файл из рабочей области или карточки результата.</span>
       </div>
     );
   }
   return (
     <div className="embedded-preview-shell">
       <button className="preview-close-inline" onClick={onClosePreview}>
-        <X size={15} /> Закрыть preview
+        <X size={15} /> Закрыть файл
       </button>
       <FilePreview
         preview={preview}

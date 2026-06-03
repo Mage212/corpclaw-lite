@@ -303,9 +303,9 @@ class WebChannelOrchestrator:
         try:
             payload = await request.json()
         except Exception as e:
-            raise web.HTTPBadRequest(text="Invalid JSON payload") from e
+            raise web.HTTPBadRequest(text="Некорректный JSON в запросе.") from e
         if not isinstance(payload, dict):
-            raise web.HTTPBadRequest(text="JSON object expected")
+            raise web.HTTPBadRequest(text="Ожидался JSON-объект.")
         return payload
 
     @staticmethod
@@ -1083,7 +1083,7 @@ class WebChannelOrchestrator:
             request_started = False
             request_acquired = False
             if self._service is None:
-                await send({"type": "error", "message": "Service is not ready"})
+                await send({"type": "error", "message": "Сервис ещё не готов."})
                 return
             if not await self._rate_limiter.check(user.id):
                 await send({"type": "error", "message": "Слишком много сообщений."})
@@ -1225,10 +1225,10 @@ class WebChannelOrchestrator:
                 try:
                     payload = json.loads(msg.data)
                 except json.JSONDecodeError:
-                    await send({"type": "error", "message": "Invalid JSON"})
+                    await send({"type": "error", "message": "Некорректный формат сообщения."})
                     continue
                 if not isinstance(payload, dict):
-                    await send({"type": "error", "message": "Invalid JSON"})
+                    await send({"type": "error", "message": "Некорректный формат сообщения."})
                     continue
                 event_type = payload.get("type")
                 if event_type == "mode_change":
@@ -1244,10 +1244,10 @@ class WebChannelOrchestrator:
                         before_id = int(payload.get("before_id") or 0)
                         limit = int(payload.get("limit") or 100)
                     except (TypeError, ValueError):
-                        await send({"type": "error", "message": "Invalid history cursor"})
+                        await send({"type": "error", "message": "Некорректный указатель истории."})
                         continue
                     if before_id <= 0:
-                        await send({"type": "error", "message": "Invalid history cursor"})
+                        await send({"type": "error", "message": "Некорректный указатель истории."})
                         continue
                     page = await self._chat_store.list_before(
                         user.memory_key(), before_id=before_id, limit=limit

@@ -20,6 +20,7 @@ import {
   parseWebSocketTicketPayload,
   parseWorkspaceOverviewPayload
 } from "./contracts";
+import { REQUEST_FAILED_LABEL, UPLOAD_FAILED_LABEL } from "./i18n/ru";
 import type { UploadPayload } from "./contracts";
 
 type ApiOptions = RequestInit & {
@@ -33,7 +34,7 @@ async function readJson(response: Response): Promise<unknown> {
 async function parseJson<T>(response: Response, parser: (value: unknown) => T): Promise<T> {
   const payload = await readJson(response);
   if (!response.ok) {
-    throw new Error(errorMessageFromPayload(payload) || response.statusText || "Request failed");
+    throw new Error(errorMessageFromPayload(payload) || REQUEST_FAILED_LABEL);
   }
   return parser(payload);
 }
@@ -199,12 +200,12 @@ export function uploadFiles(
           resolve(parseUploadPayload(payload));
           return;
         }
-        reject(new Error(errorMessageFromPayload(payload) || xhr.statusText || "Upload failed"));
+        reject(new Error(errorMessageFromPayload(payload) || UPLOAD_FAILED_LABEL));
       } catch (error) {
-        reject(error instanceof Error ? error : new Error("Upload failed"));
+        reject(error instanceof Error ? error : new Error(UPLOAD_FAILED_LABEL));
       }
     };
-    xhr.onerror = () => reject(new Error("Upload failed"));
+    xhr.onerror = () => reject(new Error(UPLOAD_FAILED_LABEL));
     xhr.send(form);
   });
 }
