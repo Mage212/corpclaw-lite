@@ -4,18 +4,28 @@ from __future__ import annotations
 
 import textwrap
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import yaml
 
+from corpclaw_lite.agent.loop import RunStats
+from corpclaw_lite.calibration.analyzer import CalibrationAnalyzer
 from corpclaw_lite.calibration.editor import ConfigEditor
+from corpclaw_lite.calibration.loop import CalibrationLoop
+from corpclaw_lite.calibration.runner import CalibrationRunner
 from corpclaw_lite.calibration.scenarios import (
     CalibrationScenario,
     ScenarioExpectation,
+    ScenarioSetup,
     load_scenarios,
 )
-from corpclaw_lite.calibration.scorer import CalibrationScorer
+from corpclaw_lite.calibration.scorer import CalibrationScorer, ScenarioResult
 from corpclaw_lite.calibration.trajectory import Trajectory, TrajectoryRecorder, TrajectoryStep
+from corpclaw_lite.config.settings import LLMSettings, RoutingRule, Settings
+from corpclaw_lite.llm.base import LLMResponse
+from corpclaw_lite.users.models import User
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Scenarios
@@ -556,3 +566,453 @@ class TestBootstrapCalibrated:
         loader = BootstrapLoader(bootstrap_dir)
         prompt = loader.get_system_prompt()
         assert "Original soul" in prompt
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Analyzer
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class _FakeAnalysisProvider:
+    def __init__(self, content: str) -> None:
+        self.content = content
+        self.last_messages: list[dict[str, Any]] = []
+        self.last_system: str | None = None
+
+    async def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        system: str | None = None,
+    ) -> LLMResponse:
+        self.last_messages = messages
+        self.last_system = system
+        return LLMResponse(content=self.content)
+
+
+class TestCalibrationAnalyzer:
+    @pytest.mark.asyncio()
+    async def test_analyze_accepts_fenced_json(self) -> None:
+        provider = _FakeAnalysisProvider(
+            '```json\n{"reasoning": "Need clearer examples.", "changes": {"few_shots": []}}\n```'
+        )
+        analyzer = CalibrationAnalyzer(provider)
+        scenario = CalibrationScenario(
+            id="failed",
+            user_message="Read file",
+            expected=ScenarioExpectation(tool_calls=["read_file"]),
+        )
+        trajectory = Trajectory(scenario_id="failed", final_answer="", status="error")
+        failed = [ScenarioResult(scenario, trajectory, passed=False, failure_reason="bad")]
+
+        result = await analyzer.analyze(
+            model_id="local-model",
+            failed=failed,
+            passed=[],
+            current_system_prompt="system",
+            current_tool_schemas=[{"name": "read_file"}],
+            current_few_shots=[],
+            current_skills={"skill": "instructions"},
+            current_subagent_prompts={"agent.md": "prompt"},
+        )
+
+        assert result["reasoning"] == "Need clearer examples."
+        assert result["changes"] == {"few_shots": []}
+        assert provider.last_system is not None
+        assert "FAILED" in provider.last_messages[0]["content"]
+
+    @pytest.mark.asyncio()
+    async def test_analyze_rejects_json_without_changes(self) -> None:
+        provider = _FakeAnalysisProvider('{"reasoning": "no changes"}')
+        analyzer = CalibrationAnalyzer(provider)
+
+        with pytest.raises(ValueError, match="missing 'changes'"):
+            await analyzer.analyze(
+                model_id="local-model",
+                failed=[],
+                passed=[],
+                current_system_prompt="system",
+                current_tool_schemas=[],
+            )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Runner
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class _FakeMemory:
+    def __init__(self) -> None:
+        self.cleared_keys: list[str] = []
+
+    async def clear(self, key: str) -> None:
+        self.cleared_keys.append(key)
+
+
+class _FakeAgentLoop:
+    def __init__(self, *, crash: bool = False) -> None:
+        self.memory = _FakeMemory()
+        self.crash = crash
+        self.calls: list[dict[str, Any]] = []
+
+    async def run(
+        self,
+        *,
+        user: User,
+        message: str,
+        system_prompt: str | None,
+        trajectory_recorder: TrajectoryRecorder,
+        few_shots: list[dict[str, Any]] | None = None,
+    ) -> tuple[str, RunStats]:
+        self.calls.append(
+            {
+                "user": user,
+                "message": message,
+                "system_prompt": system_prompt,
+                "few_shots": few_shots,
+            }
+        )
+        if self.crash:
+            raise RuntimeError("agent crashed")
+        trajectory_recorder.record_tool_call("read_file", {"path": "input.txt"})
+        trajectory_recorder.record_tool_result("read_file", "ok")
+        return (
+            "Final answer",
+            RunStats(iterations=2, tools_used=["read_file"], duration_ms=12.0),
+        )
+
+
+class _FakeSkill:
+    id = "docs"
+
+
+class _FakeSkillRegistry:
+    def get_allowed_skills(self, user: User) -> list[_FakeSkill]:
+        return [_FakeSkill()]
+
+
+class _FakeSkillMatcher:
+    def match(self, message: str, allowed_skills: list[_FakeSkill]) -> list[_FakeSkill]:
+        return allowed_skills
+
+
+class TestCalibrationRunner:
+    @pytest.mark.asyncio()
+    async def test_run_all_scores_cleans_workspace_and_clears_memory(self, tmp_path: Path) -> None:
+        user = User(id=7, telegram_id=7, name="Cal", department="engineering")
+        scenario = CalibrationScenario(
+            id="read",
+            user_message="Read input.txt",
+            setup=ScenarioSetup(files=[("nested/input.txt", "hello")]),
+            expected=ScenarioExpectation(tool_calls=["read_file"], has_content=True),
+        )
+        loop = _FakeAgentLoop()
+        progress: list[tuple[str, bool, int, int]] = []
+
+        runner = CalibrationRunner(
+            loop,  # type: ignore[arg-type]
+            user,
+            "system prompt",
+            tmp_path,
+            few_shots=[{"user": "x", "assistant": {"content": "y"}}],
+            skill_matcher=_FakeSkillMatcher(),  # type: ignore[arg-type]
+            skill_registry=_FakeSkillRegistry(),  # type: ignore[arg-type]
+        )
+        results = await runner.run_all(
+            [scenario],
+            on_progress=lambda scenario_id, passed, index, total: progress.append(
+                (scenario_id, passed, index, total)
+            ),
+        )
+
+        assert results[0].passed
+        assert progress == [("read", True, 1, 1)]
+        assert not (tmp_path / "nested" / "input.txt").exists()
+        assert loop.memory.cleared_keys == ["7"]
+        assert loop.calls[0]["few_shots"] == [{"user": "x", "assistant": {"content": "y"}}]
+
+    @pytest.mark.asyncio()
+    async def test_run_all_records_crashes_as_failed_results(self, tmp_path: Path) -> None:
+        user = User(id=8, telegram_id=8, name="Cal", department="engineering")
+        scenario = CalibrationScenario(
+            id="crash",
+            user_message="Do work",
+            expected=ScenarioExpectation(has_content=True),
+        )
+        loop = _FakeAgentLoop(crash=True)
+        runner = CalibrationRunner(loop, user, "system prompt", tmp_path)  # type: ignore[arg-type]
+
+        results = await runner.run_all([scenario])
+
+        assert not results[0].passed
+        assert "Scenario crashed" in (results[0].failure_reason or "")
+        assert loop.memory.cleared_keys == ["8"]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Loop
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class _FakeBootstrapLoader:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def get_system_prompt(self) -> str:
+        return "fake system prompt"
+
+
+class _FakeToolRegistry:
+    def __init__(self) -> None:
+        self.loaded_overrides: list[dict[str, Any]] = []
+
+    def to_schemas(self) -> list[dict[str, Any]]:
+        return [{"function": {"name": "read_file"}}]
+
+    def load_overrides_dict(self, overrides: dict[str, Any]) -> None:
+        self.loaded_overrides.append(overrides)
+
+
+def _write_loop_scenarios(path: Path) -> CalibrationScenario:
+    path.write_text(
+        textwrap.dedent("""\
+            scenarios:
+              - id: read
+                user_message: "Read input.txt"
+                category: tool_use
+                expected:
+                  tool_calls: ["read_file"]
+                  has_content: true
+        """),
+        encoding="utf-8",
+    )
+    return CalibrationScenario(
+        id="read",
+        user_message="Read input.txt",
+        expected=ScenarioExpectation(tool_calls=["read_file"], has_content=True),
+        category="tool_use",
+    )
+
+
+def _loop_result(scenario: CalibrationScenario, *, passed: bool) -> ScenarioResult:
+    steps = (
+        [
+            TrajectoryStep(
+                step_type="tool_call", tool_name="read_file", tool_args={"path": "input.txt"}
+            )
+        ]
+        if passed
+        else []
+    )
+    trajectory = Trajectory(
+        scenario_id=scenario.id,
+        steps=steps,
+        final_answer="done" if passed else "",
+        status="ok" if passed else "error",
+    )
+    return ScenarioResult(
+        scenario=scenario,
+        trajectory=trajectory,
+        passed=passed,
+        failure_reason=None if passed else "failed",
+    )
+
+
+def _patch_loop_basics(
+    monkeypatch: pytest.MonkeyPatch,
+    settings: Settings,
+    stacks: list[SimpleNamespace],
+) -> None:
+    monkeypatch.setattr("corpclaw_lite.config.loader.load_settings", lambda path: settings)
+    monkeypatch.setattr(
+        "corpclaw_lite.agent.factory.build_agent_stack",
+        lambda settings: stacks.pop(0),
+    )
+    monkeypatch.setattr("corpclaw_lite.config.bootstrap.BootstrapLoader", _FakeBootstrapLoader)
+
+
+class TestCalibrationLoop:
+    @pytest.mark.asyncio()
+    async def test_run_dry_run_returns_baseline_and_removes_workspace(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        scenario = _write_loop_scenarios(tmp_path / "scenarios.yaml")
+        settings = Settings(
+            llm=LLMSettings(routing=[RoutingRule(task_kind="default", model="local-model")])
+        )
+        stack = SimpleNamespace(
+            loop=object(),
+            tool_registry=_FakeToolRegistry(),
+            skill_matcher=None,
+            skill_registry=None,
+        )
+        _patch_loop_basics(monkeypatch, settings, [stack])
+
+        class FakeRunner:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                pass
+
+            async def run_all(self, scenarios: list[CalibrationScenario]) -> list[ScenarioResult]:
+                return [_loop_result(scenario, passed=True)]
+
+        monkeypatch.setattr("corpclaw_lite.calibration.loop.CalibrationRunner", FakeRunner)
+
+        report = await CalibrationLoop(
+            "local",
+            "cloud",
+            tmp_path / "scenarios.yaml",
+            tmp_path,
+            dry_run=True,
+        ).run()
+
+        assert report.model_id == "local-model"
+        assert report.baseline_passed == 1
+        assert report.final_passed == 1
+        assert report.iterations_run == 0
+        assert not (tmp_path / ".calibration_workspace").exists()
+
+    @pytest.mark.asyncio()
+    async def test_run_returns_score_only_when_cloud_provider_missing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        scenario = _write_loop_scenarios(tmp_path / "scenarios.yaml")
+        settings = Settings(
+            llm=LLMSettings(routing=[RoutingRule(task_kind="default", model="local-model")])
+        )
+        stack = SimpleNamespace(
+            loop=object(),
+            tool_registry=_FakeToolRegistry(),
+            skill_matcher=None,
+            skill_registry=None,
+        )
+        _patch_loop_basics(monkeypatch, settings, [stack])
+
+        class FakeRunner:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                pass
+
+            async def run_all(self, scenarios: list[CalibrationScenario]) -> list[ScenarioResult]:
+                return [_loop_result(scenario, passed=False)]
+
+        class FakeProviderRegistry:
+            def get(self, name: str) -> object | None:
+                return None
+
+        from corpclaw_lite.config.providers import ProviderRegistry
+
+        monkeypatch.setattr("corpclaw_lite.calibration.loop.CalibrationRunner", FakeRunner)
+        monkeypatch.setattr(
+            ProviderRegistry,
+            "from_env",
+            classmethod(lambda cls: FakeProviderRegistry()),
+        )
+
+        report = await CalibrationLoop(
+            "local",
+            "missing-cloud",
+            tmp_path / "scenarios.yaml",
+            tmp_path,
+            dry_run=False,
+        ).run()
+
+        assert report.baseline_passed == 0
+        assert report.final_passed == 0
+        assert report.iterations_run == 0
+        assert report.improvements == ["Cloud provider not available — dry-run only"]
+        assert not (tmp_path / ".calibration_workspace").exists()
+
+    @pytest.mark.asyncio()
+    async def test_run_keeps_iteration_when_score_improves(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        scenario = _write_loop_scenarios(tmp_path / "scenarios.yaml")
+        settings = Settings(
+            llm=LLMSettings(
+                routing=[
+                    RoutingRule(task_kind="default", provider="local", model="local-model"),
+                    RoutingRule(task_kind="calibration", provider="cloud", model="cloud-model"),
+                ]
+            )
+        )
+        baseline_registry = _FakeToolRegistry()
+        improved_registry = _FakeToolRegistry()
+        stacks = [
+            SimpleNamespace(
+                loop=object(),
+                tool_registry=baseline_registry,
+                skill_matcher=None,
+                skill_registry=None,
+            ),
+            SimpleNamespace(
+                loop=object(),
+                tool_registry=improved_registry,
+                skill_matcher=None,
+                skill_registry=None,
+            ),
+        ]
+        _patch_loop_basics(monkeypatch, settings, stacks)
+
+        class FakeRunner:
+            queued = [[_loop_result(scenario, passed=False)], [_loop_result(scenario, passed=True)]]
+
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                self.kwargs = kwargs
+
+            async def run_all(self, scenarios: list[CalibrationScenario]) -> list[ScenarioResult]:
+                return self.queued.pop(0)
+
+        class FakeProviderRegistry:
+            def get(self, name: str) -> object | None:
+                return object()
+
+        class FakeRouter:
+            def for_task(self, task_kind: str) -> object:
+                return object()
+
+            def has_task_route(self, task_kind: str) -> bool:
+                return True
+
+        class FakeAnalyzer:
+            def __init__(self, provider: object) -> None:
+                self.provider = provider
+
+            async def analyze(self, **kwargs: Any) -> dict[str, Any]:
+                return {
+                    "reasoning": "Add a concrete read_file example",
+                    "changes": {
+                        "tool_overrides": {"read_file": {"description": "Read a file"}},
+                        "few_shots": [{"user": "Read x", "assistant": {"content": "Done"}}],
+                    },
+                }
+
+        from corpclaw_lite.config.providers import ProviderRegistry
+        from corpclaw_lite.llm.router import LLMRouter
+
+        monkeypatch.setattr("corpclaw_lite.calibration.loop.CalibrationRunner", FakeRunner)
+        monkeypatch.setattr("corpclaw_lite.calibration.loop.CalibrationAnalyzer", FakeAnalyzer)
+        monkeypatch.setattr(
+            ProviderRegistry,
+            "from_env",
+            classmethod(lambda cls: FakeProviderRegistry()),
+        )
+        monkeypatch.setattr(
+            LLMRouter,
+            "from_settings",
+            classmethod(lambda cls, llm_settings, provider_registry: FakeRouter()),
+        )
+
+        report = await CalibrationLoop(
+            "local",
+            "cloud",
+            tmp_path / "scenarios.yaml",
+            tmp_path,
+            max_iterations=1,
+            dry_run=False,
+        ).run()
+
+        assert report.baseline_passed == 0
+        assert report.final_passed == 1
+        assert report.iterations_run == 1
+        assert report.improvements == ["Iter 1: +1 — Add a concrete read_file example"]
+        assert improved_registry.loaded_overrides == [{"read_file": {"description": "Read a file"}}]
+        assert (tmp_path / "config" / "calibrated" / "metadata.yaml").exists()
