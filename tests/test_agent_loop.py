@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -8,7 +9,14 @@ from corpclaw_lite.agent.context import ContextBuilder
 from corpclaw_lite.agent.loop import AgentConfig, AgentLoop, RunStats
 from corpclaw_lite.config.settings import AgentSettings
 from corpclaw_lite.extensions.tools.registry import ToolRegistry
-from corpclaw_lite.llm.base import LLMResponse, Provider, StreamChunk, ToolCall
+from corpclaw_lite.llm.base import (
+    LLMResponse,
+    LLMStreamEvent,
+    Provider,
+    StreamChunk,
+    TokenUsage,
+    ToolCall,
+)
 from corpclaw_lite.users.models import User
 
 
@@ -61,6 +69,100 @@ async def test_agent_loop_basic(test_user: User, empty_registry: ToolRegistry) -
     assert stats.status == "ok"
     assert stats.iterations == 1
     assert stats.duration_ms >= 0
+    assert stats.run_id
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_accepts_explicit_run_id(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    provider = MockProvider(responses=[LLMResponse(content="ok")])
+    loop = AgentLoop(AgentConfig(provider, empty_registry, AgentSettings()))
+
+    _, stats = await loop.run(test_user, "Hi", run_id="fixed-run-id")
+
+    assert stats.run_id == "fixed-run-id"
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_uses_backend_streaming_when_available(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    class StreamingMockProvider(MockProvider):
+        def __init__(self) -> None:
+            super().__init__([LLMResponse(content="fallback")])
+            self.streamed_call_count = 0
+
+        async def chat_streamed(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]] | None = None,
+            system: str | None = None,
+            on_event: Any | None = None,
+        ) -> LLMResponse:
+            self.streamed_call_count += 1
+            if on_event is not None:
+                on_event(LLMStreamEvent(stage="started"))
+                on_event(LLMStreamEvent(stage="answer", content_delta="Hello", content_chars=5))
+                on_event(LLMStreamEvent(stage="finished", content_chars=5))
+            return LLMResponse(content="Hello")
+
+    provider = StreamingMockProvider()
+    seen_stages: list[str] = []
+    loop = AgentLoop(AgentConfig(provider, empty_registry, AgentSettings()))
+
+    res, stats = await loop.run(test_user, "Hi", on_llm_stage=seen_stages.append)
+
+    assert res == "Hello"
+    assert provider.streamed_call_count == 1
+    assert provider.call_count == 0
+    assert seen_stages == ["started", "answer", "finished"]
+    assert stats.status == "ok"
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_trace_and_token_stats(
+    tmp_path: Path, test_user: User, empty_registry: ToolRegistry
+) -> None:
+    import json
+
+    from corpclaw_lite.logging.trace import setup_trace_logging
+
+    setup_trace_logging(tmp_path, enabled=True)
+    provider = MockProvider(
+        responses=[
+            LLMResponse(
+                content="Hello!",
+                usage=TokenUsage(input_tokens=11, output_tokens=7, total_tokens=19),
+            ),
+        ]
+    )
+    loop = AgentLoop(AgentConfig(provider, empty_registry, AgentSettings()))
+
+    _, stats = await loop.run(test_user, "Hi", channel="test")
+
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "agent_trace.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    events = [r["event"] for r in records]
+    assert events == [
+        "request_started",
+        "context_built",
+        "llm_call_started",
+        "llm_call_finished",
+        "request_finished",
+    ]
+    assert {r["run_id"] for r in records} == {stats.run_id}
+    assert stats.llm_calls == 1
+    assert stats.input_tokens == 11
+    assert stats.output_tokens == 7
+    assert stats.total_tokens == 19
+    assert stats.latest_total_tokens == 19
+    llm_finished = [r for r in records if r["event"] == "llm_call_finished"][0]
+    assert llm_finished["total_tokens"] == 19
+
+    setup_trace_logging(tmp_path, enabled=False)
 
 
 @pytest.mark.asyncio
@@ -89,6 +191,49 @@ async def test_agent_loop_tool_call(test_user: User, empty_registry: ToolRegistr
     assert provider.call_count == 2
     assert stats.tools_used == ["test_tool"]
     assert stats.status == "ok"
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_trace_tool_events(
+    tmp_path: Path, test_user: User, empty_registry: ToolRegistry
+) -> None:
+    import json
+
+    from corpclaw_lite.logging.trace import setup_trace_logging
+
+    class FakeTool:
+        name = "test_tool"
+        description = "A fake tool"
+        params = []
+        terminal = False
+
+        async def execute(self, **kwargs: Any) -> str:
+            return "tool output"
+
+    empty_registry._tools["test_tool"] = FakeTool()  # type: ignore
+    setup_trace_logging(tmp_path, enabled=True)
+    provider = MockProvider(
+        responses=[
+            LLMResponse(content="", tool_calls=[ToolCall(id="1", name="test_tool", arguments={})]),
+            LLMResponse(content="done"),
+        ]
+    )
+    loop = AgentLoop(AgentConfig(provider, empty_registry, AgentSettings()))
+
+    _, stats = await loop.run(test_user, "Run test tool")
+
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "agent_trace.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    events = [r["event"] for r in records]
+    assert "tool_call_started" in events
+    assert "tool_call_finished" in events
+    tool_finished = [r for r in records if r["event"] == "tool_call_finished"][0]
+    assert tool_finished["run_id"] == stats.run_id
+    assert tool_finished["status"] == "ok"
+
+    setup_trace_logging(tmp_path, enabled=False)
 
 
 @pytest.mark.asyncio
@@ -290,6 +435,59 @@ async def test_approval_callback_per_call_takes_priority(
     assert not instance_called, "instance-level callback must not be called when per-call is given"
     assert result == "done"
     assert stats.status == "ok"
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_trace_approval_denied(
+    tmp_path: Path, test_user: User, empty_registry: ToolRegistry
+) -> None:
+    import json
+
+    from corpclaw_lite.logging.trace import setup_trace_logging
+    from corpclaw_lite.security.tool_guard import ApprovalRequest, ToolGuard
+
+    class AlwaysApprovalGuard(ToolGuard):
+        async def check(  # type: ignore[override]
+            self, tool_name: str, arguments: Any, risk_level: str | None = None
+        ) -> None:
+            raise ApprovalRequest(action="NEEDS_APPROVAL", details="approval required")
+
+    class FakeTool:
+        name = "exec_tool"
+        description = ""
+        params = []
+        terminal = False
+        risk_level = None
+
+        async def execute(self, **kwargs: Any) -> str:
+            return "executed"
+
+    async def deny_cb(action: str, details: str) -> bool:
+        return False
+
+    empty_registry._tools["exec_tool"] = FakeTool()  # type: ignore
+    setup_trace_logging(tmp_path, enabled=True)
+    provider = MockProvider(
+        responses=[
+            LLMResponse(content="", tool_calls=[ToolCall(id="1", name="exec_tool", arguments={})]),
+            LLMResponse(content="done"),
+        ]
+    )
+    loop = AgentLoop(
+        AgentConfig(provider, empty_registry, AgentSettings(), tool_guard=AlwaysApprovalGuard())
+    )
+
+    _, stats = await loop.run(test_user, "run it", approval_callback=deny_cb)
+
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "agent_trace.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    approvals = [r for r in records if r["event"] == "approval_finished"]
+    assert approvals[0]["run_id"] == stats.run_id
+    assert approvals[0]["status"] == "denied"
+
+    setup_trace_logging(tmp_path, enabled=False)
 
 
 @pytest.mark.asyncio

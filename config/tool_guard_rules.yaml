@@ -114,6 +114,38 @@ rules:
     match_pattern: "(file://|metadata\\.google\\.internal)"
     require_approval: true
 
+  - id: WEB_SEARCH_INTERNAL_TARGETS
+    description: "Searching for internal/private network targets"
+    tool: "web_search"
+    severity: MEDIUM
+    match_param: "query"
+    match_pattern: "(127\\.|10\\.|172\\.(1[6-9]|2[0-9]|3[01])\\.|192\\.168\\.|localhost|0\\.0\\.0\\.0|169\\.254\\.|metadata\\.google\\.internal)"
+    require_approval: true
+
+  - id: RESEARCH_FETCH_PRIVATE_IP
+    description: "Research fetching internal/private network addresses"
+    tool: "research_fetch_source"
+    severity: HIGH
+    match_param: "url"
+    match_pattern: "(127\\.|10\\.|172\\.(1[6-9]|2[0-9]|3[01])\\.|192\\.168\\.|localhost|0\\.0\\.0\\.0)"
+    require_approval: true
+
+  - id: RESEARCH_FETCH_SENSITIVE_PATHS
+    description: "Research fetching sensitive local paths"
+    tool: "research_fetch_source"
+    severity: MEDIUM
+    match_param: "url"
+    match_pattern: "(file://|metadata\\.google\\.internal)"
+    require_approval: true
+
+  - id: RESEARCH_SEARCH_INTERNAL_TARGETS
+    description: "Research searching for internal/private network targets"
+    tool: "research_search"
+    severity: MEDIUM
+    match_param: "query"
+    match_pattern: "(127\\.|10\\.|172\\.(1[6-9]|2[0-9]|3[01])\\.|192\\.168\\.|localhost|0\\.0\\.0\\.0|169\\.254\\.|metadata\\.google\\.internal)"
+    require_approval: true
+
   # ── Absolute path protection (defense-in-depth; code-level validation is primary) ──
 
   - id: ABS_PATH_READ

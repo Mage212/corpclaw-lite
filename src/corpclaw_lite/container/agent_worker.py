@@ -40,6 +40,8 @@ def _build_container_registry() -> ToolRegistry:
         from corpclaw_lite.extensions.tools.builtin.convert_format import ConvertFormatTool
         from corpclaw_lite.extensions.tools.builtin.diff_text import DiffTextTool
         from corpclaw_lite.extensions.tools.builtin.excel import NormalizeExcelTool
+        from corpclaw_lite.extensions.tools.builtin.excel_inspect import ExcelInspectTool
+        from corpclaw_lite.extensions.tools.builtin.excel_workbook import ExcelWorkbookTool
         from corpclaw_lite.extensions.tools.builtin.exec_script import ExecScriptTool
         from corpclaw_lite.extensions.tools.builtin.files import (
             EditFileTool,
@@ -69,6 +71,8 @@ def _build_container_registry() -> ToolRegistry:
         TableQueryTool(),
         ChartGenerateTool(),
         PdfReaderTool(),
+        ExcelInspectTool(),
+        ExcelWorkbookTool(),
     ]:
         registry.register(tool)
     return registry

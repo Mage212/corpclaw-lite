@@ -42,8 +42,7 @@ def _create_json(path: Path, data: list[dict[str, object]]) -> Path:
 def _create_markdown(path: Path, headers: list[str], rows: list[list[str]]) -> Path:
     lines = ["| " + " | ".join(headers) + " |"]
     lines.append("| " + " | ".join("---" for _ in headers) + " |")
-    for row in rows:
-        lines.append("| " + " | ".join(row) + " |")
+    lines.extend("| " + " | ".join(row) + " |" for row in rows)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
 
@@ -139,9 +138,43 @@ class TestConvertFormatTool:
         assert (tmp_path / "custom.json").exists()
 
     @pytest.mark.asyncio
+    async def test_output_path_outside_workspace_blocked(
+        self, tool: ConvertFormatTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        monkeypatch.chdir(workspace)
+        _create_csv(workspace / "data.csv", "a,b\n1,2\n")
+
+        result = await tool.execute(
+            input_path="data.csv",
+            output_format="json",
+            output_path="../escaped.json",
+        )
+
+        assert "Error" in result
+        assert not (tmp_path / "escaped.json").exists()
+
+    @pytest.mark.asyncio
     async def test_file_not_found(self, tool: ConvertFormatTool) -> None:
         result = await tool.execute(input_path="nonexistent.csv", output_format="json")
         assert "Error" in result
+
+    @pytest.mark.asyncio
+    async def test_input_file_too_large(
+        self, tool: ConvertFormatTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        _create_csv(tmp_path / "large.csv", "a,b\n1,2\n")
+        monkeypatch.setattr(
+            "corpclaw_lite.extensions.tools.builtin.convert_format._MAX_INPUT_BYTES",
+            1,
+        )
+
+        result = await tool.execute(input_path="large.csv", output_format="json")
+
+        assert "Error" in result
+        assert "too large" in result
 
     @pytest.mark.asyncio
     async def test_unsupported_input(

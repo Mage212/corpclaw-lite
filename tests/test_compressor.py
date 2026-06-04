@@ -55,6 +55,13 @@ class TestShouldCompress:
         messages = [{"role": "user", "content": "x" * 3000}]
         assert compressor.should_compress(messages)
 
+    def test_actual_tokens_can_trigger_compression(
+        self, provider: MockProvider, settings: CompressionSettings
+    ) -> None:
+        compressor = ContextCompressor(provider, settings)
+        messages = [{"role": "user", "content": "short"}]
+        assert compressor.should_compress(messages, actual_tokens=900)
+
     def test_does_not_compress_when_last_message_is_tool_result(
         self, provider: MockProvider, settings: CompressionSettings
     ) -> None:
@@ -164,6 +171,35 @@ class TestCompress:
             {"role": "assistant", "content": "b" * 200},
             {"role": "user", "content": "final"},
         ]
+        result = await compressor.compress(messages)
+
+        assert len(result) < len(messages)
+        summary_msgs = [m for m in result if "Summary" in m.get("content", "")]
+        assert len(summary_msgs) == 1
+
+    @pytest.mark.asyncio
+    async def test_compress_uses_threshold_ratio_not_full_context_limit(
+        self, provider: MockProvider, settings: CompressionSettings
+    ) -> None:
+        settings = CompressionSettings(
+            enabled=True,
+            max_context_tokens=1000,
+            threshold_ratio=0.8,
+            protect_tail_tokens=50,
+            summary_ratio=0.20,
+        )
+        compressor = ContextCompressor(provider, settings)
+        messages = [
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "x" * 600},
+            {"role": "user", "content": "y" * 700},
+            {"role": "assistant", "content": "z" * 700},
+            {"role": "user", "content": "a" * 700},
+            {"role": "assistant", "content": "b" * 700},
+            {"role": "user", "content": "final"},
+        ]
+
+        assert compressor.should_compress(messages)
         result = await compressor.compress(messages)
 
         assert len(result) < len(messages)

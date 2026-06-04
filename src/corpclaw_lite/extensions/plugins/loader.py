@@ -85,9 +85,14 @@ class PluginLoader:
                     skill_filename,
                 )
 
-        # Load tool if defined (subprocess isolation)
+        # Load tool if defined (trusted-code subprocess isolation, not a security sandbox)
         tool_filename = manifest.components.get("tool")
         if tool_filename:
+            logger.warning(
+                "Plugin %s defines a tool. Local plugin tools are trusted code executed "
+                "in a subprocess, not a security sandbox.",
+                manifest.name,
+            )
             tool_path = (plugin_dir / tool_filename).resolve()
             if not tool_path.is_relative_to(plugin_dir.resolve()):
                 logger.error(

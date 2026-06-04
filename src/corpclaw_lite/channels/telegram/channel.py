@@ -7,11 +7,11 @@ import asyncio
 import logging
 import os
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from html import escape as html_escape
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import anyio
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
@@ -24,9 +24,15 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from telegram.request import HTTPXRequest
 
 from corpclaw_lite.channels.base import Channel
 from corpclaw_lite.channels.telegram.formatting import build_response_parts
+from corpclaw_lite.channels.telegram.transport import (
+    TelegramFallbackTransport,
+    discover_fallback_ips,
+    parse_fallback_ip_env,
+)
 from corpclaw_lite.channels.telegram.upload import (
     MAX_FILE_SIZE,
     build_agent_directive,
@@ -36,6 +42,9 @@ from corpclaw_lite.channels.telegram.upload import (
 from corpclaw_lite.extensions.tools.registry import ToolRegistry
 from corpclaw_lite.memory.sqlite import SQLiteMemory
 from corpclaw_lite.users.models import User
+
+if TYPE_CHECKING:
+    from corpclaw_lite.config.settings import TelegramSettings
 
 __all__ = [
     "TelegramChannel",
@@ -62,6 +71,11 @@ class TelegramChannel(Channel):
         memory: SQLiteMemory | None = None,
         onboarding_engine: Any | None = None,
         image_handler: Callable[..., Any] | None = None,
+        cache_reset_callback: Callable[[str], Awaitable[None]] | None = None,
+        setup_handler: Callable[[int], Awaitable[str]] | None = None,
+        access_checker: Callable[[int, str], Awaitable[bool]] | None = None,
+        user_resolver: Callable[[int], Awaitable[User | None]] | None = None,
+        tg_settings: TelegramSettings | None = None,
     ) -> None:
         """
         Args:
@@ -75,6 +89,11 @@ class TelegramChannel(Channel):
                            direct image processing that bypasses the agent loop. When set,
                            uploaded images are routed here instead of through message_handler
                            so the raw vision-model response reaches the user unmodified.
+            cache_reset_callback: Optional async callback invoked by /new after
+                                  memory is cleared, so LLM cache state can be invalidated.
+            setup_handler: Optional async callback invoked by /setup under orchestrator locks.
+            access_checker: Optional async callback used before commands, uploads and callbacks.
+            tg_settings: Telegram configuration (fallback IPs, timeouts, retry limits).
         """
         self.token = token
         self._app: Application | None = None  # type: ignore
@@ -84,6 +103,11 @@ class TelegramChannel(Channel):
         self._tool_registry = tool_registry
         self._memory = memory
         self._onboarding_engine = onboarding_engine
+        self._cache_reset_callback = cache_reset_callback
+        self._setup_handler = setup_handler
+        self._access_checker = access_checker
+        self._user_resolver = user_resolver
+        self._tg_settings = tg_settings
 
         # Approval system: message_id → (Future[bool], expected_telegram_user_id)
         self._pending_approvals: dict[str, tuple[asyncio.Future[bool], int]] = {}
@@ -92,6 +116,12 @@ class TelegramChannel(Channel):
         self._processed_ids: set[int] = set()
         self._processed_order: deque[int] = deque()
         self._dedup_lock = asyncio.Lock()
+
+        # Polling recovery state
+        self._polling_error_task: asyncio.Task[None] | None = None
+        self._polling_conflict_count: int = 0
+        self._polling_network_error_count: int = 0
+        self._polling_error_callback_ref: Any = None
 
     @property
     def bot(self) -> Any:
@@ -105,15 +135,68 @@ class TelegramChannel(Channel):
 
     def get_user_workspace(self, user: User) -> Path:
         """Return per-user workspace directory, creating it if needed."""
-        ws = self._workspace_base / f"user_{user.telegram_id}"
+        ws = self._workspace_base / f"user_{user.workspace_key()}"
         ws.mkdir(parents=True, exist_ok=True)
         return ws
 
-    async def start(self) -> None:
-        """Initialize the Telegram bot application."""
-        self._app = Application.builder().token(self.token).concurrent_updates(True).build()
+    async def _resolve_user(self, telegram_id: int) -> User:
+        if self._user_resolver is not None:
+            user = await self._user_resolver(telegram_id)
+            if user is not None:
+                return user
+        return User(
+            id=telegram_id,
+            name=str(telegram_id),
+            telegram_id=telegram_id,
+            department="default",
+        )
 
-        # Commands
+    async def _check_access(self, update: Update, action: str) -> bool:
+        """Run channel-level access preflight before side effects."""
+        if self._access_checker is None:
+            return True
+        if not update.effective_user:
+            return False
+        try:
+            return await self._access_checker(update.effective_user.id, action)
+        except Exception:
+            logger.exception("Telegram access preflight failed for action=%s", action)
+            return False
+
+    async def start(self) -> None:
+        """Initialize the Telegram bot application with fallback transport and retry logic."""
+        settings = self._tg_settings
+        max_retries = settings.init_max_retries if settings else 8
+
+        # ── Build Application with fallback transport ──────────────────────
+        builder = Application.builder().token(self.token).concurrent_updates(True)
+
+        fallback_ips = await self._resolve_fallback_ips()
+        proxy_url = (
+            os.environ.get("TELEGRAM_PROXY")
+            or os.environ.get("HTTPS_PROXY")
+            or os.environ.get("ALL_PROXY")
+        )
+
+        if fallback_ips and not proxy_url:
+            logger.info("Telegram fallback IPs active: %s", ", ".join(fallback_ips))
+            request_kwargs = self._build_request_kwargs(settings)
+            transport = TelegramFallbackTransport(fallback_ips)
+            request = HTTPXRequest(**request_kwargs, httpx_kwargs={"transport": transport})
+            get_updates_request = HTTPXRequest(
+                **request_kwargs, httpx_kwargs={"transport": transport}
+            )
+            builder = builder.request(request).get_updates_request(get_updates_request)
+        elif proxy_url:
+            logger.info("Proxy detected for Telegram: %s", proxy_url)
+            request_kwargs = self._build_request_kwargs(settings)
+            request = HTTPXRequest(**request_kwargs, proxy=proxy_url)
+            get_updates_request = HTTPXRequest(**request_kwargs, proxy=proxy_url)
+            builder = builder.request(request).get_updates_request(get_updates_request)
+
+        self._app = builder.build()
+
+        # ── Register handlers ──────────────────────────────────────────────
         self._app.add_handler(CommandHandler("start", self._handle_start))
         self._app.add_handler(CommandHandler("help", self._handle_help))
         self._app.add_handler(CommandHandler("new", self._handle_new))
@@ -122,24 +205,201 @@ class TelegramChannel(Channel):
         self._app.add_handler(CommandHandler("execute", self._handle_execute))
         self._app.add_handler(CommandHandler("setup", self._handle_setup))
 
-        # Messages
         self._app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_text))
         self._app.add_handler(MessageHandler(filters.Document.ALL, self._handle_document))
         self._app.add_handler(MessageHandler(filters.PHOTO, self._handle_photo))
 
-        # Callbacks
         self._app.add_handler(CallbackQueryHandler(self._handle_callback))
-
-        # Error handler
         self._app.add_error_handler(self._on_error)
 
-        logger.info("Initializing Telegram application...")
-        await self._app.initialize()
+        # ── Initialize with retry (Layer 2) ────────────────────────────────
+        try:
+            from telegram.error import NetworkError, TimedOut
+        except ImportError:
+            NetworkError = TimedOut = OSError  # type: ignore[misc, assignment]
+
+        logger.info("Initializing Telegram application (max %d attempts)...", max_retries)
+        for attempt in range(max_retries):
+            try:
+                await self._app.initialize()
+                break
+            except (NetworkError, TimedOut, OSError) as init_err:
+                if attempt < max_retries - 1:
+                    wait = min(2**attempt, 15)
+                    logger.warning(
+                        "Connect attempt %d/%d failed: %s — retrying in %ds",
+                        attempt + 1,
+                        max_retries,
+                        init_err,
+                        wait,
+                    )
+                    await asyncio.sleep(wait)
+                else:
+                    raise
+
         await self._register_bot_commands()
         await self._app.start()
 
-        await self._app.updater.start_polling()  # type: ignore
-        logger.info("Telegram channel started (concurrent_updates=True).")
+        # ── Start polling with error callback (Layer 3) ───────────────────
+        loop = asyncio.get_running_loop()
+
+        def _polling_error_callback(error: Exception) -> None:
+            if self._polling_error_task and not self._polling_error_task.done():
+                return
+            if self._looks_like_polling_conflict(error):
+                self._polling_error_task = loop.create_task(self._handle_polling_conflict(error))
+            elif self._looks_like_network_error(error):
+                logger.warning("Telegram network error, scheduling reconnect: %s", error)
+                self._polling_error_task = loop.create_task(
+                    self._handle_polling_network_error(error)
+                )
+            else:
+                logger.error("Telegram polling error: %s", error, exc_info=True)
+
+        self._polling_error_callback_ref = _polling_error_callback
+
+        await self._app.updater.start_polling(  # type: ignore
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True,
+            error_callback=_polling_error_callback,
+        )
+        logger.info("Telegram channel started (polling mode, concurrent_updates=True).")
+
+    # ── Fallback / resilience helpers ─────────────────────────────────────────
+
+    async def _resolve_fallback_ips(self) -> list[str]:
+        """Discover fallback IPs from config, env, or DoH auto-discovery."""
+        # 1. Config-level manual IPs
+        if self._tg_settings and self._tg_settings.fallback_ips:
+            return parse_fallback_ip_env(",".join(self._tg_settings.fallback_ips))
+
+        # 2. Environment variable override
+        env_ips = parse_fallback_ip_env(os.environ.get("CORPCLAW_TELEGRAM_FALLBACK_IPS"))
+        if env_ips:
+            return env_ips
+
+        # 3. DoH auto-discovery (falls back to seed IPs)
+        return await discover_fallback_ips()
+
+    @staticmethod
+    def _build_request_kwargs(settings: TelegramSettings | None) -> dict[str, Any]:
+        """Build HTTPXRequest kwargs from TelegramSettings."""
+        if settings is None:
+            return {
+                "connect_timeout": 10.0,
+                "read_timeout": 20.0,
+                "pool_timeout": 8.0,
+            }
+        return {
+            "connect_timeout": settings.connect_timeout,
+            "read_timeout": settings.read_timeout,
+            "pool_timeout": settings.pool_timeout,
+        }
+
+    @staticmethod
+    def _looks_like_polling_conflict(error: Exception) -> bool:
+        """Detect 409 Conflict errors from Telegram long-polling."""
+        text = str(error).lower()
+        return error.__class__.__name__.lower() == "conflict" or "conflict" in text or "409" in text
+
+    @staticmethod
+    def _looks_like_network_error(error: Exception) -> bool:
+        """Detect transient network errors that warrant a reconnect attempt."""
+        name = error.__class__.__name__.lower()
+        if name in ("networkerror", "timedout", "connectionerror"):
+            return True
+        return isinstance(error, (OSError, ConnectionError, TimeoutError))
+
+    async def _handle_polling_network_error(self, error: Exception) -> None:
+        """Reconnect polling after a transient network interruption.
+
+        Strategy: exponential back-off (5s, 10s, 20s, 40s, 60s cap) up to
+        network_max_retries attempts, then raise to crash the process for
+        supervisor restart.
+        """
+        max_retries = self._tg_settings.network_max_retries if self._tg_settings else 10
+        base_delay = 5
+        max_delay = 60
+
+        self._polling_network_error_count += 1
+        attempt = self._polling_network_error_count
+
+        if attempt > max_retries:
+            logger.error(
+                "Telegram polling could not reconnect after %d network retries. Last: %s",
+                max_retries,
+                error,
+            )
+            raise RuntimeError(
+                f"Telegram polling unrecoverable after {max_retries} network errors"
+            ) from error
+
+        delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
+        logger.warning(
+            "Telegram network error (attempt %d/%d), reconnecting in %ds: %s",
+            attempt,
+            max_retries,
+            delay,
+            error,
+        )
+        await asyncio.sleep(delay)
+
+        try:
+            if self._app and self._app.updater and self._app.updater.running:  # type: ignore[attr-defined]
+                await self._app.updater.stop()  # type: ignore
+        except Exception:
+            pass
+
+        try:
+            await self._app.updater.start_polling(  # type: ignore
+                allowed_updates=Update.ALL_TYPES,
+                drop_pending_updates=False,
+                error_callback=self._polling_error_callback_ref,
+            )
+            logger.info("Telegram polling resumed after network error (attempt %d)", attempt)
+            self._polling_network_error_count = 0
+        except Exception as retry_err:
+            logger.warning("Telegram polling reconnect failed: %s", retry_err)
+            if self._polling_network_error_count <= max_retries:
+                task = asyncio.ensure_future(self._handle_polling_network_error(retry_err))
+                self._polling_error_task = task
+
+    async def _handle_polling_conflict(self, error: Exception) -> None:
+        """Retry polling after a 409 Conflict (e.g. previous instance still alive).
+
+        Fixed 10s delay, up to conflict_max_retries attempts.
+        """
+        max_retries = self._tg_settings.conflict_max_retries if self._tg_settings else 3
+        retry_delay = 10
+
+        self._polling_conflict_count += 1
+
+        if self._polling_conflict_count <= max_retries:
+            logger.warning(
+                "Telegram polling conflict (%d/%d), retry in %ds: %s",
+                self._polling_conflict_count,
+                max_retries,
+                retry_delay,
+                error,
+            )
+            await asyncio.sleep(retry_delay)
+            try:
+                await self._app.updater.start_polling(  # type: ignore
+                    allowed_updates=Update.ALL_TYPES,
+                    drop_pending_updates=False,
+                    error_callback=self._polling_error_callback_ref,
+                )
+                logger.info(
+                    "Telegram polling resumed after conflict retry %d", self._polling_conflict_count
+                )
+                self._polling_conflict_count = 0
+                return
+            except Exception as retry_err:
+                logger.warning("Telegram polling retry failed: %s", retry_err)
+                return
+
+        logger.error("Telegram polling conflict exhausted %d retries: %s", max_retries, error)
+        raise RuntimeError(f"Telegram polling conflict after {max_retries} retries") from error
 
     async def stop(self) -> None:
         """Stop polling and close the Telegram bot."""
@@ -210,17 +470,14 @@ class TelegramChannel(Channel):
     async def send_file(self, user: User, path: Path, caption: str = "") -> None:
         """Send a document wrapper."""
         if not self._app or not self._app.bot:
-            return
-        try:
-            content = await anyio.Path(path).read_bytes()
-            await self._app.bot.send_document(
-                chat_id=user.telegram_id,
-                document=content,
-                caption=caption,
-                filename=path.name,
-            )
-        except Exception as e:
-            logger.error("Failed to send file to %s: %s", user.telegram_id, e)
+            raise RuntimeError("Telegram application is not initialized")
+        content = await anyio.Path(path).read_bytes()
+        await self._app.bot.send_document(
+            chat_id=user.telegram_id,
+            document=content,
+            caption=caption,
+            filename=path.name,
+        )
 
     async def request_approval(self, user: User, action: str, details: str) -> bool:
         """Send Approve/Deny inline buttons and wait for the tap."""
@@ -274,6 +531,8 @@ class TelegramChannel(Channel):
     # ── Command handlers ──────────────────────────────────────────────────────
 
     async def _handle_start(self, update: Update, context: Any) -> None:
+        if not await self._check_access(update, "start"):
+            return
         if update.effective_chat:
             await update.effective_chat.send_message(
                 "👋 Добро пожаловать в CorpClaw Lite!\n\n"
@@ -289,12 +548,19 @@ class TelegramChannel(Channel):
         """Reset and restart onboarding for the user."""
         if not update.effective_user or not update.effective_chat:
             return
+        if not await self._check_access(update, "setup"):
+            return
+        if self._setup_handler is not None:
+            text = await self._setup_handler(update.effective_user.id)
+            await update.effective_chat.send_message(text)
+            return
         if self._onboarding_engine is None:
             await update.effective_chat.send_message("⚠️ Настройка недоступна.")
             return
         tid = update.effective_user.id
-        await self._onboarding_engine.reset(tid)
-        question = await self._onboarding_engine.start(tid, "default")
+        user = await self._resolve_user(tid)
+        await self._onboarding_engine.reset(user.id)
+        question = await self._onboarding_engine.start(user.id, user.department)
         if question:
             text = f"🔄 Перенастройка! Предыдущие настройки будут обновлены.\n\n{question.prompt}"
             if question.hint:
@@ -304,7 +570,9 @@ class TelegramChannel(Channel):
 
     async def _handle_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Show available tools."""
-        if not update.effective_chat:
+        if not update.effective_chat or not update.effective_user:
+            return
+        if not await self._check_access(update, "help"):
             return
         if self._tool_registry:
             tools = self._tool_registry.list_all()
@@ -321,9 +589,14 @@ class TelegramChannel(Channel):
         """Reset conversation history."""
         if not update.effective_user or not update.effective_chat:
             return
+        if not await self._check_access(update, "new"):
+            return
         tid = update.effective_user.id
+        user = await self._resolve_user(tid)
         if self._memory:
-            await self._memory.clear(str(tid))
+            await self._memory.clear(user.memory_key())
+        if self._cache_reset_callback is not None:
+            await self._cache_reset_callback(user.memory_key())
         await update.effective_chat.send_message("🔄 Сессия сброшена. Можете начать заново.")
         logger.info("User %d reset session", tid)
 
@@ -331,12 +604,13 @@ class TelegramChannel(Channel):
         """Open interactive file manager."""
         if not update.effective_user:
             return
+        if not await self._check_access(update, "delete"):
+            return
 
         from corpclaw_lite.channels.telegram.file_manager import DeleteBrowserHandler
 
-        tid = update.effective_user.id
-        temp_user = User(id=0, name=str(tid), telegram_id=tid, department="default")
-        workspace = self.get_user_workspace(temp_user)
+        user = await self._resolve_user(update.effective_user.id)
+        workspace = self.get_user_workspace(user)
 
         handler = DeleteBrowserHandler(workspace=workspace)
         # Store in context.user_data for thread safety
@@ -346,7 +620,9 @@ class TelegramChannel(Channel):
 
     async def _handle_chat(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Switch to chat mode (no tools)."""
-        if not update.effective_chat:
+        if not update.effective_chat or not update.effective_user:
+            return
+        if not await self._check_access(update, "chat"):
             return
         self._set_mode(context, "chat")
         await update.effective_chat.send_message(
@@ -357,7 +633,9 @@ class TelegramChannel(Channel):
 
     async def _handle_execute(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Switch to execute mode (with tools)."""
-        if not update.effective_chat:
+        if not update.effective_chat or not update.effective_user:
+            return
+        if not await self._check_access(update, "execute"):
             return
         self._set_mode(context, "execute")
         await update.effective_chat.send_message(
@@ -381,6 +659,8 @@ class TelegramChannel(Channel):
         """Handle document upload: download → sanitize → save → agent run."""
         if not update.message or not update.message.document or not update.effective_user:
             return
+        if not await self._check_access(update, "upload_document"):
+            return
         if await self._is_duplicate(update):
             return
 
@@ -395,6 +675,8 @@ class TelegramChannel(Channel):
     async def _handle_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle photo upload: take largest resolution → save → agent run."""
         if not update.message or not update.message.photo or not update.effective_user:
+            return
+        if not await self._check_access(update, "upload_photo"):
             return
         if await self._is_duplicate(update):
             return
@@ -442,10 +724,8 @@ class TelegramChannel(Channel):
             return
 
         # Resolve workspace
-        temp_user = User(
-            id=0, name=f"user_{telegram_id}", telegram_id=telegram_id, department="default"
-        )
-        workspace = self.get_user_workspace(temp_user).resolve()
+        user = await self._resolve_user(telegram_id)
+        workspace = self.get_user_workspace(user).resolve()
         target_path = (workspace / safe_name).resolve()
 
         if not target_path.is_relative_to(workspace):
@@ -475,17 +755,30 @@ class TelegramChannel(Channel):
         from corpclaw_lite.channels.telegram.upload import is_image
 
         if self._image_handler is not None and is_image(safe_name):
-            await self._image_handler(str(telegram_id), target_path, caption)
+            await self._image_handler(
+                str(telegram_id),
+                target_path,
+                caption,
+                prechecked_access=True,
+            )
         else:
             # For non-image files (or when no image_handler set), route through agent
             directive = build_agent_directive(safe_name, caption)
-            await self._on_message(str(telegram_id), directive, "execute")
+            await self._on_message(
+                str(telegram_id),
+                directive,
+                "execute",
+                prechecked_access=True,
+            )
 
     # ── Callback handler ──────────────────────────────────────────────────────
 
     async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
         if not query or not query.message:
+            return
+        if not await self._check_access(update, "callback"):
+            await query.answer("Access denied.", show_alert=True)
             return
 
         data = query.data or ""

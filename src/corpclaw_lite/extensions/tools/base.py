@@ -43,6 +43,9 @@ class Tool(ABC):
     params: list[ToolParam]
     risk_level: RiskLevel = RiskLevel.LOW
     parallel_safe: bool = True
+    source_kind: str | None = None
+    source_name: str | None = None
+    allowed_departments: list[str] | None = None
     # When True, the tool result is returned directly to the user without
     # passing through an additional LLM re-paraphrase step.  Use for tools
     # that already produce a complete, user-facing response (e.g. vision).
@@ -52,3 +55,8 @@ class Tool(ABC):
     async def execute(self, **kwargs: Any) -> str:
         """Execute the tool with the given arguments."""
         ...
+
+    def should_return_direct(self, arguments: dict[str, Any], result: str) -> bool:
+        """Return True when this tool result should skip LLM re-paraphrase."""
+        _ = arguments, result
+        return self.terminal

@@ -7,6 +7,42 @@
 # To change routing: edit llm.routing — no code changes needed.
 
 llm:
+  # Max concurrent LLM inference requests (match GPU inference slots)
+  max_concurrent_requests: 4
+  # Request queue — backpressure + user notifications
+  queue:
+    enabled: true
+    strategy: "slot_affinity"
+    notify_position: true
+    notify_interval_seconds: 30
+    slot_affinity:
+      enabled: true
+      backend: "llama_cpp"
+      provider_names: ["llamacpp"]
+      sticky_slot_ids: [0, 1, 2]
+      overflow_slot_ids: [3]
+      idle_ttl_seconds: 120.0
+      cache_prompt: true
+      auxiliary_policy: "overflow_only"
+    persistent_cache:
+      enabled: false
+      # Must point to the same directory llama-server uses for --slot-save-path
+      # when CorpClaw is expected to prune files directly. Save/restore still
+      # works through the llama-server API when this path is not locally mounted.
+      root_dir: "data/llm_cache/slot-cache"
+      index_path: "data/llm_cache/index.sqlite"
+      slot_api_base_url: null
+      max_total_bytes: 107374182400
+      max_age_days: 30
+      save_policy: "hybrid"
+      save_min_tokens: 1024
+      save_dirty_seconds: 60.0
+      validation_min_reuse_ratio: 0.70
+      validation_large_context_tokens: 16000
+      validation_large_reuse_ratio: 0.90
+      strict_mismatch_retry: true
+      prune_interval_seconds: 600.0
+      http_timeout_seconds: 30.0
   # Routing rules — checked top-to-bottom, first match wins
   # provider: must match a name registered via PROVIDER_* env vars in .env
   # model:    model identifier for that provider
@@ -14,24 +50,24 @@ llm:
   routing:
     # Main chat (used by AgentLoop)
     - task_kind: "default"
-      provider: "lmstudio"
-      model: "qwen3.5-4b"
-      preset: "qwen3.5-thinking"
+      provider: "llamacpp"
+      model: "qwen3.6-35b-a3b"
+      preset: "temperature-0.4"
 
     # Vision analysis (separate LLM call for images)
     - task_kind: "vision"
-      provider: "lmstudio"
-      model: "qwen3.5-4b"
+      provider: "llamacpp"
+      model: "qwen3.6-35b-a3b"
 
     # Memory consolidation (LLM-based history compression)
     - task_kind: "consolidate"
-      provider: "lmstudio"
-      model: "qwen3.5-4b"
+      provider: "llamacpp"
+      model: "qwen3.6-35b-a3b"
 
     # Context compression (LLM-based summary of old turns)
     - task_kind: "compress"
-      provider: "lmstudio"
-      model: "qwen3.5-4b"
+      provider: "llamacpp"
+      model: "qwen3.6-35b-a3b"
 
     # Calibration analysis (cloud provider recommended)
     # Uncomment and configure PROVIDER_OPENROUTER__* in .env to enable
@@ -47,11 +83,16 @@ llm:
 agent:
   max_steps: 15
   max_tool_calls: 30
-  max_wall_time_ms: 120000
+  max_wall_time_ms: 300000
   max_history: 20
   approval_mode: "manual"
   consolidation_enabled: true
   consolidation_threshold: 50
+  llm_streaming_enabled: true
+  llm_stream_stall_seconds: 20.0
+  llm_stream_max_reasoning_chars: 12000
+  llm_stream_status_updates: true
+  vision_max_image_bytes: 10485760
   compression:
     enabled: true
     max_context_tokens: 64000
@@ -61,8 +102,44 @@ agent:
     summary_ratio: 0.20
     prune_min_messages: 15
 
+web:
+  search_backend: "duckduckgo"
+  search_max_concurrent: 3
+  fetch_max_concurrent: 4
+  timeout_seconds: 20
+  user_agent: "CorpClawLite/0.1 web tools"
+
+web_channel:
+  host: "127.0.0.1"
+  port: 8090
+  workspace_base: "workspaces"
+  upload_max_bytes: 20971520
+  rate_limit_per_minute: 10
+  login_rate_limit_per_minute: 5
+  login_lockout_threshold: 5
+  login_lockout_seconds: 300
+  password_min_length: 12
+  password_max_length: 256
+  session_ttl_hours: 12
+  cookie_name: "corpclaw_lite_session"
+  cookie_secure: "auto"
+  ws_ticket_ttl_seconds: 30
+  chat_active_max_messages: 2000
+  chat_archived_session_ttl_days: 30
+  chat_max_archived_sessions_per_user: 20
+
+research:
+  cache_ttl_hours: 24
+  normal_max_sources: 5
+  deep_max_sources: 10
+  normal_search_waves: 1
+  deep_search_waves: 3
+  normal_max_rereads: 0
+  deep_max_rereads: 10
+  source_excerpt_chars: 6000
+
 container:
-  enabled: false
+  enabled: true
   image: "corpclaw-agent-base:latest"
   workspace_base: "workspaces"
   max_memory: "512m"
@@ -79,6 +156,21 @@ telegram:
   default_department: "default"
   admin_ids: []
 
+  # Fallback transport — manual IP overrides (empty = DoH auto-discovery)
+  # When api.telegram.org is unreachable, requests are retried via these IPs
+  # with preserved TLS SNI. Set manually or leave empty for auto-discovery.
+  fallback_ips: []
+
+  # HTTP timeouts (seconds) — passed to python-telegram-bot's HTTPXRequest
+  connect_timeout: 10.0
+  read_timeout: 20.0
+  pool_timeout: 8.0
+
+  # Connection resilience — retries for transient failures
+  init_max_retries: 8       # app.initialize() attempts (exp backoff up to 15s)
+  network_max_retries: 10   # Runtime network error retries (exp backoff 5-60s)
+  conflict_max_retries: 3   # Runtime 409 Conflict retries (10s fixed delay)
+
 skills:
   selection_mode: "semantic"
   top_k: 3
@@ -90,3 +182,6 @@ logging:
   console_level: "INFO"
   log_dir: "logs"
   health_port: 8080
+  trace_enabled: true
+  trace_level: "metadata"
+  trace_preview_chars: 200

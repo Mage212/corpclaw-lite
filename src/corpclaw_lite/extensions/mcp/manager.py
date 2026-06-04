@@ -137,7 +137,7 @@ class MCPManager:
             tools = await client.list_tools()
             registered: list[str] = []
             for tool_def in tools:
-                adapter = MCPToolAdapter(tool_def=tool_def, client=client)
+                adapter = MCPToolAdapter(tool_def=tool_def, client=client, server_name=name)
                 try:
                     registry.register(adapter, allow_replace=False)
                     registered.append(tool_def.name)

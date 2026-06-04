@@ -135,6 +135,63 @@ class TestTableQueryTool:
         assert "Error" in result
 
     @pytest.mark.asyncio
+    async def test_blocks_file_reading_sql_function(
+        self, tool: TableQueryTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        _create_csv(workspace / "data.csv", "a,b\n1,2\n")
+        outside = tmp_path / "outside.csv"
+        _create_csv(outside, "secret,value\nleaked,42\n")
+        monkeypatch.chdir(workspace)
+
+        query = f"SELECT * FROM read_csv_auto('{outside}')"
+        result = await tool.execute(path="data.csv", query=query)
+
+        assert "Error" in result
+        assert "read-only" in result
+        assert "leaked" not in result
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "SELECT * FROM glob('/etc/*')",
+            "SELECT * FROM read_text('/etc/passwd')",
+            "SELECT * FROM read_blob('/etc/passwd')",
+            "SELECT * FROM parquet_scan('/etc/passwd')",
+            "COPY data TO '/tmp/out.csv'",
+            "ATTACH '/tmp/db.duckdb' AS other",
+        ],
+    )
+    async def test_blocks_duckdb_file_access_patterns(
+        self,
+        tool: TableQueryTool,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        query: str,
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        _create_csv(tmp_path / "data.csv", "a,b\n1,2\n")
+
+        result = await tool.execute(path="data.csv", query=query)
+
+        assert "Error" in result
+        assert "read-only" in result
+
+    @pytest.mark.asyncio
+    async def test_blocks_non_select_query(
+        self, tool: TableQueryTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        _create_csv(tmp_path / "data.csv", "a,b\n1,2\n")
+
+        result = await tool.execute(path="data.csv", query="DROP TABLE data")
+
+        assert "Error" in result
+        assert "read-only" in result
+
+    @pytest.mark.asyncio
     async def test_file_not_found(self, tool: TableQueryTool) -> None:
         result = await tool.execute(path="nonexistent.csv", query="SELECT 1")
         assert "Error" in result
@@ -189,7 +246,12 @@ class TestTableQueryTool:
     ) -> None:
         """Aggregation on Windows-1251 CSV with Cyrillic column names."""
         monkeypatch.chdir(tmp_path)
-        content = "отдел,сотрудник,оклад\nБухгалтерия,Иванов,80000\nIT,Сидоров,120000\nБухгалтерия,Петрова,90000\n"
+        content = (
+            "отдел,сотрудник,оклад\n"
+            "Бухгалтерия,Иванов,80000\n"
+            "IT,Сидоров,120000\n"
+            "Бухгалтерия,Петрова,90000\n"
+        )
         (tmp_path / "depts.csv").write_bytes(content.encode("cp1251"))
 
         result = await tool.execute(
@@ -211,3 +273,119 @@ class TestTableQueryTool:
         result = await tool.execute(path="goods.csv", query="SELECT * FROM data")
         assert "Молоко" in result
         assert "Хлеб" in result
+
+    # --- sheet_name tests ---
+
+    @pytest.mark.asyncio
+    async def test_xlsx_specific_sheet(
+        self, tool: TableQueryTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Query a specific named sheet in a multi-sheet workbook."""
+        monkeypatch.chdir(tmp_path)
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws1 = wb.active
+        ws1.title = "Sales"
+        ws1.append(["product", "amount"])
+        ws1.append(["Widget", 100])
+        ws2 = wb.create_sheet("Returns")
+        ws2.append(["product", "qty"])
+        ws2.append(["Widget", 5])
+        wb.save(str(tmp_path / "multi.xlsx"))
+
+        result = await tool.execute(
+            path="multi.xlsx",
+            query="SELECT * FROM data",
+            sheet_name="Returns",
+        )
+        assert "5" in result
+        assert "100" not in result
+
+    @pytest.mark.asyncio
+    async def test_xlsx_all_sheets(
+        self, tool: TableQueryTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """sheet_name='all' loads all sheets as separate tables."""
+        monkeypatch.chdir(tmp_path)
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws1 = wb.active
+        ws1.title = "Q1"
+        ws1.append(["city", "revenue"])
+        ws1.append(["Moscow", 500])
+        ws2 = wb.create_sheet("Q2")
+        ws2.append(["city", "revenue"])
+        ws2.append(["Moscow", 700])
+        wb.save(str(tmp_path / "quarters.xlsx"))
+
+        result = await tool.execute(
+            path="quarters.xlsx",
+            query="SELECT * FROM q2",
+            sheet_name="all",
+        )
+        assert "700" in result
+
+    @pytest.mark.asyncio
+    async def test_xlsx_numeric_columns_support_aggregations(
+        self, tool: TableQueryTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Numeric XLSX cells should remain numeric in DuckDB."""
+        monkeypatch.chdir(tmp_path)
+        _create_xlsx(
+            tmp_path / "salaries.xlsx",
+            ["dept", "salary"],
+            [["IT", 100], ["IT", 200], ["HR", 150]],
+        )
+
+        result = await tool.execute(
+            path="salaries.xlsx",
+            query="SELECT dept, SUM(salary) as total FROM data GROUP BY dept ORDER BY dept",
+        )
+
+        assert "HR" in result
+        assert "150" in result
+        assert "IT" in result
+        assert "300" in result
+
+    @pytest.mark.asyncio
+    async def test_xlsx_all_sheets_data_alias(
+        self, tool: TableQueryTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With sheet_name='all', 'data' VIEW aliases the first sheet."""
+        monkeypatch.chdir(tmp_path)
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws1 = wb.active
+        ws1.title = "Alpha"
+        ws1.append(["x"])
+        ws1.append([42])
+        ws2 = wb.create_sheet("Beta")
+        ws2.append(["x"])
+        ws2.append([99])
+        wb.save(str(tmp_path / "two.xlsx"))
+
+        result = await tool.execute(
+            path="two.xlsx",
+            query="SELECT * FROM data",
+            sheet_name="all",
+        )
+        assert "42" in result
+
+    @pytest.mark.asyncio
+    async def test_xlsx_invalid_sheet_name(
+        self, tool: TableQueryTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Invalid sheet name returns an error."""
+        monkeypatch.chdir(tmp_path)
+        _create_xlsx(tmp_path / "data.xlsx", ["a"], [[1]])
+
+        result = await tool.execute(
+            path="data.xlsx",
+            query="SELECT * FROM data",
+            sheet_name="NoSuchSheet",
+        )
+        assert "Error" in result
+        assert "NoSuchSheet" in result

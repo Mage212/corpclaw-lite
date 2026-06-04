@@ -45,12 +45,32 @@ class ContextCompressor:
         for k in to_remove:
             del self._summaries[k]
 
-    def should_compress(self, messages: list[dict[str, Any]]) -> bool:
+    def _threshold_tokens(self) -> int:
+        """Return the configured compression trigger threshold."""
+        return int(self._settings.max_context_tokens * self._settings.threshold_ratio)
+
+    def _effective_tokens(
+        self,
+        messages: list[dict[str, Any]],
+        actual_tokens: int | None = None,
+    ) -> tuple[int, int]:
+        """Return (estimated, effective) tokens for compression decisions."""
+        estimated_tokens = self._estimate_tokens(messages)
+        effective_tokens = max(estimated_tokens, actual_tokens or 0)
+        return estimated_tokens, effective_tokens
+
+    def should_compress(
+        self,
+        messages: list[dict[str, Any]],
+        actual_tokens: int | None = None,
+    ) -> bool:
         """Check if compression is needed based on token threshold.
 
         Returns False if a tool result is the last message — compressing mid-ReAct
         iteration (between tool execution and the next LLM call) corrupts the agent
-        context and causes tasks to be abandoned.
+        context and causes tasks to be abandoned. ``actual_tokens`` is the latest
+        backend-reported total_tokens value and is used as a conservative signal
+        when available.
         """
         if not self._settings.enabled:
             return False
@@ -65,19 +85,25 @@ class ContextCompressor:
             )
             return False
 
-        tokens = self._estimate_tokens(messages)
-        threshold = int(self._settings.max_context_tokens * self._settings.threshold_ratio)
-        should = tokens >= threshold
+        estimated_tokens, effective_tokens = self._effective_tokens(messages, actual_tokens)
+        threshold = self._threshold_tokens()
+        should = effective_tokens >= threshold
         if should:
             logger.info(
-                "ContextCompressor: compression needed (tokens=%d, threshold=%d)",
-                tokens,
+                "ContextCompressor: compression needed "
+                "(effective_tokens=%d, estimated_tokens=%d, actual_tokens=%s, threshold=%d)",
+                effective_tokens,
+                estimated_tokens,
+                actual_tokens,
                 threshold,
             )
         return should
 
     async def compress(
-        self, messages: list[dict[str, Any]], mem_key: str | None = None
+        self,
+        messages: list[dict[str, Any]],
+        mem_key: str | None = None,
+        actual_tokens: int | None = None,
     ) -> list[dict[str, Any]]:
         """Multi-phase compression pipeline.
 
@@ -93,11 +119,12 @@ class ContextCompressor:
         # Note: prune_old_tool_results is already called by the loop before compress(),
         # so we skip it here to avoid double-pruning.
 
-        tokens = self._estimate_tokens(messages)
+        _estimated_tokens, effective_tokens = self._effective_tokens(messages, actual_tokens)
+        threshold = self._threshold_tokens()
         tail_budget = self._settings.protect_tail_tokens
         head_count = 2
 
-        if tokens <= self._settings.max_context_tokens:
+        if effective_tokens < threshold:
             return self._sanitize_tool_pairs(messages)
 
         tail_start = self._find_tail_boundary(messages, tail_budget)
@@ -215,7 +242,11 @@ Summary:"""
 
             effective_provider = self._provider
             if isinstance(self._provider, LLMRouter):
-                effective_provider = self._provider.for_task("compress")
+                effective_provider = self._provider.for_task(
+                    "compress",
+                    user_id=mem_key or "",
+                    load_class="compression",
+                )
 
             response = await effective_provider.chat(
                 messages=[{"role": "user", "content": prompt}],

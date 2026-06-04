@@ -42,13 +42,13 @@ def test_container_manager_ensure_running_creates_new(mock_docker):
     # Mock docker.errors.NotFound since we patch docker module
     mock_docker.errors.NotFound = Exception
 
-    name = manager.ensure_running(user_id=42)
-    assert name == "corpclaw_agent_42"
+    name = manager.ensure_running(user_id=900000042)
+    assert name == "corpclaw_agent_900000042"
     mock_client.containers.run.assert_called_once()
 
     args = mock_client.containers.run.call_args.kwargs
     assert args["image"] == "corpclaw-agent-base:latest"
-    assert args["name"] == "corpclaw_agent_42"
+    assert args["name"] == "corpclaw_agent_900000042"
     assert args["mem_limit"] == "512m"
 
 

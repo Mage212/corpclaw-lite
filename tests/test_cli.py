@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 
 from corpclaw_lite.cli import (
+    _filter_main_scoped_skills,
+    _resolve_password,
     cmd_generate,
     cmd_plugin_list,
     cmd_skill_list,
@@ -14,6 +16,7 @@ from corpclaw_lite.cli import (
     cmd_user_list,
     main,
 )
+from corpclaw_lite.extensions.skills.base import Skill
 
 _SKILL_MD = """\
 ---
@@ -222,6 +225,30 @@ def test_require_env_success(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _require_env("TEST_ENV_VAR") == "value"
 
 
+def test_filter_main_scoped_skills_excludes_subagent_only() -> None:
+    skills = [
+        Skill(id="main", description="", allowed_for=["*"], instructions="", scope=["main"]),
+        Skill(
+            id="global",
+            description="",
+            allowed_for=["*"],
+            instructions="",
+            scope=["*"],
+        ),
+        Skill(
+            id="data_only",
+            description="",
+            allowed_for=["*"],
+            instructions="",
+            scope=["data-agent"],
+        ),
+    ]
+
+    filtered = _filter_main_scoped_skills(skills)
+
+    assert [skill.id for skill in filtered] == ["main", "global"]
+
+
 def test_require_env_fail(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -235,13 +262,120 @@ def test_require_env_fail(
     assert "MISSING_ENV" in captured.err
 
 
+def test_startup_configuration_error_prints_warning(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import sys
+    from unittest.mock import patch
+
+    from corpclaw_lite.exceptions import StartupConfigurationError
+
+    startup_error = StartupConfigurationError(
+        "Container isolation is enabled (container.enabled=true), "
+        "but Docker daemon is not available.",
+        hint="Start Docker, or set container.enabled=false in config/settings.yaml.",
+    )
+
+    with (
+        patch.object(sys, "argv", ["corpclaw-lite", "telegram"]),
+        patch("corpclaw_lite.cli.cmd_telegram", side_effect=startup_error),
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        main()
+
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "WARNING: CorpClaw Lite was not started." in captured.err
+    assert "Container isolation is enabled" in captured.err
+    assert "Start Docker" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_resolve_password_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WEB_PASSWORD", "secret-password-123")
+
+    assert (
+        _resolve_password(password=None, password_env="WEB_PASSWORD", prompt="Password")
+        == "secret-password-123"
+    )
+
+
+def test_resolve_password_prompts_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    prompts: list[str] = []
+
+    def fake_getpass(prompt: str) -> str:
+        prompts.append(prompt)
+        return "secret-password-123"
+
+    monkeypatch.setattr("corpclaw_lite.cli.getpass.getpass", fake_getpass)
+
+    assert (
+        _resolve_password(password=None, password_env=None, prompt="Initial password")
+        == "secret-password-123"
+    )
+    assert prompts == ["Initial password: ", "Confirm password: "]
+
+
 @pytest.mark.parametrize(
     "argv,mock_target",
     [
         (["corpclaw-lite", "chat", "--telegram-id", "278278319"], "cmd_chat"),
         (["corpclaw-lite", "telegram"], "cmd_telegram"),
+        (["corpclaw-lite", "web"], "cmd_web"),
+        (
+            [
+                "corpclaw-lite",
+                "web-user-create",
+                "-u",
+                "alice",
+                "-p",
+                "secret",
+                "-d",
+                "it",
+                "-t",
+                "123",
+            ],
+            "cmd_web_user_create",
+        ),
+        (
+            [
+                "corpclaw-lite",
+                "web-user-link",
+                "-t",
+                "123",
+                "-u",
+                "alice",
+                "-p",
+                "secret",
+            ],
+            "cmd_web_user_link",
+        ),
+        (
+            ["corpclaw-lite", "web-user-password", "-u", "alice", "-p", "secret"],
+            "cmd_web_user_password",
+        ),
+        (
+            [
+                "corpclaw-lite",
+                "web-user-merge",
+                "--source-user-id",
+                "2",
+                "--target-user-id",
+                "1",
+            ],
+            "cmd_web_user_merge",
+        ),
         (["corpclaw-lite", "user-list"], "cmd_user_list"),
         (["corpclaw-lite", "user-create", "-t", "123", "-d", "it"], "cmd_user_create"),
+        (
+            ["corpclaw-lite", "user-link-telegram", "--user-id", "1", "-t", "123"],
+            "cmd_user_link_telegram",
+        ),
+        (
+            ["corpclaw-lite", "user-link-web", "--user-id", "1", "-u", "alice", "-p", "secret"],
+            "cmd_user_link_web",
+        ),
+        (["corpclaw-lite", "user-migrate-canonical-ids"], "cmd_user_migrate_canonical_ids"),
         (["corpclaw-lite", "user-allow", "-t", "123"], "cmd_user_allow"),
         (["corpclaw-lite", "user-deny", "-t", "123"], "cmd_user_deny"),
         (["corpclaw-lite", "user-revoke", "-t", "123"], "cmd_user_revoke"),

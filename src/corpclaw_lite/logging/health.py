@@ -36,6 +36,17 @@ def get_stats() -> dict[str, Any]:
         "requests": _counters.get("requests", 0),
         "tool_calls": _counters.get("tool_calls", 0),
         "errors": _counters.get("errors", 0),
+        "llm_calls": _counters.get("llm_calls", 0),
+        "llm_stream_calls": _counters.get("llm_stream_calls", 0),
+        "llm_stream_fallbacks": _counters.get("llm_stream_fallbacks", 0),
+        "llm_stream_stalls": _counters.get("llm_stream_stalls", 0),
+        "llm_reasoning_chars": _counters.get("llm_reasoning_chars", 0),
+        "llm_content_chars": _counters.get("llm_content_chars", 0),
+        "llm_timeouts": _counters.get("llm_timeouts", 0),
+        "tool_errors": _counters.get("tool_errors", 0),
+        "guard_blocks": _counters.get("guard_blocks", 0),
+        "approval_denied": _counters.get("approval_denied", 0),
+        "active_requests": _counters.get("active_requests", 0),
     }
 
 

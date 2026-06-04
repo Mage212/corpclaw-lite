@@ -6,7 +6,17 @@ from typing import Any
 
 from corpclaw_lite.departments.manager import DepartmentConfig, DepartmentManager
 from corpclaw_lite.departments.permissions import PermissionChecker
+from corpclaw_lite.extensions.tools.base import Tool
 from corpclaw_lite.users.models import User
+
+
+class DummyTool(Tool):
+    name = "dummy_tool"
+    description = "Dummy tool"
+    params = []
+
+    async def execute(self, **kwargs: object) -> str:
+        return "ok"
 
 
 def _make_checker_with_dept(
@@ -66,10 +76,23 @@ def test_can_use_plugin() -> None:
 
 
 def test_can_dispatch_subagent() -> None:
-    checker = _make_checker_with_dept(subagents=["code_reviewer"])
+    checker = _make_checker_with_dept(subagents=["data-agent"])
     user = _make_user()
-    assert checker.can_dispatch_subagent(user, "code_reviewer")
+    assert checker.can_dispatch_subagent(user, "data-agent")
     assert not checker.can_dispatch_subagent(user, "other")
+
+
+def test_department_without_allowed_subagents_denies_dispatch() -> None:
+    mgr = DepartmentManager()
+    mgr._departments["default"] = DepartmentConfig(
+        {
+            "description": "Default",
+            "allowed_tools": ["dispatch_subagent"],
+        }
+    )
+    checker = PermissionChecker(mgr)
+
+    assert not checker.can_dispatch_subagent(_make_user("default"), "research-agent")
 
 
 def test_can_use_mcp() -> None:
@@ -77,6 +100,39 @@ def test_can_use_mcp() -> None:
     user = _make_user()
     assert checker.can_use_mcp(user, "server_a")
     assert not checker.can_use_mcp(user, "server_b")
+
+
+def test_registered_plugin_tool_enforces_plugin_scope() -> None:
+    checker = _make_checker_with_dept(
+        tools=["*"],
+        plugins=["hr_plugin"],
+    )
+    user = _make_user("engineering")
+    tool = DummyTool()
+    tool.source_kind = "plugin"
+    tool.source_name = "hr_plugin"
+    tool.allowed_departments = ["hr"]
+
+    assert not checker.can_use_registered_tool(user, tool)
+
+
+def test_registered_mcp_tool_enforces_server_scope() -> None:
+    checker = _make_checker_with_dept(tools=["*"], mcp=["server_a"])
+    user = _make_user()
+    tool = DummyTool()
+    tool.source_kind = "mcp"
+    tool.source_name = "server_b"
+
+    assert not checker.can_use_registered_tool(user, tool)
+
+
+def test_registered_tool_can_skip_base_allowlist_for_subagents() -> None:
+    checker = _make_checker_with_dept(tools=["read_file"])
+    user = _make_user()
+    tool = DummyTool()
+
+    assert not checker.can_use_registered_tool(user, tool)
+    assert checker.can_use_registered_tool(user, tool, enforce_tool_allowlist=False)
 
 
 def test_get_budget_with_department() -> None:

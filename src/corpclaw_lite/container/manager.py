@@ -73,6 +73,7 @@ class ContainerManager:
         self._client = docker.from_env() if docker else None  # type: ignore[union-attr]
         self._ipc = ipc
         self._user_locks: dict[int, asyncio.Lock] = {}
+        self._managed_user_ids: set[int] = set()
 
     @staticmethod
     def is_docker_available() -> bool:
@@ -92,6 +93,12 @@ class ContainerManager:
     def get_user_workspace(self, user_id: int) -> Path:
         """Return the host-side workspace path for a user, creating it if needed."""
         ws = self._workspace_base / f"user_{user_id}"
+        ws.mkdir(parents=True, exist_ok=True)
+        return ws
+
+    def get_workspace_by_key(self, workspace_key: str) -> Path:
+        """Return the host-side workspace path for a stable channel user key."""
+        ws = self._workspace_base / f"user_{workspace_key}"
         ws.mkdir(parents=True, exist_ok=True)
         return ws
 
@@ -145,6 +152,7 @@ class ContainerManager:
                 container.restart()
             else:
                 logger.debug("Container %s already running.", name)
+            self._managed_user_ids.add(user_id)
             return name
         except Exception as _e:
             # docker.errors.NotFound → container doesn't exist, fall through to create
@@ -164,6 +172,7 @@ class ContainerManager:
         try:
             self._client.containers.run(**args)
             logger.info("Container %s started.", name)
+            self._managed_user_ids.add(user_id)
             return name
         except Exception as e:
             logger.error("Failed to create container for user %d: %s", user_id, e)
@@ -185,6 +194,20 @@ class ContainerManager:
     async def stop_async(self, user_id: int) -> None:
         """Async wrapper for stop — runs in a thread to avoid blocking the event loop."""
         await anyio.to_thread.run_sync(lambda: self.stop(user_id))  # type: ignore[reportAttributeAccessIssue]
+
+    def managed_container_names(self) -> list[str]:
+        """Return container names touched by this manager instance."""
+        return [f"corpclaw_agent_{user_id}" for user_id in sorted(self._managed_user_ids)]
+
+    def stop_managed(self) -> None:
+        """Stop containers that were started or reused by this manager instance."""
+        for name in self.managed_container_names():
+            self.stop_by_name(name)
+        self._managed_user_ids.clear()
+
+    async def stop_managed_async(self) -> None:
+        """Async wrapper for stop_managed — used during channel shutdown."""
+        await anyio.to_thread.run_sync(self.stop_managed)  # type: ignore[reportAttributeAccessIssue]
 
     def stop_by_name(self, name: str) -> None:
         """Stop and remove a container by its Docker name."""

@@ -65,6 +65,97 @@ async def test_subagent_dispatcher():
         isolated_registry = agent_config.registry
         assert "tool_a" in isolated_registry._tools
         assert "tool_b" not in isolated_registry._tools
+        assert agent_config.enforce_tool_permissions is False
+
+
+@pytest.mark.asyncio
+async def test_subagent_loop_keeps_allowed_tools_even_if_department_lacks_direct_tool_access():
+    """Subagent allowed_tools are the authority inside the isolated subagent loop."""
+    registry = ToolRegistry()
+    registry.register(DummyToolA())
+    registry.register(DummyToolB())
+
+    dispatcher = SubagentDispatcher(
+        provider=DummyProvider(), main_registry=registry, settings=AgentSettings()
+    )  # type: ignore
+
+    spec = SubagentSpec(
+        id="data-agent",
+        name="Data Agent",
+        description="Data work",
+        allowed_tools=["tool_a"],
+    )
+    user = User(id=1, name="User", department="marketing")
+
+    with patch("corpclaw_lite.agent.subagent.AgentLoop") as MockLoop:
+        mock_loop_instance = MockLoop.return_value
+        mock_loop_instance.run = AsyncMock(return_value=("Subagent result", RunStats()))
+
+        await dispatcher.dispatch(spec, user, "Analyze data")
+
+        call_args = MockLoop.call_args
+        agent_config = call_args.args[0] if call_args.args else call_args.kwargs["config"]
+        assert agent_config.enforce_tool_permissions is False
+        assert set(agent_config.registry.items()) == {"tool_a"}
+
+
+@pytest.mark.asyncio
+async def test_subagent_dispatcher_uses_same_run_id_for_router_and_loop() -> None:
+    """Subagent LLM queue/cache events must use the subagent's own run_id."""
+    from types import SimpleNamespace
+
+    from corpclaw_lite.config.providers import ProviderRegistry
+    from corpclaw_lite.config.settings import LLMSettings, RoutingRule
+    from corpclaw_lite.llm.router import LLMRouter
+
+    registry = ToolRegistry()
+    registry.register(DummyToolA())
+    provider_registry = ProviderRegistry.from_env(
+        {
+            "PROVIDER_OLLAMA__TYPE": "openai",
+            "PROVIDER_OLLAMA__BASE_URL": "http://localhost:11434/v1",
+            "PROVIDER_OLLAMA__API_KEY": "ollama",
+        }
+    )
+    router = LLMRouter.from_settings(
+        LLMSettings(
+            routing=[RoutingRule(task_kind="default", provider="ollama", model="qwen")],
+            queue={"enabled": True},
+        ),
+        provider_registry,
+    )
+    router.for_subagent = MagicMock(return_value=DummyProvider())  # type: ignore[method-assign]
+
+    dispatcher = SubagentDispatcher(
+        provider=router,
+        main_registry=registry,
+        settings=AgentSettings(),
+    )
+    spec = SubagentSpec(
+        id="data-agent",
+        name="Data Agent",
+        description="Data work",
+        allowed_tools=["tool_a"],
+    )
+    user = User(id=1, name="User", department="dev")
+
+    with (
+        patch("corpclaw_lite.agent.subagent.uuid.uuid4") as mock_uuid4,
+        patch("corpclaw_lite.agent.subagent.AgentLoop") as MockLoop,
+    ):
+        mock_uuid4.return_value = SimpleNamespace(hex="sub-run-id")
+        mock_loop_instance = MockLoop.return_value
+        mock_loop_instance.run = AsyncMock(return_value=("Subagent result", RunStats()))
+
+        await dispatcher.dispatch(spec, user, "Analyze data", parent_run_id="parent-run-id")
+
+    router.for_subagent.assert_called_once_with(
+        "data-agent",
+        user_id="1",
+        run_id="sub-run-id",
+    )
+    mock_loop_instance.run.assert_called_once()
+    assert mock_loop_instance.run.call_args.kwargs["run_id"] == "sub-run-id"
 
 
 @pytest.mark.asyncio
@@ -94,7 +185,10 @@ async def test_subagent_prompt_loading(tmp_path: Path) -> None:
     captured_system: list[str] = []
 
     async def _capture_run(
-        u: object, msg: str, system_prompt: str | None = None
+        u: object,
+        msg: str,
+        system_prompt: str | None = None,
+        **kwargs: Any,
     ) -> tuple[str, RunStats]:
         captured_system.append(system_prompt or "")
         return "done", RunStats()
@@ -135,7 +229,10 @@ async def test_subagent_prompt_fallback_when_missing() -> None:
     captured_system: list[str] = []
 
     async def _capture_run(
-        u: object, msg: str, system_prompt: str | None = None
+        u: object,
+        msg: str,
+        system_prompt: str | None = None,
+        **kwargs: Any,
     ) -> tuple[str, RunStats]:
         captured_system.append(system_prompt or "")
         return "done", RunStats()
@@ -173,7 +270,10 @@ async def test_subagent_system_prompt_passed_as_kwarg() -> None:
     captured_args: list[tuple[str, str | None]] = []
 
     async def _capture(
-        u: object, msg: str, system_prompt: str | None = None
+        u: object,
+        msg: str,
+        system_prompt: str | None = None,
+        **kwargs: Any,
     ) -> tuple[str, RunStats]:
         captured_args.append((msg, system_prompt))
         return "done", RunStats()
@@ -263,10 +363,100 @@ async def test_dispatch_subagent_tool_dispatches() -> None:
     tool = DispatchSubagentTool(dispatcher, registry)
     user = User(id=1, name="U", department="dev")
 
-    result = await tool.execute(subagent_id="worker", task="do the work", user=user)
+    result = await tool.execute(
+        subagent_id="worker",
+        task="do the work",
+        user=user,
+        run_id="parent-run",
+    )
 
     assert result == "subagent result"
-    dispatcher.dispatch.assert_called_once_with(spec, user, "do the work")
+    dispatcher.dispatch.assert_called_once_with(
+        spec,
+        user,
+        "do the work",
+        parent_run_id="parent-run",
+    )
+
+
+@pytest.mark.asyncio
+async def test_dispatch_subagent_tool_enforces_department_subagent_rbac() -> None:
+    """Department allowed_subagents must be enforced before dispatch."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from corpclaw_lite.departments.manager import DepartmentConfig, DepartmentManager
+    from corpclaw_lite.departments.permissions import PermissionChecker
+    from corpclaw_lite.extensions.subagents.base import SubagentSpec
+    from corpclaw_lite.extensions.subagents.registry import SubagentRegistry
+    from corpclaw_lite.extensions.tools.builtin.dispatch import DispatchSubagentTool
+
+    spec = SubagentSpec(
+        id="data-agent",
+        name="Data",
+        description="desc",
+        allowed_tools=["*"],
+        allowed_departments=["analytics"],
+    )
+    registry = SubagentRegistry()
+    registry.register(spec)
+
+    manager = DepartmentManager()
+    manager._departments["analytics"] = DepartmentConfig(
+        {
+            "description": "Analytics",
+            "allowed_tools": ["*"],
+            "allowed_subagents": ["research-agent"],
+        }
+    )
+    checker = PermissionChecker(manager)
+    dispatcher = MagicMock()
+    dispatcher.dispatch = AsyncMock(return_value="subagent result")
+    tool = DispatchSubagentTool(dispatcher, registry, permission_checker=checker)
+    user = User(id=1, name="U", department="analytics")
+
+    result = await tool.execute(subagent_id="data-agent", task="analyze", user=user)
+
+    assert "Permission denied" in result
+    dispatcher.dispatch.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_subagent_available_list_respects_department_rbac() -> None:
+    """Unknown-subagent errors must not list subagents the department cannot dispatch."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from corpclaw_lite.departments.manager import DepartmentConfig, DepartmentManager
+    from corpclaw_lite.departments.permissions import PermissionChecker
+    from corpclaw_lite.extensions.subagents.base import SubagentSpec
+    from corpclaw_lite.extensions.subagents.registry import SubagentRegistry
+    from corpclaw_lite.extensions.tools.builtin.dispatch import DispatchSubagentTool
+
+    registry = SubagentRegistry()
+    registry.register(
+        SubagentSpec(id="research-agent", name="Research", description="desc")
+    )
+    registry.register(
+        SubagentSpec(id="execution-agent", name="Execution", description="desc")
+    )
+    manager = DepartmentManager()
+    manager._departments["default"] = DepartmentConfig(
+        {
+            "description": "Default",
+            "allowed_tools": ["dispatch_subagent"],
+            "allowed_subagents": ["research-agent"],
+        }
+    )
+    checker = PermissionChecker(manager)
+    dispatcher = MagicMock()
+    dispatcher.dispatch = AsyncMock(return_value="subagent result")
+    tool = DispatchSubagentTool(dispatcher, registry, permission_checker=checker)
+    user = User(id=1, name="U", department="default")
+
+    result = await tool.execute(subagent_id="missing-agent", task="work", user=user)
+
+    assert "research-agent" in result
+    assert "execution-agent" not in result
+    dispatcher.dispatch.assert_not_called()
 
 
 # ── Department filtering tests ───────────────────────────────────────────────
@@ -362,7 +552,10 @@ async def test_subagent_receives_matched_skills() -> None:
     captured_system: list[str] = []
 
     async def _capture_run(
-        u: object, msg: str, system_prompt: str | None = None
+        u: object,
+        msg: str,
+        system_prompt: str | None = None,
+        **kwargs: Any,
     ) -> tuple[str, RunStats]:
         captured_system.append(system_prompt or "")
         return "done", RunStats()
@@ -405,7 +598,10 @@ async def test_subagent_no_skills_when_matcher_none() -> None:
     captured_system: list[str] = []
 
     async def _capture_run(
-        u: object, msg: str, system_prompt: str | None = None
+        u: object,
+        msg: str,
+        system_prompt: str | None = None,
+        **kwargs: Any,
     ) -> tuple[str, RunStats]:
         captured_system.append(system_prompt or "")
         return "done", RunStats()

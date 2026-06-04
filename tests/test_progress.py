@@ -70,6 +70,19 @@ async def test_mark_tool_start_updates_desired_text(session: StatusMessageSessio
 
 
 @pytest.mark.asyncio
+async def test_mark_llm_stage_updates_desired_text(session: StatusMessageSession) -> None:
+    """mark_llm_stage() should expose coarse backend LLM stages."""
+    session.mark_llm_stage("reasoning")
+    assert session._desired_text == "🤔 Думаю..."
+
+    session.mark_llm_stage("tool_call")
+    assert session._desired_text == "⚙️ Готовлю действие..."
+
+    session.mark_llm_stage("answer")
+    assert session._desired_text == "📝 Собираю ответ..."
+
+
+@pytest.mark.asyncio
 async def test_mark_tool_start_noop_when_closed(session: StatusMessageSession) -> None:
     """mark_tool_start() should be a no-op after close()."""
     session._closed = True

@@ -103,6 +103,21 @@ async def test_vision_unsupported_format(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_vision_rejects_oversized_image_before_provider_call(tmp_path: Path) -> None:
+    img = tmp_path / "large.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
+
+    provider = FakeVisionProvider()
+    vp = VisionProcessor(provider, max_image_bytes=8)
+
+    result = await vp.describe(img, "Describe")
+
+    assert "Error" in result
+    assert "too large" in result
+    assert provider.last_image_data is None
+
+
+@pytest.mark.asyncio
 async def test_vision_provider_error(tmp_path: Path) -> None:
     """Provider raises an exception — should be caught."""
     img = tmp_path / "test.png"

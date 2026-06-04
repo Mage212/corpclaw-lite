@@ -14,6 +14,11 @@
 # Priority: request-level params > preset params > provider defaults.
 
 presets:
+  # ── Main ────────────────────────────────────────────────────────────────
+  temperature-0.4:
+    inference_params:
+      temperature: 0.4
+
   # ── Gemma 4 ────────────────────────────────────────────────────────────────
   gemma4-thinking:
     description: "Gemma 4 with extended thinking via <|think|> tag injection"

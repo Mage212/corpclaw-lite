@@ -45,6 +45,7 @@ class SubagentRegistry:
                     allowed_tools=data.get("allowed_tools", ["*"]),
                     allowed_departments=data.get("allowed_departments", ["*"]),
                     prompt_path=data.get("prompt_path", ""),
+                    direct_response=bool(data.get("direct_response", False)),
                 )
                 self.register(spec)
                 loaded_count += 1

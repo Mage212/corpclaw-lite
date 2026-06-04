@@ -8,28 +8,21 @@ import logging
 import time
 from typing import Any
 
+from corpclaw_lite.channels.status import (
+    INITIAL_STATUS_TEXT,
+    READY_STATUS_TEXT,
+    TOOL_STATUS_MAP,
+    format_llm_stage_status,
+    format_tool_status,
+)
+
 __all__ = [
+    "_TOOL_STATUS_MAP",
     "StatusMessageSession",
 ]
 
 logger = logging.getLogger(__name__)
-
-_TOOL_STATUS_MAP: dict[str, str] = {
-    "list_files": "📂 Читаю файл...",
-    "read_file": "📂 Читаю файл...",
-    "read_image": "🖼️ Просматриваю изображение...",
-    "normalize_excel": "📊 Обрабатываю таблицу...",
-    "web_fetch": "🌐 Ищу информацию...",
-    "exec_script": "💻 Запускаю команду...",
-    "exec_command": "💻 Запускаю команду...",
-    "send_file_to_user": "📎 Готовлю файл...",
-    "write_file": "✏️ Записываю файл...",
-    "edit_file": "✏️ Редактирую файл...",
-    "search_files": "🔍 Ищу в файлах...",
-    "memory_store": "💾 Запоминаю...",
-    "memory_recall": "💾 Вспоминаю...",
-    "dispatch_subagent": "🤖 Делегирую субагенту...",
-}
+_TOOL_STATUS_MAP = TOOL_STATUS_MAP
 
 
 class StatusMessageSession:
@@ -58,7 +51,7 @@ class StatusMessageSession:
         typing_heartbeat_seconds: float = 4.0,
         delete_on_finish: bool = True,
         max_updates_per_request: int = 8,
-        initial_text: str = "⏳ В обработке...",
+        initial_text: str = INITIAL_STATUS_TEXT,
         thinking_timeout: float = 2.0,
     ) -> None:
         self._bot = bot
@@ -98,8 +91,13 @@ class StatusMessageSession:
 
         This is called synchronously from AgentLoop via ``on_tool_start`` callback.
         """
-        friendly = _TOOL_STATUS_MAP.get(tool_name, "⚙️ Выполняю действие...")
-        self._set_desired_text(friendly)
+        self._set_desired_text(format_tool_status(tool_name))
+
+    def mark_llm_stage(self, stage: str) -> None:
+        """Update desired status from backend LLM streaming telemetry."""
+        friendly = format_llm_stage_status(stage)
+        if friendly is not None:
+            self._set_desired_text(friendly)
 
     async def close(self) -> None:
         """Stop background work and clean up the temporary message."""
@@ -117,7 +115,7 @@ class StatusMessageSession:
             if self._delete_on_finish:
                 await self._message.delete()
             else:
-                await self._message.edit_text("✅ Готово...")
+                await self._message.edit_text(READY_STATUS_TEXT)
         except Exception as exc:
             logger.debug("Failed to finalize progress status message: %s", exc)
 
@@ -144,7 +142,7 @@ class StatusMessageSession:
             await self._bot.send_chat_action(chat_id=self._chat_id, action="typing")
 
     def _apply_timed_default_status(self, now: float) -> None:
-        if self._desired_text != "⏳ В обработке...":
+        if self._desired_text != INITIAL_STATUS_TEXT:
             return
         if now - self._started_at >= self._thinking_timeout:
             self._desired_text = "🤔 Думаю..."

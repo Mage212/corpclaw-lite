@@ -6,7 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from corpclaw_lite.extensions.tools.builtin.pdf_reader import PdfReaderTool, _parse_page_range
+from corpclaw_lite.extensions.tools.builtin.pdf_reader import (
+    PdfReaderTool,
+    _parse_page_range,
+    _sanitize_pdf_text,
+)
 
 
 @pytest.fixture
@@ -19,7 +23,7 @@ def _create_simple_pdf(path: Path, pages_text: list[str]) -> Path:
     from pypdf import PdfWriter
 
     writer = PdfWriter()
-    for text in pages_text:
+    for _text in pages_text:
         writer.add_blank_page(width=200, height=200)
         # Add text as metadata (pypdf doesn't easily add visible text).
         # For testing, we rely on the extraction logic.
@@ -66,6 +70,16 @@ class TestParsePageRange:
     def test_clamp_range(self) -> None:
         result = _parse_page_range("8-15", 10)
         assert result == [7, 8, 9]  # Clamped to available pages.
+
+
+class TestPdfTextSanitizer:
+    def test_removes_control_chars_but_preserves_text_symbols(self) -> None:
+        raw = "π θ ϵ → —\n\tkeep\x00drop\x01also\x10bad\x11chars\x1a"
+
+        result = _sanitize_pdf_text(raw)
+
+        assert result.removed_control_chars == 5
+        assert result.text == "π θ ϵ → —\n\tkeepdropalsobadchars"
 
 
 # --- Integration tests ---
@@ -133,3 +147,71 @@ class TestPdfReaderTool:
     async def test_missing_path(self, tool: PdfReaderTool) -> None:
         result = await tool.execute()
         assert "Error" in result
+
+    @pytest.mark.asyncio
+    async def test_extracted_text_is_sanitized(
+        self, tool: PdfReaderTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import pypdf
+
+        class FakePage:
+            def extract_text(self) -> str:
+                return "Formula r\x00x, yi\x01 and πθ stay"
+
+        class FakeReader:
+            is_encrypted = False
+            pages = [FakePage()]
+
+            def __init__(self, _path: str) -> None:
+                pass
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(pypdf, "PdfReader", FakeReader)
+        (tmp_path / "test.pdf").write_bytes(b"%PDF fake")
+
+        result = await tool.execute(path="test.pdf")
+
+        assert "\x00" not in result
+        assert "\x01" not in result
+        assert "Formula rx, yi and πθ stay" in result
+        assert "Warning: removed 2 control character(s)" in result
+
+    @pytest.mark.asyncio
+    async def test_output_path_writes_sanitized_text(
+        self, tool: PdfReaderTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import pypdf
+
+        class FakePage:
+            def extract_text(self) -> str:
+                return "Clean\x00 PDF text"
+
+        class FakeReader:
+            is_encrypted = False
+            pages = [FakePage()]
+
+            def __init__(self, _path: str) -> None:
+                pass
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(pypdf, "PdfReader", FakeReader)
+        (tmp_path / "test.pdf").write_bytes(b"%PDF fake")
+
+        result = await tool.execute(path="test.pdf", output_path="out/article.md")
+
+        output = (tmp_path / "out" / "article.md").read_text(encoding="utf-8")
+        assert "Extracted PDF text from test.pdf to article.md" in result
+        assert "Removed control characters: 1" in result
+        assert "\x00" not in output
+        assert "Clean PDF text" in output
+
+    @pytest.mark.asyncio
+    async def test_output_path_rejects_unsafe_extension(
+        self, tool: PdfReaderTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "test.pdf").write_bytes(b"%PDF fake")
+
+        result = await tool.execute(path="test.pdf", output_path="out/article.bin")
+
+        assert "Error: output_path must end with one of" in result

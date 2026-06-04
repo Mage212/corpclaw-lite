@@ -65,9 +65,9 @@ async def test_reset(storage: OnboardingStorage) -> None:
 
 @pytest.mark.asyncio()
 async def test_get_or_create_returns_existing(storage: OnboardingStorage) -> None:
-    state = OnboardingState(user_id=42, current_step=3, answers={"a": "b"})
+    state = OnboardingState(user_id=900000042, current_step=3, answers={"a": "b"})
     await storage.save_state(state)
-    existing = await storage.get_or_create(42)
+    existing = await storage.get_or_create(900000042)
     assert existing.current_step == 3
     assert existing.answers == {"a": "b"}
 
@@ -270,10 +270,10 @@ async def test_finalize_saves_bootstrap(tmp_path: Path) -> None:
         "additional_notes": "нет",
     }
 
-    await finalizer.finalize(42, answers, "default")
+    await finalizer.finalize(900000042, answers, "default")
 
     # Check bootstrap file was created
-    bootstrap_file = users_dir / "42.md"
+    bootstrap_file = users_dir / "900000042.md"
     assert bootstrap_file.exists()
     content = bootstrap_file.read_text()
     assert "Вадим" in content
@@ -282,7 +282,7 @@ async def test_finalize_saves_bootstrap(tmp_path: Path) -> None:
     assert mock_memory.store_fact.await_count >= 1
 
     # Check user name was updated
-    mock_user_manager.async_update_name.assert_awaited_once_with(42, "Вадим")
+    mock_user_manager.async_update_name.assert_awaited_once_with(900000042, "Вадим")
 
 
 @pytest.mark.asyncio()

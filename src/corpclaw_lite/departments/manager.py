@@ -25,14 +25,14 @@ class DepartmentConfig:
         self.allowed_tools: list[str] = data.get("allowed_tools", ["*"])
         self.allowed_skills: list[str] = data.get("allowed_skills", ["*"])
         self.allowed_plugins: list[str] = data.get("allowed_plugins", ["*"])
-        self.allowed_subagents: list[str] = data.get("allowed_subagents", ["*"])
+        self.allowed_subagents: list[str] = data.get("allowed_subagents", [])
         self.allowed_mcp: list[str] = data.get("allowed_mcp", ["*"])
 
         budget_data = data.get("budget", {})
         self.budget = SimpleBudgetGuardConfig(
             max_iterations=budget_data.get("max_iterations", 15),
             max_tool_calls=budget_data.get("max_tool_calls", 30),
-            max_time_ms=budget_data.get("max_time_ms", 120000),
+            max_time_ms=300000,
         )
 
 

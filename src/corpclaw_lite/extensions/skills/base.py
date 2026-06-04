@@ -20,6 +20,8 @@ class Skill:
         path: Optional file path where this skill was loaded from
         version: Skill version string
         keywords: Matching terms/prefixes for semantic selection (e.g. ["excel", "нормализ"])
+        scope: Which agents can use this skill. ["*"] for all, ["main"] for main agent only,
+            ["data-agent"] for a specific subagent, etc.
         always: If True, this skill is always injected into the prompt regardless of matching
     """
 
@@ -30,4 +32,5 @@ class Skill:
     path: Path | None = None
     version: str = "1.0.0"
     keywords: list[str] = field(default_factory=lambda: [])
+    scope: list[str] = field(default_factory=lambda: ["*"])
     always: bool = False
