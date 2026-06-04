@@ -53,6 +53,7 @@ CLAUDE.md
 AGENTS.md
 .mcp.json
 .codex/config.toml
+.codex/hooks.json
 .opencode/
 .qwen/
 .antigravitycli/

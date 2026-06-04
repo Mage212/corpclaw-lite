@@ -183,10 +183,13 @@ data/
 | `search_files` | LOW | Regex-поиск (пропускает .git/node_modules) |
 | `exec_script` | HIGH | Shell-команды с таймаутом (30s по умолчанию, 120s макс) |
 | `web_fetch` | MEDIUM | HTTP-запросы с защитой от SSRF |
+| `web_search` | MEDIUM | Поиск источников через DuckDuckGo-compatible backend |
 | `read_image` | LOW | Анализ изображений через отдельный LLM-вызов |
 | `memory_store` | LOW | Сохранение фактов пользователя в SQLite |
 | `memory_recall` | LOW | Поиск сохранённых фактов в SQLite |
 | `normalize_excel` | MEDIUM | Исправление форматирования Excel (ИНН, даты, невидимые символы) |
+| `excel_inspect` | LOW | Быстрая инспекция Excel-структуры, листов, диапазонов и образцов данных |
+| `excel_workbook` | MEDIUM | Чтение и заполнение Excel-книг с учётом формул, диапазонов и пагинации |
 | `send_file` | MEDIUM | Отправка файлов пользователю через канал |
 | `dispatch_subagent` | LOW | Делегирование специализированному субагенту |
 | `diff_text` | LOW | Сравнение текстов и файлов с выводом различий |
@@ -194,6 +197,12 @@ data/
 | `chart_generate` | MEDIUM | Генерация графиков (bar, line, pie, scatter, histogram) |
 | `convert_format` | MEDIUM | Конвертация между CSV, XLSX, JSON, Markdown |
 | `pdf_reader` | LOW | Извлечение текста из PDF с поддержкой диапазонов страниц |
+| `research_search` | MEDIUM | Управляемый поиск источников для исследовательского workflow |
+| `research_fetch_source` | MEDIUM | Загрузка и кеширование источника для исследования |
+| `research_read_source` | LOW | Чтение сохранённого источника с поиском и лимитами вывода |
+| `research_store_fact` | LOW | Сохранение проверенного факта исследования с метаданными |
+| `research_list_facts` | LOW | Просмотр накопленных фактов исследования |
+| `research_finalize` | LOW | Финализация исследовательского ответа с источниками |
 
 ---
 
@@ -209,6 +218,7 @@ Markdown-файлы с YAML-фронтматтером. Автоматическ
 |-------|-------|------------|
 | `translator` | main | Перевод текстов между языками |
 | `excel_normalizer` | document-agent | Нормализация Excel: ИНН, даты, невидимые символы |
+| `excel_filler` | document-agent, data-agent | Заполнение Excel-шаблонов с сохранением формул и структуры |
 | `meeting_summary` | document-agent | Структурированные итоги встреч с задачами и решениями |
 | `data_analyst` | data-agent | Анализ данных, графики, SQL-запросы, конвертация форматов |
 
@@ -248,8 +258,8 @@ plugins/my_plugin/
 | `filesystem-agent` | read_file, list_files, search_files, write_file, edit_file | Файловые операции и поиск |
 | `document-agent` | read/write/edit_file, normalize_excel, list_files | Создание и редактирование документов |
 | `execution-agent` | exec_script, write_file, read_file | Выполнение скриптов и команд |
-| `research-agent` | web_fetch, read_file, search_files, list_files, memory_store, memory_recall | Веб-исследование и анализ |
-| `data-agent` | table_query, chart_generate, convert_format, pdf_reader, diff_text, read/write_file, list_files, search_files, send_file | Анализ данных, SQL, графики, конвертация |
+| `research-agent` | research_search, research_fetch_source, research_read_source, research_store_fact, research_list_facts, research_finalize, web_fetch, web_search | Веб-исследование, проверка источников и финализация ответа |
+| `data-agent` | table_query, chart_generate, convert_format, pdf_reader, diff_text, excel_workbook, read/write_file, list_files, search_files, send_file | Анализ данных, SQL, графики, Excel и конвертация |
 
 ### MCP-серверы (`config/mcp_servers.yaml`)
 
@@ -450,7 +460,6 @@ CorpClaw Lite спроектирован для работы в **замкнут
 | `config/model_presets.yaml` | Параметры инференса и конфигурация reasoning для каждой модели |
 | `config/departments.yaml` | RBAC: инструментальные разрешения и бюджеты по департаментам |
 | `config/tool_guard_rules.yaml` | 20+ правил безопасности для ToolGuard |
-| `config/network_policy.yaml` | Сетевой allowlist для контейнеров |
 | `config/calibration_scenarios.yaml` | 20+ тестовых сценариев для калибровки |
 | `config/bootstrap/*.md` | Идентичность агента: SOUL.md, COMPANY.md, BEHAVIOR.md |
 | `config/bootstrap/departments/*.md` | Системные промпты по департаментам |
@@ -584,18 +593,18 @@ uv run pytest tests/ --cov=src/corpclaw_lite --cov-report=term-missing  # Пок
 
 | Компонент | LOC | Файлов |
 |-----------|-----|--------|
-| Agent Core | 1 901 | 10 |
-| Extensions | 2 558 | 43 |
-| Channels | 5 037 | 14 |
+| Agent Core | 2 823 | 10 |
+| Extensions | 7 395 | 47 |
+| Channels | 6 313 | 22 |
 | Calibration | 1 522 | 8 |
-| LLM Providers | 1 195 | 7 |
-| Container | 806 | 6 |
-| Security | 506 | 5 |
-| Memory | 477 | 3 |
-| Onboarding | 614 | 5 |
-| Прочее | ~2 004 | ~25 |
-| **Исходный код** | **~16 620** | **~126** |
-| **Тесты** | **~14 685** | **~85** (806 тестов) |
+| LLM Providers | 3 671 | 9 |
+| Container | 833 | 6 |
+| Security | 562 | 5 |
+| Memory | 510 | 3 |
+| Onboarding | 630 | 5 |
+| Прочее | ~6 429 | ~28 |
+| **Исходный код** | **~27 769** | **~141** |
+| **Тесты** | **~20 729** | **~97** (1018 тестов собрано) |
 
 ---
 
