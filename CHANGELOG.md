@@ -4,11 +4,11 @@
 
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/).
 
-## [0.1.3] — 2026-05-10
+## [0.1.4-beta] — 2026-06-04
 
-Текущая рабочая версия. Основной фокус — управление конкурентностью локальных LLM, slot affinity
-для llama.cpp, экспериментальный persistent KV-cache в файлах и ручные live-тесты на реальном
-llama-server.
+Текущий beta-релиз. Основной фокус — production-ready Web-канал, премиальный русскоязычный
+интерфейс, управление конкурентностью локальных LLM, slot affinity для llama.cpp,
+экспериментальный persistent KV-cache в файлах и ручные live-тесты на реальном llama-server.
 
 ### Added
 
@@ -39,6 +39,9 @@ llama-server.
 - Web-чат получил persistent transcript в SQLite: история текущей сессии переживает refresh,
   logout/login и reconnect, `/new` открывает новую пустую сессию, а долгие запросы больше не
   привязаны к одному старому WebSocket-соединению.
+- Web UI получил премиальный русскоязычный рабочий интерфейс: операционный центр с обзором
+  выполнения, последние файлы и результаты, сворачиваемые панели, отдельное меню пользователя,
+  явная новая сессия и collapsible operation center.
 - Web frontend получил runtime-проверку REST/WebSocket JSON-контрактов без новых зависимостей,
   а TypeScript-проверка усилена `noUncheckedIndexedAccess` и `exactOptionalPropertyTypes`.
 - Web-канал теперь распознаёт `502 upstream_error / Connection refused` от OpenAI-compatible
@@ -162,12 +165,14 @@ llama-server.
 
 ### Verified
 
-- Полная проверка после реализации persistent cache:
-  - `uv run ruff check src/ tests/ --fix`
-  - `uv run ruff format src/ tests/`
+- Полная релизная проверка на `pre-release`:
+  - `uv run ruff check src/ tests/`
   - `uv run pyright src/`
-  - `uv run pytest tests/ -v`
-- Результат полной проверки: `903 passed, 1 skipped`.
+  - `uv run pytest tests/ -q`
+  - `cd frontend/web && npm run build`
+  - `cd frontend/web && npm run test`
+- Результат полной проверки: `1017 passed, 1 skipped`; pyright — `0 errors`,
+  `17 warnings` по неполным matplotlib-стабам в `chart_generate.py`.
 - Ручные live-тесты на `llama-server` с моделью `gpt-oss-20b-UD-Q4_K_XL`:
   - обычный live-прогон: `7 passed, 1 skipped`;
   - slow large cache roundtrip: `1 passed`;

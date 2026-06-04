@@ -1,7 +1,7 @@
 # CorpClaw Lite — Архитектура проекта
 
-> Версия документа: 2026-04-17
-> Версия проекта: Phase 7 (Production-Ready) — ~132 модулей, ~21.7K LOC, 932 теста
+> Версия документа: 2026-06-04
+> Версия проекта: 0.1.4-beta — ~141 Python-модуль, ~27.8K LOC, 1018 pytest-кейсов
 
 ---
 
@@ -50,12 +50,12 @@ corpclaw-lite/
 │   ├── onboarding/         # Гибридный онбординг пользователей
 │   ├── llm/                # LLM провайдеры (OpenAI, Anthropic, XML fallback, presets, router)
 │   ├── extensions/
-│   │   ├── tools/          # Инструменты + registry (18 builtin) + YAML overrides
+│   │   ├── tools/          # Инструменты + registry (27 builtin tool names) + YAML overrides
 │   │   ├── skills/         # Markdown-скиллы + TF-IDF matcher + hot-reload (5s)
 │   │   ├── plugins/        # Плагины с manifest.yaml + sandbox worker + hot-reload (10s)
 │   │   ├── subagents/      # Специализированные субагенты (5 builtin)
 │   │   └── mcp/            # Model Context Protocol интеграция + hot-reload (10s)
-│   ├── channels/           # CLI и Telegram каналы (12 Telegram-модулей)
+│   ├── channels/           # CLI, Telegram и Web каналы
 │   ├── security/           # ToolGuard (YAML + Smart), NetworkPolicy, CredentialScrubber, IPCAuth
 │   ├── container/          # Docker-изоляция + IPC-прокси + agent worker
 │   ├── memory/             # SQLite + консолидация
@@ -66,10 +66,10 @@ corpclaw-lite/
 │   ├── utils/              # DB helpers
 │   └── logging/            # Структурированное логирование + health endpoint
 ├── config/                 # YAML-конфигурации + bootstrap prompts
-├── skills/                 # 4 Markdown-скилла с scope-фильтрацией (translator, excel_normalizer, meeting_summary, data_analyst)
+├── skills/                 # 5 Markdown-скиллов с scope-фильтрацией
 ├── plugins/                # Директория плагинов
 ├── docker/                 # Dockerfile, Dockerfile.agent, seccomp_default.json
-└── tests/                  # Тесты (932 теста, 95 файлов)
+└── tests/                  # Тесты (1018 pytest-кейсов, 97 Python test-файлов)
 ```
 
 ---
@@ -91,7 +91,7 @@ no tool_calls? → Response → Save to Memory
 **AgentConfig** (dataclass) — группирует все зависимости AgentLoop:
 - `provider: Provider` — LLM провайдер/router
 - `registry: ToolRegistry` — доступные инструменты
-- `settings: AgentSettings` — конфигурация (max_steps=15, max_tool_calls=30, max_wall_time_ms=120000)
+- `settings: AgentSettings` — конфигурация (max_steps=15, max_tool_calls=30, max_wall_time_ms=300000)
 - `permission_checker`, `tool_guard`, `memory`, `consolidator`, `compressor`, `approval_callback`
 
 **RunStats** (dataclass) — метрики выполнения:
@@ -329,7 +329,7 @@ class Tool(ABC):
 - `load_overrides(path)` — YAML description overrides (калибровка)
 - `to_schemas()` / `to_schemas_for_user()` — OpenAI function schemas
 
-**Builtin Tools (18):**
+**Builtin Tools (27):**
 
 | Tool | Risk | Назначение |
 |------|------|------------|
@@ -340,10 +340,13 @@ class Tool(ABC):
 | `search_files` | LOW | Regex-поиск (skip .git/node_modules) |
 | `exec_script` | HIGH | Shell-команды (timeout 30s/120s max, 50KB truncation) |
 | `web_fetch` | MEDIUM | HTTP-запросы (SSRF protection, 1MB limit) |
+| `web_search` | MEDIUM | Поиск источников через DuckDuckGo-compatible backend |
 | `read_image` | LOW | Vision-анализ (terminal=True, separate LLM call) |
 | `memory_store` | LOW | Сохранение per-user фактов в SQLite |
 | `memory_recall` | LOW | Поиск per-user фактов в SQLite |
 | `normalize_excel` | MEDIUM | Нормализация Excel (INN, dates, invisible chars) |
+| `excel_inspect` | LOW | Быстрая инспекция Excel-структуры, листов и диапазонов |
+| `excel_workbook` | MEDIUM | Чтение и заполнение Excel-книг с формулами и пагинацией |
 | `send_file` | MEDIUM | Отправка файла (20MB limit) |
 | `dispatch_subagent` | LOW | Делегирование субагенту (terminal=True) |
 | `diff_text` | LOW | Сравнение текстов/файлов (unified/words/chars) |
@@ -351,6 +354,12 @@ class Tool(ABC):
 | `chart_generate` | MEDIUM | Графики (bar, line, pie, scatter, histogram) |
 | `convert_format` | MEDIUM | Конвертация CSV ↔ XLSX ↔ JSON ↔ Markdown |
 | `pdf_reader` | LOW | Извлечение текста из PDF (page ranges) |
+| `research_search` | MEDIUM | Управляемый поиск источников для research-agent |
+| `research_fetch_source` | MEDIUM | Загрузка и кеширование источника исследования |
+| `research_read_source` | LOW | Чтение сохранённого источника с лимитами вывода |
+| `research_store_fact` | LOW | Сохранение проверенного факта исследования |
+| `research_list_facts` | LOW | Просмотр фактов исследования |
+| `research_finalize` | LOW | Финализация исследовательского ответа с источниками |
 
 ### Skills (`extensions/skills/`)
 
@@ -380,12 +389,13 @@ always: false
 - Track mtime per file
 - Detect: new, modified, deleted
 
-**Загруженные скилы (4):**
+**Загруженные скилы (5):**
 
 | Skill | Scope | Назначение |
 |-------|-------|------------|
 | `translator` | main | Перевод текстов |
 | `excel_normalizer` | document-agent | Нормализация Excel |
+| `excel_filler` | document-agent, data-agent | Заполнение Excel-шаблонов |
 | `meeting_summary` | document-agent | Итоги встреч |
 | `data_analyst` | data-agent | Анализ данных, SQL, графики |
 
@@ -525,14 +535,10 @@ User Message
 
 ### NetworkPolicy (`security/network_policy.py`)
 
-Deny-by-default + allowlist (паттерн NemoClaw):
-
-```yaml
-allowlist:
-  - "api.anthropic.com"
-  - "localhost:11434"
-  - "api.github.com"
-```
+Контейнерная сеть работает в режиме pure deny-all: для контейнеров выставляется
+`network_mode: "none"`, отдельного allowlist-конфига больше нет. Внешние HTTP-запросы
+выполняются host-side инструментами (`web_fetch`, `web_search`) с SSRF-защитой и
+department/RBAC-контролем, чтобы не открывать сеть внутри пользовательской песочницы.
 
 ### CredentialScrubber (`security/credential_scrubber.py`)
 
@@ -686,7 +692,7 @@ llm:
 agent:
   max_steps: 15
   max_tool_calls: 30
-  max_wall_time_ms: 120000
+  max_wall_time_ms: 300000
   max_history: 20
   approval_mode: "manual"  # "manual" | "smart" | "off"
   compression:
@@ -877,24 +883,24 @@ skills:
 
 | Компонент | LOC | Файлов |
 |-----------|-----|--------|
-| Agent Core | ~1,901 | 10 |
+| Agent Core | ~2,823 | 10 |
 | Calibration | ~1,522 | 8 |
-| Onboarding | ~614 | 5 |
-| LLM Providers | ~1,195 | 7 |
-| Extensions | ~2,558 | 43 |
-| Security | ~506 | 5 |
-| Channels | ~5,037 | 14 |
-| Container | ~806 | 6 |
-| Memory | ~477 | 3 |
-| Config + RBAC | ~511 | 5 |
-| Departments | ~130 | 3 |
-| Users | ~287 | 3 |
+| Onboarding | ~630 | 5 |
+| LLM Providers | ~3,671 | 9 |
+| Extensions | ~7,395 | 47 |
+| Security | ~562 | 5 |
+| Channels | ~6,313 | 22 |
+| Container | ~833 | 6 |
+| Memory | ~510 | 3 |
+| Config + RBAC | ~634 | 6 |
+| Departments | ~198 | 3 |
+| Users | ~955 | 3 |
 | Runtime | ~47 | 2 |
-| Logging | ~178 | 3 |
-| Root (cli, etc.) | ~802 | 4 |
-| **Исходники** | **~21,712** | **~132** |
-| **Тесты** | **~18,507** | **~95** |
-| **Тест-кейсов pytest** | **932** | |
+| Logging | ~359 | 4 |
+| Root (cli, etc.) | ~1,265 | 4 |
+| **Исходники** | **~27,769** | **~141** |
+| **Тесты** | **~20,729** | **~97** |
+| **Тест-кейсов pytest** | **1018** | |
 
 ---
 
