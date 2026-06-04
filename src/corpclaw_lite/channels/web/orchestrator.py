@@ -23,6 +23,7 @@ from corpclaw_lite.channels.status import (
     INITIAL_STATUS_TEXT,
     READY_STATUS_TEXT,
     format_llm_stage_status,
+    format_tool_batch_status,
     format_tool_status,
 )
 from corpclaw_lite.channels.telegram.rate_limit import RateLimiter
@@ -1018,6 +1019,12 @@ class WebChannelOrchestrator:
                 }
             )
 
+        def send_llm_status(*, request_id: str, stage: str) -> None:
+            label = format_llm_stage_status(stage)
+            if label is None:
+                return
+            send_status(request_id=request_id, phase="llm", key=stage, label=label)
+
         async def approval_cb(action: str, details: str) -> bool:
             approval_id = secrets.token_urlsafe(12)
             future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
@@ -1121,11 +1128,15 @@ class WebChannelOrchestrator:
                             key=tool,
                             label=format_tool_status(tool),
                         ),
-                        on_llm_stage=lambda stage: send_status(
+                        on_tool_batch_start=lambda tools: send_status(
                             request_id=request_id,
-                            phase="llm",
-                            key=stage,
-                            label=format_llm_stage_status(stage) or INITIAL_STATUS_TEXT,
+                            phase="tool",
+                            key="parallel_tools",
+                            label=format_tool_batch_status(tools),
+                        ),
+                        on_llm_stage=lambda stage: send_llm_status(
+                            request_id=request_id,
+                            stage=stage,
                         ),
                     ),
                 )

@@ -498,6 +498,7 @@ async def test_on_tool_start_callback_called(test_user: User, empty_registry: To
         name = "read_file"
         description = ""
         params = []  # type: ignore[var-annotated]
+        parallel_safe = False
 
         async def execute(self, **kwargs: Any) -> str:
             return "content"
@@ -525,6 +526,52 @@ async def test_on_tool_start_callback_called(test_user: User, empty_registry: To
 
     assert result == "Done."
     assert started_tools == ["read_file", "read_file"]
+    assert stats.tools_used == ["read_file", "read_file"]
+
+
+@pytest.mark.asyncio
+async def test_parallel_tool_batch_callback_suppresses_individual_starts(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """Parallel tool batches should emit one aggregate status update."""
+
+    class FakeTool:
+        name = "read_file"
+        description = ""
+        params = []  # type: ignore[var-annotated]
+        parallel_safe = True
+
+        async def execute(self, **kwargs: Any) -> str:
+            return "content"
+
+    empty_registry._tools["read_file"] = FakeTool()  # type: ignore
+
+    provider = MockProvider(
+        responses=[
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCall(id="1", name="read_file", arguments={}),
+                    ToolCall(id="2", name="read_file", arguments={}),
+                ],
+            ),
+            LLMResponse(content="Done."),
+        ]
+    )
+    loop = AgentLoop(AgentConfig(provider, empty_registry, AgentSettings()))
+    started_tools: list[str] = []
+    started_batches: list[list[str]] = []
+
+    result, stats = await loop.run(
+        test_user,
+        "read two files",
+        on_tool_start=lambda name: started_tools.append(name),
+        on_tool_batch_start=lambda names: started_batches.append(list(names)),
+    )
+
+    assert result == "Done."
+    assert started_tools == []
+    assert started_batches == [["read_file", "read_file"]]
     assert stats.tools_used == ["read_file", "read_file"]
 
 

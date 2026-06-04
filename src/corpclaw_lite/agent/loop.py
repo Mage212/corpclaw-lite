@@ -388,6 +388,7 @@ class AgentLoop:
         approval_callback: Callable[[str, str], Awaitable[bool]] | None = None,
         on_tool_start: Callable[[str], None] | None = None,
         on_llm_stage: Callable[[str], None] | None = None,
+        on_tool_batch_start: Callable[[list[str]], None] | None = None,
         tools_enabled: bool = True,
         trajectory_recorder: TrajectoryRecorder | None = None,
         few_shots: list[dict[str, Any]] | None = None,
@@ -730,6 +731,7 @@ class AgentLoop:
                         user,
                         _approval_cb,
                         on_tool_start,
+                        on_tool_batch_start,
                         trajectory_recorder,
                         stats,
                     )
@@ -918,17 +920,20 @@ class AgentLoop:
         user: User,
         approval_callback: Callable[[str, str], Awaitable[bool]] | None,
         on_tool_start: Callable[[str], None] | None,
+        on_tool_batch_start: Callable[[list[str]], None] | None,
         trajectory_recorder: TrajectoryRecorder | None = None,
         stats: RunStats | None = None,
     ) -> list[str]:
         """Execute multiple tools in parallel and return results."""
+        if on_tool_batch_start is not None:
+            on_tool_batch_start([tc.name for tc in tool_calls])
 
         async def execute_one(tc: ToolCall) -> str:
             return await self._execute_single_tool(
                 tc,
                 user,
                 approval_callback,
-                on_tool_start,
+                None,
                 trajectory_recorder,
                 stats,
             )

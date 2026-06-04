@@ -13,6 +13,7 @@ from corpclaw_lite.channels.status import (
     READY_STATUS_TEXT,
     TOOL_STATUS_MAP,
     format_llm_stage_status,
+    format_tool_batch_status,
     format_tool_status,
 )
 
@@ -92,6 +93,10 @@ class StatusMessageSession:
         This is called synchronously from AgentLoop via ``on_tool_start`` callback.
         """
         self._set_desired_text(format_tool_status(tool_name))
+
+    def mark_tool_batch_start(self, tool_names: list[str]) -> None:
+        """Update desired status from a parallel tool batch start."""
+        self._set_desired_text(format_tool_batch_status(tool_names))
 
     def mark_llm_stage(self, stage: str) -> None:
         """Update desired status from backend LLM streaming telemetry."""

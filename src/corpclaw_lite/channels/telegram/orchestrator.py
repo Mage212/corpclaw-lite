@@ -610,6 +610,9 @@ class TelegramBotOrchestrator:
                 on_tool_start=(
                     status_session.mark_tool_start if status_session is not None else None
                 ),
+                on_tool_batch_start=(
+                    status_session.mark_tool_batch_start if status_session is not None else None
+                ),
                 on_llm_stage=(
                     status_session.mark_llm_stage if status_session is not None else None
                 ),

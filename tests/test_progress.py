@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from corpclaw_lite.channels.status import format_llm_stage_status, format_tool_batch_status
 from corpclaw_lite.channels.telegram.progress import _TOOL_STATUS_MAP, StatusMessageSession
 
 
@@ -80,6 +81,25 @@ async def test_mark_llm_stage_updates_desired_text(session: StatusMessageSession
 
     session.mark_llm_stage("answer")
     assert session._desired_text == "📝 Собираю ответ..."
+
+
+@pytest.mark.asyncio
+async def test_mark_tool_batch_start_updates_desired_text(session: StatusMessageSession) -> None:
+    """mark_tool_batch_start() should expose one aggregate parallel-tools status."""
+    session.mark_tool_batch_start(["read_file", "list_files"])
+    assert session._desired_text == "📂 Работаю с файлами..."
+
+    session.mark_tool_batch_start(["read_file", "web_fetch"])
+    assert session._desired_text == "⚙️ Выполняю 2 действия..."
+
+
+def test_tool_batch_status_formatter_groups_same_kind_tools() -> None:
+    assert format_tool_batch_status(["web_fetch", "web_search"]) == "🔍 Ищу данные..."
+    assert format_tool_batch_status(["memory_store", "memory_recall"]) == "💾 Работаю с памятью..."
+
+
+def test_finished_llm_stage_has_no_user_status() -> None:
+    assert format_llm_stage_status("finished") is None
 
 
 @pytest.mark.asyncio

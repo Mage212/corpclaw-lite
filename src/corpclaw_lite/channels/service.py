@@ -77,6 +77,7 @@ class AgentRequestCallbacks:
 
     request_approval: Callable[[str, str], Awaitable[bool]] | None = None
     on_tool_start: Callable[[str], None] | None = None
+    on_tool_batch_start: Callable[[list[str]], None] | None = None
     on_llm_stage: Callable[[str], None] | None = None
 
 
@@ -204,6 +205,7 @@ class AgentRequestService:
                 system_prompt=system_prompt,
                 approval_callback=callbacks.request_approval,
                 on_tool_start=callbacks.on_tool_start,
+                on_tool_batch_start=callbacks.on_tool_batch_start,
                 on_llm_stage=callbacks.on_llm_stage,
                 tools_enabled=(mode == "execute"),
                 few_shots=stack.few_shots,

@@ -8,6 +8,7 @@ __all__ = [
     "READY_STATUS_TEXT",
     "TOOL_STATUS_MAP",
     "format_llm_stage_status",
+    "format_tool_batch_status",
     "format_tool_status",
 ]
 
@@ -41,10 +42,44 @@ LLM_STAGE_STATUS_MAP: dict[str, str] = {
     "stalled": "🤔 Думаю...",
 }
 
+FILE_TOOL_NAMES = frozenset(
+    {
+        "list_files",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "send_file_to_user",
+    }
+)
+SEARCH_TOOL_NAMES = frozenset({"search_files", "web_fetch", "web_search"})
+MEMORY_TOOL_NAMES = frozenset({"memory_store", "memory_recall"})
+
 
 def format_tool_status(tool_name: str) -> str:
     """Return a friendly status label for a tool execution start."""
     return TOOL_STATUS_MAP.get(tool_name, "⚙️ Выполняю действие...")
+
+
+def format_tool_batch_status(tool_names: list[str]) -> str:
+    """Return a friendly status label for a parallel tool batch."""
+    names = set(tool_names)
+    if names and names <= FILE_TOOL_NAMES:
+        return "📂 Работаю с файлами..."
+    if names and names <= SEARCH_TOOL_NAMES:
+        return "🔍 Ищу данные..."
+    if names and names <= MEMORY_TOOL_NAMES:
+        return "💾 Работаю с памятью..."
+
+    count = len(tool_names)
+    if count <= 0:
+        return "⚙️ Выполняю действия..."
+    if count % 10 == 1 and count % 100 != 11:
+        word = "действие"
+    elif count % 10 in (2, 3, 4) and count % 100 not in (12, 13, 14):
+        word = "действия"
+    else:
+        word = "действий"
+    return f"⚙️ Выполняю {count} {word}..."
 
 
 def format_llm_stage_status(stage: str) -> str | None:
