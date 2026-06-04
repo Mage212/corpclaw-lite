@@ -600,9 +600,7 @@ class UserManager:
         if not password:
             raise ValueError("password is required")
         if len(password) < self._password_min_length:
-            raise ValueError(
-                f"password must be at least {self._password_min_length} characters"
-            )
+            raise ValueError(f"password must be at least {self._password_min_length} characters")
         if len(password) > self._password_max_length:
             raise ValueError(f"password must be at most {self._password_max_length} characters")
 
