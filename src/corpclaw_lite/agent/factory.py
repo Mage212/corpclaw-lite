@@ -286,7 +286,6 @@ def _build_extensions_stack(
     research_tools = build_research_tools(research_runtime, web_search_tool, web_fetch_tool)
 
     registry.register(web_fetch_tool)
-    registry.register(web_search_tool)
     registry.register(read_image_tool)
 
     # Also register host-side tools on full_tool_registry so subagents

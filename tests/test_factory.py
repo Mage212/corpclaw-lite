@@ -98,7 +98,7 @@ def test_build_agent_stack_local_provider() -> None:
     assert "excel_inspect" in tool_names
     # Host-side tools registered separately
     assert "web_fetch" in tool_names
-    assert "web_search" in tool_names
+    assert "web_search" not in tool_names
     assert "read_image" in tool_names
     assert "memory_store" in tool_names
     assert "memory_recall" in tool_names
@@ -115,6 +115,13 @@ def test_build_agent_stack_local_provider() -> None:
     # In dev mode (containers disabled), tools run on host (not IPCToolProxy)
     read_file_tool = registry.get("read_file")
     assert not isinstance(read_file_tool, IPCToolProxy)
+
+    # Web search is subagent-only: the main agent delegates research, while
+    # research-agent keeps its internal search workflow.
+    assert stack.full_tool_registry is not None
+    assert stack.full_tool_registry.get("web_search") is not None
+    assert stack.full_tool_registry.get("research_search") is not None
+    assert stack.full_tool_registry.get("research_fetch_source") is not None
 
 
 def test_build_agent_stack_anthropic_provider() -> None:
@@ -284,8 +291,15 @@ def test_container_enabled_registers_ipc_proxies() -> None:
     # Host-side tools should NOT be proxied
     web_fetch = registry.get("web_fetch")
     assert not isinstance(web_fetch, IPCToolProxy)
+
+    # Main agent has no direct web_search; subagents still get it through the
+    # full registry, and it must remain host-side because containers have no net.
     web_search = registry.get("web_search")
-    assert not isinstance(web_search, IPCToolProxy)
+    assert web_search is None
+    assert stack.full_tool_registry is not None
+    full_web_search = stack.full_tool_registry.get("web_search")
+    assert full_web_search is not None
+    assert not isinstance(full_web_search, IPCToolProxy)
 
 
 def test_main_agent_tool_classes_has_four_factory_tools() -> None:
