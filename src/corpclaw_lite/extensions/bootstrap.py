@@ -15,6 +15,7 @@ from corpclaw_lite.extensions.plugins.registry import PluginRegistry
 from corpclaw_lite.extensions.skills.matcher import SkillMatcher, SkillMatcherConfig
 from corpclaw_lite.extensions.skills.registry import SkillRegistry
 from corpclaw_lite.extensions.tools.registry import ToolRegistry
+from corpclaw_lite.extensions.tools.scoped import ScopedTool
 
 __all__ = [
     "load_extensions",
@@ -27,6 +28,7 @@ def load_extensions(
     project_root: Path,
     tool_registry: ToolRegistry,
     skills_settings: SkillsSettings,
+    full_tool_registry: ToolRegistry | None = None,
 ) -> tuple[SkillRegistry, PluginRegistry, SkillMatcher | None]:
     """Load skills, plugins, register plugin tools, and create SkillMatcher.
 
@@ -49,19 +51,42 @@ def load_extensions(
         plugin_registry.load_directory(plugins_dir)
         for plugin in plugin_registry.list_all():
             for tool in plugin.tools:
+                scoped_tool = ScopedTool(
+                    tool,
+                    source_kind="plugin",
+                    source_name=plugin.manifest.name,
+                    allowed_departments=plugin.manifest.allowed_departments,
+                )
+                registered_main = False
                 try:
-                    tool_registry.register(tool)
+                    tool_registry.register(scoped_tool)
+                    registered_main = True
                     logger.info(
                         "Plugin '%s': registered tool '%s'",
                         plugin.manifest.name,
-                        tool.name,
+                        scoped_tool.name,
                     )
                 except ValueError:
                     logger.warning(
                         "Plugin '%s': tool '%s' conflicts with an existing tool, skipping.",
                         plugin.manifest.name,
-                        tool.name,
+                        scoped_tool.name,
                     )
+                if full_tool_registry is not None:
+                    try:
+                        full_tool_registry.register(scoped_tool)
+                        logger.info(
+                            "Plugin '%s': registered full-registry tool '%s'",
+                            plugin.manifest.name,
+                            scoped_tool.name,
+                        )
+                    except ValueError:
+                        if registered_main:
+                            logger.warning(
+                                "Plugin '%s': tool '%s' conflicts in full registry, skipping.",
+                                plugin.manifest.name,
+                                scoped_tool.name,
+                            )
 
     # ── Skill Matcher (semantic selection) ──────────────────────────────
     skill_matcher: SkillMatcher | None = None

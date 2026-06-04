@@ -5,6 +5,8 @@ Uses pypdf to extract text from PDF files with page range support.
 
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -12,9 +14,41 @@ from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
 from corpclaw_lite.extensions.tools.builtin.files import resolve_and_validate_path
 from corpclaw_lite.utils.async_helpers import run_in_thread
 
-__all__ = ["PdfReaderTool"]
+__all__ = ["PdfReaderTool", "_sanitize_pdf_text"]
 
 _MAX_CHARS = 50_000
+_ALLOWED_OUTPUT_SUFFIXES = {".md", ".markdown", ".txt"}
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]")
+_HYPHENATED_LINE_BREAK_RE = re.compile(r"(?<=\w)-\n(?=\w)")
+_TRAILING_SPACE_RE = re.compile(r"[ \t]+\n")
+_EXCESS_BLANK_LINES_RE = re.compile(r"\n{3,}")
+
+
+@dataclass(frozen=True)
+class SanitizedPdfText:
+    text: str
+    removed_control_chars: int
+
+
+@dataclass(frozen=True)
+class PdfExtractionResult:
+    text: str
+    total_pages: int
+    requested_pages: int
+    extracted_pages: int
+    removed_control_chars: int
+    truncated: bool
+
+
+def _sanitize_pdf_text(text: str) -> SanitizedPdfText:
+    """Clean PDF extraction artifacts that are unsafe for LLM/tool contexts."""
+    removed_control_chars = len(_CONTROL_CHARS_RE.findall(text))
+    cleaned = _CONTROL_CHARS_RE.sub("", text)
+    cleaned = cleaned.replace("\r\n", "\n").replace("\r", "\n")
+    cleaned = _HYPHENATED_LINE_BREAK_RE.sub("", cleaned)
+    cleaned = _TRAILING_SPACE_RE.sub("\n", cleaned)
+    cleaned = _EXCESS_BLANK_LINES_RE.sub("\n\n", cleaned)
+    return SanitizedPdfText(text=cleaned.strip(), removed_control_chars=removed_control_chars)
 
 
 def _parse_page_range(pages_str: str, total_pages: int) -> list[int]:
@@ -45,7 +79,7 @@ def _parse_page_range(pages_str: str, total_pages: int) -> list[int]:
     return sorted(indices)
 
 
-def _extract_text(path: Path, pages: str, max_chars: int) -> str:
+def _extract_text(path: Path, pages: str, max_chars: int) -> PdfExtractionResult | str:
     import pypdf
 
     reader = pypdf.PdfReader(str(path))
@@ -64,22 +98,69 @@ def _extract_text(path: Path, pages: str, max_chars: int) -> str:
 
     parts: list[str] = []
     total_chars = 0
+    extracted_pages = 0
+    removed_control_chars = 0
     for idx in page_indices:
         if idx >= total_pages:
             continue
-        page_text = reader.pages[idx].extract_text() or ""
+        raw_page_text = reader.pages[idx].extract_text() or ""
+        sanitized = _sanitize_pdf_text(raw_page_text)
+        page_text = sanitized.text
+        removed_control_chars += sanitized.removed_control_chars
         header = f"--- Page {idx + 1} ---\n"
         parts.append(header + page_text)
         total_chars += len(header) + len(page_text)
+        extracted_pages += 1
         if total_chars >= max_chars:
             break
 
     result = "\n\n".join(parts)
+    truncated = False
     if len(result) > max_chars:
         result = result[:max_chars] + f"\n... (truncated at {max_chars} chars)"
+        truncated = True
 
-    info = f"PDF: {path.name} | Total pages: {total_pages} | Extracted: {len(page_indices)}"
-    return f"{info}\n\n{result}"
+    return PdfExtractionResult(
+        text=result,
+        total_pages=total_pages,
+        requested_pages=len(page_indices),
+        extracted_pages=extracted_pages,
+        removed_control_chars=removed_control_chars,
+        truncated=truncated,
+    )
+
+
+def _format_extraction_result(path: Path, result: PdfExtractionResult) -> str:
+    info = (
+        f"PDF: {path.name} | Total pages: {result.total_pages} | "
+        f"Extracted: {result.requested_pages}"
+    )
+    warnings: list[str] = []
+    if result.removed_control_chars:
+        warnings.append(
+            f"Warning: removed {result.removed_control_chars} control character(s) from PDF text."
+        )
+    if result.truncated:
+        warnings.append("Warning: extraction was truncated by max_chars.")
+    warning_text = ("\n".join(warnings) + "\n\n") if warnings else ""
+    return f"{info}\n\n{warning_text}{result.text}"
+
+
+def _write_extraction_result(path: Path, output_path: Path, result: PdfExtractionResult) -> str:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(result.text + "\n", encoding="utf-8")
+    lines = [
+        f"Extracted PDF text from {path.name} to {output_path.name}",
+        f"Total pages: {result.total_pages}",
+        f"Requested pages: {result.requested_pages}",
+        f"Extracted pages: {result.extracted_pages}",
+        f"Characters written: {len(result.text)}",
+    ]
+    if result.removed_control_chars:
+        lines.append(f"Removed control characters: {result.removed_control_chars}")
+    if result.truncated:
+        lines.append("Warning: extraction was truncated by max_chars.")
+    return "\n".join(lines)
 
 
 class PdfReaderTool(Tool):
@@ -107,6 +188,12 @@ class PdfReaderTool(Tool):
             description=f"Maximum characters to extract (default: {_MAX_CHARS})",
             required=False,
         ),
+        ToolParam(
+            name="output_path",
+            type="string",
+            description="Optional .md, .markdown, or .txt path to save cleaned extracted text",
+            required=False,
+        ),
     ]
     risk_level = RiskLevel.LOW
 
@@ -114,9 +201,12 @@ class PdfReaderTool(Tool):
         path_str = kwargs.get("path", "")
         pages = kwargs.get("pages", "all") or "all"
         max_chars = kwargs.get("max_chars", _MAX_CHARS) or _MAX_CHARS
+        output_str = kwargs.get("output_path")
 
         if not path_str:
             return "Error: 'path' is required."
+        if not isinstance(max_chars, int):
+            return "Error: 'max_chars' must be an integer."
 
         try:
             resolved = resolve_and_validate_path(path_str)
@@ -129,4 +219,21 @@ class PdfReaderTool(Tool):
         if resolved.suffix.lower() != ".pdf":
             return f"Error: Not a PDF file: {path_str}"
 
-        return await run_in_thread(_extract_text, resolved, pages, max_chars)
+        output_path: Path | None = None
+        if output_str:
+            if not isinstance(output_str, str):
+                return "Error: 'output_path' must be a string."
+            try:
+                output_path = resolve_and_validate_path(output_str)
+            except PermissionError as e:
+                return f"Error: {e}"
+            if output_path.suffix.lower() not in _ALLOWED_OUTPUT_SUFFIXES:
+                allowed = ", ".join(sorted(_ALLOWED_OUTPUT_SUFFIXES))
+                return f"Error: output_path must end with one of: {allowed}"
+
+        result = await run_in_thread(_extract_text, resolved, pages, max_chars)
+        if isinstance(result, str):
+            return result
+        if output_path is not None:
+            return await run_in_thread(_write_extraction_result, resolved, output_path, result)
+        return _format_extraction_result(resolved, result)

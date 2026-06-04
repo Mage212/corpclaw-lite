@@ -10,6 +10,7 @@ wheels/
 .pytest-temp/
 .ruff_cache/
 .ipynb_checkpoints/
+node_modules/
 .coverage
 *_coverage*.txt
 htmlcov/
@@ -20,6 +21,7 @@ htmlcov/
 
 # Project-specific
 data/
+data/llm_cache/
 logs/
 workspace/
 workspaces/
@@ -50,8 +52,11 @@ hello.txt
 CLAUDE.md
 AGENTS.md
 .mcp.json
+.codex/config.toml
+.codex/hooks.json
 .opencode/
 .qwen/
+.antigravitycli/
 .axme-code/
 plans/
 

@@ -17,6 +17,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_MAX_IMAGE_BYTES = 10 * 1024 * 1024
+
 _MEDIA_TYPES: dict[str, str] = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
@@ -30,8 +32,9 @@ _MEDIA_TYPES: dict[str, str] = {
 class VisionProcessor:
     """Handles image reading via a dedicated LLM call with a vision model."""
 
-    def __init__(self, provider: Provider) -> None:
+    def __init__(self, provider: Provider, max_image_bytes: int = DEFAULT_MAX_IMAGE_BYTES) -> None:
         self._provider = provider
+        self._max_image_bytes = max(1, max_image_bytes)
 
     async def describe(self, path: Path, prompt: str, _user: User | None = None) -> str:
         """Read an image and get a description/analysis from the vision model."""
@@ -42,6 +45,16 @@ class VisionProcessor:
         media_type = _MEDIA_TYPES.get(path.suffix.lower())
         if not media_type:
             return f"Error: Unsupported image format '{path.suffix}'."
+
+        try:
+            stat = await aio_path.stat()
+            if stat.st_size > self._max_image_bytes:
+                return (
+                    f"Error: Image file too large ({stat.st_size} bytes, "
+                    f"max {self._max_image_bytes})."
+                )
+        except Exception as e:
+            return f"Error reading image file metadata: {e}"
 
         # Encode image as base64
         try:
@@ -58,7 +71,11 @@ class VisionProcessor:
 
         effective_provider: Provider
         if isinstance(self._provider, LLMRouter):
-            effective_provider = self._provider.for_task("vision")
+            effective_provider = self._provider.for_task(
+                "vision",
+                user_id=str(_user.id) if _user is not None else "",
+                load_class="vision",
+            )
         else:
             effective_provider = self._provider
 

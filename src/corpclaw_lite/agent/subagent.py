@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
+import time
+import uuid
 from typing import TYPE_CHECKING
 
 import anyio
@@ -10,6 +13,7 @@ from corpclaw_lite.agent.loop import AgentConfig, AgentLoop
 from corpclaw_lite.config.settings import AgentSettings
 from corpclaw_lite.extensions.subagents.base import SubagentSpec
 from corpclaw_lite.extensions.tools.registry import ToolRegistry
+from corpclaw_lite.logging.trace import log_event
 from corpclaw_lite.users.models import User
 
 __all__ = [
@@ -27,6 +31,60 @@ logger = logging.getLogger(__name__)
 
 # Subagent timeout derives from max_wall_time_ms so it scales automatically
 # with the model/hardware speed configured in settings.yaml.
+
+_DEEP_RESEARCH_MARKERS = (
+    "deep research",
+    "deep_research",
+    "глубок",
+    "детальн",
+    "подробн",
+    "сравн",
+    "противореч",
+    "опроверг",
+    "уточн",
+    "гипотез",
+    "fact-check",
+    "factcheck",
+    "verify",
+    "cross-check",
+    "compare",
+    "contradict",
+    "hypothesis",
+)
+_URL_RE = re.compile(r"https?://\S+")
+
+
+def _research_mode_for_task(spec: SubagentSpec, task_context: str) -> str | None:
+    if spec.id != "research-agent":
+        return None
+    lowered = task_context.casefold()
+    if any(marker in lowered for marker in _DEEP_RESEARCH_MARKERS):
+        return "deep_research"
+    return "research"
+
+
+def _prepare_research_task_context(spec: SubagentSpec, task_context: str) -> str:
+    mode = _research_mode_for_task(spec, task_context)
+    if mode is None:
+        return task_context
+    return (
+        f"Research mode: {mode}\n"
+        "Use the research-specific tools and finish with research_finalize.\n\n"
+        f"{task_context}"
+    )
+
+
+def _ensure_research_sources_section(result: str) -> str:
+    lowered = result.casefold()
+    has_sources_section = "использованные источники" in lowered or "sources" in lowered
+    urls = sorted({url.rstrip(").,]") for url in _URL_RE.findall(result)})
+    if has_sources_section and urls:
+        return result
+    if urls:
+        sources = "\n".join(f"- {url}" for url in urls)
+    else:
+        sources = "- Источники не были явно указаны в ответе research-agent."
+    return result.rstrip() + "\n\n## Использованные источники\n" + sources
 
 
 class SubagentDispatcher:
@@ -50,16 +108,36 @@ class SubagentDispatcher:
         self._skill_matcher = skill_matcher
         self._skill_registry = skill_registry
 
-    async def dispatch(self, spec: SubagentSpec, user: User, task_context: str) -> str:
+    async def dispatch(
+        self,
+        spec: SubagentSpec,
+        user: User,
+        task_context: str,
+        *,
+        parent_run_id: str | None = None,
+    ) -> str:
         """Run the subagent on a specific task."""
+        subagent_run_id = uuid.uuid4().hex
         logger.info("Dispatching subagent %s for user %s", spec.id, user.id)
+        log_event(
+            "subagent_dispatch_started",
+            subagent_run_id,
+            parent_run_id=parent_run_id,
+            subagent_id=spec.id,
+            user_id=user.id,
+            task_len=len(task_context),
+        )
 
         # Resolve provider: if we have a router, use subagent-specific routing
         from corpclaw_lite.llm.router import LLMRouter
 
         effective_provider: Provider
         if isinstance(self._provider, LLMRouter):
-            effective_provider = self._provider.for_subagent(spec.id)
+            effective_provider = self._provider.for_subagent(
+                spec.id,
+                user_id=str(user.id),
+                run_id=subagent_run_id,
+            )
         else:
             effective_provider = self._provider
 
@@ -68,6 +146,14 @@ class SubagentDispatcher:
         for tool_name, tool in self._main_registry.items().items():
             if "*" in spec.allowed_tools or tool_name in spec.allowed_tools:
                 isolated_registry.register(tool)
+
+        registered_names = list(isolated_registry.items().keys())
+        logger.debug(
+            "Subagent %s: filtered to %d tools: %s",
+            spec.id,
+            len(registered_names),
+            ", ".join(registered_names),
+        )
 
         # Load system prompt: calibrated override > prompt_path > description fallback
         system_prompt = f"You are a specialized subagent: {spec.name}.\n{spec.description}\n"
@@ -107,10 +193,11 @@ class SubagentDispatcher:
                         spec.prompt_path,
                     )
 
-        # Inject matched skills into subagent prompt (same logic as main agent)
+        # Inject matched skills into subagent prompt — only skills scoped to this subagent
         if self._skill_matcher is not None and self._skill_registry is not None:
             allowed_skills = self._skill_registry.get_allowed_skills(user)
-            matched = self._skill_matcher.match(task_context, allowed_skills)
+            scoped_skills = [s for s in allowed_skills if "*" in s.scope or spec.id in s.scope]
+            matched = self._skill_matcher.match(task_context, scoped_skills)
             from corpclaw_lite.agent.prompt import build_skill_block
 
             skill_block = build_skill_block(matched, [])
@@ -124,6 +211,7 @@ class SubagentDispatcher:
                 provider=effective_provider,
                 registry=isolated_registry,
                 settings=self._settings,
+                enforce_tool_permissions=False,
                 tool_guard=self._tool_guard,
                 permission_checker=self._permission_checker,
             )
@@ -132,14 +220,58 @@ class SubagentDispatcher:
         timeout_seconds = self._settings.max_wall_time_ms / 1000
 
         try:
+            t0 = time.monotonic()
+            effective_task_context = _prepare_research_task_context(spec, task_context)
             result, _ = await asyncio.wait_for(
-                loop.run(user, task_context, system_prompt=system_prompt),
+                loop.run(
+                    user,
+                    effective_task_context,
+                    system_prompt=system_prompt,
+                    run_id=subagent_run_id,
+                ),
                 timeout=timeout_seconds,
+            )
+            if spec.id == "research-agent":
+                result = _ensure_research_sources_section(result)
+            elapsed = time.monotonic() - t0
+            log_event(
+                "subagent_dispatch_finished",
+                subagent_run_id,
+                parent_run_id=parent_run_id,
+                subagent_id=spec.id,
+                user_id=user.id,
+                status="ok",
+                duration_ms=round(elapsed * 1000, 1),
+                result_len=len(result),
+            )
+            logger.info(
+                "Subagent %s completed: duration=%.1fs result_len=%d",
+                spec.id,
+                elapsed,
+                len(result),
             )
             return result
         except TimeoutError:
             logger.error("Subagent %s timed out after %.0fs", spec.id, timeout_seconds)
+            log_event(
+                "subagent_dispatch_finished",
+                subagent_run_id,
+                parent_run_id=parent_run_id,
+                subagent_id=spec.id,
+                user_id=user.id,
+                status="timeout",
+                timeout_seconds=timeout_seconds,
+            )
             return f"Subagent error: execution timed out after {int(timeout_seconds)}s"
         except Exception as e:
             logger.error("Subagent %s failed: %s", spec.id, e)
+            log_event(
+                "subagent_dispatch_finished",
+                subagent_run_id,
+                parent_run_id=parent_run_id,
+                subagent_id=spec.id,
+                user_id=user.id,
+                status="error",
+                error=str(e),
+            )
             return f"Subagent error: {e}"

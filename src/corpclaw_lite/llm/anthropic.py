@@ -122,6 +122,7 @@ class AnthropicProvider(Provider):
         usage = TokenUsage(
             input_tokens=response.usage.input_tokens,
             output_tokens=response.usage.output_tokens,
+            total_tokens=response.usage.input_tokens + response.usage.output_tokens,
         )
 
         return LLMResponse(content=content, tool_calls=tool_calls, usage=usage)
@@ -169,6 +170,7 @@ class AnthropicProvider(Provider):
         usage = TokenUsage(
             input_tokens=response.usage.input_tokens,
             output_tokens=response.usage.output_tokens,
+            total_tokens=response.usage.input_tokens + response.usage.output_tokens,
         )
         return LLMResponse(content=content, usage=usage)
 

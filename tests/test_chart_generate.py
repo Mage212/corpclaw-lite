@@ -102,6 +102,24 @@ class TestChartGenerateTool:
         assert (tmp_path / "my_chart.png").exists()
 
     @pytest.mark.asyncio
+    async def test_output_path_outside_workspace_blocked(
+        self, tool: ChartGenerateTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        monkeypatch.chdir(workspace)
+        _create_csv(workspace / "data.csv", "x,y\n1,2\n3,4\n")
+
+        result = await tool.execute(
+            data_path="data.csv",
+            chart_type="bar",
+            output_path="../escaped.png",
+        )
+
+        assert "Error" in result
+        assert not (tmp_path / "escaped.png").exists()
+
+    @pytest.mark.asyncio
     async def test_file_not_found(self, tool: ChartGenerateTool) -> None:
         result = await tool.execute(data_path="nonexistent.csv", chart_type="bar")
         assert "Error" in result
@@ -126,3 +144,16 @@ class TestChartGenerateTool:
 
         result = await tool.execute(data_path="data.csv", chart_type="bar")
         assert "Chart saved" in result
+
+    @pytest.mark.asyncio
+    async def test_default_output_warns_when_overwriting(
+        self, tool: ChartGenerateTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        _create_csv(tmp_path / "data.csv", "name,value\nA,10\nB,20\n")
+        (tmp_path / "chart.png").write_bytes(b"old")
+
+        result = await tool.execute(data_path="data.csv", chart_type="bar")
+
+        assert "Warning" in result
+        assert "overwritten" in result

@@ -136,7 +136,7 @@ class MemoryConsolidator:
             return False
 
         try:
-            summary = await self._summarize(old_messages)
+            summary = await self._summarize(old_messages, user_id)
             await memory.replace_oldest(user_id, count=split, summary=summary)
             self._last_consolidated[user_id] = time.monotonic()
             self._prune_tracked()
@@ -153,14 +153,18 @@ class MemoryConsolidator:
             logger.error("Consolidation failed for user %s: %s", user_id, e)
             return False
 
-    async def _summarize(self, messages: list[dict[str, Any]]) -> str:
+    async def _summarize(self, messages: list[dict[str, Any]], user_id: str) -> str:
         """Single LLM call to compress messages into bullet-point summary."""
         conversation_text = self._format_messages(messages)
         prompt = CONSOLIDATION_PROMPT.format(conversation=conversation_text)
 
         effective_provider = self._provider
         if isinstance(self._provider, LLMRouter):
-            effective_provider = self._provider.for_task("consolidate")
+            effective_provider = self._provider.for_task(
+                "consolidate",
+                user_id=user_id,
+                load_class="consolidation",
+            )
 
         response = await effective_provider.chat(
             messages=[{"role": "user", "content": prompt}],

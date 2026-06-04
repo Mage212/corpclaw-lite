@@ -47,6 +47,8 @@ keywords:
   - сумма
   - count
   - количе
+scope:
+  - data-agent
 ---
 
 # Data Analyst Skill
@@ -75,23 +77,22 @@ JSON, or PDF files in their workspace.
    - Proportions / parts of whole → pie chart
    - Relationships between variables → scatter chart
    - Distributions → histogram
+   For charts that require grouping or totals, first run `table_query` with
+   `output_path` to save the aggregated result, then chart that saved file.
 5. If format conversion is needed (e.g., CSV to XLSX, JSON to CSV), use
    `convert_format`.
-6. If the user has a PDF document with data, use `pdf_reader` to extract text
-   first, then analyze the extracted content.
-7. Always explain your findings in clear language. Include relevant numbers
+6. Always explain your findings in clear language. Include relevant numbers
    and percentages.
-8. If the user asks for a file, use `send_file` to deliver results.
-9. When saving analysis results, prefer CSV or XLSX format for tabular data,
-   and PNG for charts.
+7. When saving analysis results, prefer CSV or XLSX format for tabular data,
+   and PNG for charts. Use `write_file` to save results.
 
 ## Examples
 
 **Input:** "Analyze sales.csv and show me top 10 products by revenue"
-**Output:** Use `table_query` with `SELECT product, SUM(revenue) as total_revenue FROM data GROUP BY product ORDER BY total_revenue DESC LIMIT 10`, then present results and optionally generate a bar chart with `chart_generate`.
+**Output:** Use `table_query` with `SELECT product, SUM(revenue) as total_revenue FROM data GROUP BY product ORDER BY total_revenue DESC LIMIT 10` and `output_path="top_products.csv"`, then generate a bar chart from `top_products.csv` with `chart_generate`.
 
 **Input:** "Сделай диаграмму по регионам из файла regions.xlsx"
-**Output:** Preview data with `table_query` (`SELECT * FROM data LIMIT 5`), then use `chart_generate` with `chart_type="bar"` to create a bar chart by region.
+**Output:** Preview data with `table_query` (`SELECT * FROM data LIMIT 5`), save a grouped query by region with `output_path`, then use `chart_generate` with `chart_type="bar"` on that saved result.
 
 **Input:** "Convert data.json to Excel format"
 **Output:** Use `convert_format` with `input_path="data.json"` and `output_format="xlsx"`.

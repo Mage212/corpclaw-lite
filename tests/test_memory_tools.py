@@ -16,7 +16,7 @@ def memory(tmp_path) -> SQLiteMemory:
 
 @pytest.fixture
 def user() -> User:
-    return User(id=42, name="Alice", department="dev")
+    return User(id=900000042, name="Alice", department="dev")
 
 
 # ── SQLiteMemory fact methods ────────────────────────────────────────────────

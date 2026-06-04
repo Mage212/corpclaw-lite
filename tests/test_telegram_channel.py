@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -129,10 +129,10 @@ class TestTelegramChannel:
     @pytest.mark.asyncio
     async def test_get_user_workspace(self, channel: TelegramChannel, tmp_path: Path) -> None:
         channel._workspace_base = tmp_path
-        user = User(id="999", telegram_id=999, department="it", name="Test User")
+        user = User(id=900000042, telegram_id=999, department="it", name="Test User")
 
         ws = channel.get_user_workspace(user)
-        assert ws.name == "user_999"
+        assert ws.name == "user_900000042"
         assert ws.exists()
         assert ws.is_dir()
 
@@ -168,6 +168,27 @@ class TestTelegramChannel:
         await channel._handle_new(update, MagicMock())
         channel._memory.clear.assert_awaited_once_with("123")
         update.effective_chat.send_message.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_handle_new_marks_cache_reset(self, mock_app: MagicMock) -> None:
+        async def mock_handler(tid: str, text: str, mode: str = "execute") -> None:
+            pass
+
+        cache_reset = AsyncMock()
+        channel = TelegramChannel(
+            token="test_token",
+            message_handler=mock_handler,
+            memory=AsyncMock(),
+            cache_reset_callback=cache_reset,
+        )
+        channel._app = mock_app
+        update = MagicMock()
+        update.effective_user.id = 123
+        update.effective_chat.send_message = AsyncMock()
+
+        await channel._handle_new(update, MagicMock())
+
+        cache_reset.assert_awaited_once_with("123")
 
     @pytest.mark.asyncio
     async def test_handle_chat(self, channel: TelegramChannel) -> None:
@@ -316,3 +337,138 @@ class TestTelegramChannel:
         assert args[0] == "123"
         assert "report.pdf" in args[1]
         assert "Please read" in args[1]
+
+
+class TestPollingRecovery:
+    """Tests for polling error recovery methods."""
+
+    def test_looks_like_polling_conflict(self) -> None:
+        error = Exception("Conflict: terminated by other getUpdates request")
+        assert TelegramChannel._looks_like_polling_conflict(error) is True
+
+        class ConflictError(Exception):
+            pass
+
+        assert TelegramChannel._looks_like_polling_conflict(ConflictError("409")) is True
+        assert TelegramChannel._looks_like_polling_conflict(Exception("something else")) is False
+
+    def test_looks_like_network_error(self) -> None:
+        assert TelegramChannel._looks_like_network_error(ConnectionError("reset")) is True
+        assert TelegramChannel._looks_like_network_error(TimeoutError("timed out")) is True
+        assert TelegramChannel._looks_like_network_error(OSError("broken pipe")) is True
+        assert TelegramChannel._looks_like_network_error(ValueError("bad")) is False
+
+    @pytest.mark.asyncio
+    async def test_handle_polling_conflict_retries(self, channel: TelegramChannel) -> None:
+        from corpclaw_lite.config.settings import TelegramSettings
+
+        channel._tg_settings = TelegramSettings(conflict_max_retries=3)
+        channel._polling_conflict_count = 0
+        channel._polling_error_callback_ref = lambda e: None
+
+        updater_mock = AsyncMock()
+        channel._app = MagicMock()
+        channel._app.updater = updater_mock
+
+        await channel._handle_polling_conflict(Exception("Conflict: terminated"))
+
+        updater_mock.start_polling.assert_awaited_once()
+        # On success, count resets to 0
+        assert channel._polling_conflict_count == 0
+
+    @pytest.mark.asyncio
+    async def test_handle_polling_conflict_raises_after_max(self, channel: TelegramChannel) -> None:
+        from corpclaw_lite.config.settings import TelegramSettings
+
+        channel._tg_settings = TelegramSettings(conflict_max_retries=3)
+        channel._polling_conflict_count = 3
+        channel._polling_error_callback_ref = lambda e: None
+
+        with pytest.raises(RuntimeError, match="conflict after 3 retries"):
+            await channel._handle_polling_conflict(Exception("Conflict"))
+
+    @pytest.mark.asyncio
+    async def test_handle_polling_network_error_reconnects(self, channel: TelegramChannel) -> None:
+        from corpclaw_lite.config.settings import TelegramSettings
+
+        channel._tg_settings = TelegramSettings(network_max_retries=2)
+        channel._polling_network_error_count = 0
+        channel._polling_error_callback_ref = lambda e: None
+
+        updater_mock = AsyncMock()
+        channel._app = MagicMock()
+        channel._app.updater = updater_mock
+
+        await channel._handle_polling_network_error(ConnectionError("reset"))
+
+        updater_mock.start_polling.assert_awaited_once()
+        # On success, count resets to 0
+        assert channel._polling_network_error_count == 0
+
+    @pytest.mark.asyncio
+    async def test_handle_polling_network_error_raises_after_max(
+        self, channel: TelegramChannel
+    ) -> None:
+        from corpclaw_lite.config.settings import TelegramSettings
+
+        channel._tg_settings = TelegramSettings(network_max_retries=2)
+        channel._polling_network_error_count = 3
+        channel._polling_error_callback_ref = lambda e: None
+
+        with pytest.raises(RuntimeError, match="unrecoverable after 2"):
+            await channel._handle_polling_network_error(ConnectionError("dead"))
+
+
+class TestResolveFallbackIps:
+    """Tests for fallback IP resolution chain."""
+
+    @pytest.mark.asyncio
+    async def test_config_ips_take_priority(self) -> None:
+        from corpclaw_lite.config.settings import TelegramSettings
+
+        settings = TelegramSettings(fallback_ips=["1.1.1.1", "8.8.8.8"])
+
+        async def noop(*args: object, **kwargs: object) -> None:
+            pass
+
+        ch = TelegramChannel(token="test", message_handler=noop, tg_settings=settings)
+        result = await ch._resolve_fallback_ips()
+        assert result == ["1.1.1.1", "8.8.8.8"]
+
+    @pytest.mark.asyncio
+    async def test_env_var_override(self) -> None:
+        async def noop(*args: object, **kwargs: object) -> None:
+            pass
+
+        ch = TelegramChannel(token="test", message_handler=noop)
+        with (
+            patch.dict("os.environ", {"CORPCLAW_TELEGRAM_FALLBACK_IPS": "1.1.1.1"}),
+            patch(
+                "corpclaw_lite.channels.telegram.channel.discover_fallback_ips",
+                new_callable=AsyncMock,
+                return_value=["seed_ip"],
+            ),
+        ):
+            result = await ch._resolve_fallback_ips()
+            assert result == ["1.1.1.1"]
+
+    @pytest.mark.asyncio
+    async def test_build_request_kwargs_with_settings(self) -> None:
+        from corpclaw_lite.config.settings import TelegramSettings
+
+        settings = TelegramSettings(connect_timeout=5.0, read_timeout=30.0, pool_timeout=4.0)
+        kwargs = TelegramChannel._build_request_kwargs(settings)
+        assert kwargs == {
+            "connect_timeout": 5.0,
+            "read_timeout": 30.0,
+            "pool_timeout": 4.0,
+        }
+
+    @pytest.mark.asyncio
+    async def test_build_request_kwargs_without_settings(self) -> None:
+        kwargs = TelegramChannel._build_request_kwargs(None)
+        assert kwargs == {
+            "connect_timeout": 10.0,
+            "read_timeout": 20.0,
+            "pool_timeout": 8.0,
+        }

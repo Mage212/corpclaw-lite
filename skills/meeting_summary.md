@@ -27,6 +27,8 @@ keywords:
   - decision
   - вопрос
   - question
+scope:
+  - document-agent
 ---
 
 # Meeting Summary Skill

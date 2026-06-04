@@ -9,7 +9,7 @@
 ## Архитектура
 
 ```
-Пользователь → Канал (Telegram / CLI) → AgentLoop (ReAct)
+Пользователь → Канал (Web / Telegram / CLI) → AgentLoop (ReAct)
                                             │
                                             ▼
                                     LLM Router ──→ Ollama / vLLM / Anthropic
@@ -45,6 +45,7 @@
 
 - Python 3.12+
 - Менеджер пакетов [uv](https://docs.astral.sh/uv/)
+- Node.js 20+ и npm (для сборки браузерного интерфейса)
 - Docker (опционально, для режима песочницы)
 - Запущенный LLM (Ollama, vLLM или LM Studio)
 
@@ -55,20 +56,54 @@ git clone https://github.com/Mage212/corpclaw-lite.git
 cd corpclaw-lite
 uv sync
 cp .env.example .env
-# Заполните .env — укажите TELEGRAM_BOT_TOKEN, CORPCLAW_IPC_SECRET, OPENAI_BASE_URL
+# Заполните .env — укажите TELEGRAM_BOT_TOKEN, CORPCLAW_IPC_SECRET
+# и хотя бы один LLM-провайдер через PROVIDER_<NAME>__*
 ```
 
 ### Запуск
 
+Если пользователя ещё нет в базе, сначала создайте его:
+
 ```bash
-# Интерактивный CLI-чат (режим разработки, Docker не нужен)
-uv run corpclaw-lite chat
+uv run corpclaw-lite user-create -t <telegram_id> -d engineering
+```
 
-# Запуск Telegram-бота
+CLI-чат запускается от имени существующего пользователя:
+
+```bash
+uv run corpclaw-lite chat --telegram-id <telegram_id>
+```
+
+Telegram-канал:
+
+```bash
 uv run corpclaw-lite telegram
+```
 
-# Сборка Docker-образа песочницы (для продакшена)
-cd docker && docker build -t corpclaw-agent-base:latest -f Dockerfile .
+Web-канал в обычном локальном режиме:
+
+```bash
+uv run corpclaw-lite web-user-link -t <telegram_id> -u <username> -p '<password>'
+
+cd frontend/web
+npm ci
+npm run build
+cd ../..
+
+uv run corpclaw-lite web
+```
+
+Откройте `http://127.0.0.1:8090`.
+
+`web-user-link` — основной сценарий для уже существующего Telegram-пользователя. Команда
+добавляет логин/пароль к тому же внутреннему `users.id`, поэтому Web, Telegram, память,
+workspace и контейнер продолжают работать с одним человеческим профилем. `web-user-create`
+используйте только для отдельного web-only аккаунта.
+
+Если включена контейнеризация, Docker должен быть запущен. Образ песочницы можно собрать так:
+
+```bash
+docker build -f docker/Dockerfile -t corpclaw-agent-base:latest .
 ```
 
 Для режима разработки без Docker установите в `config/settings.yaml`:
@@ -85,10 +120,10 @@ container:
 
 ```
 workspaces/
-├── user_278278319/     # Данные пользователя (Telegram ID)
+├── user_1/             # Данные пользователя (users.id)
 │   ├── отчёт.xlsx
 │   └── скрипт.py
-├── user_42/
+├── user_900000042/     # Тестовый пользователь
 └── user_9001/
 
 data/
@@ -105,11 +140,11 @@ data/
 
 | Переменная | Обязательна | Описание |
 |------------|-------------|----------|
-| `TELEGRAM_BOT_TOKEN` | Да | Токен бота от @BotFather |
-| `CORPCLAW_IPC_SECRET` | Да | Случайная строка ≥32 символа (HMAC-ключ для IPC) |
-| `OPENAI_BASE_URL` | Да | URL провайдера (напр. `http://localhost:11434/v1` для Ollama) |
-| `ANTHROPIC_API_KEY` | Нет | Для Claude fallback/маршрутизации |
-| `OPENAI_API_KEY` | Нет | Если провайдер требует авторизацию (напр. OpenRouter) |
+| `TELEGRAM_BOT_TOKEN` | Для Telegram | Токен бота от @BotFather |
+| `CORPCLAW_IPC_SECRET` | Да | Случайная строка ≥32 символа, HMAC-ключ для IPC host↔container |
+| `PROVIDER_<NAME>__TYPE` | Да | Тип провайдера: `openai` или `anthropic` |
+| `PROVIDER_<NAME>__BASE_URL` | Да для OpenAI-compatible | URL провайдера, например `http://localhost:8080/v1` для llama.cpp |
+| `PROVIDER_<NAME>__API_KEY` | Если нужен провайдеру | Ключ доступа или техническое значение вроде `llamacpp`/`ollama` |
 
 ---
 
@@ -127,8 +162,9 @@ data/
 | **ToolGuard** | 20+ YAML-правил безопасности с уровнями CRITICAL/HIGH/MEDIUM/INFO |
 | **Субагенты** | Изолированные ReAct-циклы со специализированными инструментами (экономия 60-80% контекста) |
 | **Скиллы** | Markdown-инструкции с TF-IDF семантическим матчем + горячая перезагрузка |
-| **Плагины** | Расширения в subprocess-песочнице через manifest.yaml |
+| **Плагины** | Доверенные локальные расширения через manifest.yaml и subprocess-изоляцию |
 | **MCP-интеграция** | Model Context Protocol серверы через stdio JSON-RPC |
+| **Web-канал** | Браузерный чат, единая statusline выполнения, личный файловый диспетчер и общая идентичность с Telegram |
 | **Онбординг** | Гибридный детерминированный Q&A + LLM-финализация профиля |
 | **Автокалибровка** | Адаптация промптов/описаний инструментов/few-shots под конкретную локальную модель |
 | **RBAC** | 10 департаментов с инструментальными разрешениями и бюджетами |
@@ -147,10 +183,13 @@ data/
 | `search_files` | LOW | Regex-поиск (пропускает .git/node_modules) |
 | `exec_script` | HIGH | Shell-команды с таймаутом (30s по умолчанию, 120s макс) |
 | `web_fetch` | MEDIUM | HTTP-запросы с защитой от SSRF |
+| `web_search` | MEDIUM | Поиск источников через DuckDuckGo-compatible backend |
 | `read_image` | LOW | Анализ изображений через отдельный LLM-вызов |
 | `memory_store` | LOW | Сохранение фактов пользователя в SQLite |
 | `memory_recall` | LOW | Поиск сохранённых фактов в SQLite |
 | `normalize_excel` | MEDIUM | Исправление форматирования Excel (ИНН, даты, невидимые символы) |
+| `excel_inspect` | LOW | Быстрая инспекция Excel-структуры, листов, диапазонов и образцов данных |
+| `excel_workbook` | MEDIUM | Чтение и заполнение Excel-книг с учётом формул, диапазонов и пагинации |
 | `send_file` | MEDIUM | Отправка файлов пользователю через канал |
 | `dispatch_subagent` | LOW | Делегирование специализированному субагенту |
 | `diff_text` | LOW | Сравнение текстов и файлов с выводом различий |
@@ -158,6 +197,12 @@ data/
 | `chart_generate` | MEDIUM | Генерация графиков (bar, line, pie, scatter, histogram) |
 | `convert_format` | MEDIUM | Конвертация между CSV, XLSX, JSON, Markdown |
 | `pdf_reader` | LOW | Извлечение текста из PDF с поддержкой диапазонов страниц |
+| `research_search` | MEDIUM | Управляемый поиск источников для исследовательского workflow |
+| `research_fetch_source` | MEDIUM | Загрузка и кеширование источника для исследования |
+| `research_read_source` | LOW | Чтение сохранённого источника с поиском и лимитами вывода |
+| `research_store_fact` | LOW | Сохранение проверенного факта исследования с метаданными |
+| `research_list_facts` | LOW | Просмотр накопленных фактов исследования |
+| `research_finalize` | LOW | Финализация исследовательского ответа с источниками |
 
 ---
 
@@ -169,15 +214,13 @@ Markdown-файлы с YAML-фронтматтером. Автоматическ
 
 **Двуязычный TF-IDF матчинг:** скиллы поддерживают ключевые слова на русском и английском. Стоп-слов для обоих языков встроены в matcher.
 
-| Скилл | Департаменты | Назначение |
-|-------|-------------|------------|
-| `code_reviewer` | it, admin, default | Ревью кода: баги, стиль, безопасность |
-| `content_writer` | marketing, hr, admin, default | Маркетинговый контент, посты, рассылки |
-| `doc_writer` | it, product, admin, default | Техническая документация, README, гайды |
-| `translator` | * (все) | Перевод текстов между языками |
-| `excel_normalizer` | marketing, finance, hr, analytics, admin, default | Нормализация Excel: ИНН, даты, невидимые символы |
-| `meeting_summary` | * (все) | Структурированные итоги встреч с задачами и решениями |
-| `data_analyst` | analytics, finance, marketing, admin, development, engineering | Анализ данных, графики, SQL-запросы, конвертация форматов |
+| Скилл | Scope | Назначение |
+|-------|-------|------------|
+| `translator` | main | Перевод текстов между языками |
+| `excel_normalizer` | document-agent | Нормализация Excel: ИНН, даты, невидимые символы |
+| `excel_filler` | document-agent, data-agent | Заполнение Excel-шаблонов с сохранением формул и структуры |
+| `meeting_summary` | document-agent | Структурированные итоги встреч с задачами и решениями |
+| `data_analyst` | data-agent | Анализ данных, графики, SQL-запросы, конвертация форматов |
 
 ```markdown
 ---
@@ -185,6 +228,7 @@ id: my_skill
 description: "Описание для семантического матчинга"
 allowed_for: ["marketing", "engineering"]
 keywords: ["отчёт", "report", "генерация"]
+scope: ["main"]  # ["*"] для всех, ["data-agent"] для сабагента
 always: false
 ---
 
@@ -193,13 +237,15 @@ always: false
 
 ### Плагины (`plugins/<name>/`)
 
-Сложные расширения с изоляцией в subprocess:
+Сложные локальные расширения с subprocess-изоляцией. Это защита от падений и
+зависаний плагина, но не полноценная security-песочница: сторонние плагины
+нельзя подключать как недоверенный код без отдельной контейнерной изоляции.
 
 ```
 plugins/my_plugin/
 ├── manifest.yaml      # Обязательно
 ├── skill.md           # Опционально — инструкции для агента
-├── tool.py            # Опционально — инструмент в subprocess-песочнице
+├── tool.py            # Опционально — доверенный инструмент в subprocess
 └── scripts/           # Опционально
 ```
 
@@ -212,8 +258,8 @@ plugins/my_plugin/
 | `filesystem-agent` | read_file, list_files, search_files, write_file, edit_file | Файловые операции и поиск |
 | `document-agent` | read/write/edit_file, normalize_excel, list_files | Создание и редактирование документов |
 | `execution-agent` | exec_script, write_file, read_file | Выполнение скриптов и команд |
-| `research-agent` | web_fetch, read_file, search_files, list_files, memory_store, memory_recall | Веб-исследование и анализ |
-| `data-agent` | table_query, chart_generate, convert_format, pdf_reader, diff_text, read/write_file, list_files, search_files, send_file | Анализ данных, SQL, графики, конвертация |
+| `research-agent` | research_search, research_fetch_source, research_read_source, research_store_fact, research_list_facts, research_finalize, web_fetch, web_search | Веб-исследование, проверка источников и финализация ответа |
+| `data-agent` | table_query, chart_generate, convert_format, pdf_reader, diff_text, excel_workbook, read/write_file, list_files, search_files, send_file | Анализ данных, SQL, графики, Excel и конвертация |
 
 ### MCP-серверы (`config/mcp_servers.yaml`)
 
@@ -222,6 +268,78 @@ servers:
   - name: filesystem
     command: ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/workspace"]
 ```
+
+---
+
+## Веб-интерфейс
+
+Веб-канал даёт тот же агентный backend, что Telegram/CLI, но через браузер:
+
+- локальные аккаунты с паролем и HttpOnly session cookie;
+- личный workspace пользователя (`workspaces/user_<users.id>`) общий для Telegram и Web;
+- современный React/Vite UI с отдельной production-сборкой;
+- сворачиваемый файловый диспетчер: дерево папок, поиск, предпросмотр, drag-and-drop,
+  загрузка, скачивание, переименование, перемещение, копирование и удаление с подтверждением;
+- чат с режимами `execute` и `chat`;
+- единая statusline выполнения: WebSocket обновляет текущий статус модели в одной строке,
+  не засоряя историю чата отдельными служебными сообщениями;
+- подтверждения опасных действий через интерактивный UI.
+
+### Production-like запуск
+
+```bash
+uv run corpclaw-lite web-user-link -t <telegram_id> -u <username> -p '<password>'
+
+cd frontend/web
+npm ci
+npm run build
+cd ../..
+
+uv run corpclaw-lite web
+```
+
+По умолчанию сервер слушает `http://127.0.0.1:8090`. Настройки находятся в
+`config/settings.yaml` → `web_channel`.
+Веб-интерфейс собирается отдельным React/Vite приложением в `frontend/web/dist`; если сборки нет,
+backend покажет явное предупреждение вместо пустого интерфейса.
+
+### Frontend-разработка
+
+Для работы над UI удобнее держать backend и frontend dev server в разных терминалах.
+
+Терминал 1 — backend и API:
+
+```bash
+uv run corpclaw-lite web
+```
+
+Терминал 2 — Vite dev server:
+
+```bash
+cd frontend/web
+npm ci
+npm run dev
+```
+
+Откройте `http://127.0.0.1:5173`. Vite проксирует `/api` и `/ws` в backend на
+`http://127.0.0.1:8090`, поэтому frontend можно менять без пересборки `dist`.
+
+### Пользователи и workspace
+
+Если пользователь уже работает через Telegram, используйте `web-user-link`: тогда веб-вход
+получит тот же профиль, память и рабочее пространство по внутреннему `users.id`.
+`web-user-create` оставлен только для явных web-only аккаунтов без Telegram. Для исправления
+случайно созданного дубля есть `web-user-merge --source-user-id <duplicate> --target-user-id
+<canonical>`. Для переноса старых данных из `user_<telegram_id>` в `user_<users.id>` используйте
+`uv run corpclaw-lite user-migrate-canonical-ids`.
+
+Это важно архитектурно: контейнер, память и директория `workspaces/user_<id>` теперь привязаны к
+внутреннему `users.id`, а не к Telegram ID и не к web-логину. Один человек должен иметь один
+профиль, к которому могут быть привязаны разные способы входа.
+
+> Если `container.enabled=true`, для веб-канала также нужен `CORPCLAW_IPC_SECRET`, как и для
+> Telegram. Файловые инструменты агента выполняются в контейнере, а операции веб-диспетчера
+> дополнительно проверяют границы личного workspace на стороне хоста.
 
 ---
 
@@ -273,6 +391,9 @@ servers:
 - «📊 Обрабатываю таблицу...» — normalize_excel
 - «🤖 Делегирую субагенту...» — dispatch_subagent
 - И другие для каждого инструмента
+
+В веб-интерфейсе используется тот же словарь статусов, но отображение другое: текущий статус
+обновляется в одной statusline над чатом, а не добавляется в историю отдельными сообщениями.
 
 ### Smart Approvals
 
@@ -339,7 +460,6 @@ CorpClaw Lite спроектирован для работы в **замкнут
 | `config/model_presets.yaml` | Параметры инференса и конфигурация reasoning для каждой модели |
 | `config/departments.yaml` | RBAC: инструментальные разрешения и бюджеты по департаментам |
 | `config/tool_guard_rules.yaml` | 20+ правил безопасности для ToolGuard |
-| `config/network_policy.yaml` | Сетевой allowlist для контейнеров |
 | `config/calibration_scenarios.yaml` | 20+ тестовых сценариев для калибровки |
 | `config/bootstrap/*.md` | Идентичность агента: SOUL.md, COMPANY.md, BEHAVIOR.md |
 | `config/bootstrap/departments/*.md` | Системные промпты по департаментам |
@@ -409,11 +529,18 @@ uv run corpclaw-lite calibrate --cloud-provider cloud --max-iterations 5
 
 ```bash
 # Чат
-uv run corpclaw-lite chat                                       # Интерактивный CLI
-uv run corpclaw-lite chat --setup                               # Онбординг пользователя
+uv run corpclaw-lite chat --telegram-id <tg_id>                 # Интерактивный CLI
+uv run corpclaw-lite chat --telegram-id <tg_id> --setup         # Онбординг пользователя
 
 # Telegram
 uv run corpclaw-lite telegram                                   # Запуск бота
+
+# Web
+uv run corpclaw-lite web                                        # Запуск backend + собранного UI
+uv run corpclaw-lite web-user-link -t <tg_id> -u <login> -p '<password>'
+uv run corpclaw-lite web-user-create -u <login> -p '<password>' -d <department>
+uv run corpclaw-lite web-user-password -u <login> -p '<new_password>'
+uv run corpclaw-lite web-user-merge --source-user-id <id> --target-user-id <id>
 
 # Управление пользователями
 uv run corpclaw-lite user-list
@@ -466,18 +593,18 @@ uv run pytest tests/ --cov=src/corpclaw_lite --cov-report=term-missing  # Пок
 
 | Компонент | LOC | Файлов |
 |-----------|-----|--------|
-| Agent Core | 1 901 | 10 |
-| Extensions | 2 558 | 43 |
-| Channels | 5 037 | 14 |
+| Agent Core | 2 823 | 10 |
+| Extensions | 7 395 | 47 |
+| Channels | 6 313 | 22 |
 | Calibration | 1 522 | 8 |
-| LLM Providers | 1 195 | 7 |
-| Container | 806 | 6 |
-| Security | 506 | 5 |
-| Memory | 477 | 3 |
-| Onboarding | 614 | 5 |
-| Прочее | ~2 004 | ~25 |
-| **Исходный код** | **~16 620** | **~126** |
-| **Тесты** | **~14 685** | **~85** (806 тестов) |
+| LLM Providers | 3 671 | 9 |
+| Container | 833 | 6 |
+| Security | 562 | 5 |
+| Memory | 510 | 3 |
+| Onboarding | 630 | 5 |
+| Прочее | ~6 429 | ~28 |
+| **Исходный код** | **~27 769** | **~141** |
+| **Тесты** | **~20 729** | **~97** (1018 тестов собрано) |
 
 ---
 

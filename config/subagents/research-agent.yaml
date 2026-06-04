@@ -1,17 +1,24 @@
 id: research-agent
 name: Research Agent
 description: >
-  Specialised agent for web research tasks. Fetches URLs, retrieves
-  information from the web and returns a concise summary.
+  Specialised agent for web research tasks. Searches, fetches, caches,
+  extracts evidence-backed facts, and returns a structured research report.
 capabilities:
-  - fetch web pages via web_fetch
-  - summarise retrieved content
+  - search the web via research_search
+  - fetch and cache web pages via research_fetch_source
+  - extract source-backed facts via research_store_fact
+  - reread cached sources in deep research mode
   - answer questions based on web content
 allowed_tools:
-  - web_fetch
+  - research_search
+  - research_fetch_source
+  - research_read_source
+  - research_store_fact
+  - research_list_facts
+  - research_finalize
   - read_file
   - search_files
   - list_files
-  - memory_store
   - memory_recall
 prompt_path: "config/bootstrap/subagents/research.md"
+direct_response: true

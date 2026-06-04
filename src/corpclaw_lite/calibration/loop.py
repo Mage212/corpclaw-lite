@@ -177,7 +177,7 @@ class CalibrationLoop:
         calibration_provider = router.for_task("calibration")
 
         # If no calibration rule, try building directly from cloud provider connection
-        if calibration_provider is router.default:
+        if not router.has_task_route("calibration"):
             from corpclaw_lite.llm.router import build_provider
 
             cloud_model: str = "calibration"

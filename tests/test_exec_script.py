@@ -52,3 +52,17 @@ async def test_exec_huge_output_truncated(tool: ExecScriptTool) -> None:
     result = await tool.execute(script=f"{sys.executable} -c \"print('x' * 100000)\"")
     assert "Exit code: 0" in result
     assert "truncated" in result or len(result) < 100100
+
+
+@pytest.mark.asyncio
+async def test_exec_timeout_covers_process_after_output_limit(tool: ExecScriptTool) -> None:
+    script = (
+        f'{sys.executable} -c "import sys,time; '
+        "sys.stdout.write('o'*60000); sys.stdout.flush(); "
+        "sys.stderr.write('e'*60000); sys.stderr.flush(); "
+        'time.sleep(10)"'
+    )
+
+    result = await tool.execute(script=script, timeout=1)
+
+    assert "timed out" in result

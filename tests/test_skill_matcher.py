@@ -39,33 +39,25 @@ TRANSLATOR_SKILL = _make_skill(
     keywords=["перевед", "перевод", "translat", "язык", "language", "английск", "english"],
 )
 
-CODE_REVIEWER_SKILL = _make_skill(
-    "code_reviewer",
-    description="Review code for bugs, style issues, and best practices",
-    instructions="Read the code. Structure review with Bugs, Security, Style sections.",
-    keywords=["review", "код", "code", "баг", "bug", "ревью", "провер"],
+DATA_ANALYST_SKILL = _make_skill(
+    "data_analyst",
+    description="Analyze data files, generate charts, run SQL queries, and convert formats",
+    instructions="Use table_query for SQL. Generate charts with chart_generate.",
+    keywords=["analyze", "анализ", "data", "данны", "chart", "sql", "запрос", "report"],
 )
 
-CONTENT_WRITER_SKILL = _make_skill(
-    "content_writer",
-    description="Write marketing content, social media posts, and promotional materials",
-    instructions="Ask for target audience. Write clear content.",
-    keywords=["контент", "content", "пост", "post", "напиши", "статья", "article", "маркетинг"],
-)
-
-DOC_WRITER_SKILL = _make_skill(
-    "doc_writer",
-    description="Write technical documentation, READMEs, API docs",
-    instructions="Identify audience. Use Markdown. Include overview, installation.",
-    keywords=["документац", "document", "readme", "api", "гайд", "guide"],
+MEETING_SUMMARY_SKILL = _make_skill(
+    "meeting_summary",
+    description="Structure meeting notes into organized summaries",
+    instructions="Extract summary, decisions, action items from meeting notes.",
+    keywords=["meeting", "встреч", "собрани", "summary", "итог", "задач", "notes"],
 )
 
 ALL_SKILLS = [
     EXCEL_SKILL,
     TRANSLATOR_SKILL,
-    CODE_REVIEWER_SKILL,
-    CONTENT_WRITER_SKILL,
-    DOC_WRITER_SKILL,
+    DATA_ANALYST_SKILL,
+    MEETING_SUMMARY_SKILL,
 ]
 
 
@@ -93,23 +85,17 @@ class TestKeywordMatch:
         ids = [s.id for s in result]
         assert "translator" in ids
 
-    def test_code_review_match(self) -> None:
+    def test_data_analyst_match(self) -> None:
         matcher = SkillMatcher()
-        result = matcher.match("Сделай ревью этого кода", ALL_SKILLS)
+        result = matcher.match("Проанализируй данные из файла", ALL_SKILLS)
         ids = [s.id for s in result]
-        assert "code_reviewer" in ids
+        assert "data_analyst" in ids
 
-    def test_content_writer_match(self) -> None:
+    def test_meeting_summary_match(self) -> None:
         matcher = SkillMatcher()
-        result = matcher.match("Напиши пост для LinkedIn", ALL_SKILLS)
+        result = matcher.match("Сделай саммари встречи", ALL_SKILLS)
         ids = [s.id for s in result]
-        assert "content_writer" in ids
-
-    def test_doc_writer_match(self) -> None:
-        matcher = SkillMatcher()
-        result = matcher.match("Напиши README документацию", ALL_SKILLS)
-        ids = [s.id for s in result]
-        assert "doc_writer" in ids
+        assert "meeting_summary" in ids
 
 
 class TestExclusion:
@@ -161,7 +147,7 @@ class TestTopK:
         config = SkillMatcherConfig(top_k=1)
         matcher = SkillMatcher(config)
         # This message could match multiple skills, but top_k=1
-        result = matcher.match("review this code and write documentation", ALL_SKILLS)
+        result = matcher.match("analyze data and normalize excel table", ALL_SKILLS)
         # always skills excluded from top_k count, so at most 1 non-always skill
         non_always = [s for s in result if not s.always]
         assert len(non_always) <= 1
@@ -227,3 +213,48 @@ class TestIndexRebuild:
         ids = [s.id for s in r2]
         assert "translator" in ids
         assert "excel_normalizer" not in ids
+
+
+class TestScopeFilter:
+    """Test that scope field is part of Skill and can be used for filtering."""
+
+    def test_scope_default_is_star(self) -> None:
+        skill = _make_skill("test", description="test")
+        assert skill.scope == ["*"]
+
+    def test_scope_custom_value(self) -> None:
+        skill = Skill(
+            id="test",
+            description="test",
+            allowed_for=["*"],
+            instructions="",
+            scope=["data-agent"],
+        )
+        assert skill.scope == ["data-agent"]
+
+    def test_scope_filtering(self) -> None:
+        main_skill = Skill(
+            id="main_only",
+            description="for main",
+            allowed_for=["*"],
+            instructions="",
+            scope=["main"],
+        )
+        sub_skill = Skill(
+            id="sub_only",
+            description="for sub",
+            allowed_for=["*"],
+            instructions="",
+            scope=["data-agent"],
+        )
+        all_skills = [main_skill, sub_skill]
+
+        # Filter for main agent
+        main_scoped = [s for s in all_skills if "*" in s.scope or "main" in s.scope]
+        assert len(main_scoped) == 1
+        assert main_scoped[0].id == "main_only"
+
+        # Filter for data-agent
+        sub_scoped = [s for s in all_skills if "*" in s.scope or "data-agent" in s.scope]
+        assert len(sub_scoped) == 1
+        assert sub_scoped[0].id == "sub_only"

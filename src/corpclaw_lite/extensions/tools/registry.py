@@ -82,13 +82,16 @@ class ToolRegistry:
         name: str,
         arguments: dict[str, Any],
         user: User | None = None,
+        run_id: str | None = None,
+        permission_checker: Any | None = None,
+        enforce_tool_allowlist: bool = True,
     ) -> str:
         """Execute a tool by name with arguments.
 
-        ``user`` is passed as a keyword argument so tools that need user context
-        (e.g. DispatchSubagentTool, ReadImageTool) can receive it without the
-        LLM having to supply it explicitly.  Tools that do not need it simply
-        absorb it via ``**kwargs``.
+        ``user`` and ``run_id`` are passed as keyword arguments so tools that need
+        runtime context (e.g. DispatchSubagentTool, ReadImageTool) can receive it
+        without the LLM having to supply it explicitly. Tools that do not need it
+        simply absorb it via ``**kwargs``.
 
         Results are scrubbed for credentials before being returned so that
         API keys or tokens inside read files never reach the LLM context or
@@ -98,11 +101,28 @@ class ToolRegistry:
         if not tool:
             return f"Error: Tool '{name}' not found."
 
+        if (
+            permission_checker is not None
+            and user is not None
+            and not permission_checker.can_use_registered_tool(
+                user,
+                tool,
+                enforce_tool_allowlist=enforce_tool_allowlist,
+            )
+        ):
+            return (
+                f"Error: Permission denied. Your department ({user.department})"
+                f" cannot use tool '{name}'."
+            )
+
         try:
-            result = await tool.execute(**arguments, user=user)
-        except Exception:
+            tool_kwargs = dict(arguments)
+            tool_kwargs["user"] = user
+            tool_kwargs["run_id"] = run_id
+            result = await tool.execute(**tool_kwargs)
+        except Exception as e:
             logger.exception("Tool '%s' execution failed", name)
-            return f"Error executing '{name}': see logs for details"
+            return f"Error executing '{name}': {type(e).__name__}: {e}"
 
         from corpclaw_lite.security.credential_scrubber import scrub_text
 
@@ -161,6 +181,8 @@ class ToolRegistry:
         self,
         permission_checker: Any,
         user: Any,
+        *,
+        enforce_tool_allowlist: bool = True,
     ) -> list[dict[str, Any]]:
         """Like to_schemas(), but excludes tools the user cannot use.
 
@@ -173,5 +195,9 @@ class ToolRegistry:
         return [
             self._build_schema(tool)
             for tool in self._tools.values()
-            if permission_checker.can_use_tool(user, tool.name)
+            if permission_checker.can_use_registered_tool(
+                user,
+                tool,
+                enforce_tool_allowlist=enforce_tool_allowlist,
+            )
         ]

@@ -10,7 +10,7 @@ Container isolation (container.enabled=true, default):
       exec_script) are registered as IPCToolProxy — they execute INSIDE the container
     - Host-side tools (web_fetch, memory_*, read_image, send_file, normalize_excel,
       dispatch_subagent) run on the host as usual
-    - If Docker is unavailable with container.enabled=true → RuntimeError at startup
+    - If Docker is unavailable with container.enabled=true → typed startup exception
 
 Dev mode (container.enabled=false):
     - All tools run directly on the host (no isolation)
@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from corpclaw_lite.agent.loop import AgentConfig, AgentLoop
+from corpclaw_lite.exceptions import StartupConfigurationError
 from corpclaw_lite.paths import PROJECT_ROOT
 from corpclaw_lite.users.manager import UserManager
 
@@ -36,7 +37,7 @@ __all__ = [
 
 if TYPE_CHECKING:
     from corpclaw_lite.agent.compressor import ContextCompressor
-    from corpclaw_lite.config.settings import AgentSettings, Settings
+    from corpclaw_lite.config.settings import AgentSettings, ResearchSettings, Settings, WebSettings
     from corpclaw_lite.container.ipc import ContainerIPC
     from corpclaw_lite.container.manager import ContainerManager
     from corpclaw_lite.departments.permissions import PermissionChecker
@@ -61,6 +62,7 @@ class AgentStack:
     loop: AgentLoop
     user_manager: UserManager
     tool_registry: ToolRegistry
+    full_tool_registry: ToolRegistry | None
     mcp_manager: MCPManager | None
     container_manager: ContainerManager | None
     few_shots: list[dict[str, Any]] | None = None
@@ -110,12 +112,14 @@ def _build_router(settings: Settings | None = None) -> Provider:
     )
 
 
-def _sandboxed_tool_classes() -> list[Any]:
-    """Return the list of tool classes that need container isolation."""
+def _all_tool_classes() -> list[Any]:
+    """Return ALL tool classes (for subagent filtering and container registry)."""
     from corpclaw_lite.extensions.tools.builtin.chart_generate import ChartGenerateTool
     from corpclaw_lite.extensions.tools.builtin.convert_format import ConvertFormatTool
     from corpclaw_lite.extensions.tools.builtin.diff_text import DiffTextTool
     from corpclaw_lite.extensions.tools.builtin.excel import NormalizeExcelTool
+    from corpclaw_lite.extensions.tools.builtin.excel_inspect import ExcelInspectTool
+    from corpclaw_lite.extensions.tools.builtin.excel_workbook import ExcelWorkbookTool
     from corpclaw_lite.extensions.tools.builtin.exec_script import ExecScriptTool
     from corpclaw_lite.extensions.tools.builtin.files import (
         EditFileTool,
@@ -140,24 +144,57 @@ def _sandboxed_tool_classes() -> list[Any]:
         TableQueryTool(),
         ChartGenerateTool(),
         PdfReaderTool(),
+        ExcelInspectTool(),
+        ExcelWorkbookTool(),
     ]
+
+
+# Heavy tools only available to subagents (not exposed to main agent).
+_SUBAGENT_ONLY_TOOLS = {
+    "normalize_excel",
+    "table_query",
+    "convert_format",
+    "chart_generate",
+    "excel_workbook",
+    "write_file",
+    "edit_file",
+    "exec_script",
+    "diff_text",
+    "pdf_reader",
+}
+
+
+def _main_agent_tool_classes() -> list[Any]:
+    """Return tool classes for the main agent (lightweight, routing-oriented).
+
+    Heavy data tools (table_query, normalize_excel, etc.) are excluded —
+    the main agent should use ``excel_inspect`` to understand a file and
+    then ``dispatch_subagent`` for actual work.
+    """
+    return [t for t in _all_tool_classes() if t.name not in _SUBAGENT_ONLY_TOOLS]
 
 
 def _register_sandboxed_tools(
     registry: ToolRegistry,
     ipc: ContainerIPC,
+    tools: list[Any] | None = None,
 ) -> None:
     """Register file/script tools as IPCToolProxy (execute inside container)."""
     from corpclaw_lite.container.proxy import IPCToolProxy
 
-    for tool in _sandboxed_tool_classes():
+    tool_list = tools or _main_agent_tool_classes()
+    for tool in tool_list:
         registry.register(IPCToolProxy.from_tool(tool, ipc))
         logger.debug("Registered sandboxed IPCToolProxy: %s", tool.name)
 
 
-def _register_local_tools(registry: ToolRegistry) -> None:
+def _register_local_tools(
+    registry: ToolRegistry,
+    tools: list[Any] | None = None,
+) -> None:
     """Register file/script tools to run directly on the host (dev/test mode)."""
-    for tool in _sandboxed_tool_classes():
+    tool_list = tools or _main_agent_tool_classes()
+    for tool in tool_list:
         registry.register(tool)
         logger.debug("Registered local tool (no container): %s", tool.name)
 
@@ -189,6 +226,8 @@ def _build_security_stack(
 
 def _build_extensions_stack(
     agent_settings: AgentSettings,
+    web_settings: WebSettings,
+    research_settings: ResearchSettings,
     provider: Provider,
     registry: ToolRegistry,
     guard: ToolGuard,
@@ -196,6 +235,7 @@ def _build_extensions_stack(
     workspace_base: Path | None = None,
     skill_matcher: SkillMatcher | None = None,
     skill_registry: SkillRegistry | None = None,
+    full_tool_registry: ToolRegistry | None = None,
 ) -> SubagentRegistry:
     """Register subagents, MCP, host-side tools."""
     from corpclaw_lite.agent.subagent import SubagentDispatcher
@@ -203,7 +243,11 @@ def _build_extensions_stack(
     from corpclaw_lite.extensions.subagents.registry import SubagentRegistry
     from corpclaw_lite.extensions.tools.builtin.dispatch import DispatchSubagentTool
     from corpclaw_lite.extensions.tools.builtin.image import ReadImageTool
-    from corpclaw_lite.extensions.tools.builtin.web import WebFetchTool
+    from corpclaw_lite.extensions.tools.builtin.research import (
+        ResearchRuntime,
+        build_research_tools,
+    )
+    from corpclaw_lite.extensions.tools.builtin.web import WebFetchTool, WebSearchTool
 
     subagent_registry = SubagentRegistry()
     subagent_dir = PROJECT_ROOT / "config" / "subagents"
@@ -213,21 +257,47 @@ def _build_extensions_stack(
     if subagent_registry.list_all():
         dispatcher = SubagentDispatcher(
             provider=provider,
-            main_registry=registry,
+            main_registry=full_tool_registry or registry,
             settings=agent_settings,
             tool_guard=guard,
             permission_checker=permission_checker,
             skill_matcher=skill_matcher,
             skill_registry=skill_registry,
         )
-        registry.register(DispatchSubagentTool(dispatcher, subagent_registry))
+        registry.register(
+            DispatchSubagentTool(
+                dispatcher,
+                subagent_registry,
+                permission_checker=permission_checker,
+            )
+        )
         logger.info(
             "dispatch_subagent registered (%d subagents available)",
             len(subagent_registry.list_all()),
         )
 
-    registry.register(WebFetchTool())
-    registry.register(ReadImageTool(VisionProcessor(provider), workspace_base=workspace_base))
+    web_fetch_tool = WebFetchTool(web_settings)
+    web_search_tool = WebSearchTool(web_settings)
+    read_image_tool = ReadImageTool(
+        VisionProcessor(provider, max_image_bytes=agent_settings.vision_max_image_bytes),
+        workspace_base=workspace_base,
+    )
+    research_runtime = ResearchRuntime(research_settings, workspace_base=workspace_base)
+    research_tools = build_research_tools(research_runtime, web_search_tool, web_fetch_tool)
+
+    registry.register(web_fetch_tool)
+    registry.register(web_search_tool)
+    registry.register(read_image_tool)
+
+    # Also register host-side tools on full_tool_registry so subagents
+    # can access them when listed in allowed_tools (e.g. research-agent → web_fetch).
+    if full_tool_registry is not None:
+        full_tool_registry.register(web_fetch_tool)
+        full_tool_registry.register(web_search_tool)
+        full_tool_registry.register(read_image_tool)
+        for tool in research_tools:
+            full_tool_registry.register(tool)
+
     return subagent_registry
 
 
@@ -235,6 +305,7 @@ def _build_memory_stack(
     agent_settings: AgentSettings,
     provider: Provider,
     registry: ToolRegistry,
+    full_tool_registry: ToolRegistry | None = None,
 ) -> tuple[SQLiteMemory, MemoryConsolidator | None, ContextCompressor | None]:
     """Build memory, consolidation, compression."""
     from corpclaw_lite.agent.compressor import ContextCompressor
@@ -243,8 +314,15 @@ def _build_memory_stack(
     from corpclaw_lite.memory.sqlite import SQLiteMemory
 
     memory = SQLiteMemory()
-    registry.register(MemoryStoreTool(memory))
-    registry.register(MemoryRecallTool(memory))
+    store_tool = MemoryStoreTool(memory)
+    recall_tool = MemoryRecallTool(memory)
+
+    registry.register(store_tool)
+    registry.register(recall_tool)
+
+    if full_tool_registry is not None:
+        full_tool_registry.register(store_tool)
+        full_tool_registry.register(recall_tool)
 
     consolidator = None
     if agent_settings.consolidation_enabled:
@@ -280,6 +358,16 @@ def _build_system_prompt() -> str | None:
     return system_prompt
 
 
+def _load_calibrated_tool_overrides(*registries: ToolRegistry) -> None:
+    """Apply calibrated tool description overrides to all active registries."""
+    overrides_path = PROJECT_ROOT / "config" / "calibrated" / "tool_overrides.yaml"
+    if not overrides_path.exists():
+        return
+    for registry in registries:
+        registry.load_overrides(overrides_path)
+    logger.info("Loaded calibrated tool overrides from %s", overrides_path)
+
+
 def build_agent_stack(
     settings: Settings | None = None,
 ) -> AgentStack:
@@ -305,10 +393,13 @@ def build_agent_stack(
     workspace_base: Path | None = None
     if container_cfg.enabled:
         if not ContainerManager.is_docker_available():
-            raise RuntimeError(
-                "Container isolation is enabled (container.enabled=true) "
-                "but Docker daemon is not available. "
-                "Start Docker or set container.enabled=false in settings.yaml to use dev mode."
+            raise StartupConfigurationError(
+                "Container isolation is enabled (container.enabled=true), "
+                "but Docker daemon is not available.",
+                hint=(
+                    "Start Docker, or set container.enabled=false in config/settings.yaml "
+                    "for local development without isolation."
+                ),
             )
         from corpclaw_lite.security.ipc_auth import IPCAuth
         from corpclaw_lite.security.network_policy import NetworkPolicy
@@ -339,11 +430,22 @@ def build_agent_stack(
             workspace_base,
         )
     else:
+        container_ipc = None
         _register_local_tools(registry)
         logger.warning(
             "Container isolation DISABLED (container.enabled=false) — "
             "file/script tools run on host. Dev mode only!"
         )
+
+    # Build a separate registry with ALL tools for subagent filtering.
+    # Subagents need access to heavy tools (table_query, normalize_excel, etc.)
+    # that are NOT registered in the main agent's registry.
+    full_tool_reg = ToolRegistry()
+    all_tools = _all_tool_classes()
+    if container_cfg.enabled and container_ipc is not None:
+        _register_sandboxed_tools(full_tool_reg, container_ipc, tools=all_tools)
+    else:
+        _register_local_tools(full_tool_reg, tools=all_tools)
 
     guard, permission_checker = _build_security_stack(full_settings, provider)
 
@@ -352,11 +454,16 @@ def build_agent_stack(
     from corpclaw_lite.extensions.bootstrap import load_extensions
 
     skill_registry, plugin_registry, skill_matcher = load_extensions(
-        PROJECT_ROOT, registry, full_settings.skills
+        PROJECT_ROOT,
+        registry,
+        full_settings.skills,
+        full_tool_registry=full_tool_reg,
     )
 
     subagent_registry = _build_extensions_stack(
         agent_settings,
+        full_settings.web,
+        full_settings.research,
         provider,
         registry,
         guard,
@@ -364,8 +471,12 @@ def build_agent_stack(
         workspace_base=workspace_base,
         skill_matcher=skill_matcher,
         skill_registry=skill_registry,
+        full_tool_registry=full_tool_reg,
     )
-    memory, consolidator, compressor = _build_memory_stack(agent_settings, provider, registry)
+    memory, consolidator, compressor = _build_memory_stack(
+        agent_settings, provider, registry, full_tool_registry=full_tool_reg
+    )
+    _load_calibrated_tool_overrides(registry, full_tool_reg)
 
     mcp_manager: MCPManager | None = None
     mcp_config = PROJECT_ROOT / "config" / "mcp_servers.yaml"
@@ -410,6 +521,7 @@ def build_agent_stack(
         loop=loop,
         user_manager=user_manager,
         tool_registry=registry,
+        full_tool_registry=full_tool_reg,
         mcp_manager=mcp_manager,
         container_manager=container_manager,
         few_shots=few_shots,

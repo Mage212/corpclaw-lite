@@ -91,7 +91,7 @@ class SimpleBudgetGuardConfig:
     enabled: bool = True
     max_iterations: int = 15
     max_tool_calls: int = 30
-    max_time_ms: int = 120000  # 2 minutes by default
+    max_time_ms: int = 300000  # 5 minutes by default
 
 
 @dataclass
@@ -101,10 +101,17 @@ class SimpleBudgetGuardState:
     started_at_monotonic: float = field(default_factory=time.monotonic)
     iterations_used: int = 0
     tool_calls_used: int = 0
+    paused_at: float | None = None
+    total_paused_ms: float = 0.0
 
 
 class SimpleBudgetGuard:
-    """Tracks resource consumption and raises BudgetExceededError when limits exceeded."""
+    """Tracks resource consumption and raises BudgetExceededError when limits exceeded.
+
+    The time budget measures *active* processing time — call ``pause()`` before
+    waiting for an external resource (e.g., an LLM queue slot) and ``resume()``
+    when processing resumes. Paused time does not count toward the limit.
+    """
 
     def __init__(self, config: SimpleBudgetGuardConfig | None = None) -> None:
         self.config = config or SimpleBudgetGuardConfig()
@@ -118,6 +125,25 @@ class SimpleBudgetGuard:
         """Record tool call consumption."""
         if count > 0:
             self.state.tool_calls_used += count
+
+    def pause(self) -> None:
+        """Pause the time budget (e.g., while waiting in an LLM queue)."""
+        if self.state.paused_at is None:
+            self.state.paused_at = time.monotonic()
+
+    def resume(self) -> None:
+        """Resume the time budget after a ``pause()``."""
+        if self.state.paused_at is not None:
+            self.state.total_paused_ms += (time.monotonic() - self.state.paused_at) * 1000
+            self.state.paused_at = None
+
+    def _active_ms(self) -> float:
+        """Return elapsed active milliseconds (wall clock minus paused time)."""
+        elapsed_ms = (time.monotonic() - self.state.started_at_monotonic) * 1000
+        paused_ms = self.state.total_paused_ms
+        if self.state.paused_at is not None:
+            paused_ms += (time.monotonic() - self.state.paused_at) * 1000
+        return elapsed_ms - paused_ms
 
     def check(self) -> None:
         """Check if budget limits are exceeded.
@@ -140,10 +166,10 @@ class SimpleBudgetGuard:
                 f"{self.state.tool_calls_used}/{self.config.max_tool_calls}"
             )
 
-        elapsed_ms = (time.monotonic() - self.state.started_at_monotonic) * 1000
-        if elapsed_ms >= self.config.max_time_ms:
+        active_ms = self._active_ms()
+        if active_ms >= self.config.max_time_ms:
             raise BudgetExceededError(
-                f"Time budget exceeded: {int(elapsed_ms)}ms/{self.config.max_time_ms}ms"
+                f"Time budget exceeded: {int(active_ms)}ms/{self.config.max_time_ms}ms"
             )
 
     def reset(self) -> None:

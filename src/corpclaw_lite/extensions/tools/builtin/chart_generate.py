@@ -87,8 +87,11 @@ def _generate_chart(
         return "Error: No data found in file."
 
     # Resolve output path.
+    used_default_output = output_path is None
+    default_exists = False
     if output_path is None:
         output_path = data_path.parent / "chart.png"
+        default_exists = output_path.exists()
 
     fig, ax = plt.subplots(figsize=(10, 6))
 
@@ -157,7 +160,10 @@ def _generate_chart(
 
         fig.tight_layout()
         fig.savefig(str(output_path), dpi=100)
-        return f"Chart saved to {output_path} ({chart_type}, {len(rows)} data points)"
+        message = f"Chart saved to {output_path} ({chart_type}, {len(rows)} data points)"
+        if used_default_output and default_exists:
+            message += "\nWarning: default chart.png already existed and was overwritten."
+        return message
 
     except Exception as e:
         return f"Error generating chart: {e}"
@@ -171,7 +177,9 @@ class ChartGenerateTool(Tool):
     name = "chart_generate"
     description = (
         "Generate charts from tabular data files (CSV, XLSX, JSON). "
-        "Supports bar, line, pie, scatter, and histogram chart types."
+        "Supports bar, line, pie, scatter, and histogram chart types. "
+        "For aggregated charts, first save aggregated rows with table_query output_path, "
+        "then chart that result file. Prefer a unique output_path."
     )
     params = [
         ToolParam(
@@ -237,8 +245,8 @@ class ChartGenerateTool(Tool):
         if output_str:
             try:
                 output_path = resolve_and_validate_path(output_str)
-            except PermissionError:
-                output_path = Path(output_str)
+            except PermissionError as e:
+                return f"Error: {e}"
 
         return await run_in_thread(
             _generate_chart, resolved, chart_type, x_column, y_column, title, output_path

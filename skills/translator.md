@@ -22,6 +22,8 @@ keywords:
   - chinese
   - русск
   - russian
+scope:
+  - main
 ---
 
 # Translator Skill

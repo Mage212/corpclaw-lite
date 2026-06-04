@@ -21,6 +21,8 @@ def test_build_container_registry_has_expected_tools() -> None:
         "table_query",
         "chart_generate",
         "pdf_reader",
+        "excel_inspect",
+        "excel_workbook",
     }
     actual = {t.name for t in registry.list_all()}
     assert actual == expected

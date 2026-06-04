@@ -17,6 +17,9 @@ def setup_logging(
     log_dir: Path | str = "logs",
     level: str = "DEBUG",
     console_level: str = "INFO",
+    trace_enabled: bool = True,
+    trace_level: str = "metadata",
+    trace_preview_chars: int = 200,
 ) -> None:
     """Configure root logging with two handlers:
 
@@ -60,6 +63,19 @@ def setup_logging(
     # Reduce spam from underlying HTTP libraries
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("openai").setLevel(logging.WARNING)
+    logging.getLogger("openai._base_client").setLevel(logging.WARNING)
+    logging.getLogger("telegram").setLevel(logging.INFO)
+    logging.getLogger("telegram.ext").setLevel(logging.INFO)
+
+    from corpclaw_lite.logging.trace import setup_trace_logging
+
+    setup_trace_logging(
+        log_dir=log_path,
+        enabled=trace_enabled,
+        trace_level=trace_level,  # type: ignore[arg-type]
+        preview_chars=trace_preview_chars,
+    )
 
 
 class AgentLogger:
@@ -71,6 +87,8 @@ class AgentLogger:
     """
 
     def __init__(self, log_dir: Path | str = "logs") -> None:
+        from corpclaw_lite.security.credential_scrubber import CredentialScrubber
+
         self._path = Path(log_dir) / "agent_activity.jsonl"
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._handler = RotatingFileHandler(
@@ -79,6 +97,7 @@ class AgentLogger:
             backupCount=5,
             encoding="utf-8",
         )
+        self._handler.addFilter(CredentialScrubber())
         self._logger = logging.getLogger("agent_activity")
         self._logger.addHandler(self._handler)
         self._logger.setLevel(logging.INFO)
@@ -95,20 +114,49 @@ class AgentLogger:
         tokens: dict[str, int] | None = None,
         status: str = "ok",
         error: str | None = None,
+        run_id: str | None = None,
+        channel: str | None = None,
+        iterations: int | None = None,
+        llm_calls: int | None = None,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+        total_tokens: int | None = None,
+        latest_total_tokens: int | None = None,
+        stream_stats: dict[str, Any] | None = None,
     ) -> None:
         """Write a single structured JSON record to agent_activity.jsonl."""
+        from corpclaw_lite.security.credential_scrubber import scrub_text
+
         record: dict[str, Any] = {
             "ts": time.time(),
             "user_id": user_id,
             "department": department,
-            "message_preview": message_preview[:100],
+            "message_preview": scrub_text(message_preview)[:100],
             "duration_ms": round(duration_ms, 1),
             "tool_count": len(tools_used),
             "tools_used": tools_used,
             "tokens": tokens or {},
             "status": status,
         }
+        if run_id is not None:
+            record["run_id"] = run_id
+        if channel is not None:
+            record["channel"] = channel
+        if iterations is not None:
+            record["iterations"] = iterations
+        if llm_calls is not None:
+            record["llm_calls"] = llm_calls
+        if input_tokens is not None:
+            record["input_tokens"] = input_tokens
+        if output_tokens is not None:
+            record["output_tokens"] = output_tokens
+        if total_tokens is not None:
+            record["total_tokens"] = total_tokens
+        if latest_total_tokens is not None:
+            record["latest_total_tokens"] = latest_total_tokens
+        if stream_stats is not None:
+            record["stream"] = stream_stats
         if error:
-            record["error"] = error
+            record["error"] = scrub_text(error)
 
         self._logger.info(json.dumps(record, ensure_ascii=False))

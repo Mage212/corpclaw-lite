@@ -1,6 +1,6 @@
 [project]
 name = "corpclaw-lite"
-version = "0.1.0b0"
+version = "0.1.4-beta"
 description = "CorpClaw Lite - streamlined agent project"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -24,6 +24,7 @@ dependencies = [
     "duckdb>=1.1.0",
     "matplotlib>=3.9.0",
     "pypdf>=4.0.0",
+    "ddgs>=9.14.4",
 ]
 
 [project.scripts]
@@ -46,11 +47,13 @@ venv = ".venv"
 asyncio_mode = "auto"
 pythonpath = ["src"]
 testpaths = ["tests"]
-addopts = "--ignore=tests/debug"
+addopts = "--ignore=tests/debug --ignore=tests/live_llm"
 markers = [
     "integration: Full pipeline integration test (requires LLM + optionally Docker)",
     "docker_required: Requires running Docker daemon and corpclaw-agent-base:latest image",
     "llm_required: Requires a real LLM provider (Anthropic API key or local Ollama)",
+    "live_llm: Manual tests that require a real llama-server backend",
+    "live_llm_slow: Slow manual tests that require CORPCLAW_LIVE_LLM_RUN_SLOW=1",
 ]
 
 [tool.ruff]
@@ -67,4 +70,3 @@ dev = [
     "pytest-cov>=7.0.0",
     "ruff>=0.15.4",
 ]
-

@@ -86,7 +86,7 @@ def _all_tools_with_path_param() -> list[Tool]:
 
 def _make_workspace(tmp: Path) -> Path:
     """Create a test workspace with sample files including Cyrillic names."""
-    ws = tmp / "workspaces" / "user_12345"
+    ws = tmp / "workspaces" / "user_1"
     ws.mkdir(parents=True, exist_ok=True)
 
     # Normal files
@@ -120,11 +120,11 @@ class TestResolveContainerPath:
     """Test the shared resolve_container_path utility used by SendFileTool, ReadImageTool."""
 
     def test_relative_path_inside_workspace(self, tmp_path: Path) -> None:
-        ws = _make_workspace(tmp_path)
+        _make_workspace(tmp_path)
         ws_base = tmp_path / "workspaces"
 
         resolved = resolve_container_path("test.txt", ws_base, _TEST_USER)
-        assert resolved == (ws_base / "user_12345" / "test.txt").resolve()
+        assert resolved == (ws_base / "user_1" / "test.txt").resolve()
         assert resolved.exists()
 
     def test_cyrillic_filename(self, tmp_path: Path) -> None:
@@ -162,7 +162,7 @@ class TestResolveContainerPath:
         _make_workspace(tmp_path)
 
         resolved = resolve_container_path("/workspace/test.txt", ws_base, _TEST_USER)
-        assert resolved == (ws_base / "user_12345" / "test.txt").resolve()
+        assert resolved == (ws_base / "user_1" / "test.txt").resolve()
         assert resolved.exists()
 
     def test_container_path_cyrillic(self, tmp_path: Path) -> None:
@@ -182,8 +182,6 @@ class TestResolveContainerPath:
     def test_relative_workspace_base_still_works(self, tmp_path: Path) -> None:
         """Regression test: workspace_base as relative Path must not break boundary check."""
         _make_workspace(tmp_path)
-        # Simulate the default config value: relative "workspaces" path
-        rel_base = Path("workspaces")
         # We can't use a truly relative path from CWD, but we can verify
         # the boundary check works when workspace_base is NOT pre-resolved.
         # The _validate_boundary function must resolve internally.
