@@ -13,6 +13,9 @@ from corpclaw_lite.channels.status import (
     READY_STATUS_TEXT,
     TOOL_STATUS_MAP,
     format_llm_stage_status,
+    format_subagent_llm_stage_status,
+    format_subagent_tool_batch_status,
+    format_subagent_tool_status,
     format_tool_batch_status,
     format_tool_status,
 )
@@ -101,6 +104,20 @@ class StatusMessageSession:
     def mark_llm_stage(self, stage: str) -> None:
         """Update desired status from backend LLM streaming telemetry."""
         friendly = format_llm_stage_status(stage)
+        if friendly is not None:
+            self._set_desired_text(friendly)
+
+    def mark_subagent_tool_start(self, subagent_name: str, tool_name: str) -> None:
+        """Update desired status from a subagent tool execution start."""
+        self._set_desired_text(format_subagent_tool_status(subagent_name, tool_name))
+
+    def mark_subagent_tool_batch_start(self, subagent_name: str, tool_names: list[str]) -> None:
+        """Update desired status from a subagent parallel tool batch start."""
+        self._set_desired_text(format_subagent_tool_batch_status(subagent_name, tool_names))
+
+    def mark_subagent_llm_stage(self, subagent_name: str, stage: str) -> None:
+        """Update desired status from subagent backend LLM streaming telemetry."""
+        friendly = format_subagent_llm_stage_status(subagent_name, stage)
         if friendly is not None:
             self._set_desired_text(friendly)
 

@@ -530,6 +530,69 @@ async def test_on_tool_start_callback_called(test_user: User, empty_registry: To
 
 
 @pytest.mark.asyncio
+async def test_subagent_status_callbacks_passed_to_tool_runtime_context(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """Subagent status callbacks should reach runtime-aware tools."""
+    captured_kwargs: dict[str, Any] = {}
+
+    class FakeDispatchTool:
+        name = "dispatch_subagent"
+        description = ""
+        params = []  # type: ignore[var-annotated]
+        parallel_safe = False
+
+        async def execute(self, **kwargs: Any) -> str:
+            captured_kwargs.update(kwargs)
+            return "subagent result"
+
+    empty_registry._tools["dispatch_subagent"] = FakeDispatchTool()  # type: ignore
+
+    provider = MockProvider(
+        responses=[
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        id="1",
+                        name="dispatch_subagent",
+                        arguments={"subagent_id": "worker", "task": "work"},
+                    )
+                ],
+            ),
+            LLMResponse(content="Done."),
+        ]
+    )
+    loop = AgentLoop(AgentConfig(provider, empty_registry, AgentSettings()))
+    started_tools: list[str] = []
+
+    def on_subagent_tool_start(subagent_name: str, tool_name: str) -> None:
+        _ = subagent_name, tool_name
+
+    def on_subagent_tool_batch_start(subagent_name: str, tool_names: list[str]) -> None:
+        _ = subagent_name, tool_names
+
+    def on_subagent_llm_stage(subagent_name: str, stage: str) -> None:
+        _ = subagent_name, stage
+
+    result, stats = await loop.run(
+        test_user,
+        "delegate",
+        on_tool_start=started_tools.append,
+        on_subagent_tool_start=on_subagent_tool_start,
+        on_subagent_tool_batch_start=on_subagent_tool_batch_start,
+        on_subagent_llm_stage=on_subagent_llm_stage,
+    )
+
+    assert result == "Done."
+    assert started_tools == ["dispatch_subagent"]
+    assert stats.tools_used == ["dispatch_subagent"]
+    assert captured_kwargs["on_subagent_tool_start"] is on_subagent_tool_start
+    assert captured_kwargs["on_subagent_tool_batch_start"] is on_subagent_tool_batch_start
+    assert captured_kwargs["on_subagent_llm_stage"] is on_subagent_llm_stage
+
+
+@pytest.mark.asyncio
 async def test_parallel_tool_batch_callback_suppresses_individual_starts(
     test_user: User, empty_registry: ToolRegistry
 ) -> None:

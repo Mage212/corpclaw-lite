@@ -5,6 +5,7 @@ import logging
 import re
 import time
 import uuid
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import anyio
@@ -115,6 +116,9 @@ class SubagentDispatcher:
         task_context: str,
         *,
         parent_run_id: str | None = None,
+        on_subagent_tool_start: Callable[[str, str], None] | None = None,
+        on_subagent_tool_batch_start: Callable[[str, list[str]], None] | None = None,
+        on_subagent_llm_stage: Callable[[str, str], None] | None = None,
     ) -> str:
         """Run the subagent on a specific task."""
         subagent_run_id = uuid.uuid4().hex
@@ -218,15 +222,38 @@ class SubagentDispatcher:
         )
 
         timeout_seconds = self._settings.max_wall_time_ms / 1000
+        subagent_name = spec.name
 
         try:
             t0 = time.monotonic()
             effective_task_context = _prepare_research_task_context(spec, task_context)
+
+            def forward_tool_start(tool_name: str) -> None:
+                if on_subagent_tool_start is not None:
+                    on_subagent_tool_start(subagent_name, tool_name)
+
+            def forward_tool_batch_start(tool_names: list[str]) -> None:
+                if on_subagent_tool_batch_start is not None:
+                    on_subagent_tool_batch_start(subagent_name, tool_names)
+
+            def forward_llm_stage(stage: str) -> None:
+                if on_subagent_llm_stage is not None:
+                    on_subagent_llm_stage(subagent_name, stage)
+
             result, _ = await asyncio.wait_for(
                 loop.run(
                     user,
                     effective_task_context,
                     system_prompt=system_prompt,
+                    on_tool_start=(
+                        forward_tool_start if on_subagent_tool_start is not None else None
+                    ),
+                    on_tool_batch_start=(
+                        forward_tool_batch_start
+                        if on_subagent_tool_batch_start is not None
+                        else None
+                    ),
+                    on_llm_stage=forward_llm_stage if on_subagent_llm_stage is not None else None,
                     run_id=subagent_run_id,
                 ),
                 timeout=timeout_seconds,

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, cast
 
 from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
 
@@ -67,6 +68,24 @@ class DispatchSubagentTool(Tool):
         task = kwargs.get("task")
         run_id = kwargs.get("run_id")
         parent_run_id = run_id if isinstance(run_id, str) else None
+        raw_on_subagent_tool_start = kwargs.get("on_subagent_tool_start")
+        raw_on_subagent_tool_batch_start = kwargs.get("on_subagent_tool_batch_start")
+        raw_on_subagent_llm_stage = kwargs.get("on_subagent_llm_stage")
+        on_subagent_tool_start = (
+            cast("Callable[[str, str], None]", raw_on_subagent_tool_start)
+            if callable(raw_on_subagent_tool_start)
+            else None
+        )
+        on_subagent_tool_batch_start = (
+            cast("Callable[[str, list[str]], None]", raw_on_subagent_tool_batch_start)
+            if callable(raw_on_subagent_tool_batch_start)
+            else None
+        )
+        on_subagent_llm_stage = (
+            cast("Callable[[str, str], None]", raw_on_subagent_llm_stage)
+            if callable(raw_on_subagent_llm_stage)
+            else None
+        )
 
         if not isinstance(subagent_id, str) or not isinstance(task, str):
             return "Error: 'subagent_id' and 'task' are required string parameters."
@@ -121,7 +140,15 @@ class DispatchSubagentTool(Tool):
                 f"cannot use subagent '{subagent_id}'."
             )
 
-        return await self._dispatcher.dispatch(spec, user, task, parent_run_id=parent_run_id)
+        return await self._dispatcher.dispatch(
+            spec,
+            user,
+            task,
+            parent_run_id=parent_run_id,
+            on_subagent_tool_start=on_subagent_tool_start,
+            on_subagent_tool_batch_start=on_subagent_tool_batch_start,
+            on_subagent_llm_stage=on_subagent_llm_stage,
+        )
 
     def should_return_direct(self, arguments: dict[str, Any], result: str) -> bool:
         subagent_id = arguments.get("subagent_id")

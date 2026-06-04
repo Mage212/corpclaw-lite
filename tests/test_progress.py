@@ -6,7 +6,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from corpclaw_lite.channels.status import format_llm_stage_status, format_tool_batch_status
+from corpclaw_lite.channels.status import (
+    format_llm_stage_status,
+    format_subagent_llm_stage_status,
+    format_subagent_tool_batch_status,
+    format_subagent_tool_status,
+    format_tool_batch_status,
+)
 from corpclaw_lite.channels.telegram.progress import _TOOL_STATUS_MAP, StatusMessageSession
 
 
@@ -100,6 +106,37 @@ def test_tool_batch_status_formatter_groups_same_kind_tools() -> None:
 
 def test_finished_llm_stage_has_no_user_status() -> None:
     assert format_llm_stage_status("finished") is None
+
+
+@pytest.mark.asyncio
+async def test_mark_subagent_status_updates_desired_text(
+    session: StatusMessageSession,
+) -> None:
+    """Subagent status callbacks should prefix the human-readable subagent name."""
+    session.mark_subagent_llm_stage("Research Agent", "reasoning")
+    assert session._desired_text == "Research Agent: 🤔 Думаю..."
+
+    session.mark_subagent_tool_start("Document Agent", "read_file")
+    assert session._desired_text == "Document Agent: 📂 Читаю файл..."
+
+    session.mark_subagent_tool_batch_start("Data Analysis Agent", ["read_file", "list_files"])
+    assert session._desired_text == "Data Analysis Agent: 📂 Работаю с файлами..."
+
+
+def test_subagent_status_formatters() -> None:
+    assert (
+        format_subagent_tool_status("Execution Agent", "exec_script")
+        == "Execution Agent: 💻 Запускаю команду..."
+    )
+    assert (
+        format_subagent_tool_batch_status("Research Agent", ["web_fetch", "web_search"])
+        == "Research Agent: 🔍 Ищу данные..."
+    )
+    assert (
+        format_subagent_llm_stage_status("Document Agent", "answer")
+        == "Document Agent: 📝 Собираю ответ..."
+    )
+    assert format_subagent_llm_stage_status("Document Agent", "finished") is None
 
 
 @pytest.mark.asyncio

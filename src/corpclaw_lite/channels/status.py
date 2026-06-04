@@ -8,6 +8,9 @@ __all__ = [
     "READY_STATUS_TEXT",
     "TOOL_STATUS_MAP",
     "format_llm_stage_status",
+    "format_subagent_llm_stage_status",
+    "format_subagent_tool_batch_status",
+    "format_subagent_tool_status",
     "format_tool_batch_status",
     "format_tool_status",
 ]
@@ -85,3 +88,21 @@ def format_tool_batch_status(tool_names: list[str]) -> str:
 def format_llm_stage_status(stage: str) -> str | None:
     """Return a friendly status label for backend LLM streaming telemetry."""
     return LLM_STAGE_STATUS_MAP.get(stage)
+
+
+def format_subagent_tool_status(subagent_name: str, tool_name: str) -> str:
+    """Return a friendly status label for a subagent tool execution start."""
+    return f"{subagent_name}: {format_tool_status(tool_name)}"
+
+
+def format_subagent_tool_batch_status(subagent_name: str, tool_names: list[str]) -> str:
+    """Return a friendly status label for a subagent parallel tool batch."""
+    return f"{subagent_name}: {format_tool_batch_status(tool_names)}"
+
+
+def format_subagent_llm_stage_status(subagent_name: str, stage: str) -> str | None:
+    """Return a friendly status label for subagent backend LLM streaming telemetry."""
+    friendly = format_llm_stage_status(stage)
+    if friendly is None:
+        return None
+    return f"{subagent_name}: {friendly}"

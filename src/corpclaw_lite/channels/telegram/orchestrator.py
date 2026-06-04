@@ -616,6 +616,17 @@ class TelegramBotOrchestrator:
                 on_llm_stage=(
                     status_session.mark_llm_stage if status_session is not None else None
                 ),
+                on_subagent_tool_start=(
+                    status_session.mark_subagent_tool_start if status_session is not None else None
+                ),
+                on_subagent_tool_batch_start=(
+                    status_session.mark_subagent_tool_batch_start
+                    if status_session is not None
+                    else None
+                ),
+                on_subagent_llm_stage=(
+                    status_session.mark_subagent_llm_stage if status_session is not None else None
+                ),
                 tools_enabled=(mode == "execute"),
                 few_shots=stack.few_shots,
                 channel="telegram",

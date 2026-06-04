@@ -4,6 +4,31 @@
 
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/).
 
+## [0.1.6] — 2026-06-04
+
+Фокус версии — трансляция внутренней работы субагентов в пользовательские статусы Web/Telegram.
+
+### Added
+
+- Добавлены subagent-aware status callbacks для tool calls, parallel tool batches и LLM stages
+  внутреннего `AgentLoop` субагента.
+- Telegram и Web теперь показывают вложенные статусы с человекочитаемым именем субагента,
+  например `Research Agent: 🤔 Думаю...` или `Document Agent: 📂 Читаю файл...`.
+
+### Changed
+
+- `dispatch_subagent` больше не оставляет пользовательский статус зависшим на «Делегирую
+  субагенту...»: дальнейшие tool/LLM стадии субагента прокидываются через существующий
+  callback pipeline без раскрытия task, arguments, results, prompt или reasoning content.
+- Runtime context `ToolRegistry.execute()` расширен служебными callback-параметрами для
+  `DispatchSubagentTool`; tool schema и LLM-visible arguments не изменились.
+
+### Verified
+
+- Focused проверки после форматирования: `52 passed` по subagent/status pipeline, progress и Web.
+- Полная проверка: ruff clean, `uv run pyright src/` — `0 errors` (17 существующих
+  matplotlib stub warnings), `uv run pytest tests/ -v` — `1038 passed, 1 skipped`.
+
 ## [0.1.5] — 2026-06-04
 
 Фокус версии — улучшение пользовательской видимости текущих действий агента в Web/Telegram

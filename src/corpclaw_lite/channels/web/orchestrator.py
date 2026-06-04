@@ -23,6 +23,9 @@ from corpclaw_lite.channels.status import (
     INITIAL_STATUS_TEXT,
     READY_STATUS_TEXT,
     format_llm_stage_status,
+    format_subagent_llm_stage_status,
+    format_subagent_tool_batch_status,
+    format_subagent_tool_status,
     format_tool_batch_status,
     format_tool_status,
 )
@@ -1025,6 +1028,17 @@ class WebChannelOrchestrator:
                 return
             send_status(request_id=request_id, phase="llm", key=stage, label=label)
 
+        def send_subagent_llm_status(*, request_id: str, subagent_name: str, stage: str) -> None:
+            label = format_subagent_llm_stage_status(subagent_name, stage)
+            if label is None:
+                return
+            send_status(
+                request_id=request_id,
+                phase="subagent",
+                key=f"{subagent_name}:{stage}",
+                label=label,
+            )
+
         async def approval_cb(action: str, details: str) -> bool:
             approval_id = secrets.token_urlsafe(12)
             future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
@@ -1136,6 +1150,23 @@ class WebChannelOrchestrator:
                         ),
                         on_llm_stage=lambda stage: send_llm_status(
                             request_id=request_id,
+                            stage=stage,
+                        ),
+                        on_subagent_tool_start=lambda subagent, tool: send_status(
+                            request_id=request_id,
+                            phase="subagent",
+                            key=f"{subagent}:{tool}",
+                            label=format_subagent_tool_status(subagent, tool),
+                        ),
+                        on_subagent_tool_batch_start=lambda subagent, tools: send_status(
+                            request_id=request_id,
+                            phase="subagent",
+                            key=f"{subagent}:parallel_tools",
+                            label=format_subagent_tool_batch_status(subagent, tools),
+                        ),
+                        on_subagent_llm_stage=lambda subagent, stage: send_subagent_llm_status(
+                            request_id=request_id,
+                            subagent_name=subagent,
                             stage=stage,
                         ),
                     ),

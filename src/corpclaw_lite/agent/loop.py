@@ -389,6 +389,9 @@ class AgentLoop:
         on_tool_start: Callable[[str], None] | None = None,
         on_llm_stage: Callable[[str], None] | None = None,
         on_tool_batch_start: Callable[[list[str]], None] | None = None,
+        on_subagent_tool_start: Callable[[str, str], None] | None = None,
+        on_subagent_tool_batch_start: Callable[[str, list[str]], None] | None = None,
+        on_subagent_llm_stage: Callable[[str, str], None] | None = None,
         tools_enabled: bool = True,
         trajectory_recorder: TrajectoryRecorder | None = None,
         few_shots: list[dict[str, Any]] | None = None,
@@ -732,6 +735,9 @@ class AgentLoop:
                         _approval_cb,
                         on_tool_start,
                         on_tool_batch_start,
+                        on_subagent_tool_start,
+                        on_subagent_tool_batch_start,
+                        on_subagent_llm_stage,
                         trajectory_recorder,
                         stats,
                     )
@@ -759,6 +765,9 @@ class AgentLoop:
                             user,
                             _approval_cb,
                             on_tool_start,
+                            on_subagent_tool_start,
+                            on_subagent_tool_batch_start,
+                            on_subagent_llm_stage,
                             trajectory_recorder,
                             stats,
                         )
@@ -921,6 +930,9 @@ class AgentLoop:
         approval_callback: Callable[[str, str], Awaitable[bool]] | None,
         on_tool_start: Callable[[str], None] | None,
         on_tool_batch_start: Callable[[list[str]], None] | None,
+        on_subagent_tool_start: Callable[[str, str], None] | None,
+        on_subagent_tool_batch_start: Callable[[str, list[str]], None] | None,
+        on_subagent_llm_stage: Callable[[str, str], None] | None,
         trajectory_recorder: TrajectoryRecorder | None = None,
         stats: RunStats | None = None,
     ) -> list[str]:
@@ -934,6 +946,9 @@ class AgentLoop:
                 user,
                 approval_callback,
                 None,
+                on_subagent_tool_start,
+                on_subagent_tool_batch_start,
+                on_subagent_llm_stage,
                 trajectory_recorder,
                 stats,
             )
@@ -947,6 +962,9 @@ class AgentLoop:
         user: User,
         approval_callback: Callable[[str, str], Awaitable[bool]] | None,
         on_tool_start: Callable[[str], None] | None,
+        on_subagent_tool_start: Callable[[str, str], None] | None = None,
+        on_subagent_tool_batch_start: Callable[[str, list[str]], None] | None = None,
+        on_subagent_llm_stage: Callable[[str, str], None] | None = None,
         trajectory_recorder: TrajectoryRecorder | None = None,
         stats: RunStats | None = None,
     ) -> str:
@@ -1038,6 +1056,9 @@ class AgentLoop:
                 run_id=run_id,
                 permission_checker=self._permission_checker,
                 enforce_tool_allowlist=self._enforce_tool_permissions,
+                on_subagent_tool_start=on_subagent_tool_start,
+                on_subagent_tool_batch_start=on_subagent_tool_batch_start,
+                on_subagent_llm_stage=on_subagent_llm_stage,
             )
             status = "error" if result.startswith("Error") else "ok"
             if status == "error":
@@ -1074,6 +1095,9 @@ class AgentLoop:
                         run_id=run_id,
                         permission_checker=self._permission_checker,
                         enforce_tool_allowlist=self._enforce_tool_permissions,
+                        on_subagent_tool_start=on_subagent_tool_start,
+                        on_subagent_tool_batch_start=on_subagent_tool_batch_start,
+                        on_subagent_llm_stage=on_subagent_llm_stage,
                     )
                     status = "ok"
                 else:

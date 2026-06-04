@@ -159,6 +159,57 @@ async def test_subagent_dispatcher_uses_same_run_id_for_router_and_loop() -> Non
 
 
 @pytest.mark.asyncio
+async def test_subagent_dispatcher_wraps_status_callbacks_with_subagent_name() -> None:
+    """Internal subagent loop callbacks should include the human-readable subagent name."""
+    registry = ToolRegistry()
+    registry.register(DummyToolA())
+
+    dispatcher = SubagentDispatcher(
+        provider=DummyProvider(),  # type: ignore
+        main_registry=registry,
+        settings=AgentSettings(),
+    )
+    spec = SubagentSpec(
+        id="document-agent",
+        name="Document Agent",
+        description="Document work",
+        allowed_tools=["tool_a"],
+    )
+    user = User(id=1, name="User", department="dev")
+    status_events: list[tuple[str, str, str | list[str]]] = []
+
+    with patch("corpclaw_lite.agent.subagent.AgentLoop") as MockLoop:
+        mock_loop_instance = MockLoop.return_value
+        mock_loop_instance.run = AsyncMock(return_value=("Subagent result", RunStats()))
+
+        await dispatcher.dispatch(
+            spec,
+            user,
+            "Prepare document",
+            on_subagent_tool_start=lambda subagent, tool: status_events.append(
+                ("tool", subagent, tool)
+            ),
+            on_subagent_tool_batch_start=lambda subagent, tools: status_events.append(
+                ("batch", subagent, list(tools))
+            ),
+            on_subagent_llm_stage=lambda subagent, stage: status_events.append(
+                ("llm", subagent, stage)
+            ),
+        )
+
+    run_kwargs = mock_loop_instance.run.call_args.kwargs
+    run_kwargs["on_tool_start"]("read_file")
+    run_kwargs["on_tool_batch_start"](["read_file", "list_files"])
+    run_kwargs["on_llm_stage"]("reasoning")
+
+    assert status_events == [
+        ("tool", "Document Agent", "read_file"),
+        ("batch", "Document Agent", ["read_file", "list_files"]),
+        ("llm", "Document Agent", "reasoning"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_subagent_prompt_loading(tmp_path: Path) -> None:
     """Subagent loads system prompt from prompt_path when the file exists."""
     prompt_file = tmp_path / "test_agent.md"
@@ -376,6 +427,58 @@ async def test_dispatch_subagent_tool_dispatches() -> None:
         user,
         "do the work",
         parent_run_id="parent-run",
+        on_subagent_tool_start=None,
+        on_subagent_tool_batch_start=None,
+        on_subagent_llm_stage=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_dispatch_subagent_tool_passes_status_callbacks() -> None:
+    """DispatchSubagentTool should forward runtime status callbacks to the dispatcher."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from corpclaw_lite.extensions.subagents.base import SubagentSpec
+    from corpclaw_lite.extensions.subagents.registry import SubagentRegistry
+    from corpclaw_lite.extensions.tools.builtin.dispatch import DispatchSubagentTool
+
+    spec = SubagentSpec(id="worker", name="Worker", description="desc", allowed_tools=["*"])
+    registry = SubagentRegistry()
+    registry.register(spec)
+
+    dispatcher = MagicMock()
+    dispatcher.dispatch = AsyncMock(return_value="subagent result")
+    tool = DispatchSubagentTool(dispatcher, registry)
+    user = User(id=1, name="U", department="dev")
+
+    def on_tool_start(subagent_name: str, tool_name: str) -> None:
+        _ = subagent_name, tool_name
+
+    def on_tool_batch_start(subagent_name: str, tool_names: list[str]) -> None:
+        _ = subagent_name, tool_names
+
+    def on_llm_stage(subagent_name: str, stage: str) -> None:
+        _ = subagent_name, stage
+
+    result = await tool.execute(
+        subagent_id="worker",
+        task="do the work",
+        user=user,
+        run_id="parent-run",
+        on_subagent_tool_start=on_tool_start,
+        on_subagent_tool_batch_start=on_tool_batch_start,
+        on_subagent_llm_stage=on_llm_stage,
+    )
+
+    assert result == "subagent result"
+    dispatcher.dispatch.assert_called_once_with(
+        spec,
+        user,
+        "do the work",
+        parent_run_id="parent-run",
+        on_subagent_tool_start=on_tool_start,
+        on_subagent_tool_batch_start=on_tool_batch_start,
+        on_subagent_llm_stage=on_llm_stage,
     )
 
 
@@ -432,12 +535,8 @@ async def test_dispatch_subagent_available_list_respects_department_rbac() -> No
     from corpclaw_lite.extensions.tools.builtin.dispatch import DispatchSubagentTool
 
     registry = SubagentRegistry()
-    registry.register(
-        SubagentSpec(id="research-agent", name="Research", description="desc")
-    )
-    registry.register(
-        SubagentSpec(id="execution-agent", name="Execution", description="desc")
-    )
+    registry.register(SubagentSpec(id="research-agent", name="Research", description="desc"))
+    registry.register(SubagentSpec(id="execution-agent", name="Execution", description="desc"))
     manager = DepartmentManager()
     manager._departments["default"] = DepartmentConfig(
         {
