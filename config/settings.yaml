@@ -104,7 +104,7 @@ agent:
 
 web:
   search_backend: "duckduckgo"
-  search_max_concurrent: 3
+  search_max_concurrent: 1
   fetch_max_concurrent: 4
   timeout_seconds: 20
   user_agent: "CorpClawLite/0.1 web tools"

@@ -27,15 +27,15 @@ class SimpleProgressGuardConfig:
 class SimpleProgressGuardState:
     """Mutable state for progress guard."""
 
-    last_tool_error_signature: tuple[str, str] | None = None
+    last_tool_error_signature: tuple[tuple[str, str], ...] | None = None
     same_error_count: int = 0
 
 
 class SimpleProgressGuard:
     """Detects loops based on repeated tool errors.
 
-    When the same tool produces the same error multiple times, injects a warning
-    into the conversation to help the model break out of the loop.
+    When the same tool action produces the same error across multiple model
+    turns, the caller can give the model a recovery hint before hard-stopping.
     """
 
     def __init__(self, config: SimpleProgressGuardConfig | None = None) -> None:
@@ -49,35 +49,43 @@ class SimpleProgressGuard:
         normalized = re.sub(r"\s+", " ", normalized).strip().lower()
         return normalized[:200]  # Truncate for comparison stability
 
-    def detect_loop(self, tool_name: str, result: str) -> bool:
-        """Check if tool execution resulted in repeated error.
+    def detect_loop_for_results(self, tool_results: list[tuple[str, str]]) -> bool:
+        """Check if one model action repeated the same failing strategy."""
 
-        Args:
-            tool_name: Name of the executed tool.
-            result: Tool execution result.
-
-        Returns:
-            True if loop detected (same error repeated), False otherwise.
-        """
         if not self.config.enabled:
             return False
 
-        if not result.startswith(TOOL_ERROR_PREFIX):
-            # Reset on success
+        signatures: list[tuple[str, str]] = []
+        for tool_name, result in tool_results:
+            if not result.startswith(TOOL_ERROR_PREFIX):
+                # Any successful result in the action is progress.
+                self.state.last_tool_error_signature = None
+                self.state.same_error_count = 0
+                return False
+
+            normalized_error = self._normalize_error(result)
+            signature = (tool_name, normalized_error)
+            if signature not in signatures:
+                signatures.append(signature)
+
+        if not signatures:
             self.state.last_tool_error_signature = None
             self.state.same_error_count = 0
             return False
 
-        normalized_error = self._normalize_error(result)
-        signature = (tool_name, normalized_error)
+        action_signature = tuple(signatures)
 
-        if signature == self.state.last_tool_error_signature:
+        if action_signature == self.state.last_tool_error_signature:
             self.state.same_error_count += 1
         else:
-            self.state.last_tool_error_signature = signature
+            self.state.last_tool_error_signature = action_signature
             self.state.same_error_count = 1
 
         return self.state.same_error_count >= self.config.max_same_tool_error
+
+    def detect_loop(self, tool_name: str, result: str) -> bool:
+        """Check if a single tool execution repeated the same error."""
+        return self.detect_loop_for_results([(tool_name, result)])
 
     def reset(self) -> None:
         """Reset guard state for new conversation."""

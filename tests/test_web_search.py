@@ -36,6 +36,14 @@ class _FakeDDGS:
         ]
 
 
+def test_web_search_defaults_are_conservative() -> None:
+    settings = WebSettings()
+    tool = WebSearchTool(settings)
+
+    assert settings.search_max_concurrent == 1
+    assert tool.parallel_safe is False
+
+
 @pytest.mark.asyncio
 async def test_web_search_normalizes_ddgs_results() -> None:
     _FakeDDGS.calls = []

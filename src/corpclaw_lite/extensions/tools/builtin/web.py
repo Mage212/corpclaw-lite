@@ -449,6 +449,7 @@ class WebSearchTool(Tool):
         ),
     ]
     risk_level = RiskLevel.MEDIUM
+    parallel_safe = False
 
     def __init__(self, settings: WebSettings | None = None) -> None:
         self._settings = settings or WebSettings()

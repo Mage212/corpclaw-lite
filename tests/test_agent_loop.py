@@ -735,15 +735,10 @@ async def test_pruning_in_loop_reduces_context(
 
 
 @pytest.mark.asyncio
-async def test_parallel_loop_all_results_added(
+async def test_parallel_same_batch_errors_do_not_trigger_loop(
     test_user: User, empty_registry: ToolRegistry
 ) -> None:
-    """Parallel loop detection must NOT orphan tool results.
-
-    When the progress guard detects a loop on the N-th tool in a parallel batch,
-    all results (including N+1, N+2, …) must still be added to context so that
-    every tool_call in the assistant message has a matching tool result.
-    """
+    """Repeated errors in one parallel action are one failed strategy, not a loop."""
     call_count = 0
 
     class LoopingTool:
@@ -759,10 +754,10 @@ async def test_parallel_loop_all_results_added(
 
     empty_registry._tools["loop_tool"] = LoopingTool()  # type: ignore
 
-    # 3 parallel tool calls — loop will be detected on the 1st one
     tool_calls = [ToolCall(id=str(i), name="loop_tool", arguments={}) for i in range(3)]
 
     captured_contexts: list[list[dict[str, Any]]] = []
+    captured_systems: list[str | None] = []
 
     class CapturingProvider(MockProvider):
         async def chat(  # type: ignore[override]
@@ -772,6 +767,7 @@ async def test_parallel_loop_all_results_added(
             system: Any = None,
         ) -> LLMResponse:
             captured_contexts.append(list(messages))
+            captured_systems.append(system if isinstance(system, str) else None)
             return await super().chat(messages, tools, system)
 
     provider = CapturingProvider(
@@ -784,14 +780,63 @@ async def test_parallel_loop_all_results_added(
     loop = AgentLoop(AgentConfig(provider, empty_registry, settings))
     result, stats = await loop.run(test_user, "run parallel")
 
-    # First loop detection gives LLM another chance; LLM responds with text → "ok"
     assert "stopped" in result.lower()
-    # All 3 tools were actually executed
     assert call_count == 3
     assert stats.status == "ok"
+    assert all("Internal recovery instruction" not in (system or "") for system in captured_systems)
 
     # The context sent to the first LLM call had the user message
     assert any(m.get("role") == "user" for m in captured_contexts[0])
+
+
+@pytest.mark.asyncio
+async def test_sequential_same_batch_errors_do_not_trigger_loop(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """Repeated errors in one non-parallel action are one failed strategy."""
+    call_count = 0
+
+    class LoopingTool:
+        name = "loop_tool"
+        description = ""
+        params: list[Any] = []
+        parallel_safe = False
+
+        async def execute(self, **kwargs: Any) -> str:
+            nonlocal call_count
+            call_count += 1
+            return "Error: same error every time"
+
+    empty_registry._tools["loop_tool"] = LoopingTool()  # type: ignore
+
+    tool_calls = [ToolCall(id=str(i), name="loop_tool", arguments={}) for i in range(3)]
+    captured_systems: list[str | None] = []
+
+    class CapturingProvider(MockProvider):
+        async def chat(  # type: ignore[override]
+            self,
+            messages: list[dict[str, Any]],
+            tools: Any = None,
+            system: Any = None,
+        ) -> LLMResponse:
+            captured_systems.append(system if isinstance(system, str) else None)
+            return await super().chat(messages, tools, system)
+
+    provider = CapturingProvider(
+        responses=[
+            LLMResponse(content="", tool_calls=tool_calls),
+            LLMResponse(content="Stopped."),
+        ]
+    )
+    settings = AgentSettings(max_steps=10, max_tool_calls=50)
+    loop = AgentLoop(AgentConfig(provider, empty_registry, settings))
+
+    result, stats = await loop.run(test_user, "run sequential")
+
+    assert result == "Stopped."
+    assert call_count == 3
+    assert stats.status == "ok"
+    assert all("Internal recovery instruction" not in (system or "") for system in captured_systems)
 
 
 @pytest.mark.asyncio
@@ -917,10 +962,10 @@ async def test_parallel_tool_one_approved_one_denied(
 async def test_loop_detection_gives_second_chance(
     test_user: User, empty_registry: ToolRegistry
 ) -> None:
-    """First loop detection injects a warning and continues; second breaks.
+    """First loop detection gives a recovery turn; repeated failure then breaks.
 
-    P0-6: Previously loop detection immediately broke on the first occurrence,
-    meaning the LLM never saw the warning. Now the LLM gets one more turn.
+    The recovery hint is internal system context, not assistant text that can be
+    returned verbatim to the user.
     """
 
     class FailTool:
@@ -934,8 +979,8 @@ async def test_loop_detection_gives_second_chance(
 
     empty_registry._tools["fail_tool"] = FailTool()  # type: ignore
 
-    call_count = 0
-    saw_warning: list[bool] = []
+    saw_recovery_instruction: list[bool] = []
+    saw_assistant_guard_text: list[bool] = []
 
     class TrackingProvider(MockProvider):
         async def chat(  # type: ignore[override]
@@ -944,10 +989,10 @@ async def test_loop_detection_gives_second_chance(
             tools: Any = None,
             system: Any = None,
         ) -> LLMResponse:
-            nonlocal call_count
-            # Check if any message contains the loop warning
-            has_warning = any("System Guard" in str(m.get("content", "")) for m in messages)
-            saw_warning.append(has_warning)
+            has_recovery = "Internal recovery instruction" in str(system or "")
+            has_guard_text = any("System Guard" in str(m.get("content", "")) for m in messages)
+            saw_recovery_instruction.append(has_recovery)
+            saw_assistant_guard_text.append(has_guard_text)
             return await super().chat(messages, tools, system)
 
     # Enough responses: 3 errors to trigger first detection, warning injected,
@@ -967,7 +1012,32 @@ async def test_loop_detection_gives_second_chance(
     result, stats = await loop.run(test_user, "do it")
 
     assert stats.status == "loop"
-    # The LLM saw the warning at least once before the hard stop
-    assert any(saw_warning), "LLM should have seen the System Guard warning"
-    # More than 3 iterations (first detection doesn't stop immediately)
+    assert any(saw_recovery_instruction), "LLM should get one recovery turn"
+    assert not any(saw_assistant_guard_text), "Guard text must not be assistant-visible"
     assert stats.iterations > 3
+
+
+@pytest.mark.asyncio
+async def test_loop_guard_echo_is_not_returned_to_user(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """Old internal guard text must be converted to a user-facing fallback."""
+
+    provider = MockProvider(
+        responses=[
+            LLMResponse(
+                content=(
+                    "System Guard: You seem to be stuck in a loop repeating the same error. "
+                    "Please change your strategy or stop using this tool."
+                )
+            ),
+        ]
+    )
+    loop = AgentLoop(AgentConfig(provider, empty_registry, AgentSettings()))
+
+    result, stats = await loop.run(test_user, "run it")
+
+    assert not result.startswith("System Guard:")
+    assert "detected a loop" in result
+    assert stats.status == "loop"
+    assert stats.error == "model_echoed_loop_guard"

@@ -148,7 +148,7 @@ class WebSettings(BaseModel):
     """Settings for host-side web tools."""
 
     search_backend: Literal["duckduckgo"] = "duckduckgo"
-    search_max_concurrent: int = 3
+    search_max_concurrent: int = 1
     fetch_max_concurrent: int = 4
     timeout_seconds: int = 20
     user_agent: str = "CorpClawLite/0.1 web tools"

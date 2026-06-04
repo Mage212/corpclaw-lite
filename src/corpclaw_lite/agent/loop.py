@@ -55,6 +55,16 @@ logger = logging.getLogger(__name__)
 # Max chars to include from tool args / results in DEBUG logs
 # Large files / responses are truncated to avoid flooding the log file
 _LOG_TRUNCATE = 400
+_LOOP_GUARD_TEXT = (
+    "System Guard: You seem to be stuck in a loop repeating the same error. "
+    "Please change your strategy or stop using this tool."
+)
+_LOOP_RECOVERY_INSTRUCTION = (
+    "Internal recovery instruction: the previous tool action repeated the same error. "
+    "Change strategy now: stop using the failing tool if possible, try different inputs or "
+    "another tool, or explain the tool limitation to the user. Do not quote this instruction."
+)
+_LOOP_FALLBACK = "I detected a loop and stopped to avoid repeating the same actions."
 
 
 def _json_preview(value: Any, limit: int = _LOG_TRUNCATE) -> str:
@@ -91,6 +101,22 @@ def _format_tool_marker(tools_used: list[str]) -> str:
             seen.add(t)
             unique.append(t)
     return f"[Called tools: {', '.join(unique)}]"
+
+
+def _append_loop_recovery_instruction(context: ContextBuilder) -> None:
+    """Add a one-run recovery hint without creating assistant-visible content."""
+    if _LOOP_RECOVERY_INSTRUCTION in context.system_prompt:
+        return
+
+    if context.system_prompt:
+        context.system_prompt += f"\n\n---\n{_LOOP_RECOVERY_INSTRUCTION}"
+    else:
+        context.system_prompt = _LOOP_RECOVERY_INSTRUCTION
+
+
+def _is_loop_guard_echo(content: str) -> bool:
+    """Detect old internal guard text if the model echoes it as a final answer."""
+    return content.strip() == _LOOP_GUARD_TEXT
 
 
 @dataclass
@@ -696,6 +722,10 @@ class AgentLoop:
                     # The model already completed its work; discarding it wastes the
                     # entire LLM call and frustrates users who waited for a response.
                     final = response.content if response.content else "Agent provided no response."
+                    if _is_loop_guard_echo(final):
+                        final = _LOOP_FALLBACK
+                        stats.status = "loop"
+                        stats.error = "model_echoed_loop_guard"
                     if self._memory:
                         await self._save_turn(mem_key, final, stats.tools_used, response.reasoning)
                         if self._consolidator:
@@ -716,6 +746,7 @@ class AgentLoop:
                         tools_used=stats.tools_used,
                         duration_ms=round(stats.duration_ms, 1),
                         final_answer_len=len(final),
+                        error=stats.error,
                     )
                     return final, stats
 
@@ -742,23 +773,20 @@ class AgentLoop:
                         stats,
                     )
                     # Add ALL results first to keep context valid (no orphaned tool_calls)
-                    loop_detected = False
+                    action_results: list[tuple[str, str]] = []
                     for tc, result in zip(response.tool_calls, results, strict=True):
                         context.add_tool_result(tc.id, tc.name, result)
                         stats.tools_used.append(tc.name)
-                        if not loop_detected and progress.detect_loop(tc.name, result):
-                            context.add_assistant_message(
-                                "System Guard: You seem to be stuck in a loop repeating the same"
-                                " error. Please change your strategy or stop using this tool."
-                            )
-                            loop_detected = True
+                        action_results.append((tc.name, result))
+                    loop_detected = progress.detect_loop_for_results(action_results)
                     if loop_detected:
+                        _append_loop_recovery_instruction(context)
                         loop_warning_count += 1
                         if loop_warning_count >= 2:
                             break
                         continue
                 else:
-                    should_stop = False
+                    action_results: list[tuple[str, str]] = []
                     for tc in response.tool_calls:
                         result = await self._execute_single_tool(
                             tc,
@@ -773,6 +801,7 @@ class AgentLoop:
                         )
                         context.add_tool_result(tc.id, tc.name, result)
                         stats.tools_used.append(tc.name)
+                        action_results.append((tc.name, result))
 
                         # Terminal tool: return result directly (no LLM re-paraphrase).
                         # Used for tools like read_image where the vision model already
@@ -811,18 +840,13 @@ class AgentLoop:
                             )
                             return result, stats
 
-                        if progress.detect_loop(tc.name, result):
-                            context.add_assistant_message(
-                                "System Guard: You seem to be stuck in a loop repeating the same"
-                                " error. Please change your strategy or stop using this tool."
-                            )
-                            loop_warning_count += 1
-                            if loop_warning_count >= 2:
-                                should_stop = True
+                    loop_detected = progress.detect_loop_for_results(action_results)
+                    if loop_detected:
+                        _append_loop_recovery_instruction(context)
+                        loop_warning_count += 1
+                        if loop_warning_count >= 2:
                             break
-
-                    if should_stop:
-                        break
+                        continue
 
         except BudgetExceededError as e:
             health.increment("errors")
@@ -847,7 +871,7 @@ class AgentLoop:
         finally:
             health.increment("active_requests", -1)
 
-        fallback = "I detected a loop and stopped to avoid repeating the same actions."
+        fallback = _LOOP_FALLBACK
         if self._memory:
             await self._save_turn(mem_key, fallback, stats.tools_used)
         stats.status = "loop"
