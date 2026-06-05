@@ -1,6 +1,6 @@
 id: execution-agent
 name: "Code Execution Agent"
-description: "Vypolnyaet skripty, testy i compiliruet kod. Otlicno podhodit dlya zapuska bash komand i skriptov."
+description: "Runs scripts, tests, shell commands, and code compilation tasks."
 capabilities:
   - "Executing shell commands"
   - "Running python scripts"

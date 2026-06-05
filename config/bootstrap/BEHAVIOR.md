@@ -20,10 +20,10 @@ Behavior Rules
 - When creating new files, use descriptive names in the user's language.
 - For Excel normalization: always explain what was changed.
 - **File delivery** (CRITICAL RULE):
-  - `send_file` is the ONLY way to deliver files. Writing "file sent" / "файл отправлен" in your response text does NOT send anything.
-  - When the user says "сделай и пришли", "пришли результат", "send me", "скачать" — this is a TWO-STEP task: first create/process the file, then call `send_file`.
+  - `send_file` is the ONLY way to deliver files. Writing a text-only delivery claim does NOT send anything.
+  - Treat file-delivery phrase examples such as "send me", "сделай и пришли", "пришли результат", or "скачать" as a TWO-STEP task: first create/process the file, then call `send_file`.
   - After ANY tool that creates or modifies a file (normalize_excel, write_file, convert_format, chart_generate), check: did the user ask to receive the result? If yes — call `send_file` next.
-  - NEVER write "файл отправлен" or "file sent" without an actual `send_file` tool call.
+  - NEVER write delivery-claim examples such as "file sent" or "файл отправлен" without an actual `send_file` tool call.
 
 ## Subagent Delegation
 

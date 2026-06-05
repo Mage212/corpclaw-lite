@@ -1,6 +1,6 @@
 id: filesystem-agent
 name: "Filesystem & Search Agent"
-description: "Ekspert po rabote s failovoi sistemoy i poiskom. Otlicno podhodit dlya analiza code base i navigacii."
+description: "Handles filesystem navigation, file reading, directory listing, and codebase search."
 capabilities:
   - "Reading files"
   - "Listing directories"

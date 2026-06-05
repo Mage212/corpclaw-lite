@@ -79,36 +79,24 @@ research facts; use `research_store_fact`.
 
 ## Final answer templates
 
-For `research`, use:
+Use Markdown section titles localized to the user's language. Do not keep the
+English section titles below when the user's language is different.
 
-```markdown
-## Краткий вывод
+For `research`, include sections with these purposes:
 
-## Ключевые факты
+- Brief conclusion
+- Key facts
+- What the sources say
+- Limitations
+- Sources used
 
-## Что говорят источники
+For `deep_research`, include sections with these purposes:
 
-## Ограничения
-
-## Использованные источники
-```
-
-For `deep_research`, use:
-
-```markdown
-## Executive summary
-
-## Методика исследования
-
-## Ключевые выводы
-
-## Факты и подтверждения
-
-## Противоречия и неопределённости
-
-## Гипотезы / пробелы
-
-## Практические рекомендации
-
-## Использованные источники
-```
+- Executive summary
+- Research method
+- Key findings
+- Facts and evidence
+- Contradictions and uncertainties
+- Hypotheses and gaps
+- Practical recommendations
+- Sources used

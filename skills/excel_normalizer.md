@@ -43,12 +43,11 @@ invisible Unicode characters, and missing leading zeros.
 
 1. **Removes invisible characters** — zero-width spaces, BOM, NBSP, soft hyphens, etc.
 2. **Strict cell type enforcement:**
-   - **INN columns** (header contains "инн"): converted to text, scientific notation
-     eliminated, leading zeros restored
-   - **Date columns** (header contains "дата"): datetime → DD.MM.YYYY text, serial
-     dates → DD.MM.YYYY text
-   - **Numeric columns** (header contains "инвентарь" or "сумма"): floats rounded to
-     2 decimal places
+   - **INN columns**: converted to text, scientific notation eliminated, leading
+     zeros restored. Header pattern examples: "инн".
+   - **Date columns**: datetime → DD.MM.YYYY text, serial dates → DD.MM.YYYY
+     text. Header pattern examples: "дата".
+   - **Numeric columns**: floats rounded to 2 decimal places. Header pattern examples: "инвентарь", "сумма".
    - **Text columns**: floats like 123.0 converted to "123"
 3. **Creates new formatted workbook** — Calibri 11pt bold headers, thin borders,
    auto-fitted column widths, freeze panes, proper cell number formats

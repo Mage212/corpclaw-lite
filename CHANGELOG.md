@@ -4,6 +4,28 @@
 
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/).
 
+## [non-version] — 2026-06-05
+
+### Changed
+
+- Стабилизирован системный prompt layer проекта: core/subagent prompts, builtin subagent
+  metadata и skill instructions приведены к английскому языку; русские фразы оставлены только
+  как явно помеченные examples/pattern examples/keywords для распознавания пользовательских
+  формулировок.
+- Research-agent final answer templates заменены на language-neutral описания секций, чтобы
+  системный prompt не смешивал русские и английские заголовки внутри одного шаблона.
+
+### Added
+
+- Добавлена focused-проверка prompt hygiene, запрещающая кириллицу в системных prompt surfaces
+  вне явно разрешённых зон examples/patterns/keywords и ловящая транслит в subagent metadata.
+
+### Verified
+
+- `uv run ruff check src/ tests/test_prompt_hygiene.py` — clean.
+- `uv run pyright src/` — `0 errors` (17 существующих matplotlib stub warnings).
+- `uv run pytest tests/ -v` — `1060 passed, 1 skipped`.
+
 ## [0.1.7] — 2026-06-05
 
 Фокус версии — корректное отображение LLM-очереди и ожидания начала генерации в Web/Telegram.

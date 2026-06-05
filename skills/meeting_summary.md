@@ -43,15 +43,15 @@ with sections for summary, decisions, and action items.
 
 1. Read the provided meeting notes or text carefully. If notes are in a file,
    use `read_file` to access them first.
-2. Structure the output into these sections:
-   - **Краткое описание / Summary** (2-4 sentences: what was discussed, key topics)
-   - **Ключевые решения / Key Decisions** (bulleted list of decisions made)
-   - **Задачи / Action Items** (table: task, assignee, deadline if mentioned)
-   - **Открытые вопросы / Open Questions** (unresolved items needing follow-up)
+2. Structure the output into localized sections for:
+   - Summary (2-4 sentences: what was discussed, key topics)
+   - Key decisions (bulleted list of decisions made)
+   - Action items (table: task, assignee, deadline if mentioned)
+   - Open questions (unresolved items needing follow-up)
 3. For each action item, try to identify: what needs to be done, who is
    responsible, and the deadline or timeframe.
-4. Match the input language — if the user writes in Russian, respond in
-   Russian. If English, respond in English.
+4. Match the input language. Use section titles in the same language as the
+   user's notes or request.
 5. Keep the summary concise but complete. Don't omit important details.
 6. Offer to save the summary to a file using `write_file` if the notes are
    long or the user may want to share them.

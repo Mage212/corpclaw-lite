@@ -1,6 +1,6 @@
 id: document-agent
 name: "Document Processing Agent"
-description: "Создание, редактирование и форматирование документов, отчётов и таблиц."
+description: "Creates, edits, and formats documents, reports, and spreadsheets."
 capabilities:
   - "Writing and editing documents"
   - "Creating reports"
