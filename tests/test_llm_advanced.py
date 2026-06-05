@@ -255,6 +255,26 @@ def test_resolve_reasoning_fallback_xml_tool_call_extracted() -> None:
     assert tool_calls[0].name == "read_file"
 
 
+def test_resolve_reasoning_fallback_multiple_xml_tool_calls_extracted() -> None:
+    """Multiple XML tool calls in reasoning_content become one model action."""
+    provider = _make_provider()
+    xml = (
+        '<tool_call><name>read_file</name><arguments>{"path": "a.txt"}</arguments></tool_call>'
+        '<tool_call><name>search_files</name><arguments>{"query": "needle"}</arguments></tool_call>'
+    )
+    msg = _raw_msg(reasoning_content=xml)
+    tools = [
+        {"function": {"name": "read_file", "parameters": {}}},
+        {"function": {"name": "search_files", "parameters": {}}},
+    ]
+
+    content, tool_calls = provider._resolve_reasoning_fallback("", "stop", msg, tools, [])
+
+    assert content == ""
+    assert len(tool_calls) == 2
+    assert [tool_call.name for tool_call in tool_calls] == ["read_file", "search_files"]
+
+
 def test_resolve_reasoning_fallback_unparseable_xml_falls_back_to_text() -> None:
     """XML markers present but parse fails → treat reasoning as text content."""
     provider = _make_provider()

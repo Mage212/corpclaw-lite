@@ -100,6 +100,54 @@ async def test_subagent_loop_keeps_allowed_tools_even_if_department_lacks_direct
 
 
 @pytest.mark.asyncio
+async def test_research_subagent_initializes_persisted_mode() -> None:
+    registry = ToolRegistry()
+    registry.register(DummyToolA())
+
+    class RuntimeSpy:
+        def __init__(self) -> None:
+            self.calls: list[tuple[User, str | None, str]] = []
+
+        def initialize_run_mode(self, user: User, run_id: str | None, mode: str) -> None:
+            self.calls.append((user, run_id, mode))
+
+    runtime = RuntimeSpy()
+    dispatcher = SubagentDispatcher(
+        provider=DummyProvider(),  # type: ignore[arg-type]
+        main_registry=registry,
+        settings=AgentSettings(),
+        research_runtime=runtime,  # type: ignore[arg-type]
+    )
+    spec = SubagentSpec(
+        id="research-agent",
+        name="Research Agent",
+        description="Research",
+        allowed_tools=["*"],
+    )
+    user = User(id=1, name="User", department="dev")
+    captured_messages: list[str] = []
+
+    async def _capture_run(
+        u: object,
+        msg: str,
+        system_prompt: str | None = None,
+        **kwargs: Any,
+    ) -> tuple[str, RunStats]:
+        captured_messages.append(msg)
+        return "done", RunStats()
+
+    with patch("corpclaw_lite.agent.subagent.AgentLoop") as MockLoop:
+        mock_loop_instance = MockLoop.return_value
+        mock_loop_instance.run = AsyncMock(side_effect=_capture_run)
+
+        await dispatcher.dispatch(spec, user, "Сделай детальное исследование")
+
+    assert runtime.calls
+    assert runtime.calls[0][2] == "deep_research"
+    assert captured_messages[0].startswith("Research mode: deep_research")
+
+
+@pytest.mark.asyncio
 async def test_subagent_dispatcher_uses_same_run_id_for_router_and_loop() -> None:
     """Subagent LLM queue/cache events must use the subagent's own run_id."""
     from types import SimpleNamespace

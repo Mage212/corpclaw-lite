@@ -1041,3 +1041,44 @@ async def test_loop_guard_echo_is_not_returned_to_user(
     assert "detected a loop" in result
     assert stats.status == "loop"
     assert stats.error == "model_echoed_loop_guard"
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_repairs_raw_xml_final_once(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    provider = MockProvider(
+        responses=[
+            LLMResponse(content="<tool_call>BROKEN XML</tool_call>"),
+            LLMResponse(content="safe answer"),
+        ]
+    )
+    loop = AgentLoop(AgentConfig(provider, empty_registry, AgentSettings()))
+
+    result, stats = await loop.run(test_user, "run it")
+
+    assert result == "safe answer"
+    assert "<tool_call>" not in result
+    assert provider.call_count == 2
+    assert stats.status == "ok"
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_raw_xml_final_falls_back_after_repair_failure(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    provider = MockProvider(
+        responses=[
+            LLMResponse(content="<tool_call>BROKEN XML</tool_call>"),
+            LLMResponse(content="<tool_call>STILL BROKEN</tool_call>"),
+        ]
+    )
+    loop = AgentLoop(AgentConfig(provider, empty_registry, AgentSettings()))
+
+    result, stats = await loop.run(test_user, "run it")
+
+    assert "<tool_call>" not in result
+    assert "could not safely parse" in result
+    assert provider.call_count == 2
+    assert stats.status == "error"
+    assert stats.error == "malformed_xml_tool_call"

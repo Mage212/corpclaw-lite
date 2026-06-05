@@ -249,3 +249,45 @@ async def test_research_tools_success_paths_and_budget_errors(tmp_path: Path) ->
         "research_list_facts",
         "research_finalize",
     ]
+
+
+@pytest.mark.asyncio()
+async def test_research_search_uses_persisted_deep_research_mode(tmp_path: Path) -> None:
+    user = _user()
+    runtime = ResearchRuntime(
+        settings=ResearchSettings(normal_search_waves=1, deep_search_waves=2),
+        workspace_base=tmp_path,
+    )
+    search_backend = FakeSearchTool()
+    search_tool = ResearchSearchTool(runtime, search_backend)  # type: ignore[arg-type]
+
+    runtime.initialize_run_mode(user, "deep-run", "deep_research")
+
+    first = await search_tool.execute(user=user, query="first", run_id="deep-run")
+    second = await search_tool.execute(user=user, query="second", run_id="deep-run")
+    third = await search_tool.execute(user=user, query="third", run_id="deep-run")
+
+    assert "Research note" in first
+    assert "Research note" in second
+    assert "search budget exceeded" in third
+    assert len(search_backend.calls) == 2
+
+
+@pytest.mark.asyncio()
+async def test_research_search_defaults_to_normal_budget_without_persisted_mode(
+    tmp_path: Path,
+) -> None:
+    user = _user()
+    runtime = ResearchRuntime(
+        settings=ResearchSettings(normal_search_waves=1, deep_search_waves=2),
+        workspace_base=tmp_path,
+    )
+    search_backend = FakeSearchTool()
+    search_tool = ResearchSearchTool(runtime, search_backend)  # type: ignore[arg-type]
+
+    first = await search_tool.execute(user=user, query="first", run_id="normal-run")
+    second = await search_tool.execute(user=user, query="second", run_id="normal-run")
+
+    assert "Research note" in first
+    assert "search budget exceeded" in second
+    assert len(search_backend.calls) == 1

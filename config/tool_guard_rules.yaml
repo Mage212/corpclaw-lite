@@ -103,7 +103,7 @@ rules:
     tool: "web_fetch"
     severity: HIGH
     match_param: "url"
-    match_pattern: "(127\\.|10\\.|172\\.(1[6-9]|2[0-9]|3[01])\\.|192\\.168\\.|localhost|0\\.0\\.0\\.0)"
+    match_pattern: "(?i)^https?://(?:[^/@?#\\s]+@)?(?:localhost|\\[::1\\]|0\\.0\\.0\\.0|127(?:\\.\\d{1,3}){3}|10(?:\\.\\d{1,3}){3}|192\\.168(?:\\.\\d{1,3}){2}|172\\.(?:1[6-9]|2[0-9]|3[01])(?:\\.\\d{1,3}){2})(?::\\d+)?(?:[/?#]|$)"
     require_approval: true
 
   - id: WEB_FETCH_SENSITIVE_PATHS
@@ -119,7 +119,7 @@ rules:
     tool: "web_search"
     severity: MEDIUM
     match_param: "query"
-    match_pattern: "(127\\.|10\\.|172\\.(1[6-9]|2[0-9]|3[01])\\.|192\\.168\\.|localhost|0\\.0\\.0\\.0|169\\.254\\.|metadata\\.google\\.internal)"
+    match_pattern: "(?i)(^|[^0-9A-Za-z.])(localhost|0\\.0\\.0\\.0|127(?:\\.\\d{1,3}){3}|10(?:\\.\\d{1,3}){3}|192\\.168(?:\\.\\d{1,3}){2}|172\\.(?:1[6-9]|2[0-9]|3[01])(?:\\.\\d{1,3}){2}|169\\.254(?:\\.\\d{1,3}){2}|metadata\\.google\\.internal)($|[^0-9A-Za-z.])"
     require_approval: true
 
   - id: RESEARCH_FETCH_PRIVATE_IP
@@ -127,7 +127,7 @@ rules:
     tool: "research_fetch_source"
     severity: HIGH
     match_param: "url"
-    match_pattern: "(127\\.|10\\.|172\\.(1[6-9]|2[0-9]|3[01])\\.|192\\.168\\.|localhost|0\\.0\\.0\\.0)"
+    match_pattern: "(?i)^https?://(?:[^/@?#\\s]+@)?(?:localhost|\\[::1\\]|0\\.0\\.0\\.0|127(?:\\.\\d{1,3}){3}|10(?:\\.\\d{1,3}){3}|192\\.168(?:\\.\\d{1,3}){2}|172\\.(?:1[6-9]|2[0-9]|3[01])(?:\\.\\d{1,3}){2})(?::\\d+)?(?:[/?#]|$)"
     require_approval: true
 
   - id: RESEARCH_FETCH_SENSITIVE_PATHS
@@ -143,7 +143,7 @@ rules:
     tool: "research_search"
     severity: MEDIUM
     match_param: "query"
-    match_pattern: "(127\\.|10\\.|172\\.(1[6-9]|2[0-9]|3[01])\\.|192\\.168\\.|localhost|0\\.0\\.0\\.0|169\\.254\\.|metadata\\.google\\.internal)"
+    match_pattern: "(?i)(^|[^0-9A-Za-z.])(localhost|0\\.0\\.0\\.0|127(?:\\.\\d{1,3}){3}|10(?:\\.\\d{1,3}){3}|192\\.168(?:\\.\\d{1,3}){2}|172\\.(?:1[6-9]|2[0-9]|3[01])(?:\\.\\d{1,3}){2}|169\\.254(?:\\.\\d{1,3}){2}|metadata\\.google\\.internal)($|[^0-9A-Za-z.])"
     require_approval: true
 
   # ── Absolute path protection (defense-in-depth; code-level validation is primary) ──

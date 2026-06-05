@@ -254,6 +254,15 @@ def _build_extensions_stack(
     if subagent_dir.exists():
         subagent_registry.load_directory(subagent_dir)
 
+    web_fetch_tool = WebFetchTool(web_settings)
+    web_search_tool = WebSearchTool(web_settings)
+    read_image_tool = ReadImageTool(
+        VisionProcessor(provider, max_image_bytes=agent_settings.vision_max_image_bytes),
+        workspace_base=workspace_base,
+    )
+    research_runtime = ResearchRuntime(research_settings, workspace_base=workspace_base)
+    research_tools = build_research_tools(research_runtime, web_search_tool, web_fetch_tool)
+
     if subagent_registry.list_all():
         dispatcher = SubagentDispatcher(
             provider=provider,
@@ -263,6 +272,7 @@ def _build_extensions_stack(
             permission_checker=permission_checker,
             skill_matcher=skill_matcher,
             skill_registry=skill_registry,
+            research_runtime=research_runtime,
         )
         registry.register(
             DispatchSubagentTool(
@@ -275,15 +285,6 @@ def _build_extensions_stack(
             "dispatch_subagent registered (%d subagents available)",
             len(subagent_registry.list_all()),
         )
-
-    web_fetch_tool = WebFetchTool(web_settings)
-    web_search_tool = WebSearchTool(web_settings)
-    read_image_tool = ReadImageTool(
-        VisionProcessor(provider, max_image_bytes=agent_settings.vision_max_image_bytes),
-        workspace_base=workspace_base,
-    )
-    research_runtime = ResearchRuntime(research_settings, workspace_base=workspace_base)
-    research_tools = build_research_tools(research_runtime, web_search_tool, web_fetch_tool)
 
     registry.register(web_fetch_tool)
     registry.register(read_image_tool)

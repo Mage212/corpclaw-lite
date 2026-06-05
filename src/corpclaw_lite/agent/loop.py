@@ -31,6 +31,10 @@ from corpclaw_lite.llm.base import (
     ToolCall,
 )
 from corpclaw_lite.llm.router import LLMRouter
+from corpclaw_lite.llm.xml_tool_calling import (
+    build_xml_repair_prompt,
+    contains_xml_tool_call_markers,
+)
 from corpclaw_lite.logging import health
 from corpclaw_lite.logging.trace import get_trace_logger, log_event
 from corpclaw_lite.memory.sqlite import SQLiteMemory
@@ -65,6 +69,10 @@ _LOOP_RECOVERY_INSTRUCTION = (
     "another tool, or explain the tool limitation to the user. Do not quote this instruction."
 )
 _LOOP_FALLBACK = "I detected a loop and stopped to avoid repeating the same actions."
+_XML_TOOL_CALL_FALLBACK = (
+    "I could not safely parse the model's tool-call output, so I stopped instead of "
+    "showing raw internal tool-call markup."
+)
 
 
 def _json_preview(value: Any, limit: int = _LOG_TRUNCATE) -> str:
@@ -436,6 +444,7 @@ class AgentLoop:
         """
         stats = RunStats(run_id=run_id) if run_id is not None else RunStats()
         loop_warning_count = 0
+        xml_repair_attempted = False
         last_actual_total_tokens: int | None = None
         t0 = time.monotonic()
 
@@ -722,6 +731,25 @@ class AgentLoop:
                     # The model already completed its work; discarding it wastes the
                     # entire LLM call and frustrates users who waited for a response.
                     final = response.content if response.content else "Agent provided no response."
+                    if contains_xml_tool_call_markers(final):
+                        if not xml_repair_attempted:
+                            xml_repair_attempted = True
+                            context.add_user_message(
+                                build_xml_repair_prompt(
+                                    "Raw XML tool-call markup was returned as assistant text "
+                                    "instead of parsed tool calls."
+                                )
+                            )
+                            log_event(
+                                "xml_tool_call_repair_requested",
+                                stats.run_id,
+                                iteration=stats.iterations,
+                                content_hash=_payload_hash(final),
+                            )
+                            continue
+                        final = _XML_TOOL_CALL_FALLBACK
+                        stats.status = "error"
+                        stats.error = "malformed_xml_tool_call"
                     if _is_loop_guard_echo(final):
                         final = _LOOP_FALLBACK
                         stats.status = "loop"

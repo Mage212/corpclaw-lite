@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from corpclaw_lite.departments.permissions import PermissionChecker
     from corpclaw_lite.extensions.skills.matcher import SkillMatcher
     from corpclaw_lite.extensions.skills.registry import SkillRegistry
+    from corpclaw_lite.extensions.tools.builtin.research import ResearchRuntime
     from corpclaw_lite.llm.base import Provider
     from corpclaw_lite.security.tool_guard import ToolGuard
 
@@ -100,6 +101,7 @@ class SubagentDispatcher:
         permission_checker: PermissionChecker | None = None,
         skill_matcher: SkillMatcher | None = None,
         skill_registry: SkillRegistry | None = None,
+        research_runtime: ResearchRuntime | None = None,
     ) -> None:
         self._provider = provider
         self._main_registry = main_registry
@@ -108,6 +110,7 @@ class SubagentDispatcher:
         self._permission_checker = permission_checker
         self._skill_matcher = skill_matcher
         self._skill_registry = skill_registry
+        self._research_runtime = research_runtime
 
     async def dispatch(
         self,
@@ -227,6 +230,17 @@ class SubagentDispatcher:
         try:
             t0 = time.monotonic()
             effective_task_context = _prepare_research_task_context(spec, task_context)
+            research_mode = _research_mode_for_task(spec, task_context)
+            if self._research_runtime is not None and research_mode is not None:
+                mode = "deep_research" if research_mode == "deep_research" else "research"
+                self._research_runtime.initialize_run_mode(user, subagent_run_id, mode)
+                log_event(
+                    "research_run_mode_initialized",
+                    subagent_run_id,
+                    parent_run_id=parent_run_id,
+                    subagent_id=spec.id,
+                    mode=mode,
+                )
 
             def forward_tool_start(tool_name: str) -> None:
                 if on_subagent_tool_start is not None:

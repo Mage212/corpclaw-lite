@@ -73,6 +73,27 @@ class ResearchRuntime:
     def settings(self) -> ResearchSettings:
         return self._settings
 
+    def initialize_run_mode(self, user: User, run_id: str | None, mode: ResearchMode) -> None:
+        """Persist the intended research mode for a new run."""
+        run_dir = self.run_dir(user, run_id)
+        state = self._read_state(run_dir)
+        self._upgrade_mode(state, mode)
+        self._write_json(run_dir / "state.json", state)
+
+    def resolve_mode(self, user: User, run_id: str | None, value: Any) -> ResearchMode:
+        """Resolve mode from the tool call or the persisted run state.
+
+        Explicit tool-call mode upgrades the run, but never downgrades an
+        existing deep_research run back to normal research.
+        """
+        run_dir = self.run_dir(user, run_id)
+        state = self._read_state(run_dir)
+        if value is not None and str(value).strip():
+            self._upgrade_mode(state, normalize_research_mode(value))
+            self._write_json(run_dir / "state.json", state)
+            return normalize_research_mode(state.get("mode"))
+        return normalize_research_mode(state.get("mode"))
+
     def run_dir(self, user: User, run_id: str | None) -> Path:
         self.cleanup_user(user)
         user_key = user.workspace_key()
@@ -107,7 +128,11 @@ class ResearchRuntime:
         )
         used = _as_int(state.get("search_calls"), 0)
         if used >= limit:
-            return f"Error: Research search budget exceeded ({used}/{limit})."
+            return (
+                f"Error: Research search budget exceeded ({used}/{limit}). "
+                "Do not retry research_search in this run. Use research_list_facts, then "
+                "research_finalize with the available evidence and limitations."
+            )
         state["search_calls"] = used + 1
         self._write_json(run_dir / "state.json", state)
         return None
@@ -123,7 +148,11 @@ class ResearchRuntime:
         )
         used = len(self.list_sources(user, run_id))
         if used >= limit:
-            return f"Error: Research source budget exceeded ({used}/{limit})."
+            return (
+                f"Error: Research source budget exceeded ({used}/{limit}). "
+                "Do not retry research_fetch_source in this run. Use cached sources, "
+                "research_list_facts, then research_finalize with limitations if needed."
+            )
         self._write_json(run_dir / "state.json", state)
         return None
 
@@ -138,7 +167,11 @@ class ResearchRuntime:
         )
         used = _as_int(state.get("rereads"), 0)
         if used >= limit:
-            return f"Error: Research reread budget exceeded ({used}/{limit})."
+            return (
+                f"Error: Research reread budget exceeded ({used}/{limit}). "
+                "Do not retry research_read_source in this run. Use research_list_facts, then "
+                "research_finalize with the available evidence and limitations."
+            )
         state["rereads"] = used + 1
         self._write_json(run_dir / "state.json", state)
         return None
@@ -515,7 +548,7 @@ class ResearchSearchTool(Tool):
         if not isinstance(query, str) or not query.strip():
             return "Error: 'query' is a required non-empty string parameter."
         run_id = kwargs.get("run_id") if isinstance(kwargs.get("run_id"), str) else None
-        mode = normalize_research_mode(kwargs.get("mode"))
+        mode = self._runtime.resolve_mode(user, run_id, kwargs.get("mode"))
         budget_error = self._runtime.reserve_search(user, run_id, mode)
         if budget_error:
             return budget_error
@@ -576,7 +609,7 @@ class ResearchFetchSourceTool(Tool):
             return "Error: 'url' is a required non-empty string parameter."
         url = url.strip()
         run_id = kwargs.get("run_id") if isinstance(kwargs.get("run_id"), str) else None
-        mode = normalize_research_mode(kwargs.get("mode"))
+        mode = self._runtime.resolve_mode(user, run_id, kwargs.get("mode"))
         max_chars = _as_int(kwargs.get("max_chars"), self._runtime.settings.source_excerpt_chars)
 
         existing = self._runtime.find_source_by_url(user, run_id, url)
@@ -639,7 +672,7 @@ class ResearchReadSourceTool(Tool):
         if not isinstance(source_id, str) or not source_id.strip():
             return "Error: 'source_id' is a required non-empty string parameter."
         run_id = kwargs.get("run_id") if isinstance(kwargs.get("run_id"), str) else None
-        mode = normalize_research_mode(kwargs.get("mode"))
+        mode = self._runtime.resolve_mode(user, run_id, kwargs.get("mode"))
         text = self._runtime.read_source_text(user, run_id, source_id.strip())
         if text is None:
             return f"Error: Cached source '{source_id}' not found."
@@ -705,7 +738,11 @@ class ResearchStoreFactTool(Tool):
         if not isinstance(source_id, str) or not source_id.strip():
             return "Error: 'source_id' is a required non-empty string parameter."
         if self._runtime.get_source(user, run_id, source_id.strip()) is None:
-            return f"Error: Unknown source_id '{source_id}'. Fetch the source first."
+            return (
+                f"Error: Unknown source_id '{source_id}'. Do not invent or retry unknown "
+                "source IDs. Use only source IDs returned by research_fetch_source or "
+                "research_list_facts, then finalize with limitations if needed."
+            )
         if not isinstance(fact_text, str) or not fact_text.strip():
             return "Error: 'fact' is a required non-empty string parameter."
         if not isinstance(evidence, str) or not evidence.strip():
@@ -793,7 +830,7 @@ class ResearchFinalizeTool(Tool):
         if user is None:
             return "Error: User context is required for research_finalize."
         run_id = kwargs.get("run_id") if isinstance(kwargs.get("run_id"), str) else None
-        mode = normalize_research_mode(kwargs.get("mode"))
+        mode = self._runtime.resolve_mode(user, run_id, kwargs.get("mode"))
         raw_answer = kwargs.get("answer")
         answer: str = raw_answer if isinstance(raw_answer, str) else ""
         return self._runtime.finalize_report(user, run_id, mode, answer)

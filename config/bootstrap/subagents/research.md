@@ -37,9 +37,17 @@ research facts; use `research_store_fact`.
 
 ## Rules
 
+- Include the current mode (`research` or `deep_research`) in every
+  `research_search`, `research_fetch_source`, `research_read_source`, and
+  `research_finalize` call.
 - Always cite sources with URLs in the final answer.
 - Never answer a web research question using only `research_search` snippets.
 - After every useful fetched source, store the key facts with `research_store_fact`.
+- Use only `source_id` values returned by `research_fetch_source`,
+  `research_read_source`, or `research_list_facts`. Never invent a `source_id`.
+- If a research tool says a budget is exceeded, stop retrying that tool type.
+  Use `research_list_facts`, then call `research_finalize` with available
+  evidence and clear limitations.
 - If a page is unreachable, say so in the limitations section.
 - Prefer authoritative and primary sources over blogs, forums, and summaries.
 - If sources disagree, describe the contradiction instead of hiding it.

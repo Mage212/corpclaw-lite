@@ -109,6 +109,23 @@ async def test_tool_guard_trace_block(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_default_tool_guard_private_ip_rules_do_not_match_arxiv_ids() -> None:
+    rules_path = Path(__file__).resolve().parents[1] / "config" / "tool_guard_rules.yaml"
+    guard = ToolGuard()
+    guard.load_file(rules_path)
+
+    await guard.check("research_fetch_source", {"url": "https://arxiv.org/abs/2310.06825"})
+    await guard.check("research_fetch_source", {"url": "https://arxiv.org/html/2404.14294v3"})
+    await guard.check("research_search", {"query": "arxiv 2310.06825 attention paper"})
+
+    with pytest.raises(ApprovalRequest, match="RESEARCH_FETCH_PRIVATE_IP"):
+        await guard.check("research_fetch_source", {"url": "http://10.0.0.1/"})
+
+    with pytest.raises(ApprovalRequest, match="RESEARCH_SEARCH_INTERNAL_TARGETS"):
+        await guard.check("research_search", {"query": "status page http://10.0.0.1/admin"})
+
+
+@pytest.mark.asyncio
 async def test_toolguard_rm_separate_flags(tmp_path: Path) -> None:
     rules_file = tmp_path / "rules.yaml"
     rules_file.write_text(
