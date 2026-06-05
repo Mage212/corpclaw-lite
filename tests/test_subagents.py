@@ -10,6 +10,7 @@ from corpclaw_lite.config.settings import AgentSettings
 from corpclaw_lite.extensions.subagents.base import SubagentSpec
 from corpclaw_lite.extensions.tools.base import RiskLevel, Tool
 from corpclaw_lite.extensions.tools.registry import ToolRegistry
+from corpclaw_lite.llm.queue import LLMQueueStatus
 from corpclaw_lite.users.models import User
 
 
@@ -224,7 +225,18 @@ async def test_subagent_dispatcher_wraps_status_callbacks_with_subagent_name() -
         allowed_tools=["tool_a"],
     )
     user = User(id=1, name="User", department="dev")
-    status_events: list[tuple[str, str, str | list[str]]] = []
+    status_events: list[tuple[str, str, object]] = []
+    queue_status = LLMQueueStatus(
+        user_id="1",
+        task_kind="subagent:document-agent",
+        load_class="subagent",
+        position=0,
+        estimated_wait_seconds=15.0,
+        waiting_count=1,
+        active_count=1,
+        max_concurrent=1,
+        wait_seconds=1.0,
+    )
 
     with patch("corpclaw_lite.agent.subagent.AgentLoop") as MockLoop:
         mock_loop_instance = MockLoop.return_value
@@ -243,17 +255,22 @@ async def test_subagent_dispatcher_wraps_status_callbacks_with_subagent_name() -
             on_subagent_llm_stage=lambda subagent, stage: status_events.append(
                 ("llm", subagent, stage)
             ),
+            on_subagent_llm_queue_status=lambda subagent, status: status_events.append(
+                ("queue", subagent, status)
+            ),
         )
 
     run_kwargs = mock_loop_instance.run.call_args.kwargs
     run_kwargs["on_tool_start"]("read_file")
     run_kwargs["on_tool_batch_start"](["read_file", "list_files"])
     run_kwargs["on_llm_stage"]("reasoning")
+    run_kwargs["on_llm_queue_status"](queue_status)
 
     assert status_events == [
         ("tool", "Document Agent", "read_file"),
         ("batch", "Document Agent", ["read_file", "list_files"]),
         ("llm", "Document Agent", "reasoning"),
+        ("queue", "Document Agent", queue_status),
     ]
 
 
@@ -478,6 +495,7 @@ async def test_dispatch_subagent_tool_dispatches() -> None:
         on_subagent_tool_start=None,
         on_subagent_tool_batch_start=None,
         on_subagent_llm_stage=None,
+        on_subagent_llm_queue_status=None,
     )
 
 
@@ -508,6 +526,9 @@ async def test_dispatch_subagent_tool_passes_status_callbacks() -> None:
     def on_llm_stage(subagent_name: str, stage: str) -> None:
         _ = subagent_name, stage
 
+    def on_llm_queue_status(subagent_name: str, status: LLMQueueStatus) -> None:
+        _ = subagent_name, status
+
     result = await tool.execute(
         subagent_id="worker",
         task="do the work",
@@ -516,6 +537,7 @@ async def test_dispatch_subagent_tool_passes_status_callbacks() -> None:
         on_subagent_tool_start=on_tool_start,
         on_subagent_tool_batch_start=on_tool_batch_start,
         on_subagent_llm_stage=on_llm_stage,
+        on_subagent_llm_queue_status=on_llm_queue_status,
     )
 
     assert result == "subagent result"
@@ -527,6 +549,7 @@ async def test_dispatch_subagent_tool_passes_status_callbacks() -> None:
         on_subagent_tool_start=on_tool_start,
         on_subagent_tool_batch_start=on_tool_batch_start,
         on_subagent_llm_stage=on_llm_stage,
+        on_subagent_llm_queue_status=on_llm_queue_status,
     )
 
 

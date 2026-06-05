@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+from corpclaw_lite.llm.queue import LLMQueueStatus
+
 __all__ = [
     "INITIAL_STATUS_TEXT",
     "LLM_STAGE_STATUS_MAP",
     "READY_STATUS_TEXT",
     "TOOL_STATUS_MAP",
     "format_llm_stage_status",
+    "format_llm_queue_status",
     "format_subagent_llm_stage_status",
+    "format_subagent_llm_queue_status",
     "format_subagent_tool_batch_status",
     "format_subagent_tool_status",
     "format_tool_batch_status",
@@ -37,7 +41,9 @@ TOOL_STATUS_MAP: dict[str, str] = {
 }
 
 LLM_STAGE_STATUS_MAP: dict[str, str] = {
-    "started": "🤔 Думаю...",
+    "model_preparing": "⚙️ Готовлю запрос модели...",
+    "model_waiting": "⏳ Жду начало ответа модели...",
+    "started": "⏳ Жду начало ответа модели...",
     "reasoning": "🤔 Думаю...",
     "answer": "📝 Собираю ответ...",
     "tool_call": "⚙️ Готовлю действие...",
@@ -90,6 +96,17 @@ def format_llm_stage_status(stage: str) -> str | None:
     return LLM_STAGE_STATUS_MAP.get(stage)
 
 
+def format_llm_queue_status(status: LLMQueueStatus) -> str:
+    """Return a friendly status label for waiting in the LLM request queue."""
+    if status.position is None:
+        return "⏳ Ожидаю свободный LLM-слот..."
+    position = status.position + 1
+    wait_text = ""
+    if status.estimated_wait_seconds is not None:
+        wait_text = f", примерно {int(status.estimated_wait_seconds)}с"
+    return f"⏳ Ожидаю LLM-слот. В очереди: {position}{wait_text}..."
+
+
 def format_subagent_tool_status(subagent_name: str, tool_name: str) -> str:
     """Return a friendly status label for a subagent tool execution start."""
     return f"{subagent_name}: {format_tool_status(tool_name)}"
@@ -106,3 +123,8 @@ def format_subagent_llm_stage_status(subagent_name: str, stage: str) -> str | No
     if friendly is None:
         return None
     return f"{subagent_name}: {friendly}"
+
+
+def format_subagent_llm_queue_status(subagent_name: str, status: LLMQueueStatus) -> str:
+    """Return a friendly status label for subagent LLM queue waiting."""
+    return f"{subagent_name}: {format_llm_queue_status(status)}"

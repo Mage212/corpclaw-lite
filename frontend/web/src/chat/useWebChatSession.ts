@@ -48,6 +48,7 @@ function prependUnique(messages: ChatMessage[], older: ChatMessage[]): ChatMessa
 }
 
 function timelineType(phase: string): RunTimelineEvent["type"] {
+  if (phase === "queue") return "queue";
   if (phase === "llm") return "llm";
   if (phase === "tool") return "tool";
   return "request";
@@ -71,6 +72,17 @@ function appendTimeline(
   events: RunTimelineEvent[],
   event: Omit<RunTimelineEvent, "id" | "createdAt">
 ): RunTimelineEvent[] {
+  const last = events[events.length - 1];
+  if (
+    last &&
+    last.requestId === event.requestId &&
+    last.type === event.type &&
+    last.label === event.label &&
+    last.detail === event.detail &&
+    last.tone === event.tone
+  ) {
+    return events;
+  }
   return [...events, makeTimelineEvent(event)].slice(-MAX_TIMELINE_EVENTS);
 }
 
@@ -336,18 +348,19 @@ function handleWsEvent(event: ServerWsEvent, handlers: WsEventHandlers) {
       onWorkspaceChanged?.();
     }
   } else if (event.type === "request_started" || event.type === "request_state") {
+    const phase = event.phase || "request";
     setStatus({
       active: true,
       requestId: event.request_id,
       label: event.label,
-      phase: "request",
+      phase,
       tone: "running"
     });
     if (event.type === "request_started") {
       handlers.setRunEvents([
         makeTimelineEvent({
           requestId: event.request_id,
-          type: "request",
+          type: timelineType(phase),
           label: event.label,
           tone: "running"
         })
@@ -355,7 +368,7 @@ function handleWsEvent(event: ServerWsEvent, handlers: WsEventHandlers) {
     } else {
       pushRunEvent(handlers, {
         requestId: event.request_id,
-        type: "request",
+        type: timelineType(phase),
         label: event.label,
         tone: "running"
       });

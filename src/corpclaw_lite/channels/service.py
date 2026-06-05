@@ -11,6 +11,7 @@ from corpclaw_lite.config.bootstrap import BootstrapLoader
 from corpclaw_lite.container.manager import ContainerManagerError
 from corpclaw_lite.exceptions import LLMBackendUnavailableError
 from corpclaw_lite.extensions.tools.builtin._path_utils import user_workspace_path
+from corpclaw_lite.llm.queue import LLMQueueStatus
 from corpclaw_lite.logging.agent_logger import AgentLogger
 from corpclaw_lite.paths import PROJECT_ROOT
 from corpclaw_lite.users.models import User
@@ -79,9 +80,11 @@ class AgentRequestCallbacks:
     on_tool_start: Callable[[str], None] | None = None
     on_tool_batch_start: Callable[[list[str]], None] | None = None
     on_llm_stage: Callable[[str], None] | None = None
+    on_llm_queue_status: Callable[[LLMQueueStatus], None] | None = None
     on_subagent_tool_start: Callable[[str, str], None] | None = None
     on_subagent_tool_batch_start: Callable[[str, list[str]], None] | None = None
     on_subagent_llm_stage: Callable[[str, str], None] | None = None
+    on_subagent_llm_queue_status: Callable[[str, LLMQueueStatus], None] | None = None
 
 
 @dataclass(slots=True)
@@ -210,9 +213,11 @@ class AgentRequestService:
                 on_tool_start=callbacks.on_tool_start,
                 on_tool_batch_start=callbacks.on_tool_batch_start,
                 on_llm_stage=callbacks.on_llm_stage,
+                on_llm_queue_status=callbacks.on_llm_queue_status,
                 on_subagent_tool_start=callbacks.on_subagent_tool_start,
                 on_subagent_tool_batch_start=callbacks.on_subagent_tool_batch_start,
                 on_subagent_llm_stage=callbacks.on_subagent_llm_stage,
+                on_subagent_llm_queue_status=callbacks.on_subagent_llm_queue_status,
                 tools_enabled=(mode == "execute"),
                 few_shots=stack.few_shots,
                 channel=channel,

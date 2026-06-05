@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from corpclaw_lite.extensions.skills.registry import SkillRegistry
     from corpclaw_lite.extensions.tools.builtin.research import ResearchRuntime
     from corpclaw_lite.llm.base import Provider
+    from corpclaw_lite.llm.queue import LLMQueueStatus
     from corpclaw_lite.security.tool_guard import ToolGuard
 
 logger = logging.getLogger(__name__)
@@ -122,6 +123,7 @@ class SubagentDispatcher:
         on_subagent_tool_start: Callable[[str, str], None] | None = None,
         on_subagent_tool_batch_start: Callable[[str, list[str]], None] | None = None,
         on_subagent_llm_stage: Callable[[str, str], None] | None = None,
+        on_subagent_llm_queue_status: Callable[[str, LLMQueueStatus], None] | None = None,
     ) -> str:
         """Run the subagent on a specific task."""
         subagent_run_id = uuid.uuid4().hex
@@ -254,6 +256,10 @@ class SubagentDispatcher:
                 if on_subagent_llm_stage is not None:
                     on_subagent_llm_stage(subagent_name, stage)
 
+            def forward_queue_status(status: LLMQueueStatus) -> None:
+                if on_subagent_llm_queue_status is not None:
+                    on_subagent_llm_queue_status(subagent_name, status)
+
             result, _ = await asyncio.wait_for(
                 loop.run(
                     user,
@@ -268,6 +274,9 @@ class SubagentDispatcher:
                         else None
                     ),
                     on_llm_stage=forward_llm_stage if on_subagent_llm_stage is not None else None,
+                    on_llm_queue_status=(
+                        forward_queue_status if on_subagent_llm_queue_status is not None else None
+                    ),
                     run_id=subagent_run_id,
                 ),
                 timeout=timeout_seconds,

@@ -14,6 +14,7 @@ __all__ = [
 ]
 
 if TYPE_CHECKING:
+    from corpclaw_lite.llm.queue import LLMQueueStatus
     from corpclaw_lite.users.models import User
 
 logger = logging.getLogger(__name__)
@@ -89,6 +90,7 @@ class ToolRegistry:
         on_subagent_tool_start: Callable[[str, str], None] | None = None,
         on_subagent_tool_batch_start: Callable[[str, list[str]], None] | None = None,
         on_subagent_llm_stage: Callable[[str, str], None] | None = None,
+        on_subagent_llm_queue_status: Callable[[str, LLMQueueStatus], None] | None = None,
     ) -> str:
         """Execute a tool by name with arguments.
 
@@ -129,6 +131,8 @@ class ToolRegistry:
                 tool_kwargs["on_subagent_tool_batch_start"] = on_subagent_tool_batch_start
             if on_subagent_llm_stage is not None:
                 tool_kwargs["on_subagent_llm_stage"] = on_subagent_llm_stage
+            if on_subagent_llm_queue_status is not None:
+                tool_kwargs["on_subagent_llm_queue_status"] = on_subagent_llm_queue_status
             result = await tool.execute(**tool_kwargs)
         except Exception as e:
             logger.exception("Tool '%s' execution failed", name)

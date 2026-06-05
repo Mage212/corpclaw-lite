@@ -30,7 +30,8 @@ from corpclaw_lite.llm.base import (
     StreamingProvider,
     ToolCall,
 )
-from corpclaw_lite.llm.router import LLMRouter
+from corpclaw_lite.llm.queue import LLMQueueStatus
+from corpclaw_lite.llm.router import LLMRouter, QueuedProvider
 from corpclaw_lite.llm.xml_tool_calling import (
     build_xml_repair_prompt,
     contains_xml_tool_call_markers,
@@ -109,6 +110,24 @@ def _format_tool_marker(tools_used: list[str]) -> str:
             seen.add(t)
             unique.append(t)
     return f"[Called tools: {', '.join(unique)}]"
+
+
+def _queue_notify_position(settings: AgentSettings) -> bool:
+    """Return queue position notification setting with AgentSettings fallback."""
+    settings_obj: Any = settings
+    queue_settings = getattr(getattr(settings_obj, "llm", None), "queue", None)
+    return bool(getattr(queue_settings, "notify_position", True))
+
+
+def _queue_notify_interval_seconds(settings: AgentSettings) -> float:
+    """Return queue notification interval with AgentSettings fallback."""
+    settings_obj: Any = settings
+    queue_settings = getattr(getattr(settings_obj, "llm", None), "queue", None)
+    raw_interval = getattr(queue_settings, "notify_interval_seconds", 30.0)
+    try:
+        return float(raw_interval)
+    except (TypeError, ValueError):
+        return 30.0
 
 
 def _append_loop_recovery_instruction(context: ContextBuilder) -> None:
@@ -213,6 +232,13 @@ class AgentLoop:
         stats: RunStats | None,
     ) -> LLMResponse:
         """Call an LLM provider, using backend streaming when available."""
+
+        def emit_status(stage: str) -> None:
+            if self._settings.llm_stream_status_updates and on_llm_stage is not None:
+                on_llm_stage(stage)
+
+        emit_status("model_waiting")
+
         if not self._settings.llm_streaming_enabled or not isinstance(provider, StreamingProvider):
             return await provider.chat(messages=messages, tools=tools, system=system)
 
@@ -233,10 +259,6 @@ class AgentLoop:
         first_tool_call_ms: float | None = None
         stage_counts: dict[str, int] = {}
         payload_trace_enabled = _trace_payload_enabled()
-
-        def emit_status(stage: str) -> None:
-            if self._settings.llm_stream_status_updates and on_llm_stage is not None:
-                on_llm_stage(stage)
 
         def handle_event(event: LLMStreamEvent) -> None:
             nonlocal content_delta_count, event_count, first_content_ms, first_event_ms
@@ -422,10 +444,12 @@ class AgentLoop:
         approval_callback: Callable[[str, str], Awaitable[bool]] | None = None,
         on_tool_start: Callable[[str], None] | None = None,
         on_llm_stage: Callable[[str], None] | None = None,
+        on_llm_queue_status: Callable[[LLMQueueStatus], None] | None = None,
         on_tool_batch_start: Callable[[list[str]], None] | None = None,
         on_subagent_tool_start: Callable[[str, str], None] | None = None,
         on_subagent_tool_batch_start: Callable[[str, list[str]], None] | None = None,
         on_subagent_llm_stage: Callable[[str, str], None] | None = None,
+        on_subagent_llm_queue_status: Callable[[str, LLMQueueStatus], None] | None = None,
         tools_enabled: bool = True,
         trajectory_recorder: TrajectoryRecorder | None = None,
         few_shots: list[dict[str, Any]] | None = None,
@@ -447,6 +471,10 @@ class AgentLoop:
         xml_repair_attempted = False
         last_actual_total_tokens: int | None = None
         t0 = time.monotonic()
+
+        def emit_llm_status(stage: str) -> None:
+            if self._settings.llm_stream_status_updates and on_llm_stage is not None:
+                on_llm_stage(stage)
 
         logger.debug(
             "[user=%s] run() start | msg=%r",
@@ -592,13 +620,50 @@ class AgentLoop:
                     # from LLM inference so the budget only counts active time.
                     if isinstance(self._provider, LLMRouter) and self._provider.has_queue:
                         budget.pause()
+
+                        def on_router_acquired() -> None:
+                            budget.resume()
+                            emit_llm_status("model_preparing")
+
                         response = await self._provider.call_default_with_slot(
                             user_id=str(user.id),
                             run_id=stats.run_id,
                             messages=context.messages,
                             tools=tools_schema,
                             system=context.system_prompt or None,
-                            on_acquired=budget.resume,
+                            on_acquired=on_router_acquired,
+                            call=lambda target_provider: asyncio.wait_for(
+                                self._call_llm_provider(
+                                    target_provider,
+                                    messages=context.messages,
+                                    tools=tools_schema,
+                                    system=context.system_prompt or None,
+                                    run_id=stats.run_id,
+                                    iteration=stats.iterations,
+                                    on_llm_stage=on_llm_stage,
+                                    stats=stats,
+                                ),
+                                timeout=self._settings.llm_timeout_seconds,
+                            ),
+                            on_queue_status=on_llm_queue_status,
+                            notify_position=_queue_notify_position(self._settings),
+                            notify_interval_seconds=_queue_notify_interval_seconds(self._settings),
+                        )
+                    elif isinstance(self._provider, QueuedProvider):
+                        budget.pause()
+
+                        def on_queued_provider_acquired() -> None:
+                            budget.resume()
+                            emit_llm_status("model_preparing")
+
+                        response = await self._provider.call_with_slot(
+                            messages=context.messages,
+                            tools=tools_schema,
+                            system=context.system_prompt or None,
+                            on_acquired=on_queued_provider_acquired,
+                            on_queue_status=on_llm_queue_status,
+                            notify_position=_queue_notify_position(self._settings),
+                            notify_interval_seconds=_queue_notify_interval_seconds(self._settings),
                             call=lambda target_provider: asyncio.wait_for(
                                 self._call_llm_provider(
                                     target_provider,
@@ -619,6 +684,7 @@ class AgentLoop:
                             if isinstance(self._provider, LLMRouter)
                             else self._provider
                         )
+                        emit_llm_status("model_preparing")
                         response = await asyncio.wait_for(
                             self._call_llm_provider(
                                 target_provider,
@@ -797,6 +863,7 @@ class AgentLoop:
                         on_subagent_tool_start,
                         on_subagent_tool_batch_start,
                         on_subagent_llm_stage,
+                        on_subagent_llm_queue_status,
                         trajectory_recorder,
                         stats,
                     )
@@ -824,6 +891,7 @@ class AgentLoop:
                             on_subagent_tool_start,
                             on_subagent_tool_batch_start,
                             on_subagent_llm_stage,
+                            on_subagent_llm_queue_status,
                             trajectory_recorder,
                             stats,
                         )
@@ -985,6 +1053,7 @@ class AgentLoop:
         on_subagent_tool_start: Callable[[str, str], None] | None,
         on_subagent_tool_batch_start: Callable[[str, list[str]], None] | None,
         on_subagent_llm_stage: Callable[[str, str], None] | None,
+        on_subagent_llm_queue_status: Callable[[str, LLMQueueStatus], None] | None,
         trajectory_recorder: TrajectoryRecorder | None = None,
         stats: RunStats | None = None,
     ) -> list[str]:
@@ -1001,6 +1070,7 @@ class AgentLoop:
                 on_subagent_tool_start,
                 on_subagent_tool_batch_start,
                 on_subagent_llm_stage,
+                on_subagent_llm_queue_status,
                 trajectory_recorder,
                 stats,
             )
@@ -1017,6 +1087,7 @@ class AgentLoop:
         on_subagent_tool_start: Callable[[str, str], None] | None = None,
         on_subagent_tool_batch_start: Callable[[str, list[str]], None] | None = None,
         on_subagent_llm_stage: Callable[[str, str], None] | None = None,
+        on_subagent_llm_queue_status: Callable[[str, LLMQueueStatus], None] | None = None,
         trajectory_recorder: TrajectoryRecorder | None = None,
         stats: RunStats | None = None,
     ) -> str:
@@ -1111,6 +1182,7 @@ class AgentLoop:
                 on_subagent_tool_start=on_subagent_tool_start,
                 on_subagent_tool_batch_start=on_subagent_tool_batch_start,
                 on_subagent_llm_stage=on_subagent_llm_stage,
+                on_subagent_llm_queue_status=on_subagent_llm_queue_status,
             )
             status = "error" if result.startswith("Error") else "ok"
             if status == "error":
@@ -1150,6 +1222,7 @@ class AgentLoop:
                         on_subagent_tool_start=on_subagent_tool_start,
                         on_subagent_tool_batch_start=on_subagent_tool_batch_start,
                         on_subagent_llm_stage=on_subagent_llm_stage,
+                        on_subagent_llm_queue_status=on_subagent_llm_queue_status,
                     )
                     status = "ok"
                 else:

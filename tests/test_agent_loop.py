@@ -17,6 +17,8 @@ from corpclaw_lite.llm.base import (
     TokenUsage,
     ToolCall,
 )
+from corpclaw_lite.llm.queue import LLMQueueStatus, LLMRequestQueue
+from corpclaw_lite.llm.router import LLMRouter
 from corpclaw_lite.users.models import User
 
 
@@ -116,8 +118,51 @@ async def test_agent_loop_uses_backend_streaming_when_available(
     assert res == "Hello"
     assert provider.streamed_call_count == 1
     assert provider.call_count == 0
-    assert seen_stages == ["started", "answer", "finished"]
+    assert seen_stages == ["model_preparing", "model_waiting", "started", "answer", "finished"]
     assert stats.status == "ok"
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_reports_queue_then_model_waiting_status(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    provider = MockProvider(responses=[LLMResponse(content="queued response")])
+    queue = LLMRequestQueue(max_concurrent=1)
+    router = LLMRouter(
+        providers={},
+        default_provider=provider,
+        default_provider_name="llamacpp",
+        routing=[("default", None, provider, "llamacpp")],
+        queue=queue,
+    )
+    holder = await queue.acquire("holder")
+    queue_statuses: list[LLMQueueStatus] = []
+    stages: list[str] = []
+    loop = AgentLoop(AgentConfig(router, empty_registry, AgentSettings()))
+
+    task = asyncio.create_task(
+        loop.run(
+            test_user,
+            "Hi",
+            on_llm_queue_status=queue_statuses.append,
+            on_llm_stage=stages.append,
+        )
+    )
+    for _ in range(20):
+        if queue_statuses:
+            break
+        await asyncio.sleep(0.01)
+
+    assert queue_statuses
+    assert queue_statuses[0].position == 0
+    assert stages == []
+
+    await queue.release(holder, 0.1)
+    res, stats = await task
+
+    assert res == "queued response"
+    assert stats.status == "ok"
+    assert stages == ["model_preparing", "model_waiting"]
 
 
 @pytest.mark.asyncio
@@ -575,6 +620,12 @@ async def test_subagent_status_callbacks_passed_to_tool_runtime_context(
     def on_subagent_llm_stage(subagent_name: str, stage: str) -> None:
         _ = subagent_name, stage
 
+    def on_subagent_llm_queue_status(
+        subagent_name: str,
+        status: LLMQueueStatus,
+    ) -> None:
+        _ = subagent_name, status
+
     result, stats = await loop.run(
         test_user,
         "delegate",
@@ -582,6 +633,7 @@ async def test_subagent_status_callbacks_passed_to_tool_runtime_context(
         on_subagent_tool_start=on_subagent_tool_start,
         on_subagent_tool_batch_start=on_subagent_tool_batch_start,
         on_subagent_llm_stage=on_subagent_llm_stage,
+        on_subagent_llm_queue_status=on_subagent_llm_queue_status,
     )
 
     assert result == "Done."
@@ -590,6 +642,7 @@ async def test_subagent_status_callbacks_passed_to_tool_runtime_context(
     assert captured_kwargs["on_subagent_tool_start"] is on_subagent_tool_start
     assert captured_kwargs["on_subagent_tool_batch_start"] is on_subagent_tool_batch_start
     assert captured_kwargs["on_subagent_llm_stage"] is on_subagent_llm_stage
+    assert captured_kwargs["on_subagent_llm_queue_status"] is on_subagent_llm_queue_status
 
 
 @pytest.mark.asyncio

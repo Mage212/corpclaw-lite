@@ -7,9 +7,11 @@ Tracks queue positions so callers can notify users about wait times.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import math
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -18,6 +20,7 @@ from corpclaw_lite.logging.trace import log_event
 
 __all__ = [
     "LLMLoadClass",
+    "LLMQueueStatus",
     "LLMRequestQueue",
     "QueueEntry",
     "SlotAffinityConfig",
@@ -63,6 +66,21 @@ class _SlotState:
     assigned_user_id: str | None = None
     active: bool = False
     expires_at: float = 0.0
+
+
+@dataclass
+class LLMQueueStatus:
+    """User-facing snapshot of a request waiting for an LLM inference slot."""
+
+    user_id: str
+    task_kind: str
+    load_class: LLMLoadClass
+    position: int | None
+    estimated_wait_seconds: float | None
+    waiting_count: int
+    active_count: int
+    max_concurrent: int
+    wait_seconds: float
 
 
 @dataclass
@@ -141,6 +159,9 @@ class LLMRequestQueue:
         load_class: LLMLoadClass = "interactive",
         run_id: str | None = None,
         provider_name: str | None = None,
+        on_status: Callable[[LLMQueueStatus], None] | None = None,
+        notify_position: bool = True,
+        notify_interval_seconds: float = 30.0,
     ) -> QueueEntry:
         """Enter the queue and wait for an inference slot.
 
@@ -157,6 +178,7 @@ class LLMRequestQueue:
         )
         semaphore_acquired = False
         slot_lock_acquired = False
+        notify_task: asyncio.Task[None] | None = None
         async with self._lock:
             self._waiting.append(entry)
             entry.queue_position_at_entry = len(self._waiting) - 1
@@ -182,6 +204,17 @@ class LLMRequestQueue:
             task_kind,
             load_class,
         )
+        should_notify_waiting = pos > 0 or active_count >= self._max_concurrent
+        if on_status is not None and should_notify_waiting:
+            self._emit_queue_status(entry, on_status, include_position=notify_position)
+            if notify_position and notify_interval_seconds > 0:
+                notify_task = asyncio.create_task(
+                    self._notify_waiting_status_loop(
+                        entry,
+                        on_status,
+                        notify_interval_seconds,
+                    )
+                )
         selected_slot: _SlotState | None = None
         try:
             selected_slot = await self._select_slot(entry)
@@ -209,6 +242,8 @@ class LLMRequestQueue:
                 waiting_count = len(self._waiting)
                 active_count = len(self._active)
         except asyncio.CancelledError:
+            if notify_task is not None:
+                await self._cancel_notify_task(notify_task)
             async with self._lock:
                 if entry in self._waiting:
                     self._waiting.remove(entry)
@@ -239,6 +274,8 @@ class LLMRequestQueue:
                 max_concurrent=self._max_concurrent,
             )
             raise
+        if notify_task is not None:
+            await self._cancel_notify_task(notify_task)
         queue_wait = entry.queue_wait_seconds or 0.0
         health.increment("llm_queue_acquired")
         log_event(
@@ -288,6 +325,56 @@ class LLMRequestQueue:
             load_class,
         )
         return entry
+
+    async def _notify_waiting_status_loop(
+        self,
+        entry: QueueEntry,
+        callback: Callable[[LLMQueueStatus], None],
+        interval_seconds: float,
+    ) -> None:
+        """Emit queue status periodically while an entry waits for a slot."""
+        while entry.acquired_at is None:
+            await asyncio.sleep(interval_seconds)
+            if entry.acquired_at is None:
+                self._emit_queue_status(entry, callback, include_position=True)
+
+    @staticmethod
+    async def _cancel_notify_task(task: asyncio.Task[None]) -> None:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    def _queue_status_snapshot(
+        self,
+        entry: QueueEntry,
+        *,
+        include_position: bool,
+    ) -> LLMQueueStatus:
+        position = self.get_position(entry.user_id) if include_position else None
+        estimated_wait = self.get_estimated_wait(entry.user_id) if include_position else None
+        return LLMQueueStatus(
+            user_id=entry.user_id,
+            task_kind=entry.task_kind,
+            load_class=entry.load_class,
+            position=position,
+            estimated_wait_seconds=estimated_wait,
+            waiting_count=self.queue_length,
+            active_count=self.active_count,
+            max_concurrent=self._max_concurrent,
+            wait_seconds=max(0.0, time.monotonic() - entry.enqueued_at),
+        )
+
+    def _emit_queue_status(
+        self,
+        entry: QueueEntry,
+        callback: Callable[[LLMQueueStatus], None],
+        *,
+        include_position: bool,
+    ) -> None:
+        try:
+            callback(self._queue_status_snapshot(entry, include_position=include_position))
+        except Exception as e:
+            logger.debug("[queue] status callback failed for user=%s: %s", entry.user_id, e)
 
     async def _select_slot(self, entry: QueueEntry) -> _SlotState | None:
         """Select a slot for the entry, or None when simple queue mode applies."""

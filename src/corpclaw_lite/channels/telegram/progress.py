@@ -12,13 +12,16 @@ from corpclaw_lite.channels.status import (
     INITIAL_STATUS_TEXT,
     READY_STATUS_TEXT,
     TOOL_STATUS_MAP,
+    format_llm_queue_status,
     format_llm_stage_status,
+    format_subagent_llm_queue_status,
     format_subagent_llm_stage_status,
     format_subagent_tool_batch_status,
     format_subagent_tool_status,
     format_tool_batch_status,
     format_tool_status,
 )
+from corpclaw_lite.llm.queue import LLMQueueStatus
 
 __all__ = [
     "_TOOL_STATUS_MAP",
@@ -107,6 +110,10 @@ class StatusMessageSession:
         if friendly is not None:
             self._set_desired_text(friendly)
 
+    def mark_llm_queue_status(self, status: LLMQueueStatus) -> None:
+        """Update desired status from LLM queue waiting telemetry."""
+        self._set_desired_text(format_llm_queue_status(status))
+
     def mark_subagent_tool_start(self, subagent_name: str, tool_name: str) -> None:
         """Update desired status from a subagent tool execution start."""
         self._set_desired_text(format_subagent_tool_status(subagent_name, tool_name))
@@ -120,6 +127,14 @@ class StatusMessageSession:
         friendly = format_subagent_llm_stage_status(subagent_name, stage)
         if friendly is not None:
             self._set_desired_text(friendly)
+
+    def mark_subagent_llm_queue_status(
+        self,
+        subagent_name: str,
+        status: LLMQueueStatus,
+    ) -> None:
+        """Update desired status from subagent LLM queue waiting telemetry."""
+        self._set_desired_text(format_subagent_llm_queue_status(subagent_name, status))
 
     async def close(self) -> None:
         """Stop background work and clean up the temporary message."""

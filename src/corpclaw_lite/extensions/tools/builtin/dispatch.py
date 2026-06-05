@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from corpclaw_lite.agent.subagent import SubagentDispatcher
     from corpclaw_lite.departments.permissions import PermissionChecker
     from corpclaw_lite.extensions.subagents.registry import SubagentRegistry
+    from corpclaw_lite.llm.queue import LLMQueueStatus
     from corpclaw_lite.users.models import User
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,7 @@ class DispatchSubagentTool(Tool):
         raw_on_subagent_tool_start = kwargs.get("on_subagent_tool_start")
         raw_on_subagent_tool_batch_start = kwargs.get("on_subagent_tool_batch_start")
         raw_on_subagent_llm_stage = kwargs.get("on_subagent_llm_stage")
+        raw_on_subagent_llm_queue_status = kwargs.get("on_subagent_llm_queue_status")
         on_subagent_tool_start = (
             cast("Callable[[str, str], None]", raw_on_subagent_tool_start)
             if callable(raw_on_subagent_tool_start)
@@ -84,6 +86,11 @@ class DispatchSubagentTool(Tool):
         on_subagent_llm_stage = (
             cast("Callable[[str, str], None]", raw_on_subagent_llm_stage)
             if callable(raw_on_subagent_llm_stage)
+            else None
+        )
+        on_subagent_llm_queue_status = (
+            cast("Callable[[str, LLMQueueStatus], None]", raw_on_subagent_llm_queue_status)
+            if callable(raw_on_subagent_llm_queue_status)
             else None
         )
 
@@ -148,6 +155,7 @@ class DispatchSubagentTool(Tool):
             on_subagent_tool_start=on_subagent_tool_start,
             on_subagent_tool_batch_start=on_subagent_tool_batch_start,
             on_subagent_llm_stage=on_subagent_llm_stage,
+            on_subagent_llm_queue_status=on_subagent_llm_queue_status,
         )
 
     def should_return_direct(self, arguments: dict[str, Any], result: str) -> bool:
