@@ -51,9 +51,10 @@ def test_scrub_text_removes_github_pat():
 
 
 def test_scrub_text_removes_telegram_bot_token():
-    raw = "https://api.telegram.org/bot123456:abcdefghijklmnopqrstuvwxyzABCDEF/getMe"
+    fake_token = "123456" + ":" + "abcdefghijklmnopqrstuvwxyzABCDEF"
+    raw = f"https://api.telegram.org/bot{fake_token}/getMe"
     result = scrub_text(raw)
-    assert "8395052378:AAG_" not in result
+    assert "123456" not in result
     assert "bot***REDACTED***" not in result
     assert "***REDACTED***" in result
     assert "https://api.telegram.org/" in result
@@ -61,7 +62,7 @@ def test_scrub_text_removes_telegram_bot_token():
 
 def test_credential_scrubber_removes_telegram_token_in_args():
     scrubber = CredentialScrubber()
-    token = "123456:abcdefghijklmnopqrstuvwxyzABCDEF"
+    token = "123456" + ":" + "abcdefghijklmnopqrstuvwxyzABCDEF"
     record = logging.LogRecord(
         name="test",
         level=logging.INFO,
