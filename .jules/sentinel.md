@@ -1,0 +1,4 @@
+## 2025-05-24 - [CRITICAL] Prevent arbitrary file reads in DuckDB SQL tool
+**Vulnerability:** The `table_query` tool in `table_query.py` used regex filtering (`_BLOCKED_SQL_PATTERNS`) to block potentially dangerous SQL commands like file reading, but it failed to prevent bypasses or built-in file reading functions inherently allowed by DuckDB's default configuration.
+**Learning:** Regex-based blocklists for SQL commands are bypassable and often provide false confidence. A robust defense-in-depth approach requires configuring the database connection to disable dangerous capabilities (e.g., external access) at the engine level.
+**Prevention:** Always restrict dangerous functions or external access capabilities explicitly in the database configuration (e.g., `SET enable_external_access=false` in DuckDB) rather than relying solely on query parsing or filtering.
