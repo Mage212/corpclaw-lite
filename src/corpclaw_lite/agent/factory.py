@@ -273,6 +273,7 @@ def _build_extensions_stack(
             skill_matcher=skill_matcher,
             skill_registry=skill_registry,
             research_runtime=research_runtime,
+            workspace_base=workspace_base,
         )
         registry.register(
             DispatchSubagentTool(
@@ -513,6 +514,7 @@ def build_agent_stack(
             consolidator=consolidator,
             compressor=compressor,
             default_system_prompt=system_prompt,
+            workspace_base=workspace_base,
         )
     )
     user_manager = UserManager()

@@ -6,11 +6,13 @@ import re
 import time
 import uuid
 from collections.abc import Callable
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import anyio
 
 from corpclaw_lite.agent.loop import AgentConfig, AgentLoop
+from corpclaw_lite.agent.task_run import TaskRun
 from corpclaw_lite.config.settings import AgentSettings
 from corpclaw_lite.extensions.subagents.base import SubagentSpec
 from corpclaw_lite.extensions.tools.builtin.research import detect_language
@@ -107,6 +109,7 @@ class SubagentDispatcher:
         skill_matcher: SkillMatcher | None = None,
         skill_registry: SkillRegistry | None = None,
         research_runtime: ResearchRuntime | None = None,
+        workspace_base: Path | None = None,
     ) -> None:
         self._provider = provider
         self._main_registry = main_registry
@@ -116,6 +119,7 @@ class SubagentDispatcher:
         self._skill_matcher = skill_matcher
         self._skill_registry = skill_registry
         self._research_runtime = research_runtime
+        self._workspace_base = workspace_base
 
     async def dispatch(
         self,
@@ -227,6 +231,7 @@ class SubagentDispatcher:
                 enforce_tool_permissions=False,
                 tool_guard=self._tool_guard,
                 permission_checker=self._permission_checker,
+                workspace_base=self._workspace_base,
             )
         )
 
@@ -320,6 +325,34 @@ class SubagentDispatcher:
                 status="timeout",
                 timeout_seconds=timeout_seconds,
             )
+            # Research-agent: recover stored facts/sources as a partial report instead
+            # of a bare error (B-036). finalize_report builds a language-aware skeleton
+            # from whatever the run accumulated before the hard timeout.
+            if spec.id == "research-agent" and self._research_runtime is not None:
+                research_mode = _research_mode_for_task(spec, task_context)
+                mode = "deep_research" if research_mode == "deep_research" else "research"
+                try:
+                    partial = self._research_runtime.finalize_report(
+                        user, subagent_run_id, mode, answer=""
+                    )
+                except Exception as partial_err:  # pragma: no cover - defensive
+                    logger.warning("Research partial-handoff failed: %s", partial_err)
+                    return f"Subagent error: execution timed out after {int(timeout_seconds)}s"
+                TaskRun(self._workspace_base).generate_handoff(
+                    user,
+                    subagent_run_id,
+                    partial_result=partial,
+                    reason=f"research-agent timed out after {int(timeout_seconds)}s",
+                )
+                log_event(
+                    "subagent_partial_handoff",
+                    subagent_run_id,
+                    parent_run_id=parent_run_id,
+                    subagent_id=spec.id,
+                    timeout_seconds=timeout_seconds,
+                    partial_len=len(partial),
+                )
+                return partial
             return f"Subagent error: execution timed out after {int(timeout_seconds)}s"
         except Exception as e:
             logger.error("Subagent %s failed: %s", spec.id, e)

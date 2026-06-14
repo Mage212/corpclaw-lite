@@ -26,6 +26,55 @@
 - `uv run pyright src/` — `0 errors` (17 существующих matplotlib stub warnings).
 - `uv run pytest tests/ -v` — `1060 passed, 1 skipped`.
 
+## [0.1.9] — 2026-06-15
+
+Фокус версии — частичный handoff и checkpointing для долгих субагентов на локальных LLM (B-036 MVP).
+
+### Added
+
+- `TaskRun` (`agent/task_run.py`) — per-run checkpoint-журнал в
+  `workspaces/user_<key>/.task_runs/<run_id>/` (`state.json`, `journal.jsonl`,
+  `handoff.md`) по паттерну `ResearchRuntime`. Методы `initialize`,
+  `record_tool_call`, `set_phase`, `mark_soft_deadline`, `generate_handoff`.
+- `SoftDeadline` (`agent/guards.py`) — wall-clock soft deadline через
+  `time.monotonic()`, без `pause()`/`resume()`. Фиксит race из памяти
+  `subagent-timeout-race-kills-d-038-rescue`: `asyncio.wait_for` (wall-clock)
+  всегда срабатывал раньше `SimpleBudgetGuard` (active time, D-040), поэтому
+  rescue D-038 никогда не работал для субагентов. Soft deadline тоже меряет
+  wall-clock и корректно срабатывает при queue-wait.
+- Closing mode в `AgentLoop.run()`: при достижении soft deadline (по умолчанию
+  `soft_deadline_ratio × max_wall_time_ms` = 0.85 × 300000 = 255s) цикл
+  урезает `tools_schema` до terminal-инструментов (`research_finalize` и т.п.),
+  заставляя модель финализировать вместо hard-cancel. `asyncio.wait_for`
+  остаётся аварийным внешним пределом.
+- Research partial-handoff: при таймауте research-субагента
+  `SubagentDispatcher` возвращает language-aware skeleton через
+  переиспользование `finalize_report(answer="")` (факты+источники+limitations),
+  а не bare `Subagent error: execution timed out`. Записывается `handoff.md`.
+- Trace-события: `agent_soft_deadline_reached`, `subagent_partial_handoff`.
+- Универсальный journal tool-вызовов в `AgentLoop._execute_single_tool` (args_hash,
+  status, duration, error) — единая точка перехвата.
+- `workspace_base` проброшен через `AgentConfig` → `AgentLoop` →
+  `SubagentDispatcher` для корректного расположения `.task_runs/`.
+
+### Changed
+
+- `AgentSettings.soft_deadline_ratio: float = 0.85` — новое поле.
+- `DispatchSubagentTool.should_return_direct` — задокументировано, что partial
+  reports проходят фильтр ошибок и идут пользователю напрямую (main agent не
+  повторяет тяжёлую работу).
+
+### Verified
+
+- `uv run ruff check src/ tests/` — clean.
+- `uv run pyright src/` — `0 errors` (17 существующих matplotlib stub warnings).
+- `uv run pytest tests/ -q` — `1092 passed, 1 skipped`.
+- Новые тесты: `tests/test_task_run.py` (5), `tests/test_soft_deadline.py` (7
+  включая race-fix contrast с SimpleBudgetGuard), `tests/test_research_partial_handoff.py`
+  (3: partial report, non-research bare error, trace event).
+- Manual live-LLM check deferred (требует локальную модель; soft_deadline_ratio
+  default 0.85 + closing mode non-breaking для short tasks).
+
 ## [0.1.8] — 2026-06-14
 
 Фокус версии — детерминированная и аудируемая финализация research-agent (B-037).

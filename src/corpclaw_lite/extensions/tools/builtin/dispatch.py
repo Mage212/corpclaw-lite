@@ -163,6 +163,10 @@ class DispatchSubagentTool(Tool):
         if not isinstance(subagent_id, str):
             return False
         spec = self._subagent_registry.get_spec(subagent_id)
+        # B-036: partial-handoff reports (research-agent timeout skeleton) start with
+        # markdown headings, so they pass this filter and reach the user directly —
+        # the main agent does NOT retry or substitute heavy work. Only bare errors
+        # ("Subagent error:" / "Error") fall through for the main agent to handle.
         return bool(
             spec is not None
             and spec.direct_response

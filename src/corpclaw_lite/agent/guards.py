@@ -185,10 +185,61 @@ class SimpleBudgetGuard:
         self.state = SimpleBudgetGuardState()
 
 
+@dataclass
+class SoftDeadlineConfig:
+    """Configuration for the wall-clock soft deadline (closing mode trigger)."""
+
+    enabled: bool = True
+    ratio: float = 0.85  # fraction of max_time_ms at which closing mode starts
+
+
+class SoftDeadline:
+    """Wall-clock soft deadline that triggers agent closing mode.
+
+    Unlike :class:`SimpleBudgetGuard`, which measures *active* time (pausing
+    during LLM queue waits per D-040), ``SoftDeadline`` measures real elapsed
+    wall-clock time via :func:`time.monotonic`. This is the fix for the subagent
+    timeout race: ``asyncio.wait_for`` in ``SubagentDispatcher.dispatch`` also
+    uses wall-clock and would otherwise always fire before the active-time
+    budget guard, so the D-038 final-answer rescue never ran for subagents.
+    """
+
+    def __init__(
+        self,
+        config: SoftDeadlineConfig | None = None,
+        *,
+        max_time_ms: int = 300000,
+    ) -> None:
+        self.config = config or SoftDeadlineConfig()
+        self._max_time_ms = max_time_ms
+        self._start = time.monotonic()
+        self._closing_mode = False
+
+    def is_reached(self) -> bool:
+        if not self.config.enabled:
+            return False
+        elapsed_ms = (time.monotonic() - self._start) * 1000
+        return elapsed_ms >= self._deadline_ms()
+
+    def _deadline_ms(self) -> float:
+        if not self.config.enabled:
+            return float("inf")
+        return self.config.ratio * self._max_time_ms
+
+    @property
+    def closing_mode(self) -> bool:
+        return self._closing_mode
+
+    def enter_closing_mode(self) -> None:
+        self._closing_mode = True
+
+
 __all__ = [
     "BudgetExceededError",
     "SimpleBudgetGuard",
     "SimpleBudgetGuardConfig",
     "SimpleProgressGuard",
     "SimpleProgressGuardConfig",
+    "SoftDeadline",
+    "SoftDeadlineConfig",
 ]
