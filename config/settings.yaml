@@ -137,6 +137,9 @@ research:
   normal_max_rereads: 0
   deep_max_rereads: 10
   source_excerpt_chars: 6000
+  # Enforce research_finalize validation (language grounding, source integrity,
+  # list_facts mandate, count assertions). Soft mode (false) only warns + traces.
+  finalize_strict: false
 
 container:
   enabled: true

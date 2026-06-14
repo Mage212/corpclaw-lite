@@ -26,6 +26,37 @@
 - `uv run pyright src/` — `0 errors` (17 существующих matplotlib stub warnings).
 - `uv run pytest tests/ -v` — `1060 passed, 1 skipped`.
 
+## [0.1.8] — 2026-06-14
+
+Фокус версии — детерминированная и аудируемая финализация research-agent (B-037).
+
+### Added
+
+- `detect_language()` — эвристика целевого языка research-задачи по доле кириллицы (порог 0.3);
+  язык сохраняется в `state.json` и инжектируется в task_context субагента как жёсткое поле
+  `Target language`.
+- Language-aware skeleton-шаблоны `_build_report()`: 4 набора заголовков (ru/en × research/
+  deep_research) вместо хардкода `## Executive summary` для deep_research.
+- `_validate_report()` в `finalize_report()`: соответствие языка ответа целевому, целостность
+  source_id/URL против manifest, мандат `research_list_facts` для deep_research, count-assertions
+  (число источников в отчёте ≤ реально fetched).
+- Гибридный recovery: до 2 retry через Error-строку (терминальный шлюз `loop.py:906-914`
+  пропускается), затем deterministic skeleton из stored facts. Защита от зацикливания:
+  `finalize_attempts` cap + `SimpleProgressGuard`.
+- `finalize_strict: bool = False` в `ResearchSettings` — soft-mode по умолчанию
+  (warn+trace, не блокирует); enforce после телеметрии.
+- Trace-события `research_finalize_validation_passed/failed/warning/skeleton_fallback` с counts
+  (mode, language, fetched_sources, facts_total, list_facts_called, finalize_attempts).
+- `mark_list_facts_called()` фиксирует факт вызова `research_list_facts` для аудита deep_research.
+
+### Verified
+
+- `uv run ruff check src/ tests/` — clean.
+- `uv run pyright src/` — `0 errors` (17 существующих matplotlib stub warnings).
+- `uv run pytest tests/ -q` — `1077 passed, 1 skipped`.
+- Новые тесты: `tests/test_research_finalization.py` (17 кейсов: language detection, strict
+  validation, recovery, trace, task_context injection).
+
 ## [0.1.7] — 2026-06-05
 
 Фокус версии — корректное отображение LLM-очереди и ожидания начала генерации в Web/Telegram.
