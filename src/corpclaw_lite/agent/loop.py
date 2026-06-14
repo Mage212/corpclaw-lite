@@ -10,6 +10,7 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from corpclaw_lite.agent.context import ContextBuilder
@@ -18,7 +19,10 @@ from corpclaw_lite.agent.guards import (
     SimpleBudgetGuard,
     SimpleBudgetGuardConfig,
     SimpleProgressGuard,
+    SoftDeadline,
+    SoftDeadlineConfig,
 )
+from corpclaw_lite.agent.task_run import TaskRun
 from corpclaw_lite.config.settings import AgentSettings
 from corpclaw_lite.exceptions import ContainerIPCError, StorageError
 from corpclaw_lite.extensions.tools.base import TOOL_ERROR_PREFIX
@@ -190,6 +194,7 @@ class AgentConfig:
     consolidator: MemoryConsolidator | None = None
     compressor: ContextCompressor | None = None
     default_system_prompt: str | None = None
+    workspace_base: Path | None = None
 
 
 class AgentLoop:
@@ -207,6 +212,7 @@ class AgentLoop:
         self._consolidator = config.consolidator
         self._compressor = config.compressor
         self._default_system_prompt = config.default_system_prompt
+        self._workspace_base = config.workspace_base
         self._approval_lock = asyncio.Lock()
 
     @property
@@ -561,7 +567,13 @@ class AgentLoop:
             )
         budget = SimpleBudgetGuard(guard_config)
         progress = SimpleProgressGuard()
-        tools_schema = None
+        soft_deadline = SoftDeadline(
+            SoftDeadlineConfig(ratio=self._settings.soft_deadline_ratio),
+            max_time_ms=self._settings.max_wall_time_ms,
+        )
+        task_run = TaskRun(self._workspace_base)
+        task_run.initialize(user, stats.run_id)
+        tools_schema: list[dict[str, Any]] | None = None
         if tools_enabled:
             if self._permission_checker:
                 tools_schema = self._registry.to_schemas_for_user(
@@ -587,6 +599,32 @@ class AgentLoop:
             while True:
                 budget.consume_iteration()
                 stats.iterations += 1
+
+                # Soft deadline (wall-clock) -> closing mode: reduce tool schema to
+                # finalize-only terminal tools so the model wraps up instead of being
+                # hard-cancelled by asyncio.wait_for. Fixes the subagent-timeout race
+                # where wait_for (wall-clock) always beat the active-time budget guard.
+                if soft_deadline.is_reached() and not soft_deadline.closing_mode:
+                    soft_deadline.enter_closing_mode()
+                    task_run.mark_soft_deadline(user, stats.run_id)
+                    log_event(
+                        "agent_soft_deadline_reached",
+                        stats.run_id,
+                        max_time_ms=self._settings.max_wall_time_ms,
+                        ratio=self._settings.soft_deadline_ratio,
+                    )
+                    if tools_schema:
+                        terminal_names = {
+                            t.name
+                            for t in self._registry.list_all()
+                            if getattr(t, "terminal", False)
+                        }
+                        if terminal_names:
+                            tools_schema = [
+                                s
+                                for s in tools_schema
+                                if str(s.get("function", {}).get("name", "")) in terminal_names
+                            ]
 
                 compression_cfg = self._settings.compression
                 if compression_cfg.enabled and context.message_count > (
@@ -632,11 +670,11 @@ class AgentLoop:
                             tools=tools_schema,
                             system=context.system_prompt or None,
                             on_acquired=on_router_acquired,
-                            call=lambda target_provider: asyncio.wait_for(
+                            call=lambda target_provider, _tools=tools_schema: asyncio.wait_for(
                                 self._call_llm_provider(
                                     target_provider,
                                     messages=context.messages,
-                                    tools=tools_schema,
+                                    tools=_tools,
                                     system=context.system_prompt or None,
                                     run_id=stats.run_id,
                                     iteration=stats.iterations,
@@ -664,11 +702,11 @@ class AgentLoop:
                             on_queue_status=on_llm_queue_status,
                             notify_position=_queue_notify_position(self._settings),
                             notify_interval_seconds=_queue_notify_interval_seconds(self._settings),
-                            call=lambda target_provider: asyncio.wait_for(
+                            call=lambda target_provider, _tools=tools_schema: asyncio.wait_for(
                                 self._call_llm_provider(
                                     target_provider,
                                     messages=context.messages,
-                                    tools=tools_schema,
+                                    tools=_tools,
                                     system=context.system_prompt or None,
                                     run_id=stats.run_id,
                                     iteration=stats.iterations,
@@ -866,6 +904,7 @@ class AgentLoop:
                         on_subagent_llm_queue_status,
                         trajectory_recorder,
                         stats,
+                        task_run,
                     )
                     # Add ALL results first to keep context valid (no orphaned tool_calls)
                     action_results: list[tuple[str, str]] = []
@@ -894,6 +933,7 @@ class AgentLoop:
                             on_subagent_llm_queue_status,
                             trajectory_recorder,
                             stats,
+                            task_run,
                         )
                         context.add_tool_result(tc.id, tc.name, result)
                         stats.tools_used.append(tc.name)
@@ -1056,6 +1096,7 @@ class AgentLoop:
         on_subagent_llm_queue_status: Callable[[str, LLMQueueStatus], None] | None,
         trajectory_recorder: TrajectoryRecorder | None = None,
         stats: RunStats | None = None,
+        task_run: TaskRun | None = None,
     ) -> list[str]:
         """Execute multiple tools in parallel and return results."""
         if on_tool_batch_start is not None:
@@ -1073,6 +1114,7 @@ class AgentLoop:
                 on_subagent_llm_queue_status,
                 trajectory_recorder,
                 stats,
+                task_run,
             )
 
         results = await asyncio.gather(*[execute_one(tc) for tc in tool_calls])
@@ -1090,6 +1132,7 @@ class AgentLoop:
         on_subagent_llm_queue_status: Callable[[str, LLMQueueStatus], None] | None = None,
         trajectory_recorder: TrajectoryRecorder | None = None,
         stats: RunStats | None = None,
+        task_run: TaskRun | None = None,
     ) -> str:
         """Execute a single tool with all checks."""
         run_id = stats.run_id if stats else "unknown"
@@ -1187,6 +1230,16 @@ class AgentLoop:
             status = "error" if result.startswith("Error") else "ok"
             if status == "error":
                 health.increment("tool_errors")
+            if task_run is not None:
+                task_run.record_tool_call(
+                    user,
+                    run_id,
+                    name=tc.name,
+                    args_hash=_payload_hash(tc.arguments),
+                    status=status,
+                    duration_ms=(time.monotonic() - tool_t0) * 1000,
+                    error=result if status == "error" else None,
+                )
 
         except ApprovalRequest as e:
             log_event(
