@@ -107,10 +107,12 @@ async def test_research_subagent_initializes_persisted_mode() -> None:
 
     class RuntimeSpy:
         def __init__(self) -> None:
-            self.calls: list[tuple[User, str | None, str]] = []
+            self.calls: list[tuple[User, str | None, str, str]] = []
 
-        def initialize_run_mode(self, user: User, run_id: str | None, mode: str) -> None:
-            self.calls.append((user, run_id, mode))
+        def initialize_run_mode(
+            self, user: User, run_id: str | None, mode: str, *, language: str = "en"
+        ) -> None:
+            self.calls.append((user, run_id, mode, language))
 
     runtime = RuntimeSpy()
     dispatcher = SubagentDispatcher(
@@ -145,7 +147,9 @@ async def test_research_subagent_initializes_persisted_mode() -> None:
 
     assert runtime.calls
     assert runtime.calls[0][2] == "deep_research"
+    assert runtime.calls[0][3] == "ru"  # Cyrillic task -> target language ru
     assert captured_messages[0].startswith("Research mode: deep_research")
+    assert "Target language: ru" in captured_messages[0]
 
 
 @pytest.mark.asyncio

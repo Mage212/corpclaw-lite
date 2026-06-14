@@ -13,6 +13,7 @@ import anyio
 from corpclaw_lite.agent.loop import AgentConfig, AgentLoop
 from corpclaw_lite.config.settings import AgentSettings
 from corpclaw_lite.extensions.subagents.base import SubagentSpec
+from corpclaw_lite.extensions.tools.builtin.research import detect_language
 from corpclaw_lite.extensions.tools.registry import ToolRegistry
 from corpclaw_lite.logging.trace import log_event
 from corpclaw_lite.users.models import User
@@ -70,8 +71,11 @@ def _prepare_research_task_context(spec: SubagentSpec, task_context: str) -> str
     mode = _research_mode_for_task(spec, task_context)
     if mode is None:
         return task_context
+    language = detect_language(task_context)
     return (
         f"Research mode: {mode}\n"
+        f"Target language: {language}\n"
+        "Write the final report ONLY in this language. Do not switch to English.\n"
         "Use the research-specific tools and finish with research_finalize.\n\n"
         f"{task_context}"
     )
@@ -235,13 +239,17 @@ class SubagentDispatcher:
             research_mode = _research_mode_for_task(spec, task_context)
             if self._research_runtime is not None and research_mode is not None:
                 mode = "deep_research" if research_mode == "deep_research" else "research"
-                self._research_runtime.initialize_run_mode(user, subagent_run_id, mode)
+                language = detect_language(task_context)
+                self._research_runtime.initialize_run_mode(
+                    user, subagent_run_id, mode, language=language
+                )
                 log_event(
                     "research_run_mode_initialized",
                     subagent_run_id,
                     parent_run_id=parent_run_id,
                     subagent_id=spec.id,
                     mode=mode,
+                    language=language,
                 )
 
             def forward_tool_start(tool_name: str) -> None:

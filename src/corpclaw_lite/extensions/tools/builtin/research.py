@@ -11,17 +11,20 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from corpclaw_lite.config.settings import ResearchSettings
 from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
+from corpclaw_lite.logging.trace import log_event
 from corpclaw_lite.paths import PROJECT_ROOT
 
 __all__ = [
     "ResearchFetchSourceTool",
     "ResearchFinalizeTool",
+    "ResearchLanguage",
     "ResearchListFactsTool",
     "ResearchReadSourceTool",
     "ResearchRuntime",
     "ResearchSearchTool",
     "ResearchStoreFactTool",
     "build_research_tools",
+    "detect_language",
     "normalize_research_mode",
 ]
 
@@ -30,14 +33,141 @@ if TYPE_CHECKING:
     from corpclaw_lite.users.models import User
 
 ResearchMode = Literal["research", "deep_research"]
+ResearchLanguage = Literal["ru", "en"]
 
 _SAFE_ID_RE = re.compile(r"[^A-Za-z0-9_-]+")
 _URL_RE = re.compile(r"https?://\S+")
+# Cited source IDs look like "[abcdef123456]" or "[abcdef123456-2]" (12 hex + optional suffix).
+_CITED_SOURCE_ID_RE = re.compile(r"\[\s*([0-9a-f]{12}(?:-\d+)?)\b", re.IGNORECASE)
+# Count assertions like "проанализировано 10 источников" / "identified 8 sources".
+_COUNT_ASSERTION_RE = re.compile(
+    r"(?:проанализировано|изучено|исследовано|найдено|identified|analyzed|reviewed|found)\s+"
+    r"(?P<n>\d+)\s+(?P<word>источник(?:а|ов)?|source)s?",
+    re.IGNORECASE,
+)
+# After this many failed finalize retries, the next call returns a deterministic skeleton
+# instead of another Error string (prevents LLM finalize loops; coexists with ProgressGuard).
+_FINALIZE_MAX_ATTEMPTS = 2
 
 
 def normalize_research_mode(value: Any) -> ResearchMode:
     """Normalize a tool/user supplied mode value."""
     return "deep_research" if str(value or "").strip() == "deep_research" else "research"
+
+
+def _cyrillic_ratio(text: str) -> float:
+    """Fraction of Cyrillic letters among alphabetic characters in *text*."""
+    if not text:
+        return 0.0
+    cyrillic = 0
+    total = 0
+    for ch in text:
+        if ch.isalpha():
+            total += 1
+            if "Ѐ" <= ch <= "ӿ":  # Cyrillic block (incl. ё/Ё)
+                cyrillic += 1
+    return cyrillic / total if total else 0.0
+
+
+def detect_language(text: str) -> ResearchLanguage:
+    """Heuristic target language for a research task.
+
+    Returns ``"ru"`` when more than 30% of alphabetic characters are Cyrillic,
+    otherwise ``"en"``. Covers the RU+EN user base without extra dependencies.
+    """
+    return "ru" if _cyrillic_ratio(text) > 0.3 else "en"
+
+
+_REPORT_STRINGS: dict[ResearchLanguage, dict[str, str]] = {
+    "ru": {
+        "no_facts": "- Структурированные факты не сохранены.",
+        "no_sources": "- Источники не были успешно загружены.",
+        "sources_section": "## Использованные источники",
+        "limitations_section": "## Ограничения",
+        "limitations_no_facts": (
+            "- Не удалось зафиксировать структурированные факты через research_store_fact."
+        ),
+    },
+    "en": {
+        "no_facts": "- No structured facts stored.",
+        "no_sources": "- No sources were successfully fetched.",
+        "sources_section": "## Sources",
+        "limitations_section": "## Limitations",
+        "limitations_no_facts": ("- Could not record structured facts via research_store_fact."),
+    },
+}
+
+
+def _report_strings(language: ResearchLanguage) -> dict[str, str]:
+    return _REPORT_STRINGS[language if language in ("ru", "en") else "en"]
+
+
+# Report skeleton templates keyed by (mode, language). Placeholders:
+#   {n_sources}, {n_facts}, {facts}, {sources}, {sources_section}.
+_REPORT_TEMPLATES: dict[tuple[ResearchMode, ResearchLanguage], str] = {
+    ("deep_research", "ru"): (
+        "## Краткий вывод\n"
+        "См. ключевые выводы ниже.\n\n"
+        "## Методология исследования\n"
+        "- Проанализировано источников: {n_sources}.\n"
+        "- Зафиксировано фактов: {n_facts}.\n\n"
+        "## Ключевые выводы\n"
+        "{facts}\n\n"
+        "## Факты и подтверждения\n"
+        "{facts}\n\n"
+        "## Противоречия и неопределённости\n"
+        "- Явные противоречия не выделены в сохранённых фактах.\n\n"
+        "## Гипотезы / пробелы\n"
+        "- Дополнительные гипотезы не зафиксированы.\n\n"
+        "## Практические рекомендации\n"
+        "- Используйте выводы выше с учётом ограничений источников.\n\n"
+        "{sources_section}\n"
+        "{sources}"
+    ),
+    ("deep_research", "en"): (
+        "## Executive summary\n"
+        "See key findings below.\n\n"
+        "## Methodology\n"
+        "- Sources analyzed: {n_sources}.\n"
+        "- Facts recorded: {n_facts}.\n\n"
+        "## Key findings\n"
+        "{facts}\n\n"
+        "## Facts and evidence\n"
+        "{facts}\n\n"
+        "## Contradictions and uncertainties\n"
+        "- No explicit contradictions identified in stored facts.\n\n"
+        "## Hypotheses / gaps\n"
+        "- No additional hypotheses recorded.\n\n"
+        "## Practical recommendations\n"
+        "- Use the conclusions above with source limitations in mind.\n\n"
+        "{sources_section}\n"
+        "{sources}"
+    ),
+    ("research", "ru"): (
+        "## Краткий вывод\n"
+        "См. ключевые факты ниже.\n\n"
+        "## Ключевые факты\n"
+        "{facts}\n\n"
+        "## Что говорят источники\n"
+        "{facts}\n\n"
+        "## Ограничения\n"
+        "- Ответ построен по сохранённым фактам research-agent.\n\n"
+        "{sources_section}\n"
+        "{sources}"
+    ),
+    ("research", "en"): (
+        "## Summary\n"
+        "See key facts below.\n\n"
+        "## Key facts\n"
+        "{facts}\n\n"
+        "## What sources say\n"
+        "{facts}\n\n"
+        "## Limitations\n"
+        "- The answer is built from research-agent stored facts.\n\n"
+        "{sources_section}\n"
+        "{sources}"
+    ),
+}
 
 
 def _as_int(value: Any, default: int) -> int:
@@ -73,11 +203,20 @@ class ResearchRuntime:
     def settings(self) -> ResearchSettings:
         return self._settings
 
-    def initialize_run_mode(self, user: User, run_id: str | None, mode: ResearchMode) -> None:
-        """Persist the intended research mode for a new run."""
+    def initialize_run_mode(
+        self,
+        user: User,
+        run_id: str | None,
+        mode: ResearchMode,
+        *,
+        language: ResearchLanguage | None = None,
+    ) -> None:
+        """Persist the intended research mode (and optional target language) for a run."""
         run_dir = self.run_dir(user, run_id)
         state = self._read_state(run_dir)
         self._upgrade_mode(state, mode)
+        if language in ("ru", "en"):
+            state["language"] = language
         self._write_json(run_dir / "state.json", state)
 
     def resolve_mode(self, user: User, run_id: str | None, value: Any) -> ResearchMode:
@@ -93,6 +232,20 @@ class ResearchRuntime:
             self._write_json(run_dir / "state.json", state)
             return normalize_research_mode(state.get("mode"))
         return normalize_research_mode(state.get("mode"))
+
+    def get_language(self, user: User, run_id: str | None) -> ResearchLanguage:
+        """Read the persisted target language for a run (default ``"en"``)."""
+        run_dir = self.run_dir(user, run_id)
+        state = self._read_state(run_dir)
+        language = str(state.get("language") or "en")
+        return language if language in ("ru", "en") else "en"
+
+    def mark_list_facts_called(self, user: User, run_id: str | None) -> None:
+        """Record that research_list_facts was invoked in this run."""
+        run_dir = self.run_dir(user, run_id)
+        state = self._read_state(run_dir)
+        state["list_facts_called"] = True
+        self._write_json(run_dir / "state.json", state)
 
     def run_dir(self, user: User, run_id: str | None) -> Path:
         self.cleanup_user(user)
@@ -338,6 +491,151 @@ class ResearchRuntime:
                 lines.append(f"Evidence: {evidence[:500]}")
         return "\n".join(lines)
 
+    def _validate_report(
+        self,
+        user: User,
+        run_id: str | None,
+        mode: ResearchMode,
+        answer: str,
+        language: ResearchLanguage,
+        state: dict[str, Any],
+    ) -> str | None:
+        """Return an Error reason if the final answer violates grounding rules.
+
+        Returns ``None`` when acceptable. Checks: target-language match for ru
+        tasks, cited source_id/URL integrity, deep_research list_facts mandate,
+        and count assertions vs. actually fetched sources.
+        """
+        if not answer.strip():
+            return None  # empty answer -> deterministic skeleton, nothing to validate
+
+        sources = self.list_sources(user, run_id)
+        source_ids = {str(s.get("source_id") or "") for s in sources}
+        source_urls = {str(s.get("url") or "") for s in sources}
+
+        # 1. Language mismatch: ru task answered in English.
+        if language == "ru":
+            lowered = answer.casefold()
+            en_signatures = (
+                "executive summary",
+                "## methodology",
+                "key findings",
+                "## summary",
+            )
+            if any(sig in lowered for sig in en_signatures):
+                return (
+                    "answer appears to be in English but the target language is Russian (ru). "
+                    "Rewrite the report in Russian with Russian headings "
+                    "(## Краткий вывод, ## Методология, ## Источники) and call "
+                    "research_finalize again."
+                )
+            if _cyrillic_ratio(answer) < 0.15:
+                return (
+                    "answer is mostly Latin text but the target language is Russian (ru). "
+                    "Write the report in Russian and call research_finalize again."
+                )
+
+        # 2. Cited source_id / URL must exist in the manifest.
+        cited_ids = {m.group(1) for m in _CITED_SOURCE_ID_RE.finditer(answer)}
+        invented_ids = sorted(c for c in cited_ids if c not in source_ids)
+        if invented_ids:
+            return (
+                f"answer cites unknown source_id(s): {', '.join(invented_ids)}. "
+                "Only cite source IDs returned by research_fetch_source or "
+                "research_list_facts, or mark them as search-only limitations. "
+                "Call research_finalize again."
+            )
+        cited_urls = {u.rstrip(").,]") for u in _URL_RE.findall(answer)}
+        invented_urls = sorted(u for u in cited_urls if u and u not in source_urls)
+        if invented_urls:
+            return (
+                f"answer cites {len(invented_urls)} URL(s) not present in fetched sources. "
+                "Mark unfetched sources as a limitation instead. "
+                "Call research_finalize again."
+            )
+
+        # 3. deep_research must consult research_list_facts before synthesis.
+        if mode == "deep_research" and not state.get("list_facts_called"):
+            return (
+                "deep_research requires calling research_list_facts before finalize to "
+                "verify stored facts. Call research_list_facts, then research_finalize again."
+            )
+
+        # 4. Count assertions must not exceed actually fetched sources.
+        n_sources = len(sources)
+        for m in _COUNT_ASSERTION_RE.finditer(answer):
+            claimed = int(m.group("n"))
+            if claimed > n_sources:
+                return (
+                    f"answer claims {claimed} {m.group('word')} but only {n_sources} "
+                    f"source(s) were actually fetched. Correct the count to {n_sources} "
+                    "(or fewer) and call research_finalize again."
+                )
+
+        return None
+
+    def _handle_validation_failure(
+        self,
+        user: User,
+        run_id: str | None,
+        mode: ResearchMode,
+        language: ResearchLanguage,
+        facts: list[dict[str, Any]],
+        sources: list[dict[str, Any]],
+        state: dict[str, Any],
+        reason: str,
+    ) -> str | None:
+        """Recovery for a failed validation.
+
+        Returns the report string when the caller should return it immediately
+        (strict Error or skeleton backstop), or ``None`` to continue normal
+        finalization (soft-mode warning).
+        """
+        if not self._settings.finalize_strict:
+            log_event(
+                "research_finalize_validation_warning",
+                run_id or "unknown",
+                mode=mode,
+                language=language,
+                fetched_sources=len(sources),
+                facts_total=len(facts),
+                reason=reason,
+            )
+            return None
+
+        attempts = _as_int(state.get("finalize_attempts"), 0)
+        self._bump_finalize_attempts(self.run_dir(user, run_id), state)
+        if attempts >= _FINALIZE_MAX_ATTEMPTS:
+            skeleton = self._build_report(mode, facts, sources, language)
+            log_event(
+                "research_finalize_skeleton_fallback",
+                run_id or "unknown",
+                mode=mode,
+                language=language,
+                fetched_sources=len(sources),
+                facts_total=len(facts),
+                finalize_attempts=attempts + 1,
+                reason=reason,
+            )
+            return skeleton.strip()
+
+        log_event(
+            "research_finalize_validation_failed",
+            run_id or "unknown",
+            mode=mode,
+            language=language,
+            fetched_sources=len(sources),
+            facts_total=len(facts),
+            list_facts_called=bool(state.get("list_facts_called")),
+            finalize_attempts=attempts + 1,
+            reason=reason,
+        )
+        return f"Error: research_finalize_validation_failed: {reason}"
+
+    def _bump_finalize_attempts(self, run_dir: Path, state: dict[str, Any]) -> None:
+        state["finalize_attempts"] = _as_int(state.get("finalize_attempts"), 0) + 1
+        self._write_json(run_dir / "state.json", state)
+
     def finalize_report(
         self,
         user: User,
@@ -347,21 +645,50 @@ class ResearchRuntime:
     ) -> str:
         facts = self.list_facts(user, run_id)
         sources = self.list_sources(user, run_id)
-        report = answer.strip() or self._build_report(mode, facts, sources)
+        language = self.get_language(user, run_id)
+        strings = _report_strings(language)
+        strict = self._settings.finalize_strict
+        run_dir = self.run_dir(user, run_id)
+        state = self._read_state(run_dir)
+
+        validation_reason = self._validate_report(user, run_id, mode, answer, language, state)
+        if validation_reason is not None:
+            recovery = self._handle_validation_failure(
+                user, run_id, mode, language, facts, sources, state, validation_reason
+            )
+            if recovery is not None:
+                return recovery
+        else:
+            log_event(
+                "research_finalize_validation_passed",
+                run_id or "unknown",
+                mode=mode,
+                language=language,
+                fetched_sources=len(sources),
+                facts_total=len(facts),
+                list_facts_called=bool(state.get("list_facts_called")),
+                strict=strict,
+            )
+
+        report = answer.strip() or self._build_report(mode, facts, sources, language)
         lowered = report.casefold()
         if "использованные источники" not in lowered and "sources" not in lowered:
             report = (
                 report.rstrip()
-                + "\n\n## Использованные источники\n"
-                + self._sources_markdown(sources)
+                + "\n\n"
+                + strings["sources_section"]
+                + "\n"
+                + self._sources_markdown(sources, language)
             )
         elif not _URL_RE.search(report):
-            report = report.rstrip() + "\n\n" + self._sources_markdown(sources)
+            report = report.rstrip() + "\n\n" + self._sources_markdown(sources, language)
         if not facts and "огранич" not in lowered and "limitation" not in lowered:
             report = (
                 report.rstrip()
-                + "\n\n## Ограничения\n"
-                + "- Не удалось зафиксировать структурированные факты через research_store_fact."
+                + "\n\n"
+                + strings["limitations_section"]
+                + "\n"
+                + strings["limitations_no_facts"]
             )
         return report.strip()
 
@@ -371,6 +698,10 @@ class ResearchRuntime:
         state["mode"] = mode
         state.setdefault("search_calls", 0)
         state.setdefault("rereads", 0)
+        language = str(state.get("language") or "en")
+        state.setdefault("language", language if language in ("ru", "en") else "en")
+        state.setdefault("finalize_attempts", 0)
+        state.setdefault("list_facts_called", False)
         return state
 
     def _upgrade_mode(self, state: dict[str, Any], mode: ResearchMode) -> None:
@@ -435,45 +766,25 @@ class ResearchRuntime:
         mode: ResearchMode,
         facts: list[dict[str, Any]],
         sources: list[dict[str, Any]],
+        language: ResearchLanguage = "en",
     ) -> str:
-        fact_lines = self._facts_markdown(facts)
-        sources_block = self._sources_markdown(sources)
-        if mode == "deep_research":
-            return (
-                "## Executive summary\n"
-                "См. ключевые выводы ниже.\n\n"
-                "## Методика исследования\n"
-                f"- Проанализировано источников: {len(sources)}.\n"
-                f"- Зафиксировано фактов: {len(facts)}.\n\n"
-                "## Ключевые выводы\n"
-                f"{fact_lines}\n\n"
-                "## Факты и подтверждения\n"
-                f"{fact_lines}\n\n"
-                "## Противоречия и неопределённости\n"
-                "- Явные противоречия не выделены в сохранённых фактах.\n\n"
-                "## Гипотезы / пробелы\n"
-                "- Дополнительные гипотезы не зафиксированы.\n\n"
-                "## Практические рекомендации\n"
-                "- Используйте выводы выше с учётом ограничений источников.\n\n"
-                "## Использованные источники\n"
-                f"{sources_block}"
-            )
-        return (
-            "## Краткий вывод\n"
-            "См. ключевые факты ниже.\n\n"
-            "## Ключевые факты\n"
-            f"{fact_lines}\n\n"
-            "## Что говорят источники\n"
-            f"{fact_lines}\n\n"
-            "## Ограничения\n"
-            "- Ответ построен по сохранённым фактам research-agent.\n\n"
-            "## Использованные источники\n"
-            f"{sources_block}"
+        strings = _report_strings(language)
+        fact_lines = self._facts_markdown(facts, language)
+        sources_block = self._sources_markdown(sources, language)
+        template = _REPORT_TEMPLATES[(mode, language)]
+        return template.format(
+            facts=fact_lines,
+            sources=sources_block,
+            n_sources=len(sources),
+            n_facts=len(facts),
+            sources_section=strings["sources_section"],
         )
 
-    def _facts_markdown(self, facts: list[dict[str, Any]]) -> str:
+    def _facts_markdown(
+        self, facts: list[dict[str, Any]], language: ResearchLanguage = "en"
+    ) -> str:
         if not facts:
-            return "- Структурированные факты не сохранены."
+            return _report_strings(language)["no_facts"]
         lines: list[str] = []
         for fact in facts:
             source_id = str(fact.get("source_id") or "")
@@ -487,9 +798,11 @@ class ResearchRuntime:
             lines.append(line)
         return "\n".join(lines)
 
-    def _sources_markdown(self, sources: list[dict[str, Any]]) -> str:
+    def _sources_markdown(
+        self, sources: list[dict[str, Any]], language: ResearchLanguage = "en"
+    ) -> str:
         if not sources:
-            return "- Источники не были успешно загружены."
+            return _report_strings(language)["no_sources"]
         lines: list[str] = []
         for source in sources:
             source_id = str(source.get("source_id") or "")
@@ -793,6 +1106,7 @@ class ResearchListFactsTool(Tool):
         if user is None:
             return "Error: User context is required for research_list_facts."
         run_id = kwargs.get("run_id") if isinstance(kwargs.get("run_id"), str) else None
+        self._runtime.mark_list_facts_called(user, run_id)
         return self._runtime.format_facts(user, run_id, _as_int(kwargs.get("max_facts"), 50))
 
 

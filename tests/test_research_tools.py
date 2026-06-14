@@ -63,6 +63,7 @@ def test_runtime_budgets_sources_facts_and_reports(tmp_path: Path) -> None:
         source_excerpt_chars=1200,
     )
     runtime = ResearchRuntime(settings=settings, workspace_base=tmp_path)
+    runtime.initialize_run_mode(user, "run", "research", language="ru")
 
     assert normalize_research_mode("deep_research") == "deep_research"
     assert normalize_research_mode("anything else") == "research"
@@ -108,7 +109,7 @@ def test_runtime_budgets_sources_facts_and_reports(tmp_path: Path) -> None:
     assert "https://example.com/a" in report
 
     deep_report = runtime.finalize_report(user, "run", "deep_research", "")
-    assert "## Executive summary" in deep_report
+    assert "## Краткий вывод" in deep_report
     assert "## Практические рекомендации" in deep_report
 
 
@@ -145,6 +146,7 @@ async def test_research_tools_success_paths_and_budget_errors(tmp_path: Path) ->
     )
     search_backend = FakeSearchTool()
     fetch_backend = FakeFetchTool()
+    runtime.initialize_run_mode(user, "fetch", "research", language="ru")
 
     search_tool = ResearchSearchTool(runtime, search_backend)  # type: ignore[arg-type]
     assert await search_tool.execute(query="x") == (

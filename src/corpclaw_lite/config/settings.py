@@ -187,6 +187,7 @@ class ResearchSettings(BaseModel):
     normal_max_rereads: int = 0
     deep_max_rereads: int = 10
     source_excerpt_chars: int = 6000
+    finalize_strict: bool = False
 
 
 class TelegramSettings(BaseModel):
