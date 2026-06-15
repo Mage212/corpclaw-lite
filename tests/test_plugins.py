@@ -142,9 +142,7 @@ def test_load_extensions_registers_plugin_tools_in_full_registry(
 
 
 @pytest.mark.asyncio
-async def test_plugin_tool_scope_filters_schema_and_execution(
-    tmp_path: Path, monkeypatch
-) -> None:
+async def test_plugin_tool_scope_filters_schema_and_execution(tmp_path: Path, monkeypatch) -> None:
     from corpclaw_lite.extensions import bootstrap
 
     plugins_dir = tmp_path / "plugins"
