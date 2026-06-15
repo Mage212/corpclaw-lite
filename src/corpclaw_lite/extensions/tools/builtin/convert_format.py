@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import csv
 import json
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -26,11 +27,29 @@ _MAX_INPUT_BYTES = 50 * 1024 * 1024
 # --- Loaders ---
 
 
+def _dedupe_headers(headers: list[str]) -> list[str]:
+    """Rename duplicate headers with a _N suffix (DuckDB-style: col, col_1, col_2)."""
+    seen: dict[str, int] = {}
+    result: list[str] = []
+    for h in headers:
+        if h in seen:
+            seen[h] += 1
+            result.append(f"{h}_{seen[h]}")
+        else:
+            seen[h] = 0
+            result.append(h)
+    return result
+
+
 def _load_csv(path: Path) -> list[dict[str, str]]:
     encoding = detect_csv_encoding(path)
     with open(path, newline="", encoding=encoding) as f:
-        reader = csv.DictReader(f)
-        return list(reader)  # pyright: ignore[reportUnknownVariableType]
+        reader = csv.reader(f)
+        raw_headers = next(reader, None)
+        if raw_headers is None:
+            return []
+        headers = _dedupe_headers([h.strip() for h in raw_headers])
+        return [dict(zip(headers, row, strict=False)) for row in reader]
 
 
 def _load_json(path: Path) -> list[dict[str, Any]]:
@@ -56,9 +75,9 @@ def _load_xlsx(path: Path) -> list[dict[str, Any]]:
         data: list[dict[str, Any]] = []
         for row in rows_iter:
             if headers is None:
-                headers = [
-                    str(c).strip() if c is not None else f"col{i}" for i, c in enumerate(row)
-                ]
+                headers = _dedupe_headers(
+                    [str(c).strip() if c is not None else f"col{i}" for i, c in enumerate(row)]
+                )
                 continue
             data.append(dict(zip(headers, row, strict=False)))
         return data
@@ -110,6 +129,31 @@ def _write_json(data: list[dict[str, Any]], path: Path) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
 
 
+def _apply_cell_value(cell: Any, value: Any) -> None:
+    """Set a cell value together with a number_format matching its Python type.
+
+    Strings (and None) get the text format "@" so identifiers with leading
+    zeros such as INN are not reinterpreted by Excel.
+    """
+    if isinstance(value, bool):
+        cell.value = value
+    elif isinstance(value, int):
+        cell.value = value
+        cell.number_format = "0"
+    elif isinstance(value, float):
+        cell.value = value
+        cell.number_format = "0.00"
+    elif isinstance(value, datetime):
+        cell.value = value
+        cell.number_format = "DD.MM.YYYY HH:MM:SS"
+    elif isinstance(value, date):
+        cell.value = value
+        cell.number_format = "DD.MM.YYYY"
+    else:
+        cell.value = value
+        cell.number_format = "@"
+
+
 def _write_xlsx(data: list[dict[str, Any]], path: Path) -> None:
     import openpyxl
 
@@ -121,10 +165,10 @@ def _write_xlsx(data: list[dict[str, Any]], path: Path) -> None:
         return
     headers = list(data[0].keys())
     for col, h in enumerate(headers, 1):
-        ws.cell(row=1, column=col, value=h)
+        _apply_cell_value(ws.cell(row=1, column=col), h)
     for row_idx, row in enumerate(data, 2):
         for col, h in enumerate(headers, 1):
-            ws.cell(row=row_idx, column=col, value=row.get(h))
+            _apply_cell_value(ws.cell(row=row_idx, column=col), row.get(h))
     wb.save(str(path))
 
 
@@ -188,10 +232,16 @@ def _do_convert(input_path: Path, output_format: str, output_path: Path | None) 
     else:
         return f"Error: Unsupported output format '{output_format}'."
 
-    return (
+    result = (
         f"Converted {input_path.name} ({ext}) → {output_path.name} ({output_format})\n"
         f"Rows: {len(data)}, Columns: {len(data[0].keys()) if data else 0}"
     )
+    if ext == ".xlsx":
+        result += (
+            "\nNote: XLSX input is read as values only — formulas and formatting "
+            "are lost. Use excel_workbook for formula-preserving edits."
+        )
+    return result
 
 
 class ConvertFormatTool(Tool):
@@ -200,7 +250,9 @@ class ConvertFormatTool(Tool):
     name = "convert_format"
     description = (
         "Convert tabular data between CSV, XLSX, JSON, and Markdown table formats. "
-        "Input format is detected from file extension."
+        "Input format is detected from file extension. XLSX input is read as values "
+        "only — formulas, formatting, and merged cells are not preserved. For "
+        "formula-preserving Excel edits, use excel_workbook."
     )
     params = [
         ToolParam(

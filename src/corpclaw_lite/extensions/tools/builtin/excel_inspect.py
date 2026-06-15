@@ -143,7 +143,9 @@ def _inspect_csv(path: Path) -> str:
             if size > _MAX_CSV_COUNT_BYTES and row_count >= _MAX_CSV_COUNT_ROWS:
                 break
         if size > _MAX_CSV_COUNT_BYTES and row_count >= _MAX_CSV_COUNT_ROWS:
-            lines.append(f"Data rows: at least {row_count} (large file; count limited)")
+            lines.append(
+                f"Data rows: \u2265{row_count} (large file; exact count skipped for performance)"
+            )
         else:
             lines.append(f"Data rows: {row_count}")
 

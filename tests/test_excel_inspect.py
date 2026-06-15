@@ -125,6 +125,28 @@ class TestExcelInspectTool:
         assert "Alice" in result
 
     @pytest.mark.asyncio
+    async def test_inspect_large_csv_wording(
+        self, tool: ExcelInspectTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Large CSV row count uses a clear lower-bound phrasing, not 'at least'."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "big.csv").write_text("a,b\n1,2\n3,4\n", encoding="utf-8")
+        # Force the large-file branch: file is tiny, so lower both thresholds.
+        monkeypatch.setattr(
+            "corpclaw_lite.extensions.tools.builtin.excel_inspect._MAX_CSV_COUNT_BYTES",
+            1,
+        )
+        monkeypatch.setattr(
+            "corpclaw_lite.extensions.tools.builtin.excel_inspect._MAX_CSV_COUNT_ROWS",
+            1,
+        )
+
+        result = await tool.execute(path="big.csv")
+        assert "\u2265" in result  # ≥
+        assert "skipped for performance" in result
+        assert "at least" not in result
+
+    @pytest.mark.asyncio
     async def test_inspect_json_array(
         self, tool: ExcelInspectTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
