@@ -387,6 +387,96 @@ class TestExcelWorkbookRead:
         assert "Row 101:" not in result
         assert "More rows may exist" in result
 
+    @pytest.mark.asyncio
+    async def test_read_returns_file_sig(
+        self, tool: ExcelWorkbookTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Read result ends with a [file_sig:...] change-detection token."""
+        monkeypatch.chdir(tmp_path)
+        _create_basic_xlsx(tmp_path / "data.xlsx", ["A"], [[1]])
+
+        result = await tool.execute(path="data.xlsx", action="read")
+        assert "[file_sig:" in result
+
+    @pytest.mark.asyncio
+    async def test_values_mode_loads_workbook_once(
+        self, tool: ExcelWorkbookTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """formula_mode=values loads only one workbook (the data_only copy)."""
+        import openpyxl
+
+        monkeypatch.chdir(tmp_path)
+        _create_basic_xlsx(tmp_path / "data.xlsx", ["A", "B"], [["x", "y"]])
+
+        calls: list[bool] = []
+        real_load = openpyxl.load_workbook
+
+        def _spy_load(*args: object, **kwargs: object) -> object:
+            calls.append(bool(kwargs.get("data_only", False)))
+            return real_load(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(openpyxl, "load_workbook", _spy_load)
+        await tool.execute(path="data.xlsx", action="read", formula_mode="values")
+
+        assert len(calls) == 1
+        assert calls == [True]
+
+    @pytest.mark.asyncio
+    async def test_formulas_mode_loads_workbook_once(
+        self, tool: ExcelWorkbookTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """formula_mode=formulas loads only one workbook (the formula copy)."""
+        import openpyxl
+
+        monkeypatch.chdir(tmp_path)
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = 1
+        ws["B1"] = "=A1+1"
+        wb.save(str(tmp_path / "data.xlsx"))
+        wb.close()
+
+        calls: list[bool] = []
+        real_load = openpyxl.load_workbook
+
+        def _spy_load(*args: object, **kwargs: object) -> object:
+            calls.append(bool(kwargs.get("data_only", False)))
+            return real_load(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(openpyxl, "load_workbook", _spy_load)
+        await tool.execute(path="data.xlsx", action="read", formula_mode="formulas")
+
+        assert len(calls) == 1
+        assert calls == [False]
+
+    @pytest.mark.asyncio
+    async def test_both_mode_loads_workbook_twice(
+        self, tool: ExcelWorkbookTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """formula_mode=both (default) still loads two workbooks."""
+        import openpyxl
+
+        monkeypatch.chdir(tmp_path)
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = 1
+        ws["B1"] = "=A1+1"
+        wb.save(str(tmp_path / "data.xlsx"))
+        wb.close()
+
+        calls: list[bool] = []
+        real_load = openpyxl.load_workbook
+
+        def _spy_load(*args: object, **kwargs: object) -> object:
+            calls.append(bool(kwargs.get("data_only", False)))
+            return real_load(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(openpyxl, "load_workbook", _spy_load)
+        await tool.execute(path="data.xlsx", action="read", cells="B1")
+
+        assert len(calls) == 2
+        assert calls == [False, True]
+
 
 class TestExcelWorkbookFill:
     @pytest.mark.asyncio
@@ -583,6 +673,117 @@ class TestExcelWorkbookFill:
         original = openpyxl.load_workbook(str(tmp_path / "template.xlsx"))
         assert original.active["A2"].value == "old"
         original.close()
+
+    # --- read-before-write guard (Правка 5) ---
+
+    @pytest.mark.asyncio
+    async def test_fill_sig_match_no_warning(
+        self, tool: ExcelWorkbookTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When expected_sig matches the current file, no warning is added."""
+        monkeypatch.chdir(tmp_path)
+        _create_basic_xlsx(tmp_path / "data.xlsx", ["H1"], [["old"]])
+
+        read_result = await tool.execute(path="data.xlsx", action="read", cells="A1")
+        # Extract the signature token returned by read.
+        sig = read_result.split("[file_sig:")[1].rstrip("]")
+
+        result = await tool.execute(
+            path="data.xlsx",
+            action="fill",
+            cells=json.dumps({"A2": "new"}),
+            expected_sig=sig,
+        )
+        assert "Warning" not in result
+        assert "Filled 1 cells" in result
+
+    @pytest.mark.asyncio
+    async def test_fill_sig_mismatch_warns(
+        self, tool: ExcelWorkbookTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A stale expected_sig surfaces a warning but the fill still applies."""
+        monkeypatch.chdir(tmp_path)
+        _create_basic_xlsx(tmp_path / "data.xlsx", ["H1"], [["old"]])
+
+        result = await tool.execute(
+            path="data.xlsx",
+            action="fill",
+            cells=json.dumps({"A2": "new"}),
+            expected_sig="9999999-999999",
+        )
+        assert "Warning: file may have changed" in result
+        assert "signature mismatch" in result
+        # Fill still applied.
+        assert "Filled 1 cells" in result
+        wb = openpyxl.load_workbook(str(tmp_path / "data_filled.xlsx"))
+        assert wb.active["A2"].value == "new"
+        wb.close()
+
+    @pytest.mark.asyncio
+    async def test_fill_no_sig_silent(
+        self, tool: ExcelWorkbookTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without expected_sig the guard is silent (backwards compatible)."""
+        monkeypatch.chdir(tmp_path)
+        _create_basic_xlsx(tmp_path / "data.xlsx", ["H1"], [["old"]])
+
+        result = await tool.execute(
+            path="data.xlsx", action="fill", cells=json.dumps({"A2": "new"})
+        )
+        assert "Warning" not in result
+        assert "Filled 1 cells" in result
+
+    # --- stale formula note (Правка 6) ---
+
+    @pytest.mark.asyncio
+    async def test_fill_formula_dependency_note(
+        self, tool: ExcelWorkbookTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Filling a cell referenced by a formula surfaces a stale-cache note."""
+        monkeypatch.chdir(tmp_path)
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = 10
+        ws["B1"] = "=A1*2"  # references A1
+        ws["A2"] = 5
+        wb.save(str(tmp_path / "data.xlsx"))
+        wb.close()
+
+        result = await tool.execute(path="data.xlsx", action="fill", cells=json.dumps({"A1": 20}))
+        assert "Filled 1 cells" in result
+        assert "1 formula(s) reference filled cells" in result
+        assert "stale" in result
+
+    @pytest.mark.asyncio
+    async def test_fill_no_formula_no_note(
+        self, tool: ExcelWorkbookTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Filling cells with no dependent formulas produces no stale-cache note."""
+        monkeypatch.chdir(tmp_path)
+        _create_basic_xlsx(tmp_path / "data.xlsx", ["A", "B"], [["x", "y"]])
+
+        result = await tool.execute(path="data.xlsx", action="fill", cells=json.dumps({"A2": "z"}))
+        assert "Filled 1 cells" in result
+        assert "formula(s) reference" not in result
+
+    @pytest.mark.asyncio
+    async def test_fill_formula_range_dependency_note(
+        self, tool: ExcelWorkbookTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A formula referencing a range (A1:A3) that overlaps a filled cell is detected."""
+        monkeypatch.chdir(tmp_path)
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = 1
+        ws["A2"] = 2
+        ws["A3"] = 3
+        ws["B1"] = "=SUM(A1:A3)"  # references range A1:A3
+        wb.save(str(tmp_path / "data.xlsx"))
+        wb.close()
+
+        result = await tool.execute(path="data.xlsx", action="fill", cells=json.dumps({"A2": 99}))
+        assert "Filled 1 cells" in result
+        assert "1 formula(s) reference filled cells" in result
 
 
 class TestExcelWorkbookErrors:
