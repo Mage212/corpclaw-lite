@@ -66,6 +66,7 @@ class TelegramBotOrchestrator:
         self._plugin_reloader: PluginHotReloader | None = None
         self._subagent_reloader: Any = None
         self._cleanup_task: asyncio.Task[None] | None = None
+        self._queue_notify_task: asyncio.Task[None] | None = None
         self._shutdown_event = asyncio.Event()
         self._agent_activity_logger: AgentLogger | None = None
         self._active_user_requests: set[int] = set()
@@ -297,6 +298,24 @@ class TelegramBotOrchestrator:
 
         self._cleanup_task = asyncio.create_task(self._rate_limit_cleanup_loop())
 
+        # Queue notification loop
+        from corpclaw_lite.llm.router import LLMRouter
+
+        if (
+            isinstance(agent_loop.provider, LLMRouter)
+            and agent_loop.provider.has_queue
+            and self._settings.llm.queue.notify_position
+        ):
+            self._queue_notify_task = asyncio.create_task(
+                self._queue_notification_loop(
+                    agent_loop.provider.queue,
+                    self._settings.llm.queue.notify_interval_seconds,
+                )
+            )
+            logger.info(
+                "Queue notification loop started (interval=%ds)",
+                self._settings.llm.queue.notify_interval_seconds,
+            )
         self._started = True
 
     async def run_until_shutdown(self) -> None:
@@ -312,6 +331,8 @@ class TelegramBotOrchestrator:
                 logger.warning("Health server cleanup failed: %s", e)
         if self._cleanup_task is not None:
             self._cleanup_task.cancel()
+        if self._queue_notify_task is not None:
+            self._queue_notify_task.cancel()
         for task in self._background_tasks:
             task.cancel()
         if self._reloader is not None:
@@ -439,6 +460,25 @@ class TelegramBotOrchestrator:
                     "⚠️ Слишком много сообщений. Подождите минуту и попробуйте снова.",
                 )
                 return
+
+        # Queue position notification
+        from corpclaw_lite.llm.router import LLMRouter
+
+        if (
+            isinstance(agent_loop.provider, LLMRouter)
+            and agent_loop.provider.has_queue
+            and self._settings.llm.queue.notify_position
+        ):
+            queue = agent_loop.provider.queue
+            if queue is not None:
+                position = queue.get_position(user.memory_key())
+                if position is not None:
+                    est_wait = queue.get_estimated_wait(user.memory_key())
+                    wait_text = f" ~{int(est_wait)}с." if est_wait is not None else "."
+                    await channel.send_message(
+                        user,
+                        f"Запрос принят. Вы #{position + 1} в очереди.{wait_text}",
+                    )
 
         # Onboarding intercept
         if self._onboarding_engine is not None and await self._onboarding_engine.needs_onboarding(
@@ -570,30 +610,8 @@ class TelegramBotOrchestrator:
                 on_tool_start=(
                     status_session.mark_tool_start if status_session is not None else None
                 ),
-                on_tool_batch_start=(
-                    status_session.mark_tool_batch_start if status_session is not None else None
-                ),
                 on_llm_stage=(
                     status_session.mark_llm_stage if status_session is not None else None
-                ),
-                on_llm_queue_status=(
-                    status_session.mark_llm_queue_status if status_session is not None else None
-                ),
-                on_subagent_tool_start=(
-                    status_session.mark_subagent_tool_start if status_session is not None else None
-                ),
-                on_subagent_tool_batch_start=(
-                    status_session.mark_subagent_tool_batch_start
-                    if status_session is not None
-                    else None
-                ),
-                on_subagent_llm_stage=(
-                    status_session.mark_subagent_llm_stage if status_session is not None else None
-                ),
-                on_subagent_llm_queue_status=(
-                    status_session.mark_subagent_llm_queue_status
-                    if status_session is not None
-                    else None
                 ),
                 tools_enabled=(mode == "execute"),
                 few_shots=stack.few_shots,
@@ -810,3 +828,45 @@ class TelegramBotOrchestrator:
         while True:
             await asyncio.sleep(300)
             await self._rate_limiter.cleanup()
+
+    async def _queue_notification_loop(
+        self,
+        queue: object,
+        interval_seconds: int,
+    ) -> None:
+        """Periodically notify waiting users about their queue position."""
+        import time
+
+        from corpclaw_lite.llm.queue import LLMRequestQueue
+
+        assert isinstance(queue, LLMRequestQueue)
+        channel = self._channel
+        user_manager = self._stack.user_manager if self._stack else None
+        if channel is None or user_manager is None:
+            return
+
+        while True:
+            await asyncio.sleep(interval_seconds)
+            waiting = queue.get_waiting_entries()
+            if not waiting:
+                continue
+            now = time.monotonic()
+            for entry in waiting:
+                if now - entry.last_notified_at < interval_seconds:
+                    continue
+                position = queue.get_position(entry.user_id)
+                if position is None:
+                    continue
+                est = queue.get_estimated_wait(entry.user_id)
+                wait_text = f" ~{int(est)}с." if est is not None else "."
+                try:
+                    tid = int(entry.user_id)
+                    user = await user_manager.async_get_by_telegram_id(tid)
+                    if user is not None:
+                        await channel.send_message(
+                            user,
+                            f"Обновление: Вы #{position + 1} в очереди.{wait_text}",
+                        )
+                        entry.last_notified_at = time.monotonic()
+                except Exception as e:
+                    logger.warning("Queue notification failed for user %s: %s", entry.user_id, e)
