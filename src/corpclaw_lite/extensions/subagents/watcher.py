@@ -105,7 +105,11 @@ class SubagentHotReloader:
 
     @staticmethod
     def _load_spec(path: Path) -> SubagentSpec | None:
-        """Parse a single subagent YAML file into a SubagentSpec."""
+        """Parse a single subagent YAML file into a SubagentSpec.
+
+        Field mapping is kept in sync with :meth:`SubagentRegistry.load_directory`
+        (registry.py) — both loaders must produce identical specs from the same YAML.
+        """
         try:
             data: dict[str, Any] = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
             return SubagentSpec(
@@ -116,6 +120,10 @@ class SubagentHotReloader:
                 allowed_tools=data.get("allowed_tools", ["*"]),
                 allowed_departments=data.get("allowed_departments", ["*"]),
                 prompt_path=data.get("prompt_path", ""),
+                direct_response=bool(data.get("direct_response", False)),
+                max_wall_time_ms=data.get("max_wall_time_ms"),
+                terminal_tool=data.get("terminal_tool"),
+                required_before_terminal=data.get("required_before_terminal", []),
             )
         except Exception as e:
             logger.error("SubagentHotReloader: failed to load %s: %s", path, e)

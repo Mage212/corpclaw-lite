@@ -87,6 +87,15 @@ _REPORT_STRINGS: dict[ResearchLanguage, dict[str, str]] = {
         "limitations_no_facts": (
             "- Не удалось зафиксировать структурированные факты через research_store_fact."
         ),
+        # B-045: honest marker for a research run that hit the wall-clock limit before
+        # the model could synthesize. The body below this banner is stored facts only.
+        "interrupted_banner": (
+            "⚠️ Исследование прервано по лимиту времени. Ниже приведены собранные факты "
+            "без синтеза и выводов — это не готовый отчёт."
+        ),
+        "interrupted_limitation": (
+            "- Синтез не выполнен: исследование прервано до research_finalize."
+        ),
     },
     "en": {
         "no_facts": "- No structured facts stored.",
@@ -94,6 +103,13 @@ _REPORT_STRINGS: dict[ResearchLanguage, dict[str, str]] = {
         "sources_section": "## Sources",
         "limitations_section": "## Limitations",
         "limitations_no_facts": ("- Could not record structured facts via research_store_fact."),
+        "interrupted_banner": (
+            "⚠️ Research interrupted by the time limit. The facts below were gathered but "
+            "not synthesized — this is not a finished report."
+        ),
+        "interrupted_limitation": (
+            "- No synthesis: research was interrupted before research_finalize."
+        ),
     },
 }
 
@@ -103,7 +119,11 @@ def _report_strings(language: ResearchLanguage) -> dict[str, str]:
 
 
 # Report skeleton templates keyed by (mode, language). Placeholders:
-#   {n_sources}, {n_facts}, {facts}, {sources}, {sources_section}.
+#   {n_sources}, {n_facts}, {facts} (brief, no evidence), {evidence} (full, with
+#   evidence excerpt), {sources}, {sources_section}.
+# B-048: deep_research previously rendered {facts} twice (Key findings + Facts and
+# evidence). The second section now uses {evidence} so the two sections differ and
+# the body is not duplicated.
 _REPORT_TEMPLATES: dict[tuple[ResearchMode, ResearchLanguage], str] = {
     ("deep_research", "ru"): (
         "## Краткий вывод\n"
@@ -114,7 +134,7 @@ _REPORT_TEMPLATES: dict[tuple[ResearchMode, ResearchLanguage], str] = {
         "## Ключевые выводы\n"
         "{facts}\n\n"
         "## Факты и подтверждения\n"
-        "{facts}\n\n"
+        "{evidence}\n\n"
         "## Противоречия и неопределённости\n"
         "- Явные противоречия не выделены в сохранённых фактах.\n\n"
         "## Гипотезы / пробелы\n"
@@ -133,7 +153,7 @@ _REPORT_TEMPLATES: dict[tuple[ResearchMode, ResearchLanguage], str] = {
         "## Key findings\n"
         "{facts}\n\n"
         "## Facts and evidence\n"
-        "{facts}\n\n"
+        "{evidence}\n\n"
         "## Contradictions and uncertainties\n"
         "- No explicit contradictions identified in stored facts.\n\n"
         "## Hypotheses / gaps\n"
@@ -149,7 +169,7 @@ _REPORT_TEMPLATES: dict[tuple[ResearchMode, ResearchLanguage], str] = {
         "## Ключевые факты\n"
         "{facts}\n\n"
         "## Что говорят источники\n"
-        "{facts}\n\n"
+        "{evidence}\n\n"
         "## Ограничения\n"
         "- Ответ построен по сохранённым фактам research-agent.\n\n"
         "{sources_section}\n"
@@ -161,9 +181,63 @@ _REPORT_TEMPLATES: dict[tuple[ResearchMode, ResearchLanguage], str] = {
         "## Key facts\n"
         "{facts}\n\n"
         "## What sources say\n"
-        "{facts}\n\n"
+        "{evidence}\n\n"
         "## Limitations\n"
         "- The answer is built from research-agent stored facts.\n\n"
+        "{sources_section}\n"
+        "{sources}"
+    ),
+}
+
+
+# B-045: interrupted-run templates. Rendered when finalize_report is called with
+# interrupted=True (research-agent timed out before calling research_finalize). These
+# are deliberately short and honest: a banner, the gathered facts (with evidence), the
+# sources, and a single limitation line stating synthesis did not happen. They do NOT
+# include the analysis sections (Contradictions / Hypotheses / Recommendations) that a
+# finished deep_research report promises, because no synthesis was performed.
+# Placeholders: {banner}, {n_sources}, {n_facts}, {evidence}, {sources_section},
+# {sources}, {limitations_section}, {interrupted_limitation}.
+_INTERRUPTED_REPORT_TEMPLATES: dict[tuple[ResearchMode, ResearchLanguage], str] = {
+    ("deep_research", "ru"): (
+        "{banner}\n\n"
+        "## Методология\n"
+        "- Проанализировано источников: {n_sources}.\n"
+        "- Зафиксировано фактов: {n_facts}.\n\n"
+        "## Собранные факты\n"
+        "{evidence}\n\n"
+        "{limitations_section}\n"
+        "{interrupted_limitation}\n\n"
+        "{sources_section}\n"
+        "{sources}"
+    ),
+    ("deep_research", "en"): (
+        "{banner}\n\n"
+        "## Methodology\n"
+        "- Sources analyzed: {n_sources}.\n"
+        "- Facts recorded: {n_facts}.\n\n"
+        "## Gathered facts\n"
+        "{evidence}\n\n"
+        "{limitations_section}\n"
+        "{interrupted_limitation}\n\n"
+        "{sources_section}\n"
+        "{sources}"
+    ),
+    ("research", "ru"): (
+        "{banner}\n\n"
+        "## Собранные факты\n"
+        "{evidence}\n\n"
+        "{limitations_section}\n"
+        "{interrupted_limitation}\n\n"
+        "{sources_section}\n"
+        "{sources}"
+    ),
+    ("research", "en"): (
+        "{banner}\n\n"
+        "## Gathered facts\n"
+        "{evidence}\n\n"
+        "{limitations_section}\n"
+        "{interrupted_limitation}\n\n"
         "{sources_section}\n"
         "{sources}"
     ),
@@ -642,7 +716,21 @@ class ResearchRuntime:
         run_id: str | None,
         mode: ResearchMode,
         answer: str,
+        *,
+        interrupted: bool = False,
     ) -> str:
+        # B-045: interrupted=True is set by SubagentDispatcher on a research timeout.
+        # In that case we skip grounding validation (the model never produced an answer
+        # to validate) and build the honest interrupted skeleton directly.
+        if interrupted:
+            return self._build_report(
+                mode,
+                self.list_facts(user, run_id),
+                self.list_sources(user, run_id),
+                self.get_language(user, run_id),
+                interrupted=True,
+            ).strip()
+
         facts = self.list_facts(user, run_id)
         sources = self.list_sources(user, run_id)
         language = self.get_language(user, run_id)
@@ -767,13 +855,33 @@ class ResearchRuntime:
         facts: list[dict[str, Any]],
         sources: list[dict[str, Any]],
         language: ResearchLanguage = "en",
+        *,
+        interrupted: bool = False,
     ) -> str:
         strings = _report_strings(language)
-        fact_lines = self._facts_markdown(facts, language)
+        # B-048: two renderings of the facts — brief (no evidence) and full (with
+        # evidence) — so the two sections of a normal template no longer duplicate
+        # the same body. Interrupted reports (B-045) only use the full rendering.
+        facts_brief = self._facts_markdown(facts, language, with_evidence=False)
+        facts_full = self._facts_markdown(facts, language, with_evidence=True)
         sources_block = self._sources_markdown(sources, language)
+        if interrupted:
+            template = _INTERRUPTED_REPORT_TEMPLATES[(mode, language)]
+            return template.format(
+                banner=strings["interrupted_banner"],
+                facts=facts_brief,
+                evidence=facts_full,
+                sources=sources_block,
+                n_sources=len(sources),
+                n_facts=len(facts),
+                sources_section=strings["sources_section"],
+                limitations_section=strings["limitations_section"],
+                interrupted_limitation=strings["interrupted_limitation"],
+            )
         template = _REPORT_TEMPLATES[(mode, language)]
         return template.format(
-            facts=fact_lines,
+            facts=facts_brief,
+            evidence=facts_full,
             sources=sources_block,
             n_sources=len(sources),
             n_facts=len(facts),
@@ -781,7 +889,11 @@ class ResearchRuntime:
         )
 
     def _facts_markdown(
-        self, facts: list[dict[str, Any]], language: ResearchLanguage = "en"
+        self,
+        facts: list[dict[str, Any]],
+        language: ResearchLanguage = "en",
+        *,
+        with_evidence: bool = True,
     ) -> str:
         if not facts:
             return _report_strings(language)["no_facts"]
@@ -789,12 +901,13 @@ class ResearchRuntime:
         for fact in facts:
             source_id = str(fact.get("source_id") or "")
             fact_text = str(fact.get("fact") or "").strip()
-            evidence = str(fact.get("evidence") or "").strip()
             confidence = str(fact.get("confidence") or "medium")
             relation = str(fact.get("relation") or "neutral")
             line = f"- {fact_text} [{source_id}; {confidence}; {relation}]"
-            if evidence:
-                line += f" Evidence: {evidence[:240]}"
+            if with_evidence:
+                evidence = str(fact.get("evidence") or "").strip()
+                if evidence:
+                    line += f" Evidence: {evidence[:240]}"
             lines.append(line)
         return "\n".join(lines)
 

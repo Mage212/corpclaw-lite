@@ -234,6 +234,103 @@ class SoftDeadline:
         self._closing_mode = True
 
 
+@dataclass
+class TerminalToolMandateConfig:
+    """Configuration for the workflow-finalize guard (B-047).
+
+    Knows that a research subagent has a mandatory terminal tool (research_finalize)
+    that must be reached before the budget runs out. The guard escalates in two
+    deterministic steps — a soft nudge and a hard tool-schema restriction — so a local
+    LLM that keeps gathering data instead of synthesizing is pushed toward finalization
+    *before* the wall-clock limit cancels the run.
+
+    This is deliberately NOT LLM-based planning: there is no objective storage, no
+    verifier, no re-planner. It is a static declaration of the required terminal tool
+    plus wall-clock thresholds, evaluated from recorded tool-call evidence.
+    """
+
+    enabled: bool = True
+    terminal_tool: str = ""
+    required_before: tuple[str, ...] = ()
+    # Fraction of max_wall_time_ms at which the soft nudge (system note) is injected.
+    nudge_ratio: float = 0.6
+    # Fraction at which tools_schema is restricted to {required_before + terminal_tool}.
+    restrict_ratio: float = 0.75
+
+
+class TerminalToolMandate:
+    """Workflow-finalize guard: push the run toward its mandatory terminal tool.
+
+    Tracks elapsed wall-clock time (via :func:`time.monotonic`, mirroring
+    :class:`SoftDeadline`) and, when the run is running low on budget AND has not yet
+    called ``terminal_tool``, signals the caller to escalate:
+
+    - :meth:`should_nudge`: inject a system note telling the model to stop gathering
+      and call ``research_list_facts`` then ``research_finalize``.
+    - :meth:`should_restrict`: narrow the tool schema to ``required_before`` plus the
+      terminal tool, so the model can only finalize.
+
+    Neutral (``enabled=False``) when no terminal tool is configured — the main agent
+    and non-research subagents are unaffected.
+    """
+
+    def __init__(
+        self,
+        config: TerminalToolMandateConfig | None = None,
+        *,
+        max_time_ms: int = 300000,
+    ) -> None:
+        self.config = config or TerminalToolMandateConfig()
+        self._max_time_ms = max_time_ms
+        self._start = time.monotonic()
+        self._nudge_injected = False
+        self._restricted = False
+
+    @property
+    def enabled(self) -> bool:
+        return self.config.enabled and bool(self.config.terminal_tool)
+
+    def _elapsed_ratio(self) -> float:
+        elapsed_ms = (time.monotonic() - self._start) * 1000
+        return elapsed_ms / self._max_time_ms if self._max_time_ms > 0 else 1.0
+
+    def elapsed_ratio(self) -> float:
+        """Current fraction of max_wall_time_ms elapsed (for telemetry)."""
+        return self._elapsed_ratio()
+
+    def terminal_called(self, tools_used: list[str]) -> bool:
+        """Whether the mandatory terminal tool has been called during this run."""
+        return self.config.terminal_tool in tools_used
+
+    def should_nudge(self, tools_used: list[str]) -> bool:
+        if not self.enabled or self._nudge_injected:
+            return False
+        if self.terminal_called(tools_used):
+            return False
+        if self._elapsed_ratio() < self.config.nudge_ratio:
+            return False
+        self._nudge_injected = True
+        return True
+
+    def should_restrict(self, tools_used: list[str]) -> bool:
+        if not self.enabled or self._restricted:
+            return False
+        if self.terminal_called(tools_used):
+            return False
+        if self._elapsed_ratio() < self.config.restrict_ratio:
+            return False
+        self._restricted = True
+        return True
+
+    @property
+    def nudge_injected(self) -> bool:
+        return self._nudge_injected
+
+    @property
+    def restricted(self) -> bool:
+        return self._restricted
+
+
 __all__ = [
     "BudgetExceededError",
     "SimpleBudgetGuard",
@@ -242,4 +339,6 @@ __all__ = [
     "SimpleProgressGuardConfig",
     "SoftDeadline",
     "SoftDeadlineConfig",
+    "TerminalToolMandate",
+    "TerminalToolMandateConfig",
 ]

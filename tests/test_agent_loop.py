@@ -1135,3 +1135,234 @@ async def test_agent_loop_raw_xml_final_falls_back_after_repair_failure(
     assert provider.call_count == 2
     assert stats.status == "error"
     assert stats.error == "malformed_xml_tool_call"
+
+
+# ── B-046: soft deadline granularity (check before each LLM call) ────────────
+
+
+@pytest.mark.asyncio
+async def test_closing_mode_reduces_schema_before_llm_call(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """A long iteration that straddles the wall-clock soft deadline must still trigger
+    closing mode: by the next LLM call the schema is reduced to terminal tools only.
+
+    B-046 fix: previously the check ran once per iteration, so an iteration that started
+    just under the deadline and ran past it would only enter closing mode the iteration
+    *after* next — by which point asyncio.wait_for might cancel the whole run.
+    """
+
+    # A non-terminal tool the model keeps calling, plus a terminal one it could call
+    # to finalize. Closing mode must narrow the schema to the terminal tool.
+    class GatherTool:
+        name = "gather"
+        description = "gather"
+        params = []
+        terminal = False
+        parallel_safe = True
+
+        async def execute(self, **kwargs: Any) -> str:
+            # Slow each iteration so the 20ms wall-clock deadline is crossed between
+            # LLM calls (not after the whole run completes).
+            await asyncio.sleep(0.015)
+            return "gathered"
+
+    class FinalizeTool:
+        name = "finalize"
+        description = "finalize"
+        params = []
+        terminal = True
+        parallel_safe = True
+
+        async def execute(self, **kwargs: Any) -> str:
+            return "done"
+
+    empty_registry._tools["gather"] = GatherTool()  # type: ignore[attr-defined]
+    empty_registry._tools["finalize"] = FinalizeTool()  # type: ignore[attr-defined]
+
+    # Capture the tools list passed to each chat() call so we can assert narrowing.
+    captured_tools: list[list[dict[str, Any]]] = []
+
+    class CapturingProvider(MockProvider):
+        async def chat(self, messages, tools=None, system=None):  # type: ignore[override]
+            captured_tools.append(list(tools or []))
+            return await super().chat(messages, tools=tools, system=system)
+
+    # Tiny deadline: 0.1 * 200ms = 20ms. The model keeps calling `gather`; after 20ms
+    # the next chat() call must see a schema containing only `finalize`.
+    settings = AgentSettings(
+        max_steps=10,
+        max_tool_calls=30,
+        max_wall_time_ms=200,
+        soft_deadline_ratio=0.1,
+    )
+    provider = CapturingProvider(
+        responses=[
+            # Several iterations that keep gathering (slow path)...
+            LLMResponse(content="", tool_calls=[ToolCall(id=f"t{i}", name="gather", arguments={})])
+            for i in range(6)
+        ]
+        + [LLMResponse(content="final answer")]
+    )
+    loop = AgentLoop(AgentConfig(provider, empty_registry, settings))
+
+    result, stats = await loop.run(test_user, "research", channel="test")
+    assert isinstance(result, str)
+
+    tool_names_per_call = [
+        {str(t.get("function", {}).get("name", "")) for t in tools} for tools in captured_tools
+    ]
+    # Early calls see both tools.
+    assert "gather" in tool_names_per_call[0]
+    # After the deadline (within a few calls given the 20ms window), a later call sees
+    # only the terminal tool — closing mode engaged before that LLM call.
+    narrowed = [names for names in tool_names_per_call if names == {"finalize"}]
+    assert narrowed, f"expected a schema narrowed to {{finalize}}, got {tool_names_per_call}"
+
+
+# ── B-047: workflow-finalize guard (nudge + restrict) ────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_workflow_mandate_nudges_then_restricts(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """A research-style run that keeps gathering without finalizing is nudged toward
+    research_finalize (system note) and then has its schema restricted to the finalize
+    tool set as the wall-clock budget runs low.
+    """
+    import asyncio
+
+    class SearchTool:
+        name = "research_search"
+        description = "search"
+        params = []
+        terminal = False
+        parallel_safe = True
+
+        async def execute(self, **kwargs: Any) -> str:
+            # Slow enough that ~8 iterations cross the 0.75 restrict ratio (150ms of a
+            # 200ms window) well before the run ends.
+            await asyncio.sleep(0.03)
+            return "results"
+
+    class ListFactsTool:
+        name = "research_list_facts"
+        description = "list facts"
+        params = []
+        terminal = False
+        parallel_safe = True
+
+        async def execute(self, **kwargs: Any) -> str:
+            return "facts"
+
+    class FinalizeTool:
+        name = "research_finalize"
+        description = "finalize"
+        params = []
+        terminal = True
+        parallel_safe = True
+
+        async def execute(self, **kwargs: Any) -> str:
+            return "## Report\nfinal"
+
+    for t in (SearchTool(), ListFactsTool(), FinalizeTool()):
+        empty_registry._tools[t.name] = t  # type: ignore[attr-defined]
+
+    captured_tools: list[list[dict[str, Any]]] = []
+    captured_system: list[str] = []
+
+    class CapturingProvider(MockProvider):
+        async def chat(self, messages, tools=None, system=None):  # type: ignore[override]
+            captured_tools.append(list(tools or []))
+            captured_system.append(system or "")
+            return await super().chat(messages, tools=tools, system=system)
+
+    settings = AgentSettings(
+        max_steps=12,
+        max_tool_calls=40,
+        max_wall_time_ms=200,
+    )
+    provider = CapturingProvider(
+        responses=[
+            LLMResponse(
+                content="", tool_calls=[ToolCall(id=f"t{i}", name="research_search", arguments={})]
+            )
+            for i in range(8)
+        ]
+        + [LLMResponse(content="## Report\nfinal answer")]
+    )
+    loop = AgentLoop(
+        AgentConfig(
+            provider,
+            empty_registry,
+            settings,
+            terminal_tool="research_finalize",
+            required_before_terminal=["research_list_facts"],
+        )
+    )
+
+    result, stats = await loop.run(test_user, "research", channel="test")
+    assert isinstance(result, str)
+
+    # Nudge: a system note mentioning research_finalize was injected at some point.
+    nudge_seen = any("research_finalize" in s and "time budget" in s for s in captured_system)
+    assert nudge_seen, "expected the workflow nudge note in the system prompt"
+
+    # Restrict: at least one later LLM call saw a schema narrowed to the finalize tool
+    # set (research_list_facts + research_finalize), not the full tool set.
+    names_per_call = [
+        {str(t.get("function", {}).get("name", "")) for t in tools} for tools in captured_tools
+    ]
+    restricted = [
+        names for names in names_per_call if names == {"research_list_facts", "research_finalize"}
+    ]
+    assert restricted, f"expected a restricted schema, got {names_per_call}"
+
+
+@pytest.mark.asyncio
+async def test_workflow_mandate_neutral_without_terminal_tool(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """Regression: the main agent (no terminal_tool configured) is NOT nudged or
+    restricted — the guard is neutral when AgentConfig.terminal_tool is None/empty.
+    """
+    import asyncio
+
+    class SlowTool:
+        name = "slow_tool"
+        description = "slow"
+        params = []
+        terminal = False
+        parallel_safe = True
+
+        async def execute(self, **kwargs: Any) -> str:
+            await asyncio.sleep(0.05)
+            return "ok"
+
+    empty_registry._tools["slow_tool"] = SlowTool()  # type: ignore[attr-defined]
+
+    captured_system: list[str] = []
+
+    class CapturingProvider(MockProvider):
+        async def chat(self, messages, tools=None, system=None):  # type: ignore[override]
+            captured_system.append(system or "")
+            return await super().chat(messages, tools=tools, system=system)
+
+    settings = AgentSettings(max_steps=8, max_tool_calls=20, max_wall_time_ms=100)
+    provider = CapturingProvider(
+        responses=[
+            LLMResponse(
+                content="", tool_calls=[ToolCall(id=f"t{i}", name="slow_tool", arguments={})]
+            )
+            for i in range(5)
+        ]
+        + [LLMResponse(content="done")]
+    )
+    # No terminal_tool → guard disabled.
+    loop = AgentLoop(AgentConfig(provider, empty_registry, settings))
+
+    await loop.run(test_user, "task", channel="test")
+
+    # No workflow nudge note should ever appear.
+    assert not any("research_finalize" in s and "time budget" in s for s in captured_system)
