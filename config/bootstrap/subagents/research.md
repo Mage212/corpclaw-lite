@@ -49,6 +49,11 @@ research facts; use `research_store_fact`.
   Use `research_list_facts`, then call `research_finalize` with available
   evidence and clear limitations.
 - If a page is unreachable, say so in the limitations section.
+- If `research_search` reports web search is unavailable (infrastructure), stop calling
+  `research_search` and `research_fetch_source`. Do NOT invent or guess URLs from memory.
+- If web search is unavailable and no sources were fetched, write a detailed answer from
+  your own knowledge. Begin it with: "Web search was unavailable during this research.
+  The answer below is based on model knowledge without web sources." Then finalize.
 - Prefer authoritative and primary sources over blogs, forums, and summaries.
 - If sources disagree, describe the contradiction instead of hiding it.
 - If evidence is weak or incomplete, say so directly.

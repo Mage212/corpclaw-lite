@@ -148,7 +148,9 @@ class AgentSettings(BaseModel):
 class WebSettings(BaseModel):
     """Settings for host-side web tools."""
 
-    search_backend: Literal["duckduckgo"] = "duckduckgo"
+    search_backend: Literal["auto", "duckduckgo"] = "auto"
+    search_retry_attempts: int = 3
+    search_retry_backoff_seconds: float = 1.5
     search_max_concurrent: int = 1
     fetch_max_concurrent: int = 4
     timeout_seconds: int = 20

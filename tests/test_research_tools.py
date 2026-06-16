@@ -293,3 +293,112 @@ async def test_research_search_defaults_to_normal_budget_without_persisted_mode(
     assert "Research note" in first
     assert "search budget exceeded" in second
     assert len(search_backend.calls) == 1
+
+
+# ── B-052: web-search resilience (refund / degraded / offline) ───────────────
+
+
+class _UnavailableSearchTool:
+    """Simulates WebSearchTool returning an infrastructure-unavailable error."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def execute(self, **kwargs: Any) -> str:
+        self.calls.append(kwargs)
+        return "Error: Web search unavailable (infrastructure): No results found."
+
+
+@pytest.mark.asyncio()
+async def test_research_search_infrastructure_failure_does_not_charge_budget(
+    tmp_path: Path,
+) -> None:
+    """An infrastructure 'unavailable' error does not consume the search budget (B-052)."""
+    user = _user()
+    runtime = ResearchRuntime(
+        settings=ResearchSettings(normal_search_waves=1, deep_search_waves=3),
+        workspace_base=tmp_path,
+    )
+    backend = _UnavailableSearchTool()
+    search_tool = ResearchSearchTool(runtime, backend)  # type: ignore[arg-type]
+
+    # Three infrastructure failures — none should charge the budget.
+    for _ in range(3):
+        await search_tool.execute(user=user, query="q", run_id="run")
+
+    state = runtime._read_state(runtime.run_dir(user, "run"))
+    assert state["search_calls"] == 0  # budget NOT charged on infrastructure failure
+    assert state["search_failures"] == 3
+
+
+@pytest.mark.asyncio()
+async def test_research_search_cascading_failure_returns_degraded_message(
+    tmp_path: Path,
+) -> None:
+    """After the degraded threshold is reached, the model gets a steer-to-offline message."""
+    user = _user()
+    runtime = ResearchRuntime(
+        settings=ResearchSettings(normal_search_waves=5, deep_search_waves=5),
+        workspace_base=tmp_path,
+    )
+    backend = _UnavailableSearchTool()
+    search_tool = ResearchSearchTool(runtime, backend)  # type: ignore[arg-type]
+
+    first = await search_tool.execute(user=user, query="q1", run_id="run")
+    second = await search_tool.execute(user=user, query="q2", run_id="run")
+
+    # First failure: plain unavailable error, budget not charged.
+    assert "unavailable" in first
+    # Second failure crosses the threshold → degraded message steering the model offline.
+    assert "Do NOT retry research_search" in second
+    assert "based on model knowledge" in second
+    assert runtime.is_web_search_degraded(user, "run") is True
+
+
+@pytest.mark.asyncio()
+async def test_research_search_budget_check_runs_before_request(
+    tmp_path: Path,
+) -> None:
+    """An over-budget call short-circuits without hitting the search backend (B-052)."""
+    user = _user()
+    runtime = ResearchRuntime(
+        settings=ResearchSettings(normal_search_waves=1, deep_search_waves=1),
+        workspace_base=tmp_path,
+    )
+    backend = FakeSearchTool()
+    search_tool = ResearchSearchTool(runtime, backend)  # type: ignore[arg-type]
+
+    first = await search_tool.execute(user=user, query="first", run_id="run")
+    second = await search_tool.execute(user=user, query="second", run_id="run")
+
+    assert "Research note" in first
+    assert "search budget exceeded" in second
+    # Second call must NOT reach the backend (cheap short-circuit).
+    assert len(backend.calls) == 1
+
+
+def test_finalize_report_prepends_offline_banner_when_degraded(tmp_path: Path) -> None:
+    """When web_search_degraded is set, finalize_report prepends an offline banner."""
+    user = _user()
+    runtime = ResearchRuntime(
+        settings=ResearchSettings(normal_search_waves=1, deep_search_waves=3),
+        workspace_base=tmp_path,
+    )
+    runtime.initialize_run_mode(user, "run", "research", language="en")
+    # Simulate the degraded flag being set by repeated infrastructure failures.
+    runtime.mark_search_failure(user, "run")
+    runtime.mark_search_failure(user, "run")  # crosses threshold → degraded
+    assert runtime.is_web_search_degraded(user, "run") is True
+
+    report = runtime.finalize_report(user, "run", "research", "## Summary\nKnowledge answer.")
+    assert "web search was unavailable" in report.casefold()
+    assert "model knowledge" in report.casefold()
+
+
+def test_finalize_report_no_offline_banner_when_search_healthy(tmp_path: Path) -> None:
+    """No offline banner when web search was not degraded."""
+    user = _user()
+    runtime = ResearchRuntime(workspace_base=tmp_path)
+    runtime.initialize_run_mode(user, "run", "research", language="en")
+    report = runtime.finalize_report(user, "run", "research", "## Summary\nNormal answer.")
+    assert "web search was unavailable" not in report.casefold()
