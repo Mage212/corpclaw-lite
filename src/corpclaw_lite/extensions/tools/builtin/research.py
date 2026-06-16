@@ -346,6 +346,23 @@ class ResearchRuntime:
         state["list_facts_called"] = True
         self._write_json(run_dir / "state.json", state)
 
+    def mark_list_sources_called(self, user: User, run_id: str | None) -> None:
+        """Record that research_list_sources was invoked in this run (B-053).
+
+        Mirrors mark_list_facts_called: store_fact uses this flag to steer the model
+        toward the exact cached source_id values instead of hallucinating IDs.
+        """
+        run_dir = self.run_dir(user, run_id)
+        state = self._read_state(run_dir)
+        state["list_sources_called"] = True
+        self._write_json(run_dir / "state.json", state)
+
+    def is_list_sources_called(self, user: User, run_id: str | None) -> bool:
+        """Whether research_list_sources has been called in this run (B-053)."""
+        run_dir = self.run_dir(user, run_id)
+        state = self._read_state(run_dir)
+        return bool(state.get("list_sources_called"))
+
     def run_dir(self, user: User, run_id: str | None) -> Path:
         self.cleanup_user(user)
         user_key = user.workspace_key()
@@ -626,6 +643,28 @@ class ResearchRuntime:
             f"{excerpt}"
         )
 
+    def format_sources_list(self, user: User, run_id: str | None, max_sources: int) -> str:
+        """Return a compact list of all cached sources with their exact source_id (B-053).
+
+        Used by research_list_sources and by store_fact's Unknown-source_id error so the
+        model can anchor to the real IDs instead of hallucinating them.
+        """
+        sources = self.list_sources(user, run_id)
+        if not sources:
+            return "No research sources fetched yet."
+        lines = ["Cached research sources (use these exact source_id values):", "---"]
+        for s_obj in sources[: max(1, max_sources)]:
+            title = str(s_obj.get("title") or "").strip() or "(untitled)"
+            lines.append(
+                "[{source_id}] {title} | url={url} | status={status}".format(
+                    source_id=s_obj.get("source_id", ""),
+                    title=title,
+                    url=s_obj.get("url", ""),
+                    status=s_obj.get("status", ""),
+                )
+            )
+        return "\n".join(lines)
+
     def format_facts(self, user: User, run_id: str | None, max_facts: int) -> str:
         facts = self.list_facts(user, run_id)
         if not facts:
@@ -881,6 +920,7 @@ class ResearchRuntime:
         # B-052: web-search resilience accounting.
         state.setdefault("search_failures", 0)
         state.setdefault("web_search_degraded", False)
+        state.setdefault("list_sources_called", False)
         return state
 
     def _upgrade_mode(self, state: dict[str, Any], mode: ResearchMode) -> None:
@@ -1272,10 +1312,20 @@ class ResearchStoreFactTool(Tool):
         if not isinstance(source_id, str) or not source_id.strip():
             return "Error: 'source_id' is a required non-empty string parameter."
         if self._runtime.get_source(user, run_id, source_id.strip()) is None:
+            # B-053: surface the real cached source_id values so the model can
+            # self-correct instead of retrying hallucinated IDs. If list_sources was
+            # never called, steer harder: require it first.
+            available = self._runtime.format_sources_list(user, run_id, 50)
+            if not self._runtime.is_list_sources_called(user, run_id):
+                return (
+                    f"Error: Unknown source_id '{source_id}'. You have not reviewed the "
+                    f"cached sources yet. Call research_list_sources first to get the exact "
+                    f"source_id values, then retry research_store_fact.\n\n{available}"
+                )
             return (
                 f"Error: Unknown source_id '{source_id}'. Do not invent or retry unknown "
-                "source IDs. Use only source IDs returned by research_fetch_source or "
-                "research_list_facts, then finalize with limitations if needed."
+                f"source IDs. Use only the source_id values below, then retry "
+                f"research_store_fact.\n\n{available}"
             )
         if not isinstance(fact_text, str) or not fact_text.strip():
             return "Error: 'fact' is a required non-empty string parameter."
@@ -1300,6 +1350,42 @@ class ResearchStoreFactTool(Tool):
             },
         )
         return f"Stored research fact #{fact_id} from source {source_id.strip()}."
+
+
+class ResearchListSourcesTool(Tool):
+    """List all cached sources with their exact source_id (B-053).
+
+    A deterministic anchor: the model calls this before research_store_fact to get the
+    correct source_id values instead of hallucinating them on long contexts.
+    """
+
+    name = "research_list_sources"
+    description = (
+        "List all cached sources for this research run with their exact source_id. "
+        "Call this before research_store_fact to use the correct source_id values."
+    )
+    params = [
+        ToolParam(
+            name="max_sources",
+            type="integer",
+            description="Maximum sources to return",
+            required=False,
+        )
+    ]
+    risk_level = RiskLevel.LOW
+    parallel_safe = False
+
+    def __init__(self, runtime: ResearchRuntime) -> None:
+        self._runtime = runtime
+
+    async def execute(self, *, user: User | None = None, **kwargs: Any) -> str:
+        if user is None:
+            return "Error: User context is required for research_list_sources."
+        run_id = kwargs.get("run_id") if isinstance(kwargs.get("run_id"), str) else None
+        self._runtime.mark_list_sources_called(user, run_id)
+        return self._runtime.format_sources_list(
+            user, run_id, _as_int(kwargs.get("max_sources"), 50)
+        )
 
 
 class ResearchListFactsTool(Tool):
@@ -1380,6 +1466,7 @@ def build_research_tools(
         ResearchSearchTool(runtime, search_tool),
         ResearchFetchSourceTool(runtime, fetch_tool),
         ResearchReadSourceTool(runtime),
+        ResearchListSourcesTool(runtime),
         ResearchStoreFactTool(runtime),
         ResearchListFactsTool(runtime),
         ResearchFinalizeTool(runtime),
