@@ -191,6 +191,13 @@ class ResearchSettings(BaseModel):
     deep_max_rereads: int = 10
     source_excerpt_chars: int = 6000
     finalize_strict: bool = False
+    # B-054: dynamic source budget. The agent keeps fetching until this many
+    # USABLE (HTTP 2xx) sources are collected, or until the cap (base limit
+    # multiplied by ``dynamic_budget_max_multiplier``) is reached. This keeps a
+    # run with many 404/403 responses from under-citing while bounding the
+    # worst case. See ``effective_max_sources`` / ``effective_search_waves``.
+    target_usable_sources: int = 5
+    dynamic_budget_max_multiplier: float = 2.5
 
 
 class TelegramSettings(BaseModel):

@@ -53,6 +53,11 @@ research facts; use `research_store_fact`.
   Use `research_list_facts`, then call `research_finalize` with available
   evidence and clear limitations.
 - If a page is unreachable, say so in the limitations section.
+- If `research_fetch_source` returns an HTTP error (4xx/5xx, e.g. 404/403),
+  that source is unavailable: do NOT retry the same URL and do NOT cite it or
+  base any fact on it. Before `research_store_fact` and `research_finalize`,
+  call `research_list_sources` and use only sources with a 2xx status. Citing
+  an unavailable source will fail finalize validation.
 - If `research_search` reports web search is unavailable (infrastructure), stop calling
   `research_search` and `research_fetch_source`. Do NOT invent or guess URLs from memory.
 - If web search is unavailable and no sources were fetched, write a detailed answer from

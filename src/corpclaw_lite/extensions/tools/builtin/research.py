@@ -55,6 +55,21 @@ _FINALIZE_MAX_ATTEMPTS = 2
 # knowledge-based answer with an explicit offline banner.
 _WEB_SEARCH_DEGRADED_THRESHOLD = 2
 
+
+def _is_usable_status(status: object) -> bool:
+    """Whether a stored source status represents a usable (HTTP 2xx) response.
+
+    Mirrors the ``200 <= status_code < 300`` gate in ``web.py:_fetch`` (B-054-1)
+    so that any source the filter let through counts as usable here, and any
+    legacy/sourceless entry (empty or non-numeric status) does not.
+    """
+    try:
+        code = int(str(status).strip())
+    except (TypeError, ValueError):
+        return False
+    return 200 <= code < 300
+
+
 # Returned to the model once web search is deemed unavailable. Tells the model to stop
 # trying to search/fetch and to not invent URLs.
 _WEB_SEARCH_DEGRADED_MESSAGE = (
@@ -390,11 +405,7 @@ class ResearchRuntime:
         run_dir = self.run_dir(user, run_id)
         state = self._read_state(run_dir)
         self._upgrade_mode(state, mode)
-        limit = (
-            self._settings.deep_search_waves
-            if state["mode"] == "deep_research"
-            else self._settings.normal_search_waves
-        )
+        limit = self.effective_search_waves(user, run_id, state["mode"])
         used = _as_int(state.get("search_calls"), 0)
         if used >= limit:
             return (
@@ -418,11 +429,7 @@ class ResearchRuntime:
         run_dir = self.run_dir(user, run_id)
         state = self._read_state(run_dir)
         self._upgrade_mode(state, mode)
-        limit = (
-            self._settings.deep_search_waves
-            if state["mode"] == "deep_research"
-            else self._settings.normal_search_waves
-        )
+        limit = self.effective_search_waves(user, run_id, state["mode"])
         used = _as_int(state.get("search_calls"), 0)
         if used >= limit:
             return (
@@ -463,15 +470,81 @@ class ResearchRuntime:
         state = self._read_state(run_dir)
         return bool(state.get("web_search_degraded"))
 
+    # -- B-054: dynamic source budget ---------------------------------------
+
+    def available_sources_count(self, user: User, run_id: str | None) -> int:
+        """Number of fetched sources with a usable HTTP status (2xx).
+
+        Used by the dynamic budget to decide whether the agent may keep
+        fetching. Sources that returned 4xx/5xx are excluded: they were never
+        a reliable basis for the report.
+        """
+        return sum(1 for s in self.list_sources(user, run_id) if _is_usable_status(s.get("status")))
+
+    def _base_max_sources(self, mode: ResearchMode) -> int:
+        return (
+            self._settings.deep_max_sources
+            if mode == "deep_research"
+            else self._settings.normal_max_sources
+        )
+
+    def _base_search_waves(self, mode: ResearchMode) -> int:
+        return (
+            self._settings.deep_search_waves
+            if mode == "deep_research"
+            else self._settings.normal_search_waves
+        )
+
+    def effective_max_sources(self, user: User, run_id: str | None, mode: ResearchMode) -> int:
+        """Dynamic cap on the number of fetchable sources (B-054-2).
+
+        Failure-driven: the limit starts at the operator-configured ``base``
+        and grows by one slot for each failed (non-2xx) fetch so far, so the
+        agent can retry and still reach ``target_usable_sources`` USABLE
+        sources. It is hard-capped at ``base * dynamic_budget_max_multiplier``::
+
+            limit = min(max(base, base + failed), cap)
+
+        A clean run stops at ``base``; a run full of 404/403 pages may store
+        up to ``base * multiplier`` before being blocked. ``target_usable_sources``
+        is the soft goal the agent is steered toward (see the research prompt),
+        not a value that can override the base ceiling.
+        """
+        base = self._base_max_sources(mode)
+        cap = max(base, int(round(base * self._settings.dynamic_budget_max_multiplier)))
+        sources = self.list_sources(user, run_id)
+        used = len(sources)
+        usable = sum(1 for s in sources if _is_usable_status(s.get("status")))
+        failed = max(0, used - usable)
+        return min(max(base, base + failed), cap)
+
+    def effective_search_waves(self, user: User, run_id: str | None, mode: ResearchMode) -> int:
+        """Dynamic cap on the number of search waves (B-054-2).
+
+        Expansion is driven by actual fetch *failures* (non-2xx stored sources),
+        not by the mere absence of usable sources: at the start of a run there
+        are always zero usable sources, so gap-based expansion would immediately
+        inflate the budget. Instead the budget only grows after the agent has
+        fetched some bad pages (404/403) and needs more waves to find
+        alternatives. Bounded by ``base * multiplier``::
+
+            limit = min(max(base, base + failed), cap)
+        """
+        base = self._base_search_waves(mode)
+        cap = max(base, int(round(base * self._settings.dynamic_budget_max_multiplier)))
+        sources = self.list_sources(user, run_id)
+        used = len(sources)
+        usable = sum(1 for s in sources if _is_usable_status(s.get("status")))
+        failed = max(0, used - usable)
+        return min(max(base, base + failed), cap)
+
     def reserve_fetch(self, user: User, run_id: str | None, mode: ResearchMode) -> str | None:
         run_dir = self.run_dir(user, run_id)
         state = self._read_state(run_dir)
         self._upgrade_mode(state, mode)
-        limit = (
-            self._settings.deep_max_sources
-            if state["mode"] == "deep_research"
-            else self._settings.normal_max_sources
-        )
+        # B-054-2: dynamic cap — grows when many fetches return non-2xx, so the
+        # agent can still reach target_usable_sources, but is hard-capped.
+        limit = self.effective_max_sources(user, run_id, state["mode"])
         used = len(self.list_sources(user, run_id))
         if used >= limit:
             return (
@@ -747,6 +820,34 @@ class ResearchRuntime:
                 f"answer cites {len(invented_urls)} URL(s) not present in fetched sources. "
                 "Mark unfetched sources as a limitation instead. "
                 "Call research_finalize again."
+            )
+
+        # 2b. B-054-3: a cited source must be USABLE (HTTP 2xx). A 4xx/5xx page
+        # is typically a 404/403/Cloudflare error body that was stored before
+        # the _fetch filter existed; the report must not lean on it. Build a
+        # status map keyed by both source_id and url so either citation form is
+        # caught.
+        status_by_key: dict[str, str] = {}
+        for s in sources:
+            sid = str(s.get("source_id") or "")
+            surl = str(s.get("url") or "")
+            status = str(s.get("status") or "").strip()
+            if status:
+                if sid:
+                    status_by_key[sid] = status
+                if surl:
+                    status_by_key[surl] = status
+        unavailable_keys = sorted(
+            {k for k in (*cited_ids, *cited_urls) if not _is_usable_status(status_by_key.get(k))}
+        )
+        if unavailable_keys:
+            shown = ", ".join(unavailable_keys[:5])
+            extra = "" if len(unavailable_keys) <= 5 else f" (and {len(unavailable_keys) - 5} more)"
+            return (
+                f"answer cites {len(unavailable_keys)} unavailable source(s): {shown}{extra}. "
+                "These sources returned an HTTP error (4xx/5xx) and are not reliable. "
+                "Remove them from the citations and the analysis, rely on usable sources "
+                "(verify with research_list_sources), then call research_finalize again."
             )
 
         # 3. deep_research must consult research_list_facts before synthesis.
