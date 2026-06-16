@@ -10,6 +10,7 @@ from corpclaw_lite.config.settings import AgentSettings
 from corpclaw_lite.extensions.subagents.base import SubagentSpec
 from corpclaw_lite.extensions.tools.base import RiskLevel, Tool
 from corpclaw_lite.extensions.tools.registry import ToolRegistry
+from corpclaw_lite.llm.queue import LLMQueueStatus
 from corpclaw_lite.users.models import User
 
 
@@ -100,6 +101,58 @@ async def test_subagent_loop_keeps_allowed_tools_even_if_department_lacks_direct
 
 
 @pytest.mark.asyncio
+async def test_research_subagent_initializes_persisted_mode() -> None:
+    registry = ToolRegistry()
+    registry.register(DummyToolA())
+
+    class RuntimeSpy:
+        def __init__(self) -> None:
+            self.calls: list[tuple[User, str | None, str, str]] = []
+
+        def initialize_run_mode(
+            self, user: User, run_id: str | None, mode: str, *, language: str = "en"
+        ) -> None:
+            self.calls.append((user, run_id, mode, language))
+
+    runtime = RuntimeSpy()
+    dispatcher = SubagentDispatcher(
+        provider=DummyProvider(),  # type: ignore[arg-type]
+        main_registry=registry,
+        settings=AgentSettings(),
+        research_runtime=runtime,  # type: ignore[arg-type]
+    )
+    spec = SubagentSpec(
+        id="research-agent",
+        name="Research Agent",
+        description="Research",
+        allowed_tools=["*"],
+    )
+    user = User(id=1, name="User", department="dev")
+    captured_messages: list[str] = []
+
+    async def _capture_run(
+        u: object,
+        msg: str,
+        system_prompt: str | None = None,
+        **kwargs: Any,
+    ) -> tuple[str, RunStats]:
+        captured_messages.append(msg)
+        return "done", RunStats()
+
+    with patch("corpclaw_lite.agent.subagent.AgentLoop") as MockLoop:
+        mock_loop_instance = MockLoop.return_value
+        mock_loop_instance.run = AsyncMock(side_effect=_capture_run)
+
+        await dispatcher.dispatch(spec, user, "Сделай детальное исследование")
+
+    assert runtime.calls
+    assert runtime.calls[0][2] == "deep_research"
+    assert runtime.calls[0][3] == "ru"  # Cyrillic task -> target language ru
+    assert captured_messages[0].startswith("Research mode: deep_research")
+    assert "Target language: ru" in captured_messages[0]
+
+
+@pytest.mark.asyncio
 async def test_subagent_dispatcher_uses_same_run_id_for_router_and_loop() -> None:
     """Subagent LLM queue/cache events must use the subagent's own run_id."""
     from types import SimpleNamespace
@@ -156,6 +209,73 @@ async def test_subagent_dispatcher_uses_same_run_id_for_router_and_loop() -> Non
     )
     mock_loop_instance.run.assert_called_once()
     assert mock_loop_instance.run.call_args.kwargs["run_id"] == "sub-run-id"
+
+
+@pytest.mark.asyncio
+async def test_subagent_dispatcher_wraps_status_callbacks_with_subagent_name() -> None:
+    """Internal subagent loop callbacks should include the human-readable subagent name."""
+    registry = ToolRegistry()
+    registry.register(DummyToolA())
+
+    dispatcher = SubagentDispatcher(
+        provider=DummyProvider(),  # type: ignore
+        main_registry=registry,
+        settings=AgentSettings(),
+    )
+    spec = SubagentSpec(
+        id="document-agent",
+        name="Document Agent",
+        description="Document work",
+        allowed_tools=["tool_a"],
+    )
+    user = User(id=1, name="User", department="dev")
+    status_events: list[tuple[str, str, object]] = []
+    queue_status = LLMQueueStatus(
+        user_id="1",
+        task_kind="subagent:document-agent",
+        load_class="subagent",
+        position=0,
+        estimated_wait_seconds=15.0,
+        waiting_count=1,
+        active_count=1,
+        max_concurrent=1,
+        wait_seconds=1.0,
+    )
+
+    with patch("corpclaw_lite.agent.subagent.AgentLoop") as MockLoop:
+        mock_loop_instance = MockLoop.return_value
+        mock_loop_instance.run = AsyncMock(return_value=("Subagent result", RunStats()))
+
+        await dispatcher.dispatch(
+            spec,
+            user,
+            "Prepare document",
+            on_subagent_tool_start=lambda subagent, tool: status_events.append(
+                ("tool", subagent, tool)
+            ),
+            on_subagent_tool_batch_start=lambda subagent, tools: status_events.append(
+                ("batch", subagent, list(tools))
+            ),
+            on_subagent_llm_stage=lambda subagent, stage: status_events.append(
+                ("llm", subagent, stage)
+            ),
+            on_subagent_llm_queue_status=lambda subagent, status: status_events.append(
+                ("queue", subagent, status)
+            ),
+        )
+
+    run_kwargs = mock_loop_instance.run.call_args.kwargs
+    run_kwargs["on_tool_start"]("read_file")
+    run_kwargs["on_tool_batch_start"](["read_file", "list_files"])
+    run_kwargs["on_llm_stage"]("reasoning")
+    run_kwargs["on_llm_queue_status"](queue_status)
+
+    assert status_events == [
+        ("tool", "Document Agent", "read_file"),
+        ("batch", "Document Agent", ["read_file", "list_files"]),
+        ("llm", "Document Agent", "reasoning"),
+        ("queue", "Document Agent", queue_status),
+    ]
 
 
 @pytest.mark.asyncio
@@ -376,6 +496,64 @@ async def test_dispatch_subagent_tool_dispatches() -> None:
         user,
         "do the work",
         parent_run_id="parent-run",
+        on_subagent_tool_start=None,
+        on_subagent_tool_batch_start=None,
+        on_subagent_llm_stage=None,
+        on_subagent_llm_queue_status=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_dispatch_subagent_tool_passes_status_callbacks() -> None:
+    """DispatchSubagentTool should forward runtime status callbacks to the dispatcher."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from corpclaw_lite.extensions.subagents.base import SubagentSpec
+    from corpclaw_lite.extensions.subagents.registry import SubagentRegistry
+    from corpclaw_lite.extensions.tools.builtin.dispatch import DispatchSubagentTool
+
+    spec = SubagentSpec(id="worker", name="Worker", description="desc", allowed_tools=["*"])
+    registry = SubagentRegistry()
+    registry.register(spec)
+
+    dispatcher = MagicMock()
+    dispatcher.dispatch = AsyncMock(return_value="subagent result")
+    tool = DispatchSubagentTool(dispatcher, registry)
+    user = User(id=1, name="U", department="dev")
+
+    def on_tool_start(subagent_name: str, tool_name: str) -> None:
+        _ = subagent_name, tool_name
+
+    def on_tool_batch_start(subagent_name: str, tool_names: list[str]) -> None:
+        _ = subagent_name, tool_names
+
+    def on_llm_stage(subagent_name: str, stage: str) -> None:
+        _ = subagent_name, stage
+
+    def on_llm_queue_status(subagent_name: str, status: LLMQueueStatus) -> None:
+        _ = subagent_name, status
+
+    result = await tool.execute(
+        subagent_id="worker",
+        task="do the work",
+        user=user,
+        run_id="parent-run",
+        on_subagent_tool_start=on_tool_start,
+        on_subagent_tool_batch_start=on_tool_batch_start,
+        on_subagent_llm_stage=on_llm_stage,
+        on_subagent_llm_queue_status=on_llm_queue_status,
+    )
+
+    assert result == "subagent result"
+    dispatcher.dispatch.assert_called_once_with(
+        spec,
+        user,
+        "do the work",
+        parent_run_id="parent-run",
+        on_subagent_tool_start=on_tool_start,
+        on_subagent_tool_batch_start=on_tool_batch_start,
+        on_subagent_llm_stage=on_llm_stage,
+        on_subagent_llm_queue_status=on_llm_queue_status,
     )
 
 
@@ -432,12 +610,8 @@ async def test_dispatch_subagent_available_list_respects_department_rbac() -> No
     from corpclaw_lite.extensions.tools.builtin.dispatch import DispatchSubagentTool
 
     registry = SubagentRegistry()
-    registry.register(
-        SubagentSpec(id="research-agent", name="Research", description="desc")
-    )
-    registry.register(
-        SubagentSpec(id="execution-agent", name="Execution", description="desc")
-    )
+    registry.register(SubagentSpec(id="research-agent", name="Research", description="desc"))
+    registry.register(SubagentSpec(id="execution-agent", name="Execution", description="desc"))
     manager = DepartmentManager()
     manager._departments["default"] = DepartmentConfig(
         {
@@ -615,3 +789,57 @@ async def test_subagent_no_skills_when_matcher_none() -> None:
     assert captured_system
     # No skill block should be present
     assert "## Available Skills" not in captured_system[0]
+
+
+# ── B-049: per-subagent wall-clock budget override ───────────────────────────
+
+
+def _settings_override_dispatcher() -> tuple[SubagentDispatcher, ToolRegistry]:
+    registry = ToolRegistry()
+    return (
+        SubagentDispatcher(
+            provider=DummyProvider(),  # type: ignore[arg-type]
+            main_registry=registry,
+            settings=AgentSettings(max_wall_time_ms=300000),
+        ),
+        registry,
+    )
+
+
+@pytest.mark.asyncio
+async def test_subagent_spec_max_wall_time_ms_overrides_inner_budget() -> None:
+    """A spec with max_wall_time_ms scales the inner AgentLoop budget (and thus
+    SimpleBudgetGuard + SoftDeadline) to that value, independent of the parent."""
+    dispatcher, _ = _settings_override_dispatcher()
+    spec = SubagentSpec(
+        id="research-agent",
+        name="Research",
+        description="d",
+        allowed_tools=["*"],
+        max_wall_time_ms=600000,
+    )
+    user = User(id=1, name="User", department="dev")
+
+    with patch("corpclaw_lite.agent.subagent.AgentLoop") as MockLoop:
+        MockLoop.return_value.run = AsyncMock(return_value=("ok", RunStats()))
+        await dispatcher.dispatch(spec, user, "task")
+
+    agent_config = MockLoop.call_args.args[0]
+    assert agent_config.settings.max_wall_time_ms == 600000
+    # Parent dispatcher budget is untouched.
+    assert dispatcher._settings.max_wall_time_ms == 300000
+
+
+@pytest.mark.asyncio
+async def test_subagent_spec_without_max_wall_time_ms_falls_back_to_parent() -> None:
+    """A spec without max_wall_time_ms uses the parent AgentSettings value."""
+    dispatcher, _ = _settings_override_dispatcher()
+    spec = SubagentSpec(id="plain", name="Plain", description="d", allowed_tools=["*"])
+    user = User(id=1, name="User", department="dev")
+
+    with patch("corpclaw_lite.agent.subagent.AgentLoop") as MockLoop:
+        MockLoop.return_value.run = AsyncMock(return_value=("ok", RunStats()))
+        await dispatcher.dispatch(spec, user, "task")
+
+    agent_config = MockLoop.call_args.args[0]
+    assert agent_config.settings.max_wall_time_ms == 300000

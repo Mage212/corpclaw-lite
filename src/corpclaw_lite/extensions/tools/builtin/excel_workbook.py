@@ -8,6 +8,7 @@ corporate reports where structure must be maintained.
 from __future__ import annotations
 
 import json
+import re
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,10 @@ _MAX_ROWS_PER_CALL = 100
 _MAX_OUTPUT_CHARS = 15_000
 _FORMULA_MODES = {"both", "values", "formulas"}
 _MISSING_CACHED_VALUE = "<unavailable>"
+
+# Matches an A1-style cell/range reference (absolute or relative) inside a formula,
+# e.g. A1, $B$2, C3:D5, Sheet2!E7. Capture group 1 is the cell/range token.
+_CELL_REF_RE = re.compile(r"(\$?[A-Z]{1,3}\$?\d{1,7}(?::\$?[A-Z]{1,3}\$?\d{1,7})?)")
 
 
 def _resolve_sheet(wb: Any, sheet_name: str | None) -> Any:
@@ -47,6 +52,58 @@ def _normalize_formula_mode(show_formulas: bool, formula_mode: Any) -> str:
 
 def _is_formula(value: Any) -> bool:
     return isinstance(value, str) and value.startswith("=")
+
+
+def _file_signature(path: Path) -> str:
+    """Return a cheap change-detection signature (mtime-ns + size).
+
+    Compared across a read→fill sequence: a mismatch means the file was touched
+    in between. Stateless and safe across the container per-call process boundary.
+    """
+    st = path.stat()
+    return f"{st.st_mtime_ns}-{st.st_size}"
+
+
+def _expand_cell_refs(refs: set[str]) -> set[str]:
+    """Expand any A1:B2 ranges into their individual cell coordinates."""
+    from openpyxl.utils import range_boundaries
+    from openpyxl.utils.cell import get_column_letter
+
+    expanded: set[str] = set()
+    for ref in refs:
+        if ":" not in ref:
+            expanded.add(ref.replace("$", ""))
+            continue
+        min_col, min_row, max_col, max_row = range_boundaries(ref)
+        if min_row is None or max_row is None or min_col is None or max_col is None:
+            continue
+        for row in range(min_row, max_row + 1):
+            for col in range(min_col, max_col + 1):
+                expanded.add(f"{get_column_letter(col)}{row}")
+    return expanded
+
+
+def _count_formulas_referencing(ws: Any, filled_addresses: set[str]) -> int:
+    """Count formulas in the sheet whose referenced cells overlap the filled set.
+
+    Uses the static formula text only (openpyxl does not recalculate). Ranges
+    like A1:B2 are expanded to individual cells before the intersection check.
+    """
+    if not filled_addresses:
+        return 0
+    affected = 0
+    for row in ws.iter_rows():
+        for cell in row:
+            value = cell.value
+            if not _is_formula(value):
+                continue
+            refs = {m.group(1) for m in _CELL_REF_RE.finditer(str(value))}
+            # Strip sheet qualifiers and absolute markers before expansion.
+            refs = {r.split("!")[-1] for r in refs}
+            refs = {r.replace("$", "") for r in refs}
+            if _expand_cell_refs(refs) & filled_addresses:
+                affected += 1
+    return affected
 
 
 def _format_value(value: Any, max_chars: int, *, quote_strings: bool = False) -> str:
@@ -131,15 +188,20 @@ def _read_cells(
 ) -> str:
     import openpyxl
 
-    wb_formula = openpyxl.load_workbook(str(path), data_only=False)
-    wb_values = (
-        openpyxl.load_workbook(str(path), data_only=True)
-        if formula_mode in {"both", "values"}
-        else None
-    )
+    # Load only what the mode needs. "values" reads a single data_only workbook;
+    # "formulas" reads a single formula workbook; "both" needs both.
+    if formula_mode == "values":
+        wb_primary = openpyxl.load_workbook(str(path), data_only=True)
+        wb_secondary = None
+    elif formula_mode == "formulas":
+        wb_primary = openpyxl.load_workbook(str(path), data_only=False)
+        wb_secondary = None
+    else:  # both
+        wb_primary = openpyxl.load_workbook(str(path), data_only=False)
+        wb_secondary = openpyxl.load_workbook(str(path), data_only=True)
     try:
-        ws = _resolve_sheet(wb_formula, sheet_name)
-        ws_values = _resolve_sheet(wb_values, sheet_name) if wb_values is not None else None
+        ws = _resolve_sheet(wb_primary, sheet_name)
+        ws_values = _resolve_sheet(wb_secondary, sheet_name) if wb_secondary is not None else None
         if ws is None:
             return "Error: Workbook has no sheets."
 
@@ -230,9 +292,9 @@ def _read_cells(
 
         return "\n".join(lines)
     finally:
-        wb_formula.close()
-        if wb_values is not None:
-            wb_values.close()
+        wb_primary.close()
+        if wb_secondary is not None:
+            wb_secondary.close()
 
 
 def _fill_cells(
@@ -293,6 +355,16 @@ def _fill_cells(
             msg += (
                 f" Skipped {len(skipped_merged)} merged cells"
                 f" (non-top-left): {', '.join(skipped_merged)}."
+            )
+        # openpyxl does not recalculate formulas. If any formula references the
+        # cells we just filled, its cached value is now stale until the workbook
+        # is reopened in Excel/LibreOffice. Surface this so the agent does not
+        # treat the old cached values as current.
+        affected_formulas = _count_formulas_referencing(ws, set(filled))
+        if affected_formulas > 0:
+            msg += (
+                f" Note: {affected_formulas} formula(s) reference filled cells; their cached "
+                f"values are stale until the file is reopened in Excel/LibreOffice."
             )
         return msg
     finally:
@@ -383,6 +455,16 @@ class ExcelWorkbookTool(Tool):
             description="Max rows to return (default: 50, max: 100)",
             required=False,
         ),
+        ToolParam(
+            name="expected_sig",
+            type="string",
+            description=(
+                "For fill action only: the [file_sig:...] value returned by a prior read. "
+                "If set and the file has changed since that read, a warning is added to "
+                "the result. Optional."
+            ),
+            required=False,
+        ),
     ]
     risk_level = RiskLevel.MEDIUM
     parallel_safe = False
@@ -423,7 +505,9 @@ class ExcelWorkbookTool(Tool):
                 )
                 if len(result) > _MAX_OUTPUT_CHARS:
                     result = result[:_MAX_OUTPUT_CHARS] + "\n... (truncated)"
-                return result
+                # Attach a change-detection signature so the caller can pass it back
+                # as expected_sig on a subsequent fill to detect concurrent changes.
+                return f"{result}\n[file_sig:{_file_signature(resolved)}]"
             except ValueError as e:
                 return f"Error: {e}"
         if action == "fill":
@@ -440,7 +524,20 @@ class ExcelWorkbookTool(Tool):
                 if output_path.suffix.lower() != ".xlsx":
                     return "Error: output_path must end with .xlsx."
             try:
-                return await run_in_thread(_fill_cells, resolved, sheet_name, cells, output_path)
+                fill_result = await run_in_thread(
+                    _fill_cells, resolved, sheet_name, cells, output_path
+                )
             except ValueError as e:
                 return f"Error: {e}"
+            # Opt-in read-before-write guard. The caller passes the file_sig from a
+            # prior read action as expected_sig; a mismatch means the file changed
+            # between the read and this fill. The fill still applied (openpyxl has
+            # already written it), so we surface a warning rather than blocking.
+            expected_sig = kwargs.get("expected_sig")
+            if expected_sig and str(expected_sig) != _file_signature(resolved):
+                fill_result = (
+                    "Warning: file may have changed since last read (signature mismatch). "
+                    "Fill applied anyway.\n" + fill_result
+                )
+            return fill_result
         return f"Error: Unknown action '{action}'. Use 'read' or 'fill'."

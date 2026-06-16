@@ -6,13 +6,14 @@ import ipaddress
 import logging
 import re
 import socket
+import time
 from html.parser import HTMLParser
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
 from ddgs import DDGS  # pyright: ignore[reportUnknownVariableType]
-from ddgs.exceptions import DDGSException, RatelimitException, TimeoutException
+from ddgs.exceptions import DDGSException, TimeoutException
 
 from corpclaw_lite.config.settings import WebSettings
 from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
@@ -366,6 +367,17 @@ class WebFetchTool(Tool):
                     continue
 
                 # Non-redirect response
+                # B-054-1: reject unavailable sources globally. A 4xx/5xx body is
+                # often an HTML error page that downstream code would otherwise
+                # store/cite as a valid source (e.g. a 404 arXiv page or a 403
+                # Cloudflare challenge). Return an Error so the caller (research
+                # or main agent) treats the URL as unusable and does not cache it.
+                if not (200 <= response.status_code < 300):
+                    return (
+                        f"Error: HTTP {response.status_code} for {current_url}."
+                        " The source is unavailable; do not cache or cite it."
+                    )
+
                 content_type = response.headers.get("content-type", "")
                 if _is_binary_content_type(content_type):
                     return (
@@ -449,6 +461,7 @@ class WebSearchTool(Tool):
         ),
     ]
     risk_level = RiskLevel.MEDIUM
+    parallel_safe = False
 
     def __init__(self, settings: WebSettings | None = None) -> None:
         self._settings = settings or WebSettings()
@@ -493,16 +506,21 @@ class WebSearchTool(Tool):
                     timelimit if isinstance(timelimit, str) else None,
                 )
         except TimeoutException:
-            return f"Error: Web search timed out after {self._settings.timeout_seconds}s."
-        except RatelimitException:
-            return "Error: Web search rate limit reached. Please retry later."
+            # TimeoutException is also an infrastructure failure: the search endpoint did
+            # not respond in time. Mark as unavailable so the research layer refunds the
+            # search budget instead of charging the model for an infrastructure outage.
+            return (
+                f"Error: Web search unavailable (infrastructure): "
+                f"timed out after {self._settings.timeout_seconds}s."
+            )
         except DDGSException as e:
-            return f"Error: Web search failed: {e}"
+            # ddgs.text() never returns an empty list — it raises DDGSException (which
+            # covers both "No results found." and transient blocks/rate limits that are
+            # indistinguishable here). _search_sync already retried search_retry_attempts
+            # times before reaching here, so this is a persistent infrastructure failure.
+            return f"Error: Web search unavailable (infrastructure): {e}"
         except Exception as e:
             return f"Error: Web search failed: {type(e).__name__}: {e}"
-
-        if not results:
-            return "No search results found."
 
         lines = [f"Search results for: {query}", "---"]
         for idx, item in enumerate(results, start=1):
@@ -527,13 +545,27 @@ class WebSearchTool(Tool):
         region: str,
         timelimit: str | None,
     ) -> list[dict[str, Any]]:
-        with DDGS(timeout=self._settings.timeout_seconds) as ddgs:
-            results = ddgs.text(
-                query,
-                region=region,
-                safesearch="moderate",
-                timelimit=timelimit,
-                max_results=max_results,
-                backend=self._settings.search_backend,
-            )
-        return [dict(item) for item in results[:max_results]]
+        # Retry the search a few times before surfacing the failure. ddgs raises
+        # DDGSException("No results found.") both for genuine empty results and for
+        # transient endpoint blocks/rate limits, which are indistinguishable here.
+        # Retrying absorbs transient outages; only a persistent failure propagates to
+        # execute() where it becomes an "unavailable (infrastructure)" error string.
+        last_exc: Exception | None = None
+        for attempt in range(max(1, self._settings.search_retry_attempts)):
+            try:
+                with DDGS(timeout=self._settings.timeout_seconds) as ddgs:
+                    results = ddgs.text(
+                        query,
+                        region=region,
+                        safesearch="moderate",
+                        timelimit=timelimit,
+                        max_results=max_results,
+                        backend=self._settings.search_backend,
+                    )
+                return [dict(item) for item in results[:max_results]]
+            except Exception as e:  # noqa: BLE001 — retry any ddgs failure (DDGSException/Timeout)
+                last_exc = e
+                if attempt < self._settings.search_retry_attempts - 1:
+                    time.sleep(self._settings.search_retry_backoff_seconds * (attempt + 1))
+        assert last_exc is not None  # loop runs at least once; last_exc set on any failure
+        raise last_exc

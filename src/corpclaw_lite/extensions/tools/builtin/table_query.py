@@ -340,6 +340,7 @@ def _run_query(
         count_str = str(count[0]) if count else "0"
 
         # Execute user query.
+        conn.execute("SET enable_external_access=false")
         result = conn.execute(query)
         columns = [desc[0] for desc in result.description] if result.description else []
         rows = result.fetchall()

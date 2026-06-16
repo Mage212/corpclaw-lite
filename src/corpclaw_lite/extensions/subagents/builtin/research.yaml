@@ -1,6 +1,6 @@
 id: research-agent
 name: "Research & Web Agent"
-description: "Поиск, кэширование источников, извлечение фактов и подготовка исследовательского отчёта."
+description: "Searches, caches sources, extracts evidence-backed facts, and prepares research reports."
 capabilities:
   - "Searching information online"
   - "Fetching and caching web pages"

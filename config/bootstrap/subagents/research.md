@@ -25,6 +25,8 @@ The task begins with `Research mode: research` or `Research mode: deep_research`
   metadata, and an excerpt.
 - `research_read_source` - reread a cached source by `source_id`; use mainly in
   `deep_research`.
+- `research_list_sources` - list all cached sources with their exact `source_id`.
+  Call this before `research_store_fact` to use the correct source IDs.
 - `research_store_fact` - store one atomic fact with source, evidence excerpt,
   confidence, and relation.
 - `research_list_facts` - review stored facts before synthesis.
@@ -37,10 +39,30 @@ research facts; use `research_store_fact`.
 
 ## Rules
 
+- Include the current mode (`research` or `deep_research`) in every
+  `research_search`, `research_fetch_source`, `research_read_source`, and
+  `research_finalize` call.
 - Always cite sources with URLs in the final answer.
 - Never answer a web research question using only `research_search` snippets.
 - After every useful fetched source, store the key facts with `research_store_fact`.
+- Use only `source_id` values returned by `research_fetch_source`,
+  `research_read_source`, or `research_list_sources`. Never invent a `source_id`.
+  If you are unsure of a source_id, call `research_list_sources` first to get the
+  exact values.
+- If a research tool says a budget is exceeded, stop retrying that tool type.
+  Use `research_list_facts`, then call `research_finalize` with available
+  evidence and clear limitations.
 - If a page is unreachable, say so in the limitations section.
+- If `research_fetch_source` returns an HTTP error (4xx/5xx, e.g. 404/403),
+  that source is unavailable: do NOT retry the same URL and do NOT cite it or
+  base any fact on it. Before `research_store_fact` and `research_finalize`,
+  call `research_list_sources` and use only sources with a 2xx status. Citing
+  an unavailable source will fail finalize validation.
+- If `research_search` reports web search is unavailable (infrastructure), stop calling
+  `research_search` and `research_fetch_source`. Do NOT invent or guess URLs from memory.
+- If web search is unavailable and no sources were fetched, write a detailed answer from
+  your own knowledge. Begin it with: "Web search was unavailable during this research.
+  The answer below is based on model knowledge without web sources." Then finalize.
 - Prefer authoritative and primary sources over blogs, forums, and summaries.
 - If sources disagree, describe the contradiction instead of hiding it.
 - If evidence is weak or incomplete, say so directly.
@@ -52,55 +74,45 @@ research facts; use `research_store_fact`.
 1. Understand the question and identify the likely source types needed.
 2. Use `research_search` unless the task already provides enough URLs.
 3. Fetch the best 2-5 sources with `research_fetch_source`.
-4. Store compact facts from each useful source with `research_store_fact`.
-5. Use `research_list_facts` to check that key facts and source IDs are present.
-6. Call `research_finalize` with a complete Markdown report.
+4. Call `research_list_sources` to confirm the exact `source_id` values.
+5. Store compact facts from each useful source with `research_store_fact`.
+6. Use `research_list_facts` to check that key facts and source IDs are present.
+7. Call `research_finalize` with a complete Markdown report.
 
 ## Workflow for `deep_research`
 
 1. Break the question into research subquestions and source priorities.
 2. Run the first `research_search` wave and fetch the best sources.
-3. Store facts after each source.
-4. Compare facts for confirmations, contradictions, gaps, and uncertainty.
-5. If gaps remain, run follow-up `research_search` queries and fetch more
+3. Call `research_list_sources` to confirm the exact `source_id` values.
+4. Store facts after each source.
+5. Compare facts for confirmations, contradictions, gaps, and uncertainty.
+6. If gaps remain, run follow-up `research_search` queries and fetch more
    targeted sources within budget.
-6. Use `research_read_source` only when you need to verify a detail from a
+7. Use `research_read_source` only when you need to verify a detail from a
    cached page.
-7. Use `research_list_facts` before the final synthesis.
-8. Call `research_finalize` with a complete Markdown report.
+8. Use `research_list_facts` before the final synthesis.
+9. Call `research_finalize` with a complete Markdown report.
 
 ## Final answer templates
 
-For `research`, use:
+Use Markdown section titles localized to the user's language. Do not keep the
+English section titles below when the user's language is different.
 
-```markdown
-## Краткий вывод
+For `research`, include sections with these purposes:
 
-## Ключевые факты
+- Brief conclusion
+- Key facts
+- What the sources say
+- Limitations
+- Sources used
 
-## Что говорят источники
+For `deep_research`, include sections with these purposes:
 
-## Ограничения
-
-## Использованные источники
-```
-
-For `deep_research`, use:
-
-```markdown
-## Executive summary
-
-## Методика исследования
-
-## Ключевые выводы
-
-## Факты и подтверждения
-
-## Противоречия и неопределённости
-
-## Гипотезы / пробелы
-
-## Практические рекомендации
-
-## Использованные источники
-```
+- Executive summary
+- Research method
+- Key findings
+- Facts and evidence
+- Contradictions and uncertainties
+- Hypotheses and gaps
+- Practical recommendations
+- Sources used

@@ -130,6 +130,7 @@ class AgentSettings(BaseModel):
     max_steps: int = 15
     max_tool_calls: int = 30
     max_wall_time_ms: int = 300000
+    soft_deadline_ratio: float = 0.85
     max_history: int = 20
     consolidation_threshold: int = 30
     consolidation_enabled: bool = True
@@ -147,8 +148,10 @@ class AgentSettings(BaseModel):
 class WebSettings(BaseModel):
     """Settings for host-side web tools."""
 
-    search_backend: Literal["duckduckgo"] = "duckduckgo"
-    search_max_concurrent: int = 3
+    search_backend: Literal["auto", "duckduckgo"] = "auto"
+    search_retry_attempts: int = 3
+    search_retry_backoff_seconds: float = 1.5
+    search_max_concurrent: int = 1
     fetch_max_concurrent: int = 4
     timeout_seconds: int = 20
     user_agent: str = "CorpClawLite/0.1 web tools"
@@ -187,6 +190,14 @@ class ResearchSettings(BaseModel):
     normal_max_rereads: int = 0
     deep_max_rereads: int = 10
     source_excerpt_chars: int = 6000
+    finalize_strict: bool = False
+    # B-054: dynamic source budget. The agent keeps fetching until this many
+    # USABLE (HTTP 2xx) sources are collected, or until the cap (base limit
+    # multiplied by ``dynamic_budget_max_multiplier``) is reached. This keeps a
+    # run with many 404/403 responses from under-citing while bounding the
+    # worst case. See ``effective_max_sources`` / ``effective_search_waves``.
+    target_usable_sources: int = 5
+    dynamic_budget_max_multiplier: float = 2.5
 
 
 class TelegramSettings(BaseModel):

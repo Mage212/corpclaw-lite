@@ -13,6 +13,7 @@ allowed_tools:
   - research_search
   - research_fetch_source
   - research_read_source
+  - research_list_sources
   - research_store_fact
   - research_list_facts
   - research_finalize
@@ -22,3 +23,11 @@ allowed_tools:
   - memory_recall
 prompt_path: "config/bootstrap/subagents/research.md"
 direct_response: true
+# B-049: research runs longer than the main agent (default 5 min) because deep_research
+# needs multiple search waves + fetch + fact storage + synthesis. 10 min gives headroom
+# for production where competing requests slow prompt-processing/decode on shared GPUs.
+max_wall_time_ms: 600000
+# B-047: workflow-finalize guard. research_finalize is the mandatory terminal tool;
+# research_list_facts must be called before it (deep_research fact-discipline audit).
+terminal_tool: research_finalize
+required_before_terminal: [research_list_facts]

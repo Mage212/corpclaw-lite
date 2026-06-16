@@ -103,8 +103,10 @@ agent:
     prune_min_messages: 15
 
 web:
-  search_backend: "duckduckgo"
-  search_max_concurrent: 3
+  search_backend: "auto"
+  search_retry_attempts: 3
+  search_retry_backoff_seconds: 1.5
+  search_max_concurrent: 1
   fetch_max_concurrent: 4
   timeout_seconds: 20
   user_agent: "CorpClawLite/0.1 web tools"
@@ -137,6 +139,9 @@ research:
   normal_max_rereads: 0
   deep_max_rereads: 10
   source_excerpt_chars: 6000
+  # Enforce research_finalize validation (language grounding, source integrity,
+  # list_facts mandate, count assertions). Soft mode (false) only warns + traces.
+  finalize_strict: false
 
 container:
   enabled: true

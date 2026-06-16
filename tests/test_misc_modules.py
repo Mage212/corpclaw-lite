@@ -138,6 +138,62 @@ def test_xml_tool_calling_valid() -> None:
     assert result.tool_call.arguments == {"path": "/tmp/test.txt"}
 
 
+def test_xml_tool_calling_multiple_standard_calls() -> None:
+    from corpclaw_lite.llm.xml_tool_calling import parse_xml_tool_calls
+
+    xml = (
+        '<tool_call><name>read_file</name><arguments>{"path": "a.txt"}</arguments></tool_call>'
+        '<tool_call><name>search_files</name><arguments>{"query": "needle"}</arguments></tool_call>'
+    )
+
+    result = parse_xml_tool_calls(xml, allowed_tool_names={"read_file", "search_files"})
+
+    assert result.status == "valid"
+    assert len(result.tool_calls) == 2
+    assert result.tool_calls[0].id == "xml-tool-call-1"
+    assert result.tool_calls[0].name == "read_file"
+    assert result.tool_calls[1].id == "xml-tool-call-2"
+    assert result.tool_calls[1].arguments == {"query": "needle"}
+    assert result.tool_call is None
+
+
+def test_xml_tool_calling_multiple_qwen3_calls() -> None:
+    from corpclaw_lite.llm.xml_tool_calling import parse_xml_tool_calls
+
+    xml = (
+        "<tool_call><function=research_fetch_source>"
+        "<parameter=url>https://example.com/a</parameter>"
+        "<parameter=max_chars>30000</parameter>"
+        "</function></tool_call>"
+        "<tool_call><function=research_fetch_source>"
+        "<parameter=url>https://example.com/b</parameter>"
+        "<parameter=max_chars>30000</parameter>"
+        "</function></tool_call>"
+    )
+
+    result = parse_xml_tool_calls(xml, allowed_tool_names={"research_fetch_source"})
+
+    assert result.status == "valid"
+    assert len(result.tool_calls) == 2
+    assert result.tool_calls[0].name == "research_fetch_source"
+    assert result.tool_calls[0].arguments["max_chars"] == 30000
+    assert result.tool_calls[1].arguments["url"] == "https://example.com/b"
+
+
+def test_xml_tool_calling_multiple_calls_are_all_or_nothing() -> None:
+    from corpclaw_lite.llm.xml_tool_calling import parse_xml_tool_calls
+
+    xml = (
+        '<tool_call><name>read_file</name><arguments>{"path": "a.txt"}</arguments></tool_call>'
+        '<tool_call><name>unknown_tool</name><arguments>{"path": "b.txt"}</arguments></tool_call>'
+    )
+
+    result = parse_xml_tool_calls(xml, allowed_tool_names={"read_file"})
+
+    assert result.status == "invalid_tool_name"
+    assert result.tool_calls == ()
+
+
 def test_xml_tool_calling_malformed() -> None:
     from corpclaw_lite.llm.xml_tool_calling import parse_xml_tool_call
 

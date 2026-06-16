@@ -72,7 +72,8 @@ After filling, read back the filled cells to confirm values were placed correctl
 
 1. **Read source data** — use `table_query` (`SELECT * FROM data LIMIT 20`) or `excel_workbook action=read`.
 2. **Read template — filled zone** — `excel_workbook action=read formula_mode=both` on the range
-   that already has data. Understand the column mapping (G=Показы, J=Охват, etc.) and how rows
+   that already has data. Understand the column mapping. Column name examples: G=Показы, J=Охват.
+   Learn how rows
    correspond to dates.
 3. **Read template — target zone** — read the area that needs filling **with generous margin**.
    Use `formula_mode=both`. Find the exact rows by matching date labels and cached formula values
@@ -84,7 +85,7 @@ After filling, read back the filled cells to confirm values were placed correctl
 
 ## What NOT to do
 
-- DO NOT assume "13-17 апреля" means rows 13-17 — these are dates, find their actual row positions
+- DO NOT assume a user date phrase example such as "13-17 апреля" means rows 13-17 — these are dates, find their actual row positions
 - DO NOT overwrite formula/date cells unless the user explicitly asked to replace formulas with values
 - DO NOT treat `cached_value=<unavailable>` as a real empty date or zero value
 - DO NOT skip the read steps even if the task provides row numbers

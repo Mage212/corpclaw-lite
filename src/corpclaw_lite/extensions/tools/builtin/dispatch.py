@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, cast
 
 from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
 
@@ -13,6 +14,7 @@ if TYPE_CHECKING:
     from corpclaw_lite.agent.subagent import SubagentDispatcher
     from corpclaw_lite.departments.permissions import PermissionChecker
     from corpclaw_lite.extensions.subagents.registry import SubagentRegistry
+    from corpclaw_lite.llm.queue import LLMQueueStatus
     from corpclaw_lite.users.models import User
 
 logger = logging.getLogger(__name__)
@@ -67,6 +69,30 @@ class DispatchSubagentTool(Tool):
         task = kwargs.get("task")
         run_id = kwargs.get("run_id")
         parent_run_id = run_id if isinstance(run_id, str) else None
+        raw_on_subagent_tool_start = kwargs.get("on_subagent_tool_start")
+        raw_on_subagent_tool_batch_start = kwargs.get("on_subagent_tool_batch_start")
+        raw_on_subagent_llm_stage = kwargs.get("on_subagent_llm_stage")
+        raw_on_subagent_llm_queue_status = kwargs.get("on_subagent_llm_queue_status")
+        on_subagent_tool_start = (
+            cast("Callable[[str, str], None]", raw_on_subagent_tool_start)
+            if callable(raw_on_subagent_tool_start)
+            else None
+        )
+        on_subagent_tool_batch_start = (
+            cast("Callable[[str, list[str]], None]", raw_on_subagent_tool_batch_start)
+            if callable(raw_on_subagent_tool_batch_start)
+            else None
+        )
+        on_subagent_llm_stage = (
+            cast("Callable[[str, str], None]", raw_on_subagent_llm_stage)
+            if callable(raw_on_subagent_llm_stage)
+            else None
+        )
+        on_subagent_llm_queue_status = (
+            cast("Callable[[str, LLMQueueStatus], None]", raw_on_subagent_llm_queue_status)
+            if callable(raw_on_subagent_llm_queue_status)
+            else None
+        )
 
         if not isinstance(subagent_id, str) or not isinstance(task, str):
             return "Error: 'subagent_id' and 'task' are required string parameters."
@@ -121,13 +147,26 @@ class DispatchSubagentTool(Tool):
                 f"cannot use subagent '{subagent_id}'."
             )
 
-        return await self._dispatcher.dispatch(spec, user, task, parent_run_id=parent_run_id)
+        return await self._dispatcher.dispatch(
+            spec,
+            user,
+            task,
+            parent_run_id=parent_run_id,
+            on_subagent_tool_start=on_subagent_tool_start,
+            on_subagent_tool_batch_start=on_subagent_tool_batch_start,
+            on_subagent_llm_stage=on_subagent_llm_stage,
+            on_subagent_llm_queue_status=on_subagent_llm_queue_status,
+        )
 
     def should_return_direct(self, arguments: dict[str, Any], result: str) -> bool:
         subagent_id = arguments.get("subagent_id")
         if not isinstance(subagent_id, str):
             return False
         spec = self._subagent_registry.get_spec(subagent_id)
+        # B-036: partial-handoff reports (research-agent timeout skeleton) start with
+        # markdown headings, so they pass this filter and reach the user directly —
+        # the main agent does NOT retry or substitute heavy work. Only bare errors
+        # ("Subagent error:" / "Error") fall through for the main agent to handle.
         return bool(
             spec is not None
             and spec.direct_response

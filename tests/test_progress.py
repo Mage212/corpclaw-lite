@@ -6,7 +6,17 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from corpclaw_lite.channels.status import (
+    format_llm_queue_status,
+    format_llm_stage_status,
+    format_subagent_llm_queue_status,
+    format_subagent_llm_stage_status,
+    format_subagent_tool_batch_status,
+    format_subagent_tool_status,
+    format_tool_batch_status,
+)
 from corpclaw_lite.channels.telegram.progress import _TOOL_STATUS_MAP, StatusMessageSession
+from corpclaw_lite.llm.queue import LLMQueueStatus
 
 
 @pytest.fixture
@@ -72,6 +82,9 @@ async def test_mark_tool_start_updates_desired_text(session: StatusMessageSessio
 @pytest.mark.asyncio
 async def test_mark_llm_stage_updates_desired_text(session: StatusMessageSession) -> None:
     """mark_llm_stage() should expose coarse backend LLM stages."""
+    session.mark_llm_stage("model_waiting")
+    assert session._desired_text == "⏳ Жду начало ответа модели..."
+
     session.mark_llm_stage("reasoning")
     assert session._desired_text == "🤔 Думаю..."
 
@@ -80,6 +93,96 @@ async def test_mark_llm_stage_updates_desired_text(session: StatusMessageSession
 
     session.mark_llm_stage("answer")
     assert session._desired_text == "📝 Собираю ответ..."
+
+
+@pytest.mark.asyncio
+async def test_mark_tool_batch_start_updates_desired_text(session: StatusMessageSession) -> None:
+    """mark_tool_batch_start() should expose one aggregate parallel-tools status."""
+    session.mark_tool_batch_start(["read_file", "list_files"])
+    assert session._desired_text == "📂 Работаю с файлами..."
+
+    session.mark_tool_batch_start(["read_file", "web_fetch"])
+    assert session._desired_text == "⚙️ Выполняю 2 действия..."
+
+
+def test_tool_batch_status_formatter_groups_same_kind_tools() -> None:
+    assert format_tool_batch_status(["web_fetch", "web_search"]) == "🔍 Ищу данные..."
+    assert format_tool_batch_status(["memory_store", "memory_recall"]) == "💾 Работаю с памятью..."
+
+
+def test_finished_llm_stage_has_no_user_status() -> None:
+    assert format_llm_stage_status("finished") is None
+
+
+@pytest.mark.asyncio
+async def test_mark_subagent_status_updates_desired_text(
+    session: StatusMessageSession,
+) -> None:
+    """Subagent status callbacks should prefix the human-readable subagent name."""
+    session.mark_subagent_llm_stage("Research Agent", "reasoning")
+    assert session._desired_text == "Research Agent: 🤔 Думаю..."
+
+    session.mark_subagent_tool_start("Document Agent", "read_file")
+    assert session._desired_text == "Document Agent: 📂 Читаю файл..."
+
+    session.mark_subagent_tool_batch_start("Data Analysis Agent", ["read_file", "list_files"])
+    assert session._desired_text == "Data Analysis Agent: 📂 Работаю с файлами..."
+
+
+@pytest.mark.asyncio
+async def test_mark_llm_queue_status_updates_desired_text(session: StatusMessageSession) -> None:
+    status = LLMQueueStatus(
+        user_id="1",
+        task_kind="default",
+        load_class="interactive",
+        position=1,
+        estimated_wait_seconds=32.8,
+        waiting_count=2,
+        active_count=1,
+        max_concurrent=1,
+        wait_seconds=3.0,
+    )
+
+    session.mark_llm_queue_status(status)
+    assert session._desired_text == "⏳ Ожидаю LLM-слот. В очереди: 2, примерно 32с..."
+
+    session.mark_subagent_llm_queue_status("Research Agent", status)
+    assert (
+        session._desired_text == "Research Agent: ⏳ Ожидаю LLM-слот. В очереди: 2, примерно 32с..."
+    )
+
+
+def test_subagent_status_formatters() -> None:
+    assert (
+        format_subagent_tool_status("Execution Agent", "exec_script")
+        == "Execution Agent: 💻 Запускаю команду..."
+    )
+    assert (
+        format_subagent_tool_batch_status("Research Agent", ["web_fetch", "web_search"])
+        == "Research Agent: 🔍 Ищу данные..."
+    )
+    assert (
+        format_subagent_llm_stage_status("Document Agent", "answer")
+        == "Document Agent: 📝 Собираю ответ..."
+    )
+    assert format_subagent_llm_stage_status("Document Agent", "finished") is None
+
+    status = LLMQueueStatus(
+        user_id="1",
+        task_kind="default",
+        load_class="interactive",
+        position=None,
+        estimated_wait_seconds=None,
+        waiting_count=1,
+        active_count=1,
+        max_concurrent=1,
+        wait_seconds=1.0,
+    )
+    assert format_llm_queue_status(status) == "⏳ Ожидаю свободный LLM-слот..."
+    assert (
+        format_subagent_llm_queue_status("Document Agent", status)
+        == "Document Agent: ⏳ Ожидаю свободный LLM-слот..."
+    )
 
 
 @pytest.mark.asyncio

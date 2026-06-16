@@ -39,7 +39,12 @@ from corpclaw_lite.llm.base import (
 )
 from corpclaw_lite.llm.cache import LLMCacheManager, config_from_settings
 from corpclaw_lite.llm.presets import ModelPreset, PresetRegistry
-from corpclaw_lite.llm.queue import LLMLoadClass, LLMRequestQueue, SlotAffinityConfig
+from corpclaw_lite.llm.queue import (
+    LLMLoadClass,
+    LLMQueueStatus,
+    LLMRequestQueue,
+    SlotAffinityConfig,
+)
 from corpclaw_lite.logging.trace import log_event
 
 if TYPE_CHECKING:
@@ -54,6 +59,7 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 ProviderMeta = tuple[str | None, str, str | None]
+QueueStatusCallback = Callable[[LLMQueueStatus], None]
 
 
 def _load_class_for_task(task_kind: str) -> LLMLoadClass:
@@ -296,6 +302,9 @@ class LLMRouter:
         load_class: LLMLoadClass,
         run_id: str | None = None,
         agent_id: str = "main",
+        on_queue_status: QueueStatusCallback | None = None,
+        notify_position: bool = True,
+        notify_interval_seconds: float = 30.0,
     ) -> Provider:
         if self._queue is None:
             return provider
@@ -315,6 +324,9 @@ class LLMRouter:
             model=model,
             preset_name=preset_name,
             agent_id=agent_id,
+            on_queue_status=on_queue_status,
+            notify_position=notify_position,
+            notify_interval_seconds=notify_interval_seconds,
         )
 
     def _details_for_provider(
@@ -375,6 +387,9 @@ class LLMRouter:
         *,
         user_id: str = "",
         run_id: str | None = None,
+        on_queue_status: QueueStatusCallback | None = None,
+        notify_position: bool = True,
+        notify_interval_seconds: float = 30.0,
     ) -> Provider:
         """Return the provider configured for a given subagent_id.
 
@@ -390,6 +405,9 @@ class LLMRouter:
                     load_class="subagent",
                     run_id=run_id,
                     agent_id=subagent_id,
+                    on_queue_status=on_queue_status,
+                    notify_position=notify_position,
+                    notify_interval_seconds=notify_interval_seconds,
                 )
         return self._wrap_provider(
             self._default_provider,
@@ -399,6 +417,9 @@ class LLMRouter:
             load_class="subagent",
             run_id=run_id,
             agent_id=subagent_id,
+            on_queue_status=on_queue_status,
+            notify_position=notify_position,
+            notify_interval_seconds=notify_interval_seconds,
         )
 
     @property
@@ -432,6 +453,9 @@ class LLMRouter:
         system: str | None,
         on_acquired: Callable[[], None] | None,
         call: Callable[[Provider], Awaitable[LLMResponse]],
+        on_queue_status: QueueStatusCallback | None = None,
+        notify_position: bool = True,
+        notify_interval_seconds: float = 30.0,
     ) -> LLMResponse:
         """Call the default provider through queue/cache while preserving budget control."""
         if self._queue is None:
@@ -458,6 +482,9 @@ class LLMRouter:
             tools=tools,
             system=system,
             on_acquired=on_acquired,
+            on_queue_status=on_queue_status,
+            notify_position=notify_position,
+            notify_interval_seconds=notify_interval_seconds,
             call=call,
         )
 
@@ -592,6 +619,9 @@ async def _execute_with_queue(
     tools: list[dict[str, Any]] | None,
     system: str | None,
     on_acquired: Callable[[], None] | None,
+    on_queue_status: QueueStatusCallback | None,
+    notify_position: bool,
+    notify_interval_seconds: float,
     call: Callable[[Provider], Awaitable[LLMResponse]],
 ) -> LLMResponse:
     entry = await queue.acquire(
@@ -600,6 +630,9 @@ async def _execute_with_queue(
         load_class=load_class,
         run_id=run_id,
         provider_name=provider_name,
+        on_status=on_queue_status,
+        notify_position=notify_position,
+        notify_interval_seconds=notify_interval_seconds,
     )
     t0 = time.monotonic()
     if on_acquired is not None:
@@ -682,6 +715,9 @@ class QueuedProvider:
         load_class: LLMLoadClass,
         agent_id: str,
         run_id: str | None = None,
+        on_queue_status: QueueStatusCallback | None = None,
+        notify_position: bool = True,
+        notify_interval_seconds: float = 30.0,
     ) -> None:
         self._provider = provider
         self._queue = queue
@@ -694,6 +730,44 @@ class QueuedProvider:
         self._load_class: LLMLoadClass = load_class
         self._agent_id = agent_id
         self._run_id = run_id
+        self._on_queue_status = on_queue_status
+        self._notify_position = notify_position
+        self._notify_interval_seconds = notify_interval_seconds
+
+    async def call_with_slot(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        system: str | None,
+        on_acquired: Callable[[], None] | None,
+        on_queue_status: QueueStatusCallback | None,
+        notify_position: bool,
+        notify_interval_seconds: float,
+        call: Callable[[Provider], Awaitable[LLMResponse]],
+    ) -> LLMResponse:
+        """Call the wrapped provider through this queued provider's slot."""
+        return await _execute_with_queue(
+            provider=self._provider,
+            queue=self._queue,
+            cache_manager=self._cache_manager,
+            provider_name=self._provider_name,
+            model=self._model,
+            preset_name=self._preset_name,
+            user_id=self._user_id,
+            task_kind=self._task_kind,
+            load_class=self._load_class,
+            run_id=self._run_id,
+            agent_id=self._agent_id,
+            messages=messages,
+            tools=tools,
+            system=system,
+            on_acquired=on_acquired,
+            on_queue_status=on_queue_status,
+            notify_position=notify_position,
+            notify_interval_seconds=notify_interval_seconds,
+            call=call,
+        )
 
     async def chat(
         self,
@@ -717,6 +791,9 @@ class QueuedProvider:
             tools=tools,
             system=system,
             on_acquired=None,
+            on_queue_status=self._on_queue_status,
+            notify_position=self._notify_position,
+            notify_interval_seconds=self._notify_interval_seconds,
             call=lambda provider: provider.chat(messages=messages, tools=tools, system=system),
         )
 
@@ -732,6 +809,9 @@ class QueuedProvider:
             load_class=self._load_class,
             run_id=self._run_id,
             provider_name=self._provider_name,
+            on_status=self._on_queue_status,
+            notify_position=self._notify_position,
+            notify_interval_seconds=self._notify_interval_seconds,
         )
         t0 = time.monotonic()
         token = set_backend_request_options(
@@ -779,6 +859,9 @@ class QueuedProvider:
             tools=tools,
             system=system,
             on_acquired=None,
+            on_queue_status=self._on_queue_status,
+            notify_position=self._notify_position,
+            notify_interval_seconds=self._notify_interval_seconds,
             call=call,
         )
 
@@ -795,6 +878,9 @@ class QueuedProvider:
             load_class=self._load_class,
             run_id=self._run_id,
             provider_name=self._provider_name,
+            on_status=self._on_queue_status,
+            notify_position=self._notify_position,
+            notify_interval_seconds=self._notify_interval_seconds,
         )
         t0 = time.monotonic()
         token = set_backend_request_options(

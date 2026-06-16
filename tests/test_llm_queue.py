@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from corpclaw_lite.llm.queue import LLMRequestQueue, SlotAffinityConfig
+from corpclaw_lite.llm.queue import LLMQueueStatus, LLMRequestQueue, SlotAffinityConfig
 
 
 class TestQueueBasic:
@@ -51,6 +51,53 @@ class TestQueueBasic:
         await task
         assert result == ["acquired"]
         assert q.queue_length == 0
+
+    @pytest.mark.asyncio
+    async def test_status_callback_emits_initial_and_periodic_waiting_status(self) -> None:
+        q = LLMRequestQueue(max_concurrent=1)
+        holder = await q.acquire("holder")
+        statuses: list[LLMQueueStatus] = []
+
+        waiter = asyncio.create_task(
+            q.acquire(
+                "waiting-user",
+                on_status=statuses.append,
+                notify_interval_seconds=0.01,
+            )
+        )
+        await asyncio.sleep(0.035)
+
+        assert len(statuses) >= 2
+        assert statuses[0].user_id == "waiting-user"
+        assert statuses[0].position == 0
+        assert statuses[0].estimated_wait_seconds == 15.0
+        assert statuses[0].waiting_count == 1
+        assert statuses[0].active_count == 1
+
+        await q.release(holder, 0.1)
+        entry = await waiter
+        await q.release(entry, 0.1)
+
+    @pytest.mark.asyncio
+    async def test_status_callback_errors_do_not_break_acquire(self) -> None:
+        q = LLMRequestQueue(max_concurrent=1)
+        holder = await q.acquire("holder")
+        called = False
+
+        def broken_callback(_status: LLMQueueStatus) -> None:
+            nonlocal called
+            called = True
+            raise RuntimeError("status channel failed")
+
+        waiter = asyncio.create_task(q.acquire("user1", on_status=broken_callback))
+        await asyncio.sleep(0.02)
+        await q.release(holder, 0.1)
+        entry = await waiter
+
+        assert called is True
+        assert entry.user_id == "user1"
+        assert q.active_count == 1
+        await q.release(entry, 0.1)
 
 
 class TestPositionTracking:

@@ -10,6 +10,7 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from corpclaw_lite.agent.context import ContextBuilder
@@ -18,7 +19,12 @@ from corpclaw_lite.agent.guards import (
     SimpleBudgetGuard,
     SimpleBudgetGuardConfig,
     SimpleProgressGuard,
+    SoftDeadline,
+    SoftDeadlineConfig,
+    TerminalToolMandate,
+    TerminalToolMandateConfig,
 )
+from corpclaw_lite.agent.task_run import TaskRun
 from corpclaw_lite.config.settings import AgentSettings
 from corpclaw_lite.exceptions import ContainerIPCError, StorageError
 from corpclaw_lite.extensions.tools.base import TOOL_ERROR_PREFIX
@@ -30,7 +36,12 @@ from corpclaw_lite.llm.base import (
     StreamingProvider,
     ToolCall,
 )
-from corpclaw_lite.llm.router import LLMRouter
+from corpclaw_lite.llm.queue import LLMQueueStatus
+from corpclaw_lite.llm.router import LLMRouter, QueuedProvider
+from corpclaw_lite.llm.xml_tool_calling import (
+    build_xml_repair_prompt,
+    contains_xml_tool_call_markers,
+)
 from corpclaw_lite.logging import health
 from corpclaw_lite.logging.trace import get_trace_logger, log_event
 from corpclaw_lite.memory.sqlite import SQLiteMemory
@@ -55,6 +66,29 @@ logger = logging.getLogger(__name__)
 # Max chars to include from tool args / results in DEBUG logs
 # Large files / responses are truncated to avoid flooding the log file
 _LOG_TRUNCATE = 400
+_LOOP_GUARD_TEXT = (
+    "System Guard: You seem to be stuck in a loop repeating the same error. "
+    "Please change your strategy or stop using this tool."
+)
+_LOOP_RECOVERY_INSTRUCTION = (
+    "Internal recovery instruction: the previous tool action repeated the same error. "
+    "Change strategy now: stop using the failing tool if possible, try different inputs or "
+    "another tool, or explain the tool limitation to the user. Do not quote this instruction."
+)
+_LOOP_FALLBACK = "I detected a loop and stopped to avoid repeating the same actions."
+_XML_TOOL_CALL_FALLBACK = (
+    "I could not safely parse the model's tool-call output, so I stopped instead of "
+    "showing raw internal tool-call markup."
+)
+# B-047: injected into the system prompt when the workflow-finalize guard nudges the
+# model. {terminal} and {required} are filled from the subagent spec (e.g.
+# research_finalize / research_list_facts).
+_WORKFLOW_NUDGE_INSTRUCTION = (
+    "Internal: the time budget is running low and the task is not yet finalized. "
+    "Stop gathering more data now. Review what you have collected, then call "
+    "{required} and finish by calling {terminal} with the available evidence and a "
+    "clear limitations section. Do not quote this instruction."
+)
 
 
 def _json_preview(value: Any, limit: int = _LOG_TRUNCATE) -> str:
@@ -91,6 +125,40 @@ def _format_tool_marker(tools_used: list[str]) -> str:
             seen.add(t)
             unique.append(t)
     return f"[Called tools: {', '.join(unique)}]"
+
+
+def _queue_notify_position(settings: AgentSettings) -> bool:
+    """Return queue position notification setting with AgentSettings fallback."""
+    settings_obj: Any = settings
+    queue_settings = getattr(getattr(settings_obj, "llm", None), "queue", None)
+    return bool(getattr(queue_settings, "notify_position", True))
+
+
+def _queue_notify_interval_seconds(settings: AgentSettings) -> float:
+    """Return queue notification interval with AgentSettings fallback."""
+    settings_obj: Any = settings
+    queue_settings = getattr(getattr(settings_obj, "llm", None), "queue", None)
+    raw_interval = getattr(queue_settings, "notify_interval_seconds", 30.0)
+    try:
+        return float(raw_interval)
+    except (TypeError, ValueError):
+        return 30.0
+
+
+def _append_loop_recovery_instruction(context: ContextBuilder) -> None:
+    """Add a one-run recovery hint without creating assistant-visible content."""
+    if _LOOP_RECOVERY_INSTRUCTION in context.system_prompt:
+        return
+
+    if context.system_prompt:
+        context.system_prompt += f"\n\n---\n{_LOOP_RECOVERY_INSTRUCTION}"
+    else:
+        context.system_prompt = _LOOP_RECOVERY_INSTRUCTION
+
+
+def _is_loop_guard_echo(content: str) -> bool:
+    """Detect old internal guard text if the model echoes it as a final answer."""
+    return content.strip() == _LOOP_GUARD_TEXT
 
 
 @dataclass
@@ -137,6 +205,13 @@ class AgentConfig:
     consolidator: MemoryConsolidator | None = None
     compressor: ContextCompressor | None = None
     default_system_prompt: str | None = None
+    workspace_base: Path | None = None
+    # B-047: workflow-finalize guard config. When terminal_tool is set, the loop nudges
+    # the model toward the mandatory terminal tool and restricts the schema as the
+    # wall-clock budget runs out. None/empty for the main agent and non-research
+    # subagents — the guard is neutral then.
+    terminal_tool: str | None = None
+    required_before_terminal: list[str] = field(default_factory=list[str])
 
 
 class AgentLoop:
@@ -154,6 +229,9 @@ class AgentLoop:
         self._consolidator = config.consolidator
         self._compressor = config.compressor
         self._default_system_prompt = config.default_system_prompt
+        self._workspace_base = config.workspace_base
+        self._terminal_tool = config.terminal_tool
+        self._required_before_terminal = config.required_before_terminal
         self._approval_lock = asyncio.Lock()
 
     @property
@@ -179,6 +257,13 @@ class AgentLoop:
         stats: RunStats | None,
     ) -> LLMResponse:
         """Call an LLM provider, using backend streaming when available."""
+
+        def emit_status(stage: str) -> None:
+            if self._settings.llm_stream_status_updates and on_llm_stage is not None:
+                on_llm_stage(stage)
+
+        emit_status("model_waiting")
+
         if not self._settings.llm_streaming_enabled or not isinstance(provider, StreamingProvider):
             return await provider.chat(messages=messages, tools=tools, system=system)
 
@@ -199,10 +284,6 @@ class AgentLoop:
         first_tool_call_ms: float | None = None
         stage_counts: dict[str, int] = {}
         payload_trace_enabled = _trace_payload_enabled()
-
-        def emit_status(stage: str) -> None:
-            if self._settings.llm_stream_status_updates and on_llm_stage is not None:
-                on_llm_stage(stage)
 
         def handle_event(event: LLMStreamEvent) -> None:
             nonlocal content_delta_count, event_count, first_content_ms, first_event_ms
@@ -388,6 +469,12 @@ class AgentLoop:
         approval_callback: Callable[[str, str], Awaitable[bool]] | None = None,
         on_tool_start: Callable[[str], None] | None = None,
         on_llm_stage: Callable[[str], None] | None = None,
+        on_llm_queue_status: Callable[[LLMQueueStatus], None] | None = None,
+        on_tool_batch_start: Callable[[list[str]], None] | None = None,
+        on_subagent_tool_start: Callable[[str, str], None] | None = None,
+        on_subagent_tool_batch_start: Callable[[str, list[str]], None] | None = None,
+        on_subagent_llm_stage: Callable[[str, str], None] | None = None,
+        on_subagent_llm_queue_status: Callable[[str, LLMQueueStatus], None] | None = None,
         tools_enabled: bool = True,
         trajectory_recorder: TrajectoryRecorder | None = None,
         few_shots: list[dict[str, Any]] | None = None,
@@ -406,8 +493,13 @@ class AgentLoop:
         """
         stats = RunStats(run_id=run_id) if run_id is not None else RunStats()
         loop_warning_count = 0
+        xml_repair_attempted = False
         last_actual_total_tokens: int | None = None
         t0 = time.monotonic()
+
+        def emit_llm_status(stage: str) -> None:
+            if self._settings.llm_stream_status_updates and on_llm_stage is not None:
+                on_llm_stage(stage)
 
         logger.debug(
             "[user=%s] run() start | msg=%r",
@@ -494,7 +586,22 @@ class AgentLoop:
             )
         budget = SimpleBudgetGuard(guard_config)
         progress = SimpleProgressGuard()
-        tools_schema = None
+        soft_deadline = SoftDeadline(
+            SoftDeadlineConfig(ratio=self._settings.soft_deadline_ratio),
+            max_time_ms=self._settings.max_wall_time_ms,
+        )
+        # B-047: workflow-finalize guard. Neutral when no terminal tool is configured
+        # (main agent, non-research subagents); active for research-agent.
+        mandate = TerminalToolMandate(
+            TerminalToolMandateConfig(
+                terminal_tool=self._terminal_tool or "",
+                required_before=tuple(self._required_before_terminal),
+            ),
+            max_time_ms=self._settings.max_wall_time_ms,
+        )
+        task_run = TaskRun(self._workspace_base)
+        task_run.initialize(user, stats.run_id)
+        tools_schema: list[dict[str, Any]] | None = None
         if tools_enabled:
             if self._permission_checker:
                 tools_schema = self._registry.to_schemas_for_user(
@@ -520,6 +627,18 @@ class AgentLoop:
             while True:
                 budget.consume_iteration()
                 stats.iterations += 1
+
+                # Soft deadline (wall-clock) -> closing mode: reduce tool schema to
+                # finalize-only terminal tools so the model wraps up instead of being
+                # hard-cancelled by asyncio.wait_for. Fixes the subagent-timeout race
+                # where wait_for (wall-clock) always beat the active-time budget guard.
+                # B-046: the same check is also applied right before each LLM call (see
+                # _apply_closing_mode) so a single long iteration that straddles the
+                # deadline still triggers it before the model is asked to produce more
+                # tool calls.
+                tools_schema = self._apply_closing_mode(
+                    soft_deadline, tools_schema, task_run, user, stats
+                )
 
                 compression_cfg = self._settings.compression
                 if compression_cfg.enabled and context.message_count > (
@@ -549,22 +668,67 @@ class AgentLoop:
                         system_prompt_chars=len(context.system_prompt or ""),
                         streaming_enabled=self._settings.llm_streaming_enabled,
                     )
+                    # B-046: re-check the soft deadline immediately before the LLM call.
+                    # A long previous iteration may have crossed the wall-clock deadline
+                    # mid-iteration; without this check the model is asked for another
+                    # round of tool calls and closing mode only engages next iteration
+                    # (by which point asyncio.wait_for may already cancel the run).
+                    tools_schema = self._apply_closing_mode(
+                        soft_deadline, tools_schema, task_run, user, stats
+                    )
                     # When the provider is a queued router, separate queue wait
                     # from LLM inference so the budget only counts active time.
                     if isinstance(self._provider, LLMRouter) and self._provider.has_queue:
                         budget.pause()
+
+                        def on_router_acquired() -> None:
+                            budget.resume()
+                            emit_llm_status("model_preparing")
+
                         response = await self._provider.call_default_with_slot(
                             user_id=str(user.id),
                             run_id=stats.run_id,
                             messages=context.messages,
                             tools=tools_schema,
                             system=context.system_prompt or None,
-                            on_acquired=budget.resume,
-                            call=lambda target_provider: asyncio.wait_for(
+                            on_acquired=on_router_acquired,
+                            call=lambda target_provider, _tools=tools_schema: asyncio.wait_for(
                                 self._call_llm_provider(
                                     target_provider,
                                     messages=context.messages,
-                                    tools=tools_schema,
+                                    tools=_tools,
+                                    system=context.system_prompt or None,
+                                    run_id=stats.run_id,
+                                    iteration=stats.iterations,
+                                    on_llm_stage=on_llm_stage,
+                                    stats=stats,
+                                ),
+                                timeout=self._settings.llm_timeout_seconds,
+                            ),
+                            on_queue_status=on_llm_queue_status,
+                            notify_position=_queue_notify_position(self._settings),
+                            notify_interval_seconds=_queue_notify_interval_seconds(self._settings),
+                        )
+                    elif isinstance(self._provider, QueuedProvider):
+                        budget.pause()
+
+                        def on_queued_provider_acquired() -> None:
+                            budget.resume()
+                            emit_llm_status("model_preparing")
+
+                        response = await self._provider.call_with_slot(
+                            messages=context.messages,
+                            tools=tools_schema,
+                            system=context.system_prompt or None,
+                            on_acquired=on_queued_provider_acquired,
+                            on_queue_status=on_llm_queue_status,
+                            notify_position=_queue_notify_position(self._settings),
+                            notify_interval_seconds=_queue_notify_interval_seconds(self._settings),
+                            call=lambda target_provider, _tools=tools_schema: asyncio.wait_for(
+                                self._call_llm_provider(
+                                    target_provider,
+                                    messages=context.messages,
+                                    tools=_tools,
                                     system=context.system_prompt or None,
                                     run_id=stats.run_id,
                                     iteration=stats.iterations,
@@ -580,6 +744,7 @@ class AgentLoop:
                             if isinstance(self._provider, LLMRouter)
                             else self._provider
                         )
+                        emit_llm_status("model_preparing")
                         response = await asyncio.wait_for(
                             self._call_llm_provider(
                                 target_provider,
@@ -692,6 +857,29 @@ class AgentLoop:
                     # The model already completed its work; discarding it wastes the
                     # entire LLM call and frustrates users who waited for a response.
                     final = response.content if response.content else "Agent provided no response."
+                    if contains_xml_tool_call_markers(final):
+                        if not xml_repair_attempted:
+                            xml_repair_attempted = True
+                            context.add_user_message(
+                                build_xml_repair_prompt(
+                                    "Raw XML tool-call markup was returned as assistant text "
+                                    "instead of parsed tool calls."
+                                )
+                            )
+                            log_event(
+                                "xml_tool_call_repair_requested",
+                                stats.run_id,
+                                iteration=stats.iterations,
+                                content_hash=_payload_hash(final),
+                            )
+                            continue
+                        final = _XML_TOOL_CALL_FALLBACK
+                        stats.status = "error"
+                        stats.error = "malformed_xml_tool_call"
+                    if _is_loop_guard_echo(final):
+                        final = _LOOP_FALLBACK
+                        stats.status = "loop"
+                        stats.error = "model_echoed_loop_guard"
                     if self._memory:
                         await self._save_turn(mem_key, final, stats.tools_used, response.reasoning)
                         if self._consolidator:
@@ -712,6 +900,7 @@ class AgentLoop:
                         tools_used=stats.tools_used,
                         duration_ms=round(stats.duration_ms, 1),
                         final_answer_len=len(final),
+                        error=stats.error,
                     )
                     return final, stats
 
@@ -730,38 +919,51 @@ class AgentLoop:
                         user,
                         _approval_cb,
                         on_tool_start,
+                        on_tool_batch_start,
+                        on_subagent_tool_start,
+                        on_subagent_tool_batch_start,
+                        on_subagent_llm_stage,
+                        on_subagent_llm_queue_status,
                         trajectory_recorder,
                         stats,
+                        task_run,
                     )
                     # Add ALL results first to keep context valid (no orphaned tool_calls)
-                    loop_detected = False
+                    action_results: list[tuple[str, str]] = []
                     for tc, result in zip(response.tool_calls, results, strict=True):
                         context.add_tool_result(tc.id, tc.name, result)
                         stats.tools_used.append(tc.name)
-                        if not loop_detected and progress.detect_loop(tc.name, result):
-                            context.add_assistant_message(
-                                "System Guard: You seem to be stuck in a loop repeating the same"
-                                " error. Please change your strategy or stop using this tool."
-                            )
-                            loop_detected = True
+                        action_results.append((tc.name, result))
+                    loop_detected = progress.detect_loop_for_results(action_results)
                     if loop_detected:
+                        _append_loop_recovery_instruction(context)
                         loop_warning_count += 1
                         if loop_warning_count >= 2:
                             break
                         continue
+                    # B-047: push toward the mandatory terminal tool as budget runs low.
+                    tools_schema = self._apply_workflow_mandate(
+                        mandate, tools_schema, context, stats
+                    )
                 else:
-                    should_stop = False
+                    action_results: list[tuple[str, str]] = []
                     for tc in response.tool_calls:
                         result = await self._execute_single_tool(
                             tc,
                             user,
                             _approval_cb,
                             on_tool_start,
+                            on_subagent_tool_start,
+                            on_subagent_tool_batch_start,
+                            on_subagent_llm_stage,
+                            on_subagent_llm_queue_status,
                             trajectory_recorder,
                             stats,
+                            task_run,
                         )
                         context.add_tool_result(tc.id, tc.name, result)
                         stats.tools_used.append(tc.name)
+                        action_results.append((tc.name, result))
 
                         # Terminal tool: return result directly (no LLM re-paraphrase).
                         # Used for tools like read_image where the vision model already
@@ -800,18 +1002,17 @@ class AgentLoop:
                             )
                             return result, stats
 
-                        if progress.detect_loop(tc.name, result):
-                            context.add_assistant_message(
-                                "System Guard: You seem to be stuck in a loop repeating the same"
-                                " error. Please change your strategy or stop using this tool."
-                            )
-                            loop_warning_count += 1
-                            if loop_warning_count >= 2:
-                                should_stop = True
+                    loop_detected = progress.detect_loop_for_results(action_results)
+                    if loop_detected:
+                        _append_loop_recovery_instruction(context)
+                        loop_warning_count += 1
+                        if loop_warning_count >= 2:
                             break
-
-                    if should_stop:
-                        break
+                        continue
+                    # B-047: push toward the mandatory terminal tool as budget runs low.
+                    tools_schema = self._apply_workflow_mandate(
+                        mandate, tools_schema, context, stats
+                    )
 
         except BudgetExceededError as e:
             health.increment("errors")
@@ -836,7 +1037,7 @@ class AgentLoop:
         finally:
             health.increment("active_requests", -1)
 
-        fallback = "I detected a loop and stopped to avoid repeating the same actions."
+        fallback = _LOOP_FALLBACK
         if self._memory:
             await self._save_turn(mem_key, fallback, stats.tools_used)
         stats.status = "loop"
@@ -912,25 +1113,129 @@ class AgentLoop:
                 return False
         return True
 
+    def _apply_closing_mode(
+        self,
+        soft_deadline: SoftDeadline,
+        tools_schema: list[dict[str, Any]] | None,
+        task_run: TaskRun,
+        user: User,
+        stats: RunStats,
+    ) -> list[dict[str, Any]] | None:
+        """Enter closing mode when the wall-clock soft deadline is reached.
+
+        Closing mode reduces ``tools_schema`` to terminal tools only so the model is
+        pushed to wrap up instead of being hard-cancelled by ``asyncio.wait_for``.
+        Idempotent: once closing mode is entered the schema stays reduced and the
+        deadline/event are only emitted once. Returns the (possibly reduced) schema.
+
+        B-046: called both at the top of each iteration and immediately before each LLM
+        provider call, so a single long iteration that straddles the deadline still
+        triggers the reduction before the model is asked for more tool calls.
+        """
+        if not soft_deadline.is_reached() or soft_deadline.closing_mode:
+            return tools_schema
+        soft_deadline.enter_closing_mode()
+        task_run.mark_soft_deadline(user, stats.run_id)
+        log_event(
+            "agent_soft_deadline_reached",
+            stats.run_id,
+            max_time_ms=self._settings.max_wall_time_ms,
+            ratio=self._settings.soft_deadline_ratio,
+        )
+        if not tools_schema:
+            return tools_schema
+        terminal_names = {
+            t.name for t in self._registry.list_all() if getattr(t, "terminal", False)
+        }
+        if not terminal_names:
+            return tools_schema
+        return [
+            s for s in tools_schema if str(s.get("function", {}).get("name", "")) in terminal_names
+        ]
+
+    def _apply_workflow_mandate(
+        self,
+        mandate: TerminalToolMandate,
+        tools_schema: list[dict[str, Any]] | None,
+        context: ContextBuilder,
+        stats: RunStats,
+    ) -> list[dict[str, Any]] | None:
+        """B-047: escalate toward the mandatory terminal tool as budget runs low.
+
+        Two deterministic steps (each idempotent): (1) nudge — inject a one-shot system
+        note telling the model to stop gathering and finalize; (2) restrict — narrow
+        ``tools_schema`` to ``required_before + terminal_tool`` so only finalization
+        tools remain. Returns the (possibly restricted) schema.
+
+        Neutral when the mandate is disabled (no terminal tool configured): returns the
+        schema unchanged.
+        """
+        if not mandate.enabled:
+            return tools_schema
+
+        if mandate.should_nudge(stats.tools_used):
+            required = ", ".join(mandate.config.required_before) or "(none)"
+            instruction = _WORKFLOW_NUDGE_INSTRUCTION.format(
+                required=required, terminal=mandate.config.terminal_tool
+            )
+            # Idempotent append, mirroring _append_loop_recovery_instruction.
+            if instruction not in (context.system_prompt or ""):
+                sep = "\n\n---\n" if context.system_prompt else ""
+                context.system_prompt = f"{context.system_prompt or ''}{sep}{instruction}"
+            log_event(
+                "workflow_nudge_injected",
+                stats.run_id,
+                terminal_tool=mandate.config.terminal_tool,
+                elapsed_ratio=round(mandate.elapsed_ratio(), 3),
+            )
+
+        if mandate.should_restrict(stats.tools_used):
+            allowed = set(mandate.config.required_before) | {mandate.config.terminal_tool}
+            log_event(
+                "workflow_restrict_applied",
+                stats.run_id,
+                terminal_tool=mandate.config.terminal_tool,
+                allowed=sorted(allowed),
+                elapsed_ratio=round(mandate.elapsed_ratio(), 3),
+            )
+            if tools_schema:
+                return [
+                    s for s in tools_schema if str(s.get("function", {}).get("name", "")) in allowed
+                ]
+        return tools_schema
+
     async def _execute_parallel(
         self,
         tool_calls: list[ToolCall],
         user: User,
         approval_callback: Callable[[str, str], Awaitable[bool]] | None,
         on_tool_start: Callable[[str], None] | None,
+        on_tool_batch_start: Callable[[list[str]], None] | None,
+        on_subagent_tool_start: Callable[[str, str], None] | None,
+        on_subagent_tool_batch_start: Callable[[str, list[str]], None] | None,
+        on_subagent_llm_stage: Callable[[str, str], None] | None,
+        on_subagent_llm_queue_status: Callable[[str, LLMQueueStatus], None] | None,
         trajectory_recorder: TrajectoryRecorder | None = None,
         stats: RunStats | None = None,
+        task_run: TaskRun | None = None,
     ) -> list[str]:
         """Execute multiple tools in parallel and return results."""
+        if on_tool_batch_start is not None:
+            on_tool_batch_start([tc.name for tc in tool_calls])
 
         async def execute_one(tc: ToolCall) -> str:
             return await self._execute_single_tool(
                 tc,
                 user,
                 approval_callback,
-                on_tool_start,
+                None,
+                on_subagent_tool_start,
+                on_subagent_tool_batch_start,
+                on_subagent_llm_stage,
+                on_subagent_llm_queue_status,
                 trajectory_recorder,
                 stats,
+                task_run,
             )
 
         results = await asyncio.gather(*[execute_one(tc) for tc in tool_calls])
@@ -942,8 +1247,13 @@ class AgentLoop:
         user: User,
         approval_callback: Callable[[str, str], Awaitable[bool]] | None,
         on_tool_start: Callable[[str], None] | None,
+        on_subagent_tool_start: Callable[[str, str], None] | None = None,
+        on_subagent_tool_batch_start: Callable[[str, list[str]], None] | None = None,
+        on_subagent_llm_stage: Callable[[str, str], None] | None = None,
+        on_subagent_llm_queue_status: Callable[[str, LLMQueueStatus], None] | None = None,
         trajectory_recorder: TrajectoryRecorder | None = None,
         stats: RunStats | None = None,
+        task_run: TaskRun | None = None,
     ) -> str:
         """Execute a single tool with all checks."""
         run_id = stats.run_id if stats else "unknown"
@@ -1033,10 +1343,24 @@ class AgentLoop:
                 run_id=run_id,
                 permission_checker=self._permission_checker,
                 enforce_tool_allowlist=self._enforce_tool_permissions,
+                on_subagent_tool_start=on_subagent_tool_start,
+                on_subagent_tool_batch_start=on_subagent_tool_batch_start,
+                on_subagent_llm_stage=on_subagent_llm_stage,
+                on_subagent_llm_queue_status=on_subagent_llm_queue_status,
             )
             status = "error" if result.startswith("Error") else "ok"
             if status == "error":
                 health.increment("tool_errors")
+            if task_run is not None:
+                task_run.record_tool_call(
+                    user,
+                    run_id,
+                    name=tc.name,
+                    args_hash=_payload_hash(tc.arguments),
+                    status=status,
+                    duration_ms=(time.monotonic() - tool_t0) * 1000,
+                    error=result if status == "error" else None,
+                )
 
         except ApprovalRequest as e:
             log_event(
@@ -1069,6 +1393,10 @@ class AgentLoop:
                         run_id=run_id,
                         permission_checker=self._permission_checker,
                         enforce_tool_allowlist=self._enforce_tool_permissions,
+                        on_subagent_tool_start=on_subagent_tool_start,
+                        on_subagent_tool_batch_start=on_subagent_tool_batch_start,
+                        on_subagent_llm_stage=on_subagent_llm_stage,
+                        on_subagent_llm_queue_status=on_subagent_llm_queue_status,
                     )
                     status = "ok"
                 else:

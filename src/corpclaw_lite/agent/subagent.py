@@ -5,13 +5,17 @@ import logging
 import re
 import time
 import uuid
+from collections.abc import Callable
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import anyio
 
 from corpclaw_lite.agent.loop import AgentConfig, AgentLoop
+from corpclaw_lite.agent.task_run import TaskRun
 from corpclaw_lite.config.settings import AgentSettings
 from corpclaw_lite.extensions.subagents.base import SubagentSpec
+from corpclaw_lite.extensions.tools.builtin.research import detect_language
 from corpclaw_lite.extensions.tools.registry import ToolRegistry
 from corpclaw_lite.logging.trace import log_event
 from corpclaw_lite.users.models import User
@@ -24,7 +28,9 @@ if TYPE_CHECKING:
     from corpclaw_lite.departments.permissions import PermissionChecker
     from corpclaw_lite.extensions.skills.matcher import SkillMatcher
     from corpclaw_lite.extensions.skills.registry import SkillRegistry
+    from corpclaw_lite.extensions.tools.builtin.research import ResearchRuntime
     from corpclaw_lite.llm.base import Provider
+    from corpclaw_lite.llm.queue import LLMQueueStatus
     from corpclaw_lite.security.tool_guard import ToolGuard
 
 logger = logging.getLogger(__name__)
@@ -67,8 +73,11 @@ def _prepare_research_task_context(spec: SubagentSpec, task_context: str) -> str
     mode = _research_mode_for_task(spec, task_context)
     if mode is None:
         return task_context
+    language = detect_language(task_context)
     return (
         f"Research mode: {mode}\n"
+        f"Target language: {language}\n"
+        "Write the final report ONLY in this language. Do not switch to English.\n"
         "Use the research-specific tools and finish with research_finalize.\n\n"
         f"{task_context}"
     )
@@ -99,6 +108,8 @@ class SubagentDispatcher:
         permission_checker: PermissionChecker | None = None,
         skill_matcher: SkillMatcher | None = None,
         skill_registry: SkillRegistry | None = None,
+        research_runtime: ResearchRuntime | None = None,
+        workspace_base: Path | None = None,
     ) -> None:
         self._provider = provider
         self._main_registry = main_registry
@@ -107,6 +118,8 @@ class SubagentDispatcher:
         self._permission_checker = permission_checker
         self._skill_matcher = skill_matcher
         self._skill_registry = skill_registry
+        self._research_runtime = research_runtime
+        self._workspace_base = workspace_base
 
     async def dispatch(
         self,
@@ -115,6 +128,10 @@ class SubagentDispatcher:
         task_context: str,
         *,
         parent_run_id: str | None = None,
+        on_subagent_tool_start: Callable[[str, str], None] | None = None,
+        on_subagent_tool_batch_start: Callable[[str, list[str]], None] | None = None,
+        on_subagent_llm_stage: Callable[[str, str], None] | None = None,
+        on_subagent_llm_queue_status: Callable[[str, LLMQueueStatus], None] | None = None,
     ) -> str:
         """Run the subagent on a specific task."""
         subagent_run_id = uuid.uuid4().hex
@@ -205,28 +222,91 @@ class SubagentDispatcher:
                 system_prompt += skill_block
                 logger.debug("Subagent %s: injected %d skills for task", spec.id, len(matched))
 
+        # B-049: per-subagent wall-clock budget. When the spec overrides max_wall_time_ms
+        # (e.g. research-agent at 600000ms), clone the parent AgentSettings with the
+        # override so the inner AgentLoop's SimpleBudgetGuard AND SoftDeadline scale to
+        # the same window, and the outer asyncio.wait_for uses it as its hard limit.
+        # pydantic model_copy produces an independent instance — the parent agent's
+        # budget is untouched.
+        effective_settings = self._settings
+        if spec.max_wall_time_ms is not None:
+            effective_settings = self._settings.model_copy(
+                update={"max_wall_time_ms": spec.max_wall_time_ms}
+            )
+
         # Setup isolated loop — pass security guards through from parent
         loop = AgentLoop(
             AgentConfig(
                 provider=effective_provider,
                 registry=isolated_registry,
-                settings=self._settings,
+                settings=effective_settings,
                 enforce_tool_permissions=False,
                 tool_guard=self._tool_guard,
                 permission_checker=self._permission_checker,
+                workspace_base=self._workspace_base,
+                # B-047: workflow-finalize guard wiring. When the spec declares a
+                # terminal tool (research-agent → research_finalize), the inner loop
+                # nudges/restricts toward it as the budget runs out.
+                terminal_tool=spec.terminal_tool,
+                required_before_terminal=list(spec.required_before_terminal),
             )
         )
 
-        timeout_seconds = self._settings.max_wall_time_ms / 1000
+        timeout_seconds = effective_settings.max_wall_time_ms / 1000
+        subagent_name = spec.name
 
         try:
             t0 = time.monotonic()
             effective_task_context = _prepare_research_task_context(spec, task_context)
+            research_mode = _research_mode_for_task(spec, task_context)
+            if self._research_runtime is not None and research_mode is not None:
+                mode = "deep_research" if research_mode == "deep_research" else "research"
+                language = detect_language(task_context)
+                self._research_runtime.initialize_run_mode(
+                    user, subagent_run_id, mode, language=language
+                )
+                log_event(
+                    "research_run_mode_initialized",
+                    subagent_run_id,
+                    parent_run_id=parent_run_id,
+                    subagent_id=spec.id,
+                    mode=mode,
+                    language=language,
+                )
+
+            def forward_tool_start(tool_name: str) -> None:
+                if on_subagent_tool_start is not None:
+                    on_subagent_tool_start(subagent_name, tool_name)
+
+            def forward_tool_batch_start(tool_names: list[str]) -> None:
+                if on_subagent_tool_batch_start is not None:
+                    on_subagent_tool_batch_start(subagent_name, tool_names)
+
+            def forward_llm_stage(stage: str) -> None:
+                if on_subagent_llm_stage is not None:
+                    on_subagent_llm_stage(subagent_name, stage)
+
+            def forward_queue_status(status: LLMQueueStatus) -> None:
+                if on_subagent_llm_queue_status is not None:
+                    on_subagent_llm_queue_status(subagent_name, status)
+
             result, _ = await asyncio.wait_for(
                 loop.run(
                     user,
                     effective_task_context,
                     system_prompt=system_prompt,
+                    on_tool_start=(
+                        forward_tool_start if on_subagent_tool_start is not None else None
+                    ),
+                    on_tool_batch_start=(
+                        forward_tool_batch_start
+                        if on_subagent_tool_batch_start is not None
+                        else None
+                    ),
+                    on_llm_stage=forward_llm_stage if on_subagent_llm_stage is not None else None,
+                    on_llm_queue_status=(
+                        forward_queue_status if on_subagent_llm_queue_status is not None else None
+                    ),
                     run_id=subagent_run_id,
                 ),
                 timeout=timeout_seconds,
@@ -262,6 +342,35 @@ class SubagentDispatcher:
                 status="timeout",
                 timeout_seconds=timeout_seconds,
             )
+            # Research-agent: recover stored facts/sources as a partial report instead
+            # of a bare error (B-036). B-045: interrupted=True renders an honest skeleton
+            # — banner + gathered facts + sources + a limitation noting synthesis did not
+            # happen — instead of pretending the facts dump is a finished deep report.
+            if spec.id == "research-agent" and self._research_runtime is not None:
+                research_mode = _research_mode_for_task(spec, task_context)
+                mode = "deep_research" if research_mode == "deep_research" else "research"
+                try:
+                    partial = self._research_runtime.finalize_report(
+                        user, subagent_run_id, mode, answer="", interrupted=True
+                    )
+                except Exception as partial_err:  # pragma: no cover - defensive
+                    logger.warning("Research partial-handoff failed: %s", partial_err)
+                    return f"Subagent error: execution timed out after {int(timeout_seconds)}s"
+                TaskRun(self._workspace_base).generate_handoff(
+                    user,
+                    subagent_run_id,
+                    partial_result=partial,
+                    reason=f"research-agent timed out after {int(timeout_seconds)}s",
+                )
+                log_event(
+                    "subagent_partial_handoff",
+                    subagent_run_id,
+                    parent_run_id=parent_run_id,
+                    subagent_id=spec.id,
+                    timeout_seconds=timeout_seconds,
+                    partial_len=len(partial),
+                )
+                return partial
             return f"Subagent error: execution timed out after {int(timeout_seconds)}s"
         except Exception as e:
             logger.error("Subagent %s failed: %s", spec.id, e)

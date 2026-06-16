@@ -259,3 +259,102 @@ class TestConvertFormatTool:
         csv_content = (tmp_path / "orig.csv").read_text(encoding="utf-8-sig")
         assert "Иванов" in csv_content
         assert "Бухгалтерия" in csv_content
+
+    # --- XLSX lossy-conversion note (Правка 1) ---
+
+    @pytest.mark.asyncio
+    async def test_convert_xlsx_input_warns_formula_loss(
+        self, tool: ConvertFormatTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """XLSX input conversion must surface the lossy-read note."""
+        monkeypatch.chdir(tmp_path)
+        _create_xlsx(tmp_path / "data.xlsx", ["a", "b"], [["1", "2"]])
+
+        result = await tool.execute(input_path="data.xlsx", output_format="csv")
+        assert "Converted" in result
+        assert "values only" in result
+        assert "excel_workbook" in result
+
+    @pytest.mark.asyncio
+    async def test_convert_non_xlsx_input_has_no_lossy_note(
+        self, tool: ConvertFormatTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """CSV/JSON/Markdown inputs are not lossy and must not carry the note."""
+        monkeypatch.chdir(tmp_path)
+        _create_csv(tmp_path / "data.csv", "a,b\n1,2\n")
+
+        result = await tool.execute(input_path="data.csv", output_format="json")
+        assert "Converted" in result
+        assert "values only" not in result
+
+    # --- type-aware xlsx writer (Правка 2) ---
+
+    @pytest.mark.asyncio
+    async def test_write_xlsx_preserves_types(
+        self, tool: ConvertFormatTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """XLSX output applies number_format matching the Python type of each value."""
+        import openpyxl
+
+        monkeypatch.chdir(tmp_path)
+        _create_json(
+            tmp_path / "data.json",
+            [
+                {"inn": "0077000000", "count": 42, "price": 12.5},
+                {"inn": "0077000001", "count": 7, "price": 3.14},
+            ],
+        )
+
+        result = await tool.execute(input_path="data.json", output_format="xlsx")
+        assert "Converted" in result
+
+        wb = openpyxl.load_workbook(str(tmp_path / "data.xlsx"))
+        ws = wb.active
+        assert ws is not None
+        # Header row is text-formatted.
+        assert ws.cell(row=1, column=1).number_format == "@"
+        # INN strings keep text format so leading zeros survive in Excel.
+        assert ws.cell(row=2, column=1).number_format == "@"
+        assert ws.cell(row=2, column=1).value == "0077000000"
+        # int → "0", float → "0.00".
+        assert ws.cell(row=2, column=2).number_format == "0"
+        assert ws.cell(row=2, column=2).value == 42
+        assert ws.cell(row=2, column=3).number_format == "0.00"
+        assert ws.cell(row=2, column=3).value == 12.5
+        wb.close()
+
+    # --- duplicate headers (Правка 3) ---
+
+    @pytest.mark.asyncio
+    async def test_load_csv_duplicate_headers(
+        self, tool: ConvertFormatTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Duplicate CSV headers are renamed col, col_1 — no data loss."""
+        monkeypatch.chdir(tmp_path)
+        _create_csv(tmp_path / "data.csv", "name,city,name\nAlice,Moscow,Alice A.\n")
+
+        result = await tool.execute(input_path="data.csv", output_format="json")
+        assert "Converted" in result
+        data = json.loads((tmp_path / "data.json").read_text(encoding="utf-8"))
+        assert data[0]["name"] == "Alice"
+        assert data[0]["name_1"] == "Alice A."
+        assert data[0]["city"] == "Moscow"
+
+    @pytest.mark.asyncio
+    async def test_load_xlsx_duplicate_headers(
+        self, tool: ConvertFormatTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Duplicate XLSX headers are renamed col, col_1 — no data loss."""
+        monkeypatch.chdir(tmp_path)
+        _create_xlsx(
+            tmp_path / "data.xlsx",
+            ["name", "city", "name"],
+            [["Alice", "Moscow", "Alice A."]],
+        )
+
+        result = await tool.execute(input_path="data.xlsx", output_format="json")
+        assert "Converted" in result
+        data = json.loads((tmp_path / "data.json").read_text(encoding="utf-8"))
+        assert data[0]["name"] == "Alice"
+        assert data[0]["name_1"] == "Alice A."
+        assert data[0]["city"] == "Moscow"

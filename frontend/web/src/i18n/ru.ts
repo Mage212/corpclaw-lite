@@ -19,6 +19,8 @@ export function statusPhaseLabel(phase: string): string {
       return "Ожидание";
     case "request":
       return "Запрос";
+    case "queue":
+      return "Очередь";
     case "llm":
       return "LLM";
     case "tool":

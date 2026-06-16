@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -13,6 +14,7 @@ __all__ = [
 ]
 
 if TYPE_CHECKING:
+    from corpclaw_lite.llm.queue import LLMQueueStatus
     from corpclaw_lite.users.models import User
 
 logger = logging.getLogger(__name__)
@@ -85,6 +87,10 @@ class ToolRegistry:
         run_id: str | None = None,
         permission_checker: Any | None = None,
         enforce_tool_allowlist: bool = True,
+        on_subagent_tool_start: Callable[[str, str], None] | None = None,
+        on_subagent_tool_batch_start: Callable[[str, list[str]], None] | None = None,
+        on_subagent_llm_stage: Callable[[str, str], None] | None = None,
+        on_subagent_llm_queue_status: Callable[[str, LLMQueueStatus], None] | None = None,
     ) -> str:
         """Execute a tool by name with arguments.
 
@@ -119,6 +125,14 @@ class ToolRegistry:
             tool_kwargs = dict(arguments)
             tool_kwargs["user"] = user
             tool_kwargs["run_id"] = run_id
+            if on_subagent_tool_start is not None:
+                tool_kwargs["on_subagent_tool_start"] = on_subagent_tool_start
+            if on_subagent_tool_batch_start is not None:
+                tool_kwargs["on_subagent_tool_batch_start"] = on_subagent_tool_batch_start
+            if on_subagent_llm_stage is not None:
+                tool_kwargs["on_subagent_llm_stage"] = on_subagent_llm_stage
+            if on_subagent_llm_queue_status is not None:
+                tool_kwargs["on_subagent_llm_queue_status"] = on_subagent_llm_queue_status
             result = await tool.execute(**tool_kwargs)
         except Exception as e:
             logger.exception("Tool '%s' execution failed", name)

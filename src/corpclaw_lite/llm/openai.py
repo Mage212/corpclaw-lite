@@ -20,7 +20,7 @@ from corpclaw_lite.llm.base import (
     get_backend_request_options,
 )
 from corpclaw_lite.llm.presets import ModelPreset
-from corpclaw_lite.llm.xml_tool_calling import parse_xml_tool_call
+from corpclaw_lite.llm.xml_tool_calling import parse_xml_tool_calls
 
 __all__ = [
     "OpenAIProvider",
@@ -237,13 +237,15 @@ class OpenAIProvider(Provider):
             _MARKERS = ("<tool_call>", "<function=")
             if any(m in reasoning_text for m in _MARKERS):
                 allowed_names = {t["function"]["name"] for t in tools if "function" in t}
-                parse_result = parse_xml_tool_call(reasoning_text, allowed_tool_names=allowed_names)
-                if parse_result.tool_call:
+                parse_result = parse_xml_tool_calls(
+                    reasoning_text, allowed_tool_names=allowed_names
+                )
+                if parse_result.tool_calls:
                     logger.info(
-                        "XML fallback (reasoning_content): parsed tool_call %s",
-                        parse_result.tool_call.name,
+                        "XML fallback (reasoning_content): parsed %d tool_call(s)",
+                        len(parse_result.tool_calls),
                     )
-                    return "", [*tool_calls, parse_result.tool_call]
+                    return "", [*tool_calls, *parse_result.tool_calls]
                 logger.debug("XML fallback (reasoning_content): no tool_call parsed from reasoning")
                 return reasoning_text.strip(), tool_calls
             return reasoning_text.strip(), tool_calls
@@ -331,13 +333,14 @@ class OpenAIProvider(Provider):
 
         if not tool_calls and tools and content:
             allowed_names = {t["function"]["name"] for t in tools if "function" in t}
-            parse_result = parse_xml_tool_call(content, allowed_tool_names=allowed_names)
-            if parse_result.tool_call:
+            parse_result = parse_xml_tool_calls(content, allowed_tool_names=allowed_names)
+            if parse_result.tool_calls:
                 logger.info(
-                    "XML fallback (content): parsed tool_call %s",
-                    parse_result.tool_call.name,
+                    "XML fallback (content): parsed %d tool_call(s)",
+                    len(parse_result.tool_calls),
                 )
-                tool_calls.append(parse_result.tool_call)
+                tool_calls.extend(parse_result.tool_calls)
+                content = ""
 
         return LLMResponse(
             content=content,

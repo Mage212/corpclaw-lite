@@ -97,7 +97,17 @@ export type WorkspaceOverviewPayload = {
 export type RunTimelineEvent = {
   id: string;
   requestId: string | null;
-  type: "request" | "llm" | "tool" | "approval" | "file" | "warning" | "error" | "done" | "reset";
+  type:
+    | "request"
+    | "queue"
+    | "llm"
+    | "tool"
+    | "approval"
+    | "file"
+    | "warning"
+    | "error"
+    | "done"
+    | "reset";
   label: string;
   detail?: string | undefined;
   tone: "idle" | "running" | "warning" | "error" | "done";

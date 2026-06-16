@@ -22,9 +22,9 @@ export type ServerWsEvent =
   | { type: "chat_history"; messages: ChatMessage[]; has_more: boolean; session_id?: number }
   | { type: "history_page"; messages: ChatMessage[]; has_more: boolean; session_id?: number }
   | { type: "chat_message"; message: ChatMessage }
-  | { type: "request_started"; request_id: string; label: string }
-  | { type: "request_state"; request_id: string; label: string }
-  | { type: "status_update"; request_id: string; label: string; phase: string }
+  | { type: "request_started"; request_id: string; label: string; phase?: string; key?: string }
+  | { type: "request_state"; request_id: string; label: string; phase?: string; key?: string }
+  | { type: "status_update"; request_id: string; label: string; phase: string; key?: string }
   | { type: "status"; stage: string }
   | { type: "assistant_message"; message: string }
   | {
@@ -421,25 +421,41 @@ export function parseServerWsEvent(value: unknown): ServerWsEvent | null {
       const message = parseChatMessage(value.message);
       return message === null ? null : { type: "chat_message", message };
     }
-    case "request_started":
-      return {
+    case "request_started": {
+      const event: Extract<ServerWsEvent, { type: "request_started" }> = {
         type: "request_started",
         request_id: stringValue(value.request_id, ""),
         label: stringValue(value.label, "В обработке...")
       };
-    case "request_state":
-      return {
+      const phase = optionalString(value.phase);
+      const key = optionalString(value.key);
+      if (phase !== undefined) event.phase = phase;
+      if (key !== undefined) event.key = key;
+      return event;
+    }
+    case "request_state": {
+      const event: Extract<ServerWsEvent, { type: "request_state" }> = {
         type: "request_state",
         request_id: stringValue(value.request_id, ""),
         label: stringValue(value.label, "В обработке...")
       };
-    case "status_update":
-      return {
+      const phase = optionalString(value.phase);
+      const key = optionalString(value.key);
+      if (phase !== undefined) event.phase = phase;
+      if (key !== undefined) event.key = key;
+      return event;
+    }
+    case "status_update": {
+      const event: Extract<ServerWsEvent, { type: "status_update" }> = {
         type: "status_update",
         request_id: stringValue(value.request_id, ""),
         label: stringValue(value.label, stringValue(value.key, "В обработке...")),
         phase: stringValue(value.phase, "status")
       };
+      const key = optionalString(value.key);
+      if (key !== undefined) event.key = key;
+      return event;
+    }
     case "status":
       return { type: "status", stage: stringValue(value.stage, "") };
     case "assistant_message":

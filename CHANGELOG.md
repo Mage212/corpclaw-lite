@@ -4,6 +4,320 @@
 
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/).
 
+## [non-version] — 2026-06-05
+
+### Changed
+
+- Стабилизирован системный prompt layer проекта: core/subagent prompts, builtin subagent
+  metadata и skill instructions приведены к английскому языку; русские фразы оставлены только
+  как явно помеченные examples/pattern examples/keywords для распознавания пользовательских
+  формулировок.
+- Research-agent final answer templates заменены на language-neutral описания секций, чтобы
+  системный prompt не смешивал русские и английские заголовки внутри одного шаблона.
+
+### Added
+
+- Добавлена focused-проверка prompt hygiene, запрещающая кириллицу в системных prompt surfaces
+  вне явно разрешённых зон examples/patterns/keywords и ловящая транслит в subagent metadata.
+
+### Verified
+
+- `uv run ruff check src/ tests/test_prompt_hygiene.py` — clean.
+- `uv run pyright src/` — `0 errors` (17 существующих matplotlib stub warnings).
+- `uv run pytest tests/ -v` — `1060 passed, 1 skipped`.
+
+## [0.1.11] — 2026-06-16
+
+Фокус версии — достоверность источников research-агента на локальных LLM. Три задачи
+(B-052, B-053, B-054) закрывают три разных режима галлюцинации, выявленных в live-тестах
+`deep_research`: (1) веб-поиск падает на transient-блоках → модель выдумывает URL; (2) на
+длинном контексте модель «забывает» реальные source_id и выдумывает новые; (3) 404/403-страницы
+сохраняются как валидные источники и цитируются в отчёте.
+
+Валидировано live-раном `1b038558` (2026-06-16): 10/10 источников HTTP 200 (было 4/10 живых),
+0 галлюцинированных source_id, finalize-валидация пройдена с первого раза, укладывается в
+264с из 600с окна. Модель честно признаёт пробелы (HTTP 404) вместо маскировки их фактами.
+
+### Added
+
+- **B-054-2 — Динамический бюджет источников и поиска.** Новые поля `ResearchSettings`:
+  `target_usable_sources=5`, `dynamic_budget_max_multiplier=2.5`. Новые методы `ResearchRuntime`:
+  `available_sources_count()` (считает только HTTP 2xx), `effective_max_sources()`,
+  `effective_search_waves()`. Расширение failure-driven: `limit = min(max(base, base + failed),
+  cap)` — чистый рун останавливается на base, каждый не-2xx fetch даёт один дополнительный
+  слот чтобы добрать target_usable_sources, жёсткий потолок `base * multiplier`. `reserve_fetch`
+  и оба search-бюджета (`reserve_search`, `search_budget_exceeded`) используют динамические
+  лимиты. `target_usable_sources` — мягкая цель, на которую модель направляют через промпт,
+  а не значение, способное переопределить base.
+- **B-054-3 — Валидация недоступных источников в finalize.** `_validate_report` (новая
+  проверка 2b) отклоняет ответы, цитирующие source_id или URL со статусом ≠ 2xx. Строит
+  карту source_id/url → status по манифесту; недоступные цитаты → Error «remove them from
+  citations», модель направляется к `research_list_sources`. Идёт после проверок integrity
+  source_id/URL, усиливая их.
+- **B-053 — `research_list_sources` + source-anchor в `store_fact`.** Новый инструмент
+  `ResearchListSourcesTool` (`research_list_sources`) — зеркало `research_list_facts` для
+  источников: возвращает точный список `[source_id → title | url | status]`. Устраняет
+  галлюцинацию source_id в `research_store_fact` на длинном контексте (модель получала
+  реальные ID от `fetch_source`, но через ~200с «забывала» их и выдумывала 12-hex ID).
+  `store_fact` при Unknown source_id теперь возвращает реальные кэшированные source_ids
+  (самокорректирующаяся ошибка): жёсткий нудж, если `list_sources` не вызывался, мягкий —
+  если вызывался. Счастливый путь `fetch → store` не блокируется. `ResearchRuntime.format_sources_list`,
+  флаг состояния `list_sources_called`, `research-agent.yaml` `allowed_tools`.
+- **B-052 — Resilience веб-поиска (auto backend + retry) + offline-режим.**
+  - `WebSearchTool._search_sync` ретраит `search_retry_attempts` раз с backoff перед тем
+    как сообщить об ошибке; каскадный сбой → маркер «unavailable (infrastructure)».
+    Удалён мёртвый код (`RatelimitException`, недостижимая ветка `if not results` —
+    `ddgs.text()` никогда не возвращает `[]`, всегда бросает `DDGSException`).
+  - Бюджет: `ResearchSearchTool` peek-ает бюджет (`search_budget_exceeded`) до HTTP-запроса,
+    а unit (`reserve_search`) списывает только при успехе. Инфраструктурные сбои НЕ списывают
+    бюджет (`refund_search`). `mark_search_failure` / `is_web_search_degraded`: после ≥2 сбоев
+    рун помечается `web_search_degraded`, модель получает `_WEB_SEARCH_DEGRADED_MESSAGE`
+    («прекрати веб-поиск, не выдумывай URL»).
+  - Offline-режим: правила в `research.md` (остановить поиск, не выдумывать URL, ответить
+    из знаний с явной пометкой) + `finalize_report` safety-net баннер «web search was
+    unavailable... based on model knowledge», даже если модель его пропустила.
+
+### Changed
+
+- **B-054-1 — Глобальный HTTP-фильтр в `web.py:_fetch`.** Не-2xx ответ (404/403/5xx)
+  теперь возвращает `Error: HTTP {code} ... The source is unavailable; do not cache or cite it`
+  *до* любого парсинга контента. Поскольку `research_fetch_source.execute` проверяет
+  `result.startswith("Error")` до `store_source`, 4xx/5xx страницы физически не попадают в
+  манифест. Глобально — лечит и `research_fetch_source`, и `web_fetch` основного агента.
+  Редиректы (is_redirect → re-fetch) и 2xx не затронуты.
+- **B-052-2 — Конфигурация веб-поиска.** `WebSettings.search_backend` default `duckduckgo`
+  → `auto` (8 движков с fallback; `duckduckgo` transient-блокирует серверные запросы через
+  `html.duckduckgo.com/html/`). Новые поля: `search_retry_attempts=3`,
+  `search_retry_backoff_seconds=1.5`.
+- **B-054-4 — Промпт `research.md`.** Добавлено правило: HTTP-error источник (4xx/5xx)
+  недоступен навсегда — не ретраить тот же URL, не цитировать; перед `store_fact`/`finalize`
+  сверять usable-источники через `research_list_sources`.
+- **B-053 — Промпт `research.md`.** Документирован инструмент `research_list_sources` и
+  усилен workflow (вызов `research_list_sources` перед `store_fact` для точных source_id).
+
+### Verified
+
+- `uv run ruff check src/ tests/` — clean.
+- `uv run pyright src/` — `0 errors` (17 существующих matplotlib stub warnings).
+- `uv run pytest tests/ -v` — `1165 passed, 1 skipped` (+105 тестов с 0.1.10).
+- Live-ран `1b038558`: 10/10 источников HTTP 200, 0 галлюцинированных source_id, 5 fetch-ошибок
+  корректно отбракованы HTTP-фильтром B-054-1, finalize `validation_passed` с первого раза.
+
+
+
+Фокус версии — устойчивость research-агента в тяжёлом `deep_research` на локальных LLM.
+Комплекс из 5 задач (B-045…B-049) по стратегии finalize-first (D-048): больше окно →
+подталкивание модели к `research_finalize` внутри окна → честный skeleton как safety-net.
+
+### Added
+
+- **B-049 — Per-subagent wall-clock budget.** Поле `max_wall_time_ms` в `SubagentSpec` +
+  `research-agent.yaml: 600000` (10 мин). `subagent.py` клонирует `AgentSettings` через
+  `model_copy` со значением из спеки, так что внутренний `AgentLoop` budget + `SoftDeadline`
+  + `asyncio.wait_for` outer limit масштабируются автоматически; родительский агент и
+  остальные субагенты остаются на 5 мин. **Багфикс:** `watcher.py:_load_spec` не передавал
+  `direct_response` (дивергенция с `registry.py`) — починено, оба лоадера теперь идентичны;
+  добавлен регресс-тест `test_watcher_load_spec_matches_registry`.
+- **B-047 — Workflow-finalize guard (`TerminalToolMandate`).** Детерминированный гвард в
+  `agent/guards.py`, знающий про обязательную терминальную воронку research
+  (`store_fact → list_facts → research_finalize`). Эскалация: nudge (60% — системное
+  напоминание «прекратите сбор, вызовите list_facts+finalize») → restrict (75% —
+  `tools_schema` урезан до `{list_facts, finalize}`). Нейтрален без `terminal_tool`
+  (основной агент, не-research субагенты). Строго детерминирован — не нарушает запрет
+  AGENTS.md на LLM-based planning. Поля `SubagentSpec.terminal_tool`/`required_before_terminal`
+  + wiring через `AgentConfig` → `AgentLoop`. Trace events `workflow_nudge_injected`,
+  `workflow_restrict_applied`.
+- **B-045 — Честный skeleton на partial-handoff (вариант A).** При таймауте
+  `finalize_report(interrupted=True)` рендерит честный баннер «⚠️ Исследование прервано по
+  лимиту времени» + собранные факты + источники + «Синтез не выполнен», БЕЗ фейковых секций
+  «Противоречия/Гипотезы/Рекомендации» которые обещает finished deep_research. Новые
+  `_INTERRUPTED_REPORT_TEMPLATES` (4: ru/en × research/deep_research).
+
+### Changed
+
+- **B-048 — Дедуп фактов в deep_research-шаблоне.** «Ключевые выводы» используют `{facts}`
+  (brief, без evidence-экзепшена), «Факты и подтверждения» — новый `{evidence}` (full). Раньше
+  обе секции рендерили один `{facts}` → факты дублировались. `_facts_markdown(with_evidence)`.
+- **B-046 — SoftDeadline granularity.** Closing-mode логика вынесена в
+  `AgentLoop._apply_closing_mode()` и вызывается не только в начале каждой итерации, но и
+  **непосредственно перед каждым LLM-вызовом** (3 ветки). Фиксит race: итерация стартовала до
+  soft_deadline (248s < 255s), длилась >50s, на 255s мы уже внутри LLM-вызова — теперь closing
+  mode включается на следующей итерации до LLM-вызова, а не после.
+
+### Decisions
+
+- **D-047** — направление B-045…B-049 как комплекс.
+- **D-048** — стратегия finalize-first: прерывание оставляем (освобождает GPU под
+  конкурентные запросы при ограниченных ресурсах), resume (B-050) отнесён в Phase 2.
+
+### Verified
+
+ruff clean, pyright 0 errors (17 существующих matplotlib stub warnings), pytest 1131
+passed/1 skipped (+39 новых тестов), coverage 78% (CI-гейт 75%).
+
+## [0.1.9] — 2026-06-15
+
+Фокус версии — частичный handoff и checkpointing для долгих субагентов на локальных LLM (B-036 MVP).
+
+### Added
+
+- `TaskRun` (`agent/task_run.py`) — per-run checkpoint-журнал в
+  `workspaces/user_<key>/.task_runs/<run_id>/` (`state.json`, `journal.jsonl`,
+  `handoff.md`) по паттерну `ResearchRuntime`. Методы `initialize`,
+  `record_tool_call`, `set_phase`, `mark_soft_deadline`, `generate_handoff`.
+- `SoftDeadline` (`agent/guards.py`) — wall-clock soft deadline через
+  `time.monotonic()`, без `pause()`/`resume()`. Фиксит race из памяти
+  `subagent-timeout-race-kills-d-038-rescue`: `asyncio.wait_for` (wall-clock)
+  всегда срабатывал раньше `SimpleBudgetGuard` (active time, D-040), поэтому
+  rescue D-038 никогда не работал для субагентов. Soft deadline тоже меряет
+  wall-clock и корректно срабатывает при queue-wait.
+- Closing mode в `AgentLoop.run()`: при достижении soft deadline (по умолчанию
+  `soft_deadline_ratio × max_wall_time_ms` = 0.85 × 300000 = 255s) цикл
+  урезает `tools_schema` до terminal-инструментов (`research_finalize` и т.п.),
+  заставляя модель финализировать вместо hard-cancel. `asyncio.wait_for`
+  остаётся аварийным внешним пределом.
+- Research partial-handoff: при таймауте research-субагента
+  `SubagentDispatcher` возвращает language-aware skeleton через
+  переиспользование `finalize_report(answer="")` (факты+источники+limitations),
+  а не bare `Subagent error: execution timed out`. Записывается `handoff.md`.
+- Trace-события: `agent_soft_deadline_reached`, `subagent_partial_handoff`.
+- Универсальный journal tool-вызовов в `AgentLoop._execute_single_tool` (args_hash,
+  status, duration, error) — единая точка перехвата.
+- `workspace_base` проброшен через `AgentConfig` → `AgentLoop` →
+  `SubagentDispatcher` для корректного расположения `.task_runs/`.
+
+### Changed
+
+- `AgentSettings.soft_deadline_ratio: float = 0.85` — новое поле.
+- `DispatchSubagentTool.should_return_direct` — задокументировано, что partial
+  reports проходят фильтр ошибок и идут пользователю напрямую (main agent не
+  повторяет тяжёлую работу).
+
+### Verified
+
+- `uv run ruff check src/ tests/` — clean.
+- `uv run pyright src/` — `0 errors` (17 существующих matplotlib stub warnings).
+- `uv run pytest tests/ -q` — `1092 passed, 1 skipped`.
+- Новые тесты: `tests/test_task_run.py` (5), `tests/test_soft_deadline.py` (7
+  включая race-fix contrast с SimpleBudgetGuard), `tests/test_research_partial_handoff.py`
+  (3: partial report, non-research bare error, trace event).
+- Manual live-LLM check deferred (требует локальную модель; soft_deadline_ratio
+  default 0.85 + closing mode non-breaking для short tasks).
+
+## [0.1.8] — 2026-06-14
+
+Фокус версии — детерминированная и аудируемая финализация research-agent (B-037).
+
+### Added
+
+- `detect_language()` — эвристика целевого языка research-задачи по доле кириллицы (порог 0.3);
+  язык сохраняется в `state.json` и инжектируется в task_context субагента как жёсткое поле
+  `Target language`.
+- Language-aware skeleton-шаблоны `_build_report()`: 4 набора заголовков (ru/en × research/
+  deep_research) вместо хардкода `## Executive summary` для deep_research.
+- `_validate_report()` в `finalize_report()`: соответствие языка ответа целевому, целостность
+  source_id/URL против manifest, мандат `research_list_facts` для deep_research, count-assertions
+  (число источников в отчёте ≤ реально fetched).
+- Гибридный recovery: до 2 retry через Error-строку (терминальный шлюз `loop.py:906-914`
+  пропускается), затем deterministic skeleton из stored facts. Защита от зацикливания:
+  `finalize_attempts` cap + `SimpleProgressGuard`.
+- `finalize_strict: bool = False` в `ResearchSettings` — soft-mode по умолчанию
+  (warn+trace, не блокирует); enforce после телеметрии.
+- Trace-события `research_finalize_validation_passed/failed/warning/skeleton_fallback` с counts
+  (mode, language, fetched_sources, facts_total, list_facts_called, finalize_attempts).
+- `mark_list_facts_called()` фиксирует факт вызова `research_list_facts` для аудита deep_research.
+
+### Verified
+
+- `uv run ruff check src/ tests/` — clean.
+- `uv run pyright src/` — `0 errors` (17 существующих matplotlib stub warnings).
+- `uv run pytest tests/ -q` — `1077 passed, 1 skipped`.
+- Новые тесты: `tests/test_research_finalization.py` (17 кейсов: language detection, strict
+  validation, recovery, trace, task_context injection).
+
+## [0.1.7] — 2026-06-05
+
+Фокус версии — корректное отображение LLM-очереди и ожидания начала генерации в Web/Telegram.
+
+### Added
+
+- Добавлен backend-контракт `LLMQueueStatus`: очередь LLM теперь отдаёт позицию, примерное
+  время ожидания, число активных запросов и фактическое время ожидания слота.
+- AgentLoop получил отдельные callbacks для ожидания LLM-слота основным агентом и субагентами,
+  а также явные стадии `model_preparing` и `model_waiting`.
+- Web и Telegram теперь показывают разные пользовательские состояния: ожидание GPU/LLM-слота
+  и ожидание начала генерации ответа модели.
+- Статусы LLM-очереди субагентов прокидываются с названием субагента, чтобы было понятно,
+  какой именно исполнитель ждёт слот или начало генерации.
+- Web timeline получил отдельную фазу `Очередь` и дедупликацию повторяющихся одинаковых
+  status-событий.
+
+### Changed
+
+- Telegram больше не использует отдельный pre-run polling очереди: статус ожидания слота теперь
+  приходит из самого `LLMRequestQueue`, то есть отражает реальное состояние backend-очереди.
+- Queue wait по-прежнему не сжигает agent budget: бюджет ставится на паузу до получения слота и
+  возобновляется перед фактическим LLM-вызовом.
+
+### Verified
+
+- Полная проверка: ruff clean, `uv run pyright src/` — `0 errors` (17 существующих
+  matplotlib stub warnings), `uv run pytest tests/ -v` — `1055 passed, 1 skipped`.
+- Frontend проверки: `npm run test` и `npm run build`.
+
+## [0.1.6] — 2026-06-04
+
+Фокус версии — трансляция внутренней работы субагентов в пользовательские статусы Web/Telegram.
+
+### Added
+
+- Добавлены subagent-aware status callbacks для tool calls, parallel tool batches и LLM stages
+  внутреннего `AgentLoop` субагента.
+- Telegram и Web теперь показывают вложенные статусы с человекочитаемым именем субагента,
+  например `Research Agent: 🤔 Думаю...` или `Document Agent: 📂 Читаю файл...`.
+
+### Changed
+
+- `dispatch_subagent` больше не оставляет пользовательский статус зависшим на «Делегирую
+  субагенту...»: дальнейшие tool/LLM стадии субагента прокидываются через существующий
+  callback pipeline без раскрытия task, arguments, results, prompt или reasoning content.
+- Runtime context `ToolRegistry.execute()` расширен служебными callback-параметрами для
+  `DispatchSubagentTool`; tool schema и LLM-visible arguments не изменились.
+
+### Verified
+
+- Focused проверки после форматирования: `52 passed` по subagent/status pipeline, progress и Web.
+- Полная проверка: ruff clean, `uv run pyright src/` — `0 errors` (17 существующих
+  matplotlib stub warnings), `uv run pytest tests/ -v` — `1038 passed, 1 skipped`.
+
+## [0.1.5] — 2026-06-04
+
+Фокус версии — улучшение пользовательской видимости текущих действий агента в Web/Telegram
+и закрепление процесса версионирования после функциональных доработок.
+
+### Added
+
+- Добавлен агрегированный статус для параллельных tool calls: AgentLoop теперь поддерживает
+  `on_tool_batch_start`, а Web/Telegram показывают один понятный статус вроде «Работаю с
+  файлами...» или «Выполняю 2 действия...» вместо гонки нескольких отдельных tool-статусов.
+- Введено проектное правило: после существенных функциональных изменений обновлять версию и
+  `CHANGELOG.md`; перед будущим выбором номера версии запрашивать подтверждение пользователя,
+  чтобы при крупных изменениях можно было поднять minor-версию.
+
+### Changed
+
+- Web-канал больше не превращает технический LLM stage `finished` в пользовательский статус
+  «В обработке...». Неизвестные/unmapped LLM stages игнорируются, а финальный переход остаётся
+  только через `request_finished`.
+- Parallel-safe инструменты больше не отправляют индивидуальные `on_tool_start` статусы внутри
+  одной параллельной пачки; одиночные и последовательные tool calls сохраняют прежнее поведение.
+
+### Verified
+
+- Полная проверка: `uv run ruff check src/ --fix && uv run ruff format src/ && uv run pyright src/ && uv run pytest tests/ -v`.
+- Результат: ruff clean, pyright `0 errors` (17 существующих matplotlib stub warnings),
+  pytest `1033 passed, 1 skipped`.
+
 ## [0.1.4-beta] — 2026-06-04
 
 Текущий beta-релиз. Основной фокус — production-ready Web-канал, премиальный русскоязычный

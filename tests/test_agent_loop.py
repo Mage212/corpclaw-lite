@@ -17,6 +17,8 @@ from corpclaw_lite.llm.base import (
     TokenUsage,
     ToolCall,
 )
+from corpclaw_lite.llm.queue import LLMQueueStatus, LLMRequestQueue
+from corpclaw_lite.llm.router import LLMRouter
 from corpclaw_lite.users.models import User
 
 
@@ -116,8 +118,51 @@ async def test_agent_loop_uses_backend_streaming_when_available(
     assert res == "Hello"
     assert provider.streamed_call_count == 1
     assert provider.call_count == 0
-    assert seen_stages == ["started", "answer", "finished"]
+    assert seen_stages == ["model_preparing", "model_waiting", "started", "answer", "finished"]
     assert stats.status == "ok"
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_reports_queue_then_model_waiting_status(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    provider = MockProvider(responses=[LLMResponse(content="queued response")])
+    queue = LLMRequestQueue(max_concurrent=1)
+    router = LLMRouter(
+        providers={},
+        default_provider=provider,
+        default_provider_name="llamacpp",
+        routing=[("default", None, provider, "llamacpp")],
+        queue=queue,
+    )
+    holder = await queue.acquire("holder")
+    queue_statuses: list[LLMQueueStatus] = []
+    stages: list[str] = []
+    loop = AgentLoop(AgentConfig(router, empty_registry, AgentSettings()))
+
+    task = asyncio.create_task(
+        loop.run(
+            test_user,
+            "Hi",
+            on_llm_queue_status=queue_statuses.append,
+            on_llm_stage=stages.append,
+        )
+    )
+    for _ in range(20):
+        if queue_statuses:
+            break
+        await asyncio.sleep(0.01)
+
+    assert queue_statuses
+    assert queue_statuses[0].position == 0
+    assert stages == []
+
+    await queue.release(holder, 0.1)
+    res, stats = await task
+
+    assert res == "queued response"
+    assert stats.status == "ok"
+    assert stages == ["model_preparing", "model_waiting"]
 
 
 @pytest.mark.asyncio
@@ -498,6 +543,7 @@ async def test_on_tool_start_callback_called(test_user: User, empty_registry: To
         name = "read_file"
         description = ""
         params = []  # type: ignore[var-annotated]
+        parallel_safe = False
 
         async def execute(self, **kwargs: Any) -> str:
             return "content"
@@ -525,6 +571,123 @@ async def test_on_tool_start_callback_called(test_user: User, empty_registry: To
 
     assert result == "Done."
     assert started_tools == ["read_file", "read_file"]
+    assert stats.tools_used == ["read_file", "read_file"]
+
+
+@pytest.mark.asyncio
+async def test_subagent_status_callbacks_passed_to_tool_runtime_context(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """Subagent status callbacks should reach runtime-aware tools."""
+    captured_kwargs: dict[str, Any] = {}
+
+    class FakeDispatchTool:
+        name = "dispatch_subagent"
+        description = ""
+        params = []  # type: ignore[var-annotated]
+        parallel_safe = False
+
+        async def execute(self, **kwargs: Any) -> str:
+            captured_kwargs.update(kwargs)
+            return "subagent result"
+
+    empty_registry._tools["dispatch_subagent"] = FakeDispatchTool()  # type: ignore
+
+    provider = MockProvider(
+        responses=[
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        id="1",
+                        name="dispatch_subagent",
+                        arguments={"subagent_id": "worker", "task": "work"},
+                    )
+                ],
+            ),
+            LLMResponse(content="Done."),
+        ]
+    )
+    loop = AgentLoop(AgentConfig(provider, empty_registry, AgentSettings()))
+    started_tools: list[str] = []
+
+    def on_subagent_tool_start(subagent_name: str, tool_name: str) -> None:
+        _ = subagent_name, tool_name
+
+    def on_subagent_tool_batch_start(subagent_name: str, tool_names: list[str]) -> None:
+        _ = subagent_name, tool_names
+
+    def on_subagent_llm_stage(subagent_name: str, stage: str) -> None:
+        _ = subagent_name, stage
+
+    def on_subagent_llm_queue_status(
+        subagent_name: str,
+        status: LLMQueueStatus,
+    ) -> None:
+        _ = subagent_name, status
+
+    result, stats = await loop.run(
+        test_user,
+        "delegate",
+        on_tool_start=started_tools.append,
+        on_subagent_tool_start=on_subagent_tool_start,
+        on_subagent_tool_batch_start=on_subagent_tool_batch_start,
+        on_subagent_llm_stage=on_subagent_llm_stage,
+        on_subagent_llm_queue_status=on_subagent_llm_queue_status,
+    )
+
+    assert result == "Done."
+    assert started_tools == ["dispatch_subagent"]
+    assert stats.tools_used == ["dispatch_subagent"]
+    assert captured_kwargs["on_subagent_tool_start"] is on_subagent_tool_start
+    assert captured_kwargs["on_subagent_tool_batch_start"] is on_subagent_tool_batch_start
+    assert captured_kwargs["on_subagent_llm_stage"] is on_subagent_llm_stage
+    assert captured_kwargs["on_subagent_llm_queue_status"] is on_subagent_llm_queue_status
+
+
+@pytest.mark.asyncio
+async def test_parallel_tool_batch_callback_suppresses_individual_starts(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """Parallel tool batches should emit one aggregate status update."""
+
+    class FakeTool:
+        name = "read_file"
+        description = ""
+        params = []  # type: ignore[var-annotated]
+        parallel_safe = True
+
+        async def execute(self, **kwargs: Any) -> str:
+            return "content"
+
+    empty_registry._tools["read_file"] = FakeTool()  # type: ignore
+
+    provider = MockProvider(
+        responses=[
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCall(id="1", name="read_file", arguments={}),
+                    ToolCall(id="2", name="read_file", arguments={}),
+                ],
+            ),
+            LLMResponse(content="Done."),
+        ]
+    )
+    loop = AgentLoop(AgentConfig(provider, empty_registry, AgentSettings()))
+    started_tools: list[str] = []
+    started_batches: list[list[str]] = []
+
+    result, stats = await loop.run(
+        test_user,
+        "read two files",
+        on_tool_start=lambda name: started_tools.append(name),
+        on_tool_batch_start=lambda names: started_batches.append(list(names)),
+    )
+
+    assert result == "Done."
+    assert started_tools == []
+    assert started_batches == [["read_file", "read_file"]]
     assert stats.tools_used == ["read_file", "read_file"]
 
 
@@ -625,15 +788,10 @@ async def test_pruning_in_loop_reduces_context(
 
 
 @pytest.mark.asyncio
-async def test_parallel_loop_all_results_added(
+async def test_parallel_same_batch_errors_do_not_trigger_loop(
     test_user: User, empty_registry: ToolRegistry
 ) -> None:
-    """Parallel loop detection must NOT orphan tool results.
-
-    When the progress guard detects a loop on the N-th tool in a parallel batch,
-    all results (including N+1, N+2, …) must still be added to context so that
-    every tool_call in the assistant message has a matching tool result.
-    """
+    """Repeated errors in one parallel action are one failed strategy, not a loop."""
     call_count = 0
 
     class LoopingTool:
@@ -649,10 +807,10 @@ async def test_parallel_loop_all_results_added(
 
     empty_registry._tools["loop_tool"] = LoopingTool()  # type: ignore
 
-    # 3 parallel tool calls — loop will be detected on the 1st one
     tool_calls = [ToolCall(id=str(i), name="loop_tool", arguments={}) for i in range(3)]
 
     captured_contexts: list[list[dict[str, Any]]] = []
+    captured_systems: list[str | None] = []
 
     class CapturingProvider(MockProvider):
         async def chat(  # type: ignore[override]
@@ -662,6 +820,7 @@ async def test_parallel_loop_all_results_added(
             system: Any = None,
         ) -> LLMResponse:
             captured_contexts.append(list(messages))
+            captured_systems.append(system if isinstance(system, str) else None)
             return await super().chat(messages, tools, system)
 
     provider = CapturingProvider(
@@ -674,14 +833,63 @@ async def test_parallel_loop_all_results_added(
     loop = AgentLoop(AgentConfig(provider, empty_registry, settings))
     result, stats = await loop.run(test_user, "run parallel")
 
-    # First loop detection gives LLM another chance; LLM responds with text → "ok"
     assert "stopped" in result.lower()
-    # All 3 tools were actually executed
     assert call_count == 3
     assert stats.status == "ok"
+    assert all("Internal recovery instruction" not in (system or "") for system in captured_systems)
 
     # The context sent to the first LLM call had the user message
     assert any(m.get("role") == "user" for m in captured_contexts[0])
+
+
+@pytest.mark.asyncio
+async def test_sequential_same_batch_errors_do_not_trigger_loop(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """Repeated errors in one non-parallel action are one failed strategy."""
+    call_count = 0
+
+    class LoopingTool:
+        name = "loop_tool"
+        description = ""
+        params: list[Any] = []
+        parallel_safe = False
+
+        async def execute(self, **kwargs: Any) -> str:
+            nonlocal call_count
+            call_count += 1
+            return "Error: same error every time"
+
+    empty_registry._tools["loop_tool"] = LoopingTool()  # type: ignore
+
+    tool_calls = [ToolCall(id=str(i), name="loop_tool", arguments={}) for i in range(3)]
+    captured_systems: list[str | None] = []
+
+    class CapturingProvider(MockProvider):
+        async def chat(  # type: ignore[override]
+            self,
+            messages: list[dict[str, Any]],
+            tools: Any = None,
+            system: Any = None,
+        ) -> LLMResponse:
+            captured_systems.append(system if isinstance(system, str) else None)
+            return await super().chat(messages, tools, system)
+
+    provider = CapturingProvider(
+        responses=[
+            LLMResponse(content="", tool_calls=tool_calls),
+            LLMResponse(content="Stopped."),
+        ]
+    )
+    settings = AgentSettings(max_steps=10, max_tool_calls=50)
+    loop = AgentLoop(AgentConfig(provider, empty_registry, settings))
+
+    result, stats = await loop.run(test_user, "run sequential")
+
+    assert result == "Stopped."
+    assert call_count == 3
+    assert stats.status == "ok"
+    assert all("Internal recovery instruction" not in (system or "") for system in captured_systems)
 
 
 @pytest.mark.asyncio
@@ -807,10 +1015,10 @@ async def test_parallel_tool_one_approved_one_denied(
 async def test_loop_detection_gives_second_chance(
     test_user: User, empty_registry: ToolRegistry
 ) -> None:
-    """First loop detection injects a warning and continues; second breaks.
+    """First loop detection gives a recovery turn; repeated failure then breaks.
 
-    P0-6: Previously loop detection immediately broke on the first occurrence,
-    meaning the LLM never saw the warning. Now the LLM gets one more turn.
+    The recovery hint is internal system context, not assistant text that can be
+    returned verbatim to the user.
     """
 
     class FailTool:
@@ -824,8 +1032,8 @@ async def test_loop_detection_gives_second_chance(
 
     empty_registry._tools["fail_tool"] = FailTool()  # type: ignore
 
-    call_count = 0
-    saw_warning: list[bool] = []
+    saw_recovery_instruction: list[bool] = []
+    saw_assistant_guard_text: list[bool] = []
 
     class TrackingProvider(MockProvider):
         async def chat(  # type: ignore[override]
@@ -834,10 +1042,10 @@ async def test_loop_detection_gives_second_chance(
             tools: Any = None,
             system: Any = None,
         ) -> LLMResponse:
-            nonlocal call_count
-            # Check if any message contains the loop warning
-            has_warning = any("System Guard" in str(m.get("content", "")) for m in messages)
-            saw_warning.append(has_warning)
+            has_recovery = "Internal recovery instruction" in str(system or "")
+            has_guard_text = any("System Guard" in str(m.get("content", "")) for m in messages)
+            saw_recovery_instruction.append(has_recovery)
+            saw_assistant_guard_text.append(has_guard_text)
             return await super().chat(messages, tools, system)
 
     # Enough responses: 3 errors to trigger first detection, warning injected,
@@ -857,7 +1065,304 @@ async def test_loop_detection_gives_second_chance(
     result, stats = await loop.run(test_user, "do it")
 
     assert stats.status == "loop"
-    # The LLM saw the warning at least once before the hard stop
-    assert any(saw_warning), "LLM should have seen the System Guard warning"
-    # More than 3 iterations (first detection doesn't stop immediately)
+    assert any(saw_recovery_instruction), "LLM should get one recovery turn"
+    assert not any(saw_assistant_guard_text), "Guard text must not be assistant-visible"
     assert stats.iterations > 3
+
+
+@pytest.mark.asyncio
+async def test_loop_guard_echo_is_not_returned_to_user(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """Old internal guard text must be converted to a user-facing fallback."""
+
+    provider = MockProvider(
+        responses=[
+            LLMResponse(
+                content=(
+                    "System Guard: You seem to be stuck in a loop repeating the same error. "
+                    "Please change your strategy or stop using this tool."
+                )
+            ),
+        ]
+    )
+    loop = AgentLoop(AgentConfig(provider, empty_registry, AgentSettings()))
+
+    result, stats = await loop.run(test_user, "run it")
+
+    assert not result.startswith("System Guard:")
+    assert "detected a loop" in result
+    assert stats.status == "loop"
+    assert stats.error == "model_echoed_loop_guard"
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_repairs_raw_xml_final_once(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    provider = MockProvider(
+        responses=[
+            LLMResponse(content="<tool_call>BROKEN XML</tool_call>"),
+            LLMResponse(content="safe answer"),
+        ]
+    )
+    loop = AgentLoop(AgentConfig(provider, empty_registry, AgentSettings()))
+
+    result, stats = await loop.run(test_user, "run it")
+
+    assert result == "safe answer"
+    assert "<tool_call>" not in result
+    assert provider.call_count == 2
+    assert stats.status == "ok"
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_raw_xml_final_falls_back_after_repair_failure(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    provider = MockProvider(
+        responses=[
+            LLMResponse(content="<tool_call>BROKEN XML</tool_call>"),
+            LLMResponse(content="<tool_call>STILL BROKEN</tool_call>"),
+        ]
+    )
+    loop = AgentLoop(AgentConfig(provider, empty_registry, AgentSettings()))
+
+    result, stats = await loop.run(test_user, "run it")
+
+    assert "<tool_call>" not in result
+    assert "could not safely parse" in result
+    assert provider.call_count == 2
+    assert stats.status == "error"
+    assert stats.error == "malformed_xml_tool_call"
+
+
+# ── B-046: soft deadline granularity (check before each LLM call) ────────────
+
+
+@pytest.mark.asyncio
+async def test_closing_mode_reduces_schema_before_llm_call(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """A long iteration that straddles the wall-clock soft deadline must still trigger
+    closing mode: by the next LLM call the schema is reduced to terminal tools only.
+
+    B-046 fix: previously the check ran once per iteration, so an iteration that started
+    just under the deadline and ran past it would only enter closing mode the iteration
+    *after* next — by which point asyncio.wait_for might cancel the whole run.
+    """
+
+    # A non-terminal tool the model keeps calling, plus a terminal one it could call
+    # to finalize. Closing mode must narrow the schema to the terminal tool.
+    class GatherTool:
+        name = "gather"
+        description = "gather"
+        params = []
+        terminal = False
+        parallel_safe = True
+
+        async def execute(self, **kwargs: Any) -> str:
+            # Slow each iteration so the 20ms wall-clock deadline is crossed between
+            # LLM calls (not after the whole run completes).
+            await asyncio.sleep(0.015)
+            return "gathered"
+
+    class FinalizeTool:
+        name = "finalize"
+        description = "finalize"
+        params = []
+        terminal = True
+        parallel_safe = True
+
+        async def execute(self, **kwargs: Any) -> str:
+            return "done"
+
+    empty_registry._tools["gather"] = GatherTool()  # type: ignore[attr-defined]
+    empty_registry._tools["finalize"] = FinalizeTool()  # type: ignore[attr-defined]
+
+    # Capture the tools list passed to each chat() call so we can assert narrowing.
+    captured_tools: list[list[dict[str, Any]]] = []
+
+    class CapturingProvider(MockProvider):
+        async def chat(self, messages, tools=None, system=None):  # type: ignore[override]
+            captured_tools.append(list(tools or []))
+            return await super().chat(messages, tools=tools, system=system)
+
+    # Tiny deadline: 0.1 * 200ms = 20ms. The model keeps calling `gather`; after 20ms
+    # the next chat() call must see a schema containing only `finalize`.
+    settings = AgentSettings(
+        max_steps=10,
+        max_tool_calls=30,
+        max_wall_time_ms=200,
+        soft_deadline_ratio=0.1,
+    )
+    provider = CapturingProvider(
+        responses=[
+            # Several iterations that keep gathering (slow path)...
+            LLMResponse(content="", tool_calls=[ToolCall(id=f"t{i}", name="gather", arguments={})])
+            for i in range(6)
+        ]
+        + [LLMResponse(content="final answer")]
+    )
+    loop = AgentLoop(AgentConfig(provider, empty_registry, settings))
+
+    result, stats = await loop.run(test_user, "research", channel="test")
+    assert isinstance(result, str)
+
+    tool_names_per_call = [
+        {str(t.get("function", {}).get("name", "")) for t in tools} for tools in captured_tools
+    ]
+    # Early calls see both tools.
+    assert "gather" in tool_names_per_call[0]
+    # After the deadline (within a few calls given the 20ms window), a later call sees
+    # only the terminal tool — closing mode engaged before that LLM call.
+    narrowed = [names for names in tool_names_per_call if names == {"finalize"}]
+    assert narrowed, f"expected a schema narrowed to {{finalize}}, got {tool_names_per_call}"
+
+
+# ── B-047: workflow-finalize guard (nudge + restrict) ────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_workflow_mandate_nudges_then_restricts(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """A research-style run that keeps gathering without finalizing is nudged toward
+    research_finalize (system note) and then has its schema restricted to the finalize
+    tool set as the wall-clock budget runs low.
+    """
+    import asyncio
+
+    class SearchTool:
+        name = "research_search"
+        description = "search"
+        params = []
+        terminal = False
+        parallel_safe = True
+
+        async def execute(self, **kwargs: Any) -> str:
+            # Slow enough that ~8 iterations cross the 0.75 restrict ratio (150ms of a
+            # 200ms window) well before the run ends.
+            await asyncio.sleep(0.03)
+            return "results"
+
+    class ListFactsTool:
+        name = "research_list_facts"
+        description = "list facts"
+        params = []
+        terminal = False
+        parallel_safe = True
+
+        async def execute(self, **kwargs: Any) -> str:
+            return "facts"
+
+    class FinalizeTool:
+        name = "research_finalize"
+        description = "finalize"
+        params = []
+        terminal = True
+        parallel_safe = True
+
+        async def execute(self, **kwargs: Any) -> str:
+            return "## Report\nfinal"
+
+    for t in (SearchTool(), ListFactsTool(), FinalizeTool()):
+        empty_registry._tools[t.name] = t  # type: ignore[attr-defined]
+
+    captured_tools: list[list[dict[str, Any]]] = []
+    captured_system: list[str] = []
+
+    class CapturingProvider(MockProvider):
+        async def chat(self, messages, tools=None, system=None):  # type: ignore[override]
+            captured_tools.append(list(tools or []))
+            captured_system.append(system or "")
+            return await super().chat(messages, tools=tools, system=system)
+
+    settings = AgentSettings(
+        max_steps=12,
+        max_tool_calls=40,
+        max_wall_time_ms=200,
+    )
+    provider = CapturingProvider(
+        responses=[
+            LLMResponse(
+                content="", tool_calls=[ToolCall(id=f"t{i}", name="research_search", arguments={})]
+            )
+            for i in range(8)
+        ]
+        + [LLMResponse(content="## Report\nfinal answer")]
+    )
+    loop = AgentLoop(
+        AgentConfig(
+            provider,
+            empty_registry,
+            settings,
+            terminal_tool="research_finalize",
+            required_before_terminal=["research_list_facts"],
+        )
+    )
+
+    result, stats = await loop.run(test_user, "research", channel="test")
+    assert isinstance(result, str)
+
+    # Nudge: a system note mentioning research_finalize was injected at some point.
+    nudge_seen = any("research_finalize" in s and "time budget" in s for s in captured_system)
+    assert nudge_seen, "expected the workflow nudge note in the system prompt"
+
+    # Restrict: at least one later LLM call saw a schema narrowed to the finalize tool
+    # set (research_list_facts + research_finalize), not the full tool set.
+    names_per_call = [
+        {str(t.get("function", {}).get("name", "")) for t in tools} for tools in captured_tools
+    ]
+    restricted = [
+        names for names in names_per_call if names == {"research_list_facts", "research_finalize"}
+    ]
+    assert restricted, f"expected a restricted schema, got {names_per_call}"
+
+
+@pytest.mark.asyncio
+async def test_workflow_mandate_neutral_without_terminal_tool(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """Regression: the main agent (no terminal_tool configured) is NOT nudged or
+    restricted — the guard is neutral when AgentConfig.terminal_tool is None/empty.
+    """
+    import asyncio
+
+    class SlowTool:
+        name = "slow_tool"
+        description = "slow"
+        params = []
+        terminal = False
+        parallel_safe = True
+
+        async def execute(self, **kwargs: Any) -> str:
+            await asyncio.sleep(0.05)
+            return "ok"
+
+    empty_registry._tools["slow_tool"] = SlowTool()  # type: ignore[attr-defined]
+
+    captured_system: list[str] = []
+
+    class CapturingProvider(MockProvider):
+        async def chat(self, messages, tools=None, system=None):  # type: ignore[override]
+            captured_system.append(system or "")
+            return await super().chat(messages, tools=tools, system=system)
+
+    settings = AgentSettings(max_steps=8, max_tool_calls=20, max_wall_time_ms=100)
+    provider = CapturingProvider(
+        responses=[
+            LLMResponse(
+                content="", tool_calls=[ToolCall(id=f"t{i}", name="slow_tool", arguments={})]
+            )
+            for i in range(5)
+        ]
+        + [LLMResponse(content="done")]
+    )
+    # No terminal_tool → guard disabled.
+    loop = AgentLoop(AgentConfig(provider, empty_registry, settings))
+
+    await loop.run(test_user, "task", channel="test")
+
+    # No workflow nudge note should ever appear.
+    assert not any("research_finalize" in s and "time budget" in s for s in captured_system)

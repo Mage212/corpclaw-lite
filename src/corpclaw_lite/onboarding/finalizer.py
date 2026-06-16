@@ -40,10 +40,13 @@ Your task is to generate TWO outputs:
 ## Output 1: AGENT_INSTRUCTIONS
 Write a markdown document with instructions for yourself (the AI assistant) about \
 HOW to interact with this user.
-Write in second person imperative ("Общайся...", "Используй...", "Отвечай...").
+Write in second person imperative. For example, if the user's answers are in Russian,
+the generated user bootstrap may use imperative phrases such as "Общайся...",
+"Используй...", or "Отвечай...".
 This will become part of your system prompt for ALL future conversations with this user.
 
-Sections to include (skip a section if the relevant answer is empty, "нет", or a clear skip):
+Sections to include (skip a section if the relevant answer is empty, a clear skip,
+or a locale-specific negative answer such as "нет"):
 - **About This User** — role, work context (1-2 concise sentences)
 - **Communication Style** — concrete, actionable rules for tone and format
 - **Language** — which language to use
@@ -81,7 +84,7 @@ Respond in EXACTLY this format:
 (key: value lines)
 ===END===
 
-Example response:
+Example response for Russian answers:
 ===AGENT_INSTRUCTIONS===
 ## About This User
 - Алексей, маркетолог, работает с рекламными кампаниями.
