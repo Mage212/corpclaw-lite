@@ -12,6 +12,7 @@ from corpclaw_lite.extensions.tools.builtin.research import (
     ResearchFetchSourceTool,
     ResearchFinalizeTool,
     ResearchListFactsTool,
+    ResearchListSourcesTool,
     ResearchReadSourceTool,
     ResearchRuntime,
     ResearchSearchTool,
@@ -247,6 +248,7 @@ async def test_research_tools_success_paths_and_budget_errors(tmp_path: Path) ->
         "research_search",
         "research_fetch_source",
         "research_read_source",
+        "research_list_sources",
         "research_store_fact",
         "research_list_facts",
         "research_finalize",
@@ -402,3 +404,134 @@ def test_finalize_report_no_offline_banner_when_search_healthy(tmp_path: Path) -
     runtime.initialize_run_mode(user, "run", "research", language="en")
     report = runtime.finalize_report(user, "run", "research", "## Summary\nNormal answer.")
     assert "web search was unavailable" not in report.casefold()
+
+
+# ── B-053: research_list_sources + source-anchor in store_fact ───────────────
+
+
+def test_format_sources_list_empty(tmp_path: Path) -> None:
+    """No sources cached → a clear 'no sources' message."""
+    user = _user()
+    runtime = ResearchRuntime(workspace_base=tmp_path)
+    out = runtime.format_sources_list(user, "run", 50)
+    assert out == "No research sources fetched yet."
+
+
+def test_format_sources_list_returns_ids_and_titles(tmp_path: Path) -> None:
+    """Cached sources are listed with exact source_id, title, url, status."""
+    user = _user()
+    runtime = ResearchRuntime(workspace_base=tmp_path)
+    src = runtime.store_source(
+        user,
+        "run",
+        "https://example.com/a",
+        "url: https://example.com/a\nstatus: 200\nsize: 10\n---\nAlpha Title\nBody.",
+    )
+    out = runtime.format_sources_list(user, "run", 50)
+    assert src["source_id"] in out
+    assert "Alpha Title" in out
+    assert "https://example.com/a" in out
+    assert "200" in out
+    assert "use these exact source_id values" in out.casefold()
+
+
+@pytest.mark.asyncio()
+async def test_research_list_sources_tool_sets_flag_and_returns_ids(
+    tmp_path: Path,
+) -> None:
+    """research_list_sources returns the cached sources and sets list_sources_called."""
+    user = _user()
+    runtime = ResearchRuntime(workspace_base=tmp_path)
+    runtime.store_source(
+        user,
+        "run",
+        "https://example.com/a",
+        "url: https://example.com/a\nstatus: 200\nsize: 10\n---\nTitle A\nBody.",
+    )
+    tool = ResearchListSourcesTool(runtime)
+    assert runtime.is_list_sources_called(user, "run") is False
+    out = await tool.execute(user=user, run_id="run")
+    assert "Title A" in out
+    assert runtime.is_list_sources_called(user, "run") is True
+
+
+@pytest.mark.asyncio()
+async def test_store_fact_unknown_id_without_list_sources_steers_to_list(
+    tmp_path: Path,
+) -> None:
+    """When list_sources was NOT called and source_id is unknown, the error tells the
+    model to call research_list_sources first AND includes the real IDs."""
+    user = _user()
+    runtime = ResearchRuntime(workspace_base=tmp_path)
+    runtime.store_source(
+        user,
+        "run",
+        "https://example.com/a",
+        "url: https://example.com/a\nstatus: 200\nsize: 10\n---\nReal Title\nBody.",
+    )
+    store = ResearchStoreFactTool(runtime)
+    res = await store.execute(
+        user=user,
+        run_id="run",
+        source_id="deadbeefdead",
+        fact="f",
+        evidence="e",
+    )
+    assert res.startswith("Error")
+    assert "research_list_sources first" in res.casefold()
+    # The real cached source_id must be surfaced so the model can self-correct.
+    real_id = runtime.list_sources(user, "run")[0]["source_id"]
+    assert real_id in res
+
+
+@pytest.mark.asyncio()
+async def test_store_fact_unknown_id_with_list_sources_shows_real_ids(
+    tmp_path: Path,
+) -> None:
+    """When list_sources WAS called and source_id is still unknown, the error shows the
+    real IDs (softer nudge, not the 'call list_sources first' gate)."""
+    user = _user()
+    runtime = ResearchRuntime(workspace_base=tmp_path)
+    runtime.store_source(
+        user,
+        "run",
+        "https://example.com/a",
+        "url: https://example.com/a\nstatus: 200\nsize: 10\n---\nReal Title\nBody.",
+    )
+    runtime.mark_list_sources_called(user, "run")
+    store = ResearchStoreFactTool(runtime)
+    res = await store.execute(
+        user=user,
+        run_id="run",
+        source_id="deadbeefdead",
+        fact="f",
+        evidence="e",
+    )
+    assert res.startswith("Error")
+    assert "Do not invent" in res
+    real_id = runtime.list_sources(user, "run")[0]["source_id"]
+    assert real_id in res
+
+
+@pytest.mark.asyncio()
+async def test_store_fact_valid_id_is_not_blocked_by_flag(tmp_path: Path) -> None:
+    """A valid source_id works even when list_sources was never called — the flag only
+    affects the Unknown-source_id error path, not the happy path (fetch→store)."""
+    user = _user()
+    runtime = ResearchRuntime(workspace_base=tmp_path)
+    src = runtime.store_source(
+        user,
+        "run",
+        "https://example.com/a",
+        "url: https://example.com/a\nstatus: 200\nsize: 10\n---\nTitle\nBody.",
+    )
+    store = ResearchStoreFactTool(runtime)
+    res = await store.execute(
+        user=user,
+        run_id="run",
+        source_id=src["source_id"],
+        fact="A fact",
+        evidence="An excerpt",
+    )
+    assert res.startswith("Stored research fact")
+    assert runtime.is_list_sources_called(user, "run") is False

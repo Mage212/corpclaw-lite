@@ -13,6 +13,7 @@ allowed_tools:
   - research_search
   - research_fetch_source
   - research_read_source
+  - research_list_sources
   - research_store_fact
   - research_list_facts
   - research_finalize
