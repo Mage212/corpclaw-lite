@@ -367,6 +367,17 @@ class WebFetchTool(Tool):
                     continue
 
                 # Non-redirect response
+                # B-054-1: reject unavailable sources globally. A 4xx/5xx body is
+                # often an HTML error page that downstream code would otherwise
+                # store/cite as a valid source (e.g. a 404 arXiv page or a 403
+                # Cloudflare challenge). Return an Error so the caller (research
+                # or main agent) treats the URL as unusable and does not cache it.
+                if not (200 <= response.status_code < 300):
+                    return (
+                        f"Error: HTTP {response.status_code} for {current_url}."
+                        " The source is unavailable; do not cache or cite it."
+                    )
+
                 content_type = response.headers.get("content-type", "")
                 if _is_binary_content_type(content_type):
                     return (
