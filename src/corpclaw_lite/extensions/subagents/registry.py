@@ -46,6 +46,9 @@ class SubagentRegistry:
                     allowed_departments=data.get("allowed_departments", ["*"]),
                     prompt_path=data.get("prompt_path", ""),
                     direct_response=bool(data.get("direct_response", False)),
+                    max_wall_time_ms=data.get("max_wall_time_ms"),
+                    terminal_tool=data.get("terminal_tool"),
+                    required_before_terminal=data.get("required_before_terminal", []),
                 )
                 self.register(spec)
                 loaded_count += 1

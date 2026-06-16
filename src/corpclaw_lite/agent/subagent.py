@@ -222,20 +222,37 @@ class SubagentDispatcher:
                 system_prompt += skill_block
                 logger.debug("Subagent %s: injected %d skills for task", spec.id, len(matched))
 
+        # B-049: per-subagent wall-clock budget. When the spec overrides max_wall_time_ms
+        # (e.g. research-agent at 600000ms), clone the parent AgentSettings with the
+        # override so the inner AgentLoop's SimpleBudgetGuard AND SoftDeadline scale to
+        # the same window, and the outer asyncio.wait_for uses it as its hard limit.
+        # pydantic model_copy produces an independent instance — the parent agent's
+        # budget is untouched.
+        effective_settings = self._settings
+        if spec.max_wall_time_ms is not None:
+            effective_settings = self._settings.model_copy(
+                update={"max_wall_time_ms": spec.max_wall_time_ms}
+            )
+
         # Setup isolated loop — pass security guards through from parent
         loop = AgentLoop(
             AgentConfig(
                 provider=effective_provider,
                 registry=isolated_registry,
-                settings=self._settings,
+                settings=effective_settings,
                 enforce_tool_permissions=False,
                 tool_guard=self._tool_guard,
                 permission_checker=self._permission_checker,
                 workspace_base=self._workspace_base,
+                # B-047: workflow-finalize guard wiring. When the spec declares a
+                # terminal tool (research-agent → research_finalize), the inner loop
+                # nudges/restricts toward it as the budget runs out.
+                terminal_tool=spec.terminal_tool,
+                required_before_terminal=list(spec.required_before_terminal),
             )
         )
 
-        timeout_seconds = self._settings.max_wall_time_ms / 1000
+        timeout_seconds = effective_settings.max_wall_time_ms / 1000
         subagent_name = spec.name
 
         try:
@@ -326,14 +343,15 @@ class SubagentDispatcher:
                 timeout_seconds=timeout_seconds,
             )
             # Research-agent: recover stored facts/sources as a partial report instead
-            # of a bare error (B-036). finalize_report builds a language-aware skeleton
-            # from whatever the run accumulated before the hard timeout.
+            # of a bare error (B-036). B-045: interrupted=True renders an honest skeleton
+            # — banner + gathered facts + sources + a limitation noting synthesis did not
+            # happen — instead of pretending the facts dump is a finished deep report.
             if spec.id == "research-agent" and self._research_runtime is not None:
                 research_mode = _research_mode_for_task(spec, task_context)
                 mode = "deep_research" if research_mode == "deep_research" else "research"
                 try:
                     partial = self._research_runtime.finalize_report(
-                        user, subagent_run_id, mode, answer=""
+                        user, subagent_run_id, mode, answer="", interrupted=True
                     )
                 except Exception as partial_err:  # pragma: no cover - defensive
                     logger.warning("Research partial-handoff failed: %s", partial_err)

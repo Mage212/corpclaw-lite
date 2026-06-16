@@ -81,9 +81,12 @@ async def test_research_timeout_returns_partial_report_not_bare_error(tmp_path: 
     # Partial report returned, NOT bare "Subagent error: ..."
     assert not result.startswith("Subagent error:")
     assert not result.startswith("Error")
-    # Language-aware skeleton built from stored source
-    assert "## Краткий вывод" in result  # ru skeleton heading
-    assert "https://example.com/a" in result  # stored source cited
+    # B-045: interrupted skeleton carries the honest "interrupted" banner (ru) and
+    # an explicit limitation noting synthesis did not happen — instead of the old
+    # finished-report headings that implied analysis had been done.
+    assert "прервано" in result.casefold()
+    assert "Синтез не выполнен" in result
+    assert "https://example.com/a" in result  # stored source still cited
 
     # handoff.md written to .task_runs/
     handoff_files = list((tmp_path / f"user_{user.workspace_key()}").rglob("handoff.md"))

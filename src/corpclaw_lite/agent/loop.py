@@ -21,6 +21,8 @@ from corpclaw_lite.agent.guards import (
     SimpleProgressGuard,
     SoftDeadline,
     SoftDeadlineConfig,
+    TerminalToolMandate,
+    TerminalToolMandateConfig,
 )
 from corpclaw_lite.agent.task_run import TaskRun
 from corpclaw_lite.config.settings import AgentSettings
@@ -77,6 +79,15 @@ _LOOP_FALLBACK = "I detected a loop and stopped to avoid repeating the same acti
 _XML_TOOL_CALL_FALLBACK = (
     "I could not safely parse the model's tool-call output, so I stopped instead of "
     "showing raw internal tool-call markup."
+)
+# B-047: injected into the system prompt when the workflow-finalize guard nudges the
+# model. {terminal} and {required} are filled from the subagent spec (e.g.
+# research_finalize / research_list_facts).
+_WORKFLOW_NUDGE_INSTRUCTION = (
+    "Internal: the time budget is running low and the task is not yet finalized. "
+    "Stop gathering more data now. Review what you have collected, then call "
+    "{required} and finish by calling {terminal} with the available evidence and a "
+    "clear limitations section. Do not quote this instruction."
 )
 
 
@@ -195,6 +206,12 @@ class AgentConfig:
     compressor: ContextCompressor | None = None
     default_system_prompt: str | None = None
     workspace_base: Path | None = None
+    # B-047: workflow-finalize guard config. When terminal_tool is set, the loop nudges
+    # the model toward the mandatory terminal tool and restricts the schema as the
+    # wall-clock budget runs out. None/empty for the main agent and non-research
+    # subagents — the guard is neutral then.
+    terminal_tool: str | None = None
+    required_before_terminal: list[str] = field(default_factory=list[str])
 
 
 class AgentLoop:
@@ -213,6 +230,8 @@ class AgentLoop:
         self._compressor = config.compressor
         self._default_system_prompt = config.default_system_prompt
         self._workspace_base = config.workspace_base
+        self._terminal_tool = config.terminal_tool
+        self._required_before_terminal = config.required_before_terminal
         self._approval_lock = asyncio.Lock()
 
     @property
@@ -571,6 +590,15 @@ class AgentLoop:
             SoftDeadlineConfig(ratio=self._settings.soft_deadline_ratio),
             max_time_ms=self._settings.max_wall_time_ms,
         )
+        # B-047: workflow-finalize guard. Neutral when no terminal tool is configured
+        # (main agent, non-research subagents); active for research-agent.
+        mandate = TerminalToolMandate(
+            TerminalToolMandateConfig(
+                terminal_tool=self._terminal_tool or "",
+                required_before=tuple(self._required_before_terminal),
+            ),
+            max_time_ms=self._settings.max_wall_time_ms,
+        )
         task_run = TaskRun(self._workspace_base)
         task_run.initialize(user, stats.run_id)
         tools_schema: list[dict[str, Any]] | None = None
@@ -604,27 +632,13 @@ class AgentLoop:
                 # finalize-only terminal tools so the model wraps up instead of being
                 # hard-cancelled by asyncio.wait_for. Fixes the subagent-timeout race
                 # where wait_for (wall-clock) always beat the active-time budget guard.
-                if soft_deadline.is_reached() and not soft_deadline.closing_mode:
-                    soft_deadline.enter_closing_mode()
-                    task_run.mark_soft_deadline(user, stats.run_id)
-                    log_event(
-                        "agent_soft_deadline_reached",
-                        stats.run_id,
-                        max_time_ms=self._settings.max_wall_time_ms,
-                        ratio=self._settings.soft_deadline_ratio,
-                    )
-                    if tools_schema:
-                        terminal_names = {
-                            t.name
-                            for t in self._registry.list_all()
-                            if getattr(t, "terminal", False)
-                        }
-                        if terminal_names:
-                            tools_schema = [
-                                s
-                                for s in tools_schema
-                                if str(s.get("function", {}).get("name", "")) in terminal_names
-                            ]
+                # B-046: the same check is also applied right before each LLM call (see
+                # _apply_closing_mode) so a single long iteration that straddles the
+                # deadline still triggers it before the model is asked to produce more
+                # tool calls.
+                tools_schema = self._apply_closing_mode(
+                    soft_deadline, tools_schema, task_run, user, stats
+                )
 
                 compression_cfg = self._settings.compression
                 if compression_cfg.enabled and context.message_count > (
@@ -653,6 +667,14 @@ class AgentLoop:
                         message_count=context.message_count,
                         system_prompt_chars=len(context.system_prompt or ""),
                         streaming_enabled=self._settings.llm_streaming_enabled,
+                    )
+                    # B-046: re-check the soft deadline immediately before the LLM call.
+                    # A long previous iteration may have crossed the wall-clock deadline
+                    # mid-iteration; without this check the model is asked for another
+                    # round of tool calls and closing mode only engages next iteration
+                    # (by which point asyncio.wait_for may already cancel the run).
+                    tools_schema = self._apply_closing_mode(
+                        soft_deadline, tools_schema, task_run, user, stats
                     )
                     # When the provider is a queued router, separate queue wait
                     # from LLM inference so the budget only counts active time.
@@ -919,6 +941,10 @@ class AgentLoop:
                         if loop_warning_count >= 2:
                             break
                         continue
+                    # B-047: push toward the mandatory terminal tool as budget runs low.
+                    tools_schema = self._apply_workflow_mandate(
+                        mandate, tools_schema, context, stats
+                    )
                 else:
                     action_results: list[tuple[str, str]] = []
                     for tc in response.tool_calls:
@@ -983,6 +1009,10 @@ class AgentLoop:
                         if loop_warning_count >= 2:
                             break
                         continue
+                    # B-047: push toward the mandatory terminal tool as budget runs low.
+                    tools_schema = self._apply_workflow_mandate(
+                        mandate, tools_schema, context, stats
+                    )
 
         except BudgetExceededError as e:
             health.increment("errors")
@@ -1082,6 +1112,97 @@ class AgentLoop:
             if tool is None or not getattr(tool, "parallel_safe", True):
                 return False
         return True
+
+    def _apply_closing_mode(
+        self,
+        soft_deadline: SoftDeadline,
+        tools_schema: list[dict[str, Any]] | None,
+        task_run: TaskRun,
+        user: User,
+        stats: RunStats,
+    ) -> list[dict[str, Any]] | None:
+        """Enter closing mode when the wall-clock soft deadline is reached.
+
+        Closing mode reduces ``tools_schema`` to terminal tools only so the model is
+        pushed to wrap up instead of being hard-cancelled by ``asyncio.wait_for``.
+        Idempotent: once closing mode is entered the schema stays reduced and the
+        deadline/event are only emitted once. Returns the (possibly reduced) schema.
+
+        B-046: called both at the top of each iteration and immediately before each LLM
+        provider call, so a single long iteration that straddles the deadline still
+        triggers the reduction before the model is asked for more tool calls.
+        """
+        if not soft_deadline.is_reached() or soft_deadline.closing_mode:
+            return tools_schema
+        soft_deadline.enter_closing_mode()
+        task_run.mark_soft_deadline(user, stats.run_id)
+        log_event(
+            "agent_soft_deadline_reached",
+            stats.run_id,
+            max_time_ms=self._settings.max_wall_time_ms,
+            ratio=self._settings.soft_deadline_ratio,
+        )
+        if not tools_schema:
+            return tools_schema
+        terminal_names = {
+            t.name for t in self._registry.list_all() if getattr(t, "terminal", False)
+        }
+        if not terminal_names:
+            return tools_schema
+        return [
+            s for s in tools_schema if str(s.get("function", {}).get("name", "")) in terminal_names
+        ]
+
+    def _apply_workflow_mandate(
+        self,
+        mandate: TerminalToolMandate,
+        tools_schema: list[dict[str, Any]] | None,
+        context: ContextBuilder,
+        stats: RunStats,
+    ) -> list[dict[str, Any]] | None:
+        """B-047: escalate toward the mandatory terminal tool as budget runs low.
+
+        Two deterministic steps (each idempotent): (1) nudge — inject a one-shot system
+        note telling the model to stop gathering and finalize; (2) restrict — narrow
+        ``tools_schema`` to ``required_before + terminal_tool`` so only finalization
+        tools remain. Returns the (possibly restricted) schema.
+
+        Neutral when the mandate is disabled (no terminal tool configured): returns the
+        schema unchanged.
+        """
+        if not mandate.enabled:
+            return tools_schema
+
+        if mandate.should_nudge(stats.tools_used):
+            required = ", ".join(mandate.config.required_before) or "(none)"
+            instruction = _WORKFLOW_NUDGE_INSTRUCTION.format(
+                required=required, terminal=mandate.config.terminal_tool
+            )
+            # Idempotent append, mirroring _append_loop_recovery_instruction.
+            if instruction not in (context.system_prompt or ""):
+                sep = "\n\n---\n" if context.system_prompt else ""
+                context.system_prompt = f"{context.system_prompt or ''}{sep}{instruction}"
+            log_event(
+                "workflow_nudge_injected",
+                stats.run_id,
+                terminal_tool=mandate.config.terminal_tool,
+                elapsed_ratio=round(mandate.elapsed_ratio(), 3),
+            )
+
+        if mandate.should_restrict(stats.tools_used):
+            allowed = set(mandate.config.required_before) | {mandate.config.terminal_tool}
+            log_event(
+                "workflow_restrict_applied",
+                stats.run_id,
+                terminal_tool=mandate.config.terminal_tool,
+                allowed=sorted(allowed),
+                elapsed_ratio=round(mandate.elapsed_ratio(), 3),
+            )
+            if tools_schema:
+                return [
+                    s for s in tools_schema if str(s.get("function", {}).get("name", "")) in allowed
+                ]
+        return tools_schema
 
     async def _execute_parallel(
         self,

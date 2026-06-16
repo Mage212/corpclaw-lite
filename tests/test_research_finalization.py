@@ -252,3 +252,127 @@ def test_passed_emits_validation_passed_trace(tmp_path: Path) -> None:
     runtime.finalize_report(user, "r1", "research", answer)
     events = [str(e.get("event")) for e in _read_trace(tmp_path)]
     assert "research_finalize_validation_passed" in events
+
+
+# ----------------------------------------------------- B-048: facts dedup
+
+
+def test_skeleton_deep_research_does_not_duplicate_facts(tmp_path: Path) -> None:
+    """The deep_research skeleton's 'Key findings' and 'Facts and evidence' sections
+    previously rendered the same {facts} placeholder twice. They must now differ: the
+    brief section omits the Evidence excerpt, the full section includes it.
+    """
+    user = _user()
+    runtime = _runtime(tmp_path, strict=False)
+    runtime.initialize_run_mode(user, "r1", "deep_research", language="en")
+    _add_source(runtime, user, "r1", "https://ex.test/a", "Body A", "Title A")
+    runtime.store_fact(
+        user,
+        "r1",
+        {
+            "source_id": runtime.get_source(
+                user, "r1", _source_id_of(runtime, "https://ex.test/a")
+            ),
+            "fact": "Quantum fact one",
+            "evidence": "Evidence excerpt one",
+            "confidence": "high",
+            "relation": "supports",
+        },
+    )
+    report = runtime.finalize_report(user, "r1", "deep_research", "")
+    # Both section headings present...
+    assert "## Key findings" in report
+    assert "## Facts and evidence" in report
+    # ...but the fact body is not duplicated verbatim under the two headings: the brief
+    # line (no 'Evidence:') must differ from the full line.
+    assert "Quantum fact one" in report
+    assert "Evidence excerpt one" in report  # only in the full section
+    # The brief 'Key findings' section must not carry the evidence excerpt.
+    brief_section = report.split("## Facts and evidence")[0]
+    assert "Evidence excerpt one" not in brief_section
+
+
+def test_facts_markdown_brief_omits_evidence(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path, strict=False)
+    facts = [
+        {
+            "fact": "F1",
+            "source_id": "abc",
+            "evidence": "EV1",
+            "confidence": "high",
+            "relation": "supports",
+        }
+    ]
+    brief = runtime._facts_markdown(facts, "en", with_evidence=False)
+    full = runtime._facts_markdown(facts, "en", with_evidence=True)
+    assert "Evidence: EV1" not in brief
+    assert "Evidence: EV1" in full
+    assert "F1" in brief and "F1" in full
+
+
+# --------------------------------------------------------- B-045: interrupted
+
+
+def test_interrupted_report_carries_banner_and_no_fake_analysis(tmp_path: Path) -> None:
+    """A timeout partial-handoff (interrupted=True) must be honestly marked and must
+    NOT emit the analysis sections (Contradictions / Hypotheses / Recommendations) that
+    a finished deep_research report promises, because no synthesis was performed.
+    """
+    user = _user()
+    runtime = _runtime(tmp_path, strict=False)
+    runtime.initialize_run_mode(user, "r1", "deep_research", language="ru")
+    src = _add_source(runtime, user, "r1", "https://ex.test/a", "Body A", "Title A")
+    runtime.store_fact(
+        user,
+        "r1",
+        {
+            "source_id": src["source_id"],
+            "fact": "Факт раз",
+            "evidence": "Доказательство",
+            "confidence": "high",
+            "relation": "supports",
+        },
+    )
+    report = runtime.finalize_report(user, "r1", "deep_research", "", interrupted=True)
+    # Honest banner present (ru).
+    assert "прервано" in report.casefold()
+    # Honest limitation line present.
+    assert "Синтез не выполнен" in report
+    # Gathered fact still surfaced.
+    assert "Факт раз" in report
+    # The fake analysis sections are NOT present.
+    assert "Противоречия" not in report
+    assert "Гипотезы" not in report
+    assert "Практические рекомендации" not in report
+    # Source still cited.
+    assert "https://ex.test/a" in report
+
+
+def test_interrupted_report_english(tmp_path: Path) -> None:
+    user = _user()
+    runtime = _runtime(tmp_path, strict=False)
+    runtime.initialize_run_mode(user, "r1", "research", language="en")
+    _add_source(runtime, user, "r1", "https://ex.test/a", "Body A", "Title A")
+    report = runtime.finalize_report(user, "r1", "research", "", interrupted=True)
+    assert "interrupted" in report.casefold()
+    assert "No synthesis" in report
+
+
+def test_interrupted_skips_validation(tmp_path: Path) -> None:
+    """interrupted=True short-circuits before grounding validation — it builds the
+    skeleton directly, so a strict runtime does NOT emit validation_failed traces."""
+    setup_trace_logging(tmp_path, enabled=True)
+    user = _user()
+    runtime = _runtime(tmp_path, strict=True)
+    runtime.initialize_run_mode(user, "r1", "deep_research", language="en")
+    runtime.finalize_report(user, "r1", "deep_research", "", interrupted=True)
+    events = [str(e.get("event")) for e in _read_trace(tmp_path)]
+    assert "research_finalize_validation_failed" not in events
+    assert "research_finalize_validation_passed" not in events
+
+
+def _source_id_of(runtime: ResearchRuntime, url: str) -> str:
+    """Look up the source_id for a URL via the runtime (helper for fact seeding)."""
+    src = runtime.find_source_by_url(_user(), "r1", url)
+    assert src is not None
+    return str(src.get("source_id") or "")

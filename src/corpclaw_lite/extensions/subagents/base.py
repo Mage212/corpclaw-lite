@@ -19,6 +19,14 @@ class SubagentSpec:
         allowed_tools: List of tool names this subagent has access to
         prompt_path: Relative path to the system prompt for this subagent
         direct_response: Whether dispatch_subagent should return this result directly to the user
+        max_wall_time_ms: Per-subagent wall-clock budget override (B-049). When set, the
+            subagent's inner AgentLoop and the dispatcher's asyncio.wait_for timeout use
+            this value instead of the global AgentSettings.max_wall_time_ms. None = fallback
+            to the global value. Lets heavy subagents (e.g. deep_research) run longer than
+            the main agent without inflating every agent's budget.
+        terminal_tool: Name of the required terminal tool for workflow-finalize guards (B-047).
+            None disables the guard (neutral for non-research subagents and the main agent).
+        required_before_terminal: Tools that must be called before terminal_tool (B-047).
     """
 
     id: str
@@ -29,3 +37,6 @@ class SubagentSpec:
     allowed_departments: list[str] = field(default_factory=lambda: ["*"])
     prompt_path: str = ""
     direct_response: bool = False
+    max_wall_time_ms: int | None = None
+    terminal_tool: str | None = None
+    required_before_terminal: list[str] = field(default_factory=lambda: [])

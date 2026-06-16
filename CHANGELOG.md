@@ -26,6 +26,58 @@
 - `uv run pyright src/` — `0 errors` (17 существующих matplotlib stub warnings).
 - `uv run pytest tests/ -v` — `1060 passed, 1 skipped`.
 
+## [0.1.10] — 2026-06-16
+
+Фокус версии — устойчивость research-агента в тяжёлом `deep_research` на локальных LLM.
+Комплекс из 5 задач (B-045…B-049) по стратегии finalize-first (D-048): больше окно →
+подталкивание модели к `research_finalize` внутри окна → честный skeleton как safety-net.
+
+### Added
+
+- **B-049 — Per-subagent wall-clock budget.** Поле `max_wall_time_ms` в `SubagentSpec` +
+  `research-agent.yaml: 600000` (10 мин). `subagent.py` клонирует `AgentSettings` через
+  `model_copy` со значением из спеки, так что внутренний `AgentLoop` budget + `SoftDeadline`
+  + `asyncio.wait_for` outer limit масштабируются автоматически; родительский агент и
+  остальные субагенты остаются на 5 мин. **Багфикс:** `watcher.py:_load_spec` не передавал
+  `direct_response` (дивергенция с `registry.py`) — починено, оба лоадера теперь идентичны;
+  добавлен регресс-тест `test_watcher_load_spec_matches_registry`.
+- **B-047 — Workflow-finalize guard (`TerminalToolMandate`).** Детерминированный гвард в
+  `agent/guards.py`, знающий про обязательную терминальную воронку research
+  (`store_fact → list_facts → research_finalize`). Эскалация: nudge (60% — системное
+  напоминание «прекратите сбор, вызовите list_facts+finalize») → restrict (75% —
+  `tools_schema` урезан до `{list_facts, finalize}`). Нейтрален без `terminal_tool`
+  (основной агент, не-research субагенты). Строго детерминирован — не нарушает запрет
+  AGENTS.md на LLM-based planning. Поля `SubagentSpec.terminal_tool`/`required_before_terminal`
+  + wiring через `AgentConfig` → `AgentLoop`. Trace events `workflow_nudge_injected`,
+  `workflow_restrict_applied`.
+- **B-045 — Честный skeleton на partial-handoff (вариант A).** При таймауте
+  `finalize_report(interrupted=True)` рендерит честный баннер «⚠️ Исследование прервано по
+  лимиту времени» + собранные факты + источники + «Синтез не выполнен», БЕЗ фейковых секций
+  «Противоречия/Гипотезы/Рекомендации» которые обещает finished deep_research. Новые
+  `_INTERRUPTED_REPORT_TEMPLATES` (4: ru/en × research/deep_research).
+
+### Changed
+
+- **B-048 — Дедуп фактов в deep_research-шаблоне.** «Ключевые выводы» используют `{facts}`
+  (brief, без evidence-экзепшена), «Факты и подтверждения» — новый `{evidence}` (full). Раньше
+  обе секции рендерили один `{facts}` → факты дублировались. `_facts_markdown(with_evidence)`.
+- **B-046 — SoftDeadline granularity.** Closing-mode логика вынесена в
+  `AgentLoop._apply_closing_mode()` и вызывается не только в начале каждой итерации, но и
+  **непосредственно перед каждым LLM-вызовом** (3 ветки). Фиксит race: итерация стартовала до
+  soft_deadline (248s < 255s), длилась >50s, на 255s мы уже внутри LLM-вызова — теперь closing
+  mode включается на следующей итерации до LLM-вызова, а не после.
+
+### Decisions
+
+- **D-047** — направление B-045…B-049 как комплекс.
+- **D-048** — стратегия finalize-first: прерывание оставляем (освобождает GPU под
+  конкурентные запросы при ограниченных ресурсах), resume (B-050) отнесён в Phase 2.
+
+### Verified
+
+ruff clean, pyright 0 errors (17 существующих matplotlib stub warnings), pytest 1131
+passed/1 skipped (+39 новых тестов), coverage 78% (CI-гейт 75%).
+
 ## [0.1.9] — 2026-06-15
 
 Фокус версии — частичный handoff и checkpointing для долгих субагентов на локальных LLM (B-036 MVP).

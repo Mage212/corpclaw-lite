@@ -789,3 +789,57 @@ async def test_subagent_no_skills_when_matcher_none() -> None:
     assert captured_system
     # No skill block should be present
     assert "## Available Skills" not in captured_system[0]
+
+
+# ── B-049: per-subagent wall-clock budget override ───────────────────────────
+
+
+def _settings_override_dispatcher() -> tuple[SubagentDispatcher, ToolRegistry]:
+    registry = ToolRegistry()
+    return (
+        SubagentDispatcher(
+            provider=DummyProvider(),  # type: ignore[arg-type]
+            main_registry=registry,
+            settings=AgentSettings(max_wall_time_ms=300000),
+        ),
+        registry,
+    )
+
+
+@pytest.mark.asyncio
+async def test_subagent_spec_max_wall_time_ms_overrides_inner_budget() -> None:
+    """A spec with max_wall_time_ms scales the inner AgentLoop budget (and thus
+    SimpleBudgetGuard + SoftDeadline) to that value, independent of the parent."""
+    dispatcher, _ = _settings_override_dispatcher()
+    spec = SubagentSpec(
+        id="research-agent",
+        name="Research",
+        description="d",
+        allowed_tools=["*"],
+        max_wall_time_ms=600000,
+    )
+    user = User(id=1, name="User", department="dev")
+
+    with patch("corpclaw_lite.agent.subagent.AgentLoop") as MockLoop:
+        MockLoop.return_value.run = AsyncMock(return_value=("ok", RunStats()))
+        await dispatcher.dispatch(spec, user, "task")
+
+    agent_config = MockLoop.call_args.args[0]
+    assert agent_config.settings.max_wall_time_ms == 600000
+    # Parent dispatcher budget is untouched.
+    assert dispatcher._settings.max_wall_time_ms == 300000
+
+
+@pytest.mark.asyncio
+async def test_subagent_spec_without_max_wall_time_ms_falls_back_to_parent() -> None:
+    """A spec without max_wall_time_ms uses the parent AgentSettings value."""
+    dispatcher, _ = _settings_override_dispatcher()
+    spec = SubagentSpec(id="plain", name="Plain", description="d", allowed_tools=["*"])
+    user = User(id=1, name="User", department="dev")
+
+    with patch("corpclaw_lite.agent.subagent.AgentLoop") as MockLoop:
+        MockLoop.return_value.run = AsyncMock(return_value=("ok", RunStats()))
+        await dispatcher.dispatch(spec, user, "task")
+
+    agent_config = MockLoop.call_args.args[0]
+    assert agent_config.settings.max_wall_time_ms == 300000
