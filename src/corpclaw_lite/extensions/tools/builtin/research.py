@@ -50,6 +50,22 @@ _COUNT_ASSERTION_RE = re.compile(
 _FINALIZE_MAX_ATTEMPTS = 2
 
 
+# B-052: after this many consecutive web-search infrastructure failures, the run is
+# considered to have web search degraded, and the agent is steered toward a
+# knowledge-based answer with an explicit offline banner.
+_WEB_SEARCH_DEGRADED_THRESHOLD = 2
+
+# Returned to the model once web search is deemed unavailable. Tells the model to stop
+# trying to search/fetch and to not invent URLs.
+_WEB_SEARCH_DEGRADED_MESSAGE = (
+    "Web search is unavailable (infrastructure failure after retries). "
+    "Do NOT retry research_search. Do NOT invent or guess URLs. Either finalize with "
+    "already-fetched sources, or if no sources were fetched, write a detailed answer "
+    "from your own knowledge. You MUST state in the report that web search was "
+    "unavailable and the answer is based on model knowledge only."
+)
+
+
 def normalize_research_mode(value: Any) -> ResearchMode:
     """Normalize a tool/user supplied mode value."""
     return "deep_research" if str(value or "").strip() == "deep_research" else "research"
@@ -87,6 +103,11 @@ _REPORT_STRINGS: dict[ResearchLanguage, dict[str, str]] = {
         "limitations_no_facts": (
             "- Не удалось зафиксировать структурированные факты через research_store_fact."
         ),
+        # B-052: prepended when web search was unavailable for the whole run.
+        "offline_banner": (
+            "⚠️ Веб-поиск был недоступен во время исследования. "
+            "Ответ основан на знаниях модели без веб-источников."
+        ),
     },
     "en": {
         "no_facts": "- No structured facts stored.",
@@ -94,6 +115,10 @@ _REPORT_STRINGS: dict[ResearchLanguage, dict[str, str]] = {
         "sources_section": "## Sources",
         "limitations_section": "## Limitations",
         "limitations_no_facts": ("- Could not record structured facts via research_store_fact."),
+        "offline_banner": (
+            "⚠️ Web search was unavailable during this research. "
+            "The answer is based on model knowledge without web sources."
+        ),
     },
 }
 
@@ -289,6 +314,63 @@ class ResearchRuntime:
         state["search_calls"] = used + 1
         self._write_json(run_dir / "state.json", state)
         return None
+
+    def search_budget_exceeded(
+        self, user: User, run_id: str | None, mode: ResearchMode
+    ) -> str | None:
+        """B-052: check whether the search budget is already exhausted WITHOUT consuming it.
+
+        Use this before issuing the (potentially slow / failing) web request so an
+        over-budget call short-circuits cheaply. The actual unit is consumed by
+        reserve_search only after a successful (non-infrastructure) search.
+        """
+        run_dir = self.run_dir(user, run_id)
+        state = self._read_state(run_dir)
+        self._upgrade_mode(state, mode)
+        limit = (
+            self._settings.deep_search_waves
+            if state["mode"] == "deep_research"
+            else self._settings.normal_search_waves
+        )
+        used = _as_int(state.get("search_calls"), 0)
+        if used >= limit:
+            return (
+                f"Error: Research search budget exceeded ({used}/{limit}). "
+                "Do not retry research_search in this run. Use research_list_facts, then "
+                "research_finalize with the available evidence and limitations."
+            )
+        return None
+
+    def refund_search(self, user: User, run_id: str | None) -> None:
+        """Return one search unit to the budget (B-052).
+
+        Called when the underlying web search failed with an infrastructure error
+        (not when the query legitimately returned no results). This keeps a transient
+        web-search outage from exhausting the research budget and forcing the agent
+        to finalize with no sources.
+        """
+        run_dir = self.run_dir(user, run_id)
+        state = self._read_state(run_dir)
+        used = _as_int(state.get("search_calls"), 0)
+        state["search_calls"] = max(0, used - 1)
+        self._write_json(run_dir / "state.json", state)
+
+    def mark_search_failure(self, user: User, run_id: str | None) -> None:
+        """Record a web-search infrastructure failure (B-052)."""
+        run_dir = self.run_dir(user, run_id)
+        state = self._read_state(run_dir)
+        state["search_failures"] = _as_int(state.get("search_failures"), 0) + 1
+        # Once search has failed repeatedly, mark the run so finalize_report prepends an
+        # offline banner and the agent prompt steers toward a knowledge-based answer.
+        if _as_int(state["search_failures"], 0) >= _WEB_SEARCH_DEGRADED_THRESHOLD:
+            state["web_search_degraded"] = True
+        self._write_json(run_dir / "state.json", state)
+
+    def is_web_search_degraded(self, user: User, run_id: str | None) -> bool:
+        """Whether web search has failed enough times to be considered unavailable."""
+        run_dir = self.run_dir(user, run_id)
+        state = self._read_state(run_dir)
+        return bool(state.get("web_search_degraded"))
 
     def reserve_fetch(self, user: User, run_id: str | None, mode: ResearchMode) -> str | None:
         run_dir = self.run_dir(user, run_id)
@@ -690,6 +772,12 @@ class ResearchRuntime:
                 + "\n"
                 + strings["limitations_no_facts"]
             )
+        # B-052: if web search was unavailable for the whole run, prepend an honest
+        # offline banner regardless of whether the model added one.
+        if state.get("web_search_degraded") and "web search was unavailable" not in (
+            report.casefold()
+        ):
+            report = f"{strings['offline_banner']}\n\n{report}"
         return report.strip()
 
     def _read_state(self, run_dir: Path) -> dict[str, Any]:
@@ -702,6 +790,9 @@ class ResearchRuntime:
         state.setdefault("language", language if language in ("ru", "en") else "en")
         state.setdefault("finalize_attempts", 0)
         state.setdefault("list_facts_called", False)
+        # B-052: web-search resilience accounting.
+        state.setdefault("search_failures", 0)
+        state.setdefault("web_search_degraded", False)
         return state
 
     def _upgrade_mode(self, state: dict[str, Any], mode: ResearchMode) -> None:
@@ -862,10 +953,15 @@ class ResearchSearchTool(Tool):
             return "Error: 'query' is a required non-empty string parameter."
         run_id = kwargs.get("run_id") if isinstance(kwargs.get("run_id"), str) else None
         mode = self._runtime.resolve_mode(user, run_id, kwargs.get("mode"))
-        budget_error = self._runtime.reserve_search(user, run_id, mode)
+
+        # B-052: short-circuit cheaply if the budget is already exhausted (no web request).
+        budget_error = self._runtime.search_budget_exceeded(user, run_id, mode)
         if budget_error:
             return budget_error
 
+        # Run the search before reserving, so an infrastructure failure does not charge
+        # the research budget. Only a successful (or non-infrastructure-error) search
+        # consumes a budget unit via reserve_search below.
         result = await self._search_tool.execute(
             query=query,
             max_results=kwargs.get("max_results", 5),
@@ -873,6 +969,18 @@ class ResearchSearchTool(Tool):
             region=kwargs.get("region", "wt-wt"),
             timelimit=kwargs.get("timelimit"),
         )
+
+        # Infrastructure failure: the web search itself broke (transient outage / block /
+        # timeout that survived the tool-level retries). Record the failure; the budget is
+        # NOT charged (reserve_search was not called). Steer the model once it cascades.
+        if "unavailable" in result:
+            self._runtime.mark_search_failure(user, run_id)
+            if self._runtime.is_web_search_degraded(user, run_id):
+                return _WEB_SEARCH_DEGRADED_MESSAGE
+            return result
+
+        # Success or a non-infrastructure error: consume the budget unit now.
+        self._runtime.reserve_search(user, run_id, mode)
         if result.startswith("Error"):
             return result
         return (
