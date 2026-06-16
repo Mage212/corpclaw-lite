@@ -26,7 +26,84 @@
 - `uv run pyright src/` — `0 errors` (17 существующих matplotlib stub warnings).
 - `uv run pytest tests/ -v` — `1060 passed, 1 skipped`.
 
-## [0.1.10] — 2026-06-16
+## [0.1.11] — 2026-06-16
+
+Фокус версии — достоверность источников research-агента на локальных LLM. Три задачи
+(B-052, B-053, B-054) закрывают три разных режима галлюцинации, выявленных в live-тестах
+`deep_research`: (1) веб-поиск падает на transient-блоках → модель выдумывает URL; (2) на
+длинном контексте модель «забывает» реальные source_id и выдумывает новые; (3) 404/403-страницы
+сохраняются как валидные источники и цитируются в отчёте.
+
+Валидировано live-раном `1b038558` (2026-06-16): 10/10 источников HTTP 200 (было 4/10 живых),
+0 галлюцинированных source_id, finalize-валидация пройдена с первого раза, укладывается в
+264с из 600с окна. Модель честно признаёт пробелы (HTTP 404) вместо маскировки их фактами.
+
+### Added
+
+- **B-054-2 — Динамический бюджет источников и поиска.** Новые поля `ResearchSettings`:
+  `target_usable_sources=5`, `dynamic_budget_max_multiplier=2.5`. Новые методы `ResearchRuntime`:
+  `available_sources_count()` (считает только HTTP 2xx), `effective_max_sources()`,
+  `effective_search_waves()`. Расширение failure-driven: `limit = min(max(base, base + failed),
+  cap)` — чистый рун останавливается на base, каждый не-2xx fetch даёт один дополнительный
+  слот чтобы добрать target_usable_sources, жёсткий потолок `base * multiplier`. `reserve_fetch`
+  и оба search-бюджета (`reserve_search`, `search_budget_exceeded`) используют динамические
+  лимиты. `target_usable_sources` — мягкая цель, на которую модель направляют через промпт,
+  а не значение, способное переопределить base.
+- **B-054-3 — Валидация недоступных источников в finalize.** `_validate_report` (новая
+  проверка 2b) отклоняет ответы, цитирующие source_id или URL со статусом ≠ 2xx. Строит
+  карту source_id/url → status по манифесту; недоступные цитаты → Error «remove them from
+  citations», модель направляется к `research_list_sources`. Идёт после проверок integrity
+  source_id/URL, усиливая их.
+- **B-053 — `research_list_sources` + source-anchor в `store_fact`.** Новый инструмент
+  `ResearchListSourcesTool` (`research_list_sources`) — зеркало `research_list_facts` для
+  источников: возвращает точный список `[source_id → title | url | status]`. Устраняет
+  галлюцинацию source_id в `research_store_fact` на длинном контексте (модель получала
+  реальные ID от `fetch_source`, но через ~200с «забывала» их и выдумывала 12-hex ID).
+  `store_fact` при Unknown source_id теперь возвращает реальные кэшированные source_ids
+  (самокорректирующаяся ошибка): жёсткий нудж, если `list_sources` не вызывался, мягкий —
+  если вызывался. Счастливый путь `fetch → store` не блокируется. `ResearchRuntime.format_sources_list`,
+  флаг состояния `list_sources_called`, `research-agent.yaml` `allowed_tools`.
+- **B-052 — Resilience веб-поиска (auto backend + retry) + offline-режим.**
+  - `WebSearchTool._search_sync` ретраит `search_retry_attempts` раз с backoff перед тем
+    как сообщить об ошибке; каскадный сбой → маркер «unavailable (infrastructure)».
+    Удалён мёртвый код (`RatelimitException`, недостижимая ветка `if not results` —
+    `ddgs.text()` никогда не возвращает `[]`, всегда бросает `DDGSException`).
+  - Бюджет: `ResearchSearchTool` peek-ает бюджет (`search_budget_exceeded`) до HTTP-запроса,
+    а unit (`reserve_search`) списывает только при успехе. Инфраструктурные сбои НЕ списывают
+    бюджет (`refund_search`). `mark_search_failure` / `is_web_search_degraded`: после ≥2 сбоев
+    рун помечается `web_search_degraded`, модель получает `_WEB_SEARCH_DEGRADED_MESSAGE`
+    («прекрати веб-поиск, не выдумывай URL»).
+  - Offline-режим: правила в `research.md` (остановить поиск, не выдумывать URL, ответить
+    из знаний с явной пометкой) + `finalize_report` safety-net баннер «web search was
+    unavailable... based on model knowledge», даже если модель его пропустила.
+
+### Changed
+
+- **B-054-1 — Глобальный HTTP-фильтр в `web.py:_fetch`.** Не-2xx ответ (404/403/5xx)
+  теперь возвращает `Error: HTTP {code} ... The source is unavailable; do not cache or cite it`
+  *до* любого парсинга контента. Поскольку `research_fetch_source.execute` проверяет
+  `result.startswith("Error")` до `store_source`, 4xx/5xx страницы физически не попадают в
+  манифест. Глобально — лечит и `research_fetch_source`, и `web_fetch` основного агента.
+  Редиректы (is_redirect → re-fetch) и 2xx не затронуты.
+- **B-052-2 — Конфигурация веб-поиска.** `WebSettings.search_backend` default `duckduckgo`
+  → `auto` (8 движков с fallback; `duckduckgo` transient-блокирует серверные запросы через
+  `html.duckduckgo.com/html/`). Новые поля: `search_retry_attempts=3`,
+  `search_retry_backoff_seconds=1.5`.
+- **B-054-4 — Промпт `research.md`.** Добавлено правило: HTTP-error источник (4xx/5xx)
+  недоступен навсегда — не ретраить тот же URL, не цитировать; перед `store_fact`/`finalize`
+  сверять usable-источники через `research_list_sources`.
+- **B-053 — Промпт `research.md`.** Документирован инструмент `research_list_sources` и
+  усилен workflow (вызов `research_list_sources` перед `store_fact` для точных source_id).
+
+### Verified
+
+- `uv run ruff check src/ tests/` — clean.
+- `uv run pyright src/` — `0 errors` (17 существующих matplotlib stub warnings).
+- `uv run pytest tests/ -v` — `1165 passed, 1 skipped` (+105 тестов с 0.1.10).
+- Live-ран `1b038558`: 10/10 источников HTTP 200, 0 галлюцинированных source_id, 5 fetch-ошибок
+  корректно отбракованы HTTP-фильтром B-054-1, finalize `validation_passed` с первого раза.
+
+
 
 Фокус версии — устойчивость research-агента в тяжёлом `deep_research` на локальных LLM.
 Комплекс из 5 задач (B-045…B-049) по стратегии finalize-first (D-048): больше окно →
