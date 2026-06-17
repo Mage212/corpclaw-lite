@@ -487,12 +487,16 @@ def build_agent_stack(
     _load_calibrated_tool_overrides(registry, full_tool_reg)
 
     mcp_manager: MCPManager | None = None
-    mcp_config = PROJECT_ROOT / "config" / "mcp_servers.yaml"
-    if mcp_config.exists():
-        from corpclaw_lite.extensions.mcp.manager import MCPManager
+    from corpclaw_lite.extensions.mcp.manager import MCPManager
+    from corpclaw_lite.extensions.paths import resolve_dirs as _resolve_mcp_dirs
 
-        mcp_manager = MCPManager(config_path=mcp_config)
-        logger.info("MCPManager ready (config=%s) — callers must await connect_all()", mcp_config)
+    mcp_paths = [p for p in _resolve_mcp_dirs("mcp", full_settings, PROJECT_ROOT) if p.exists()]
+    if mcp_paths:
+        mcp_manager = MCPManager(config_path=mcp_paths)
+        logger.info(
+            "MCPManager ready (configs=%s) — callers must await connect_all()",
+            ", ".join(str(p) for p in mcp_paths),
+        )
 
     system_prompt = _build_system_prompt()
 

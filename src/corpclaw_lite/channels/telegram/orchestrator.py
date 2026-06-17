@@ -259,11 +259,12 @@ class TelegramBotOrchestrator:
 
         if mcp_manager is not None:
             from corpclaw_lite.extensions.mcp.watcher import MCPHotReloader
+            from corpclaw_lite.extensions.paths import resolve_dirs as _resolve_dirs
 
-            mcp_cfg_path = PROJECT_ROOT / "config" / "mcp_servers.yaml"
-            self._mcp_reloader = MCPHotReloader(mcp_cfg_path, mcp_manager, tool_registry)
+            mcp_cfg_paths = _resolve_dirs("mcp", self._settings, PROJECT_ROOT)
+            self._mcp_reloader = MCPHotReloader(mcp_cfg_paths, mcp_manager, tool_registry)
             self._mcp_reloader.start()
-            logger.info("MCP hot-reloader started watching %s", mcp_cfg_path)
+            logger.info("MCP hot-reloader started watching %s", mcp_cfg_paths)
 
         if plugin_registry is not None and skill_registry is not None:
             self._plugin_reloader = PluginHotReloader(
