@@ -225,6 +225,8 @@ def _build_security_stack(
 
 
 def _build_extensions_stack(
+    settings: Settings,
+    project_root: Path,
     agent_settings: AgentSettings,
     web_settings: WebSettings,
     research_settings: ResearchSettings,
@@ -240,6 +242,7 @@ def _build_extensions_stack(
     """Register subagents, MCP, host-side tools."""
     from corpclaw_lite.agent.subagent import SubagentDispatcher
     from corpclaw_lite.agent.vision import VisionProcessor
+    from corpclaw_lite.extensions.paths import resolve_dirs
     from corpclaw_lite.extensions.subagents.registry import SubagentRegistry
     from corpclaw_lite.extensions.tools.builtin.dispatch import DispatchSubagentTool
     from corpclaw_lite.extensions.tools.builtin.image import ReadImageTool
@@ -250,8 +253,9 @@ def _build_extensions_stack(
     from corpclaw_lite.extensions.tools.builtin.web import WebFetchTool, WebSearchTool
 
     subagent_registry = SubagentRegistry()
-    subagent_dir = PROJECT_ROOT / "config" / "subagents"
-    if subagent_dir.exists():
+    for subagent_dir in resolve_dirs("subagents", settings, project_root):
+        if not subagent_dir.exists():
+            continue
         subagent_registry.load_directory(subagent_dir)
 
     web_fetch_tool = WebFetchTool(web_settings)
@@ -463,6 +467,8 @@ def build_agent_stack(
     )
 
     subagent_registry = _build_extensions_stack(
+        full_settings,
+        PROJECT_ROOT,
         agent_settings,
         full_settings.web,
         full_settings.research,
