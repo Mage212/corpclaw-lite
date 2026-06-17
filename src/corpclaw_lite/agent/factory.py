@@ -455,6 +455,7 @@ def build_agent_stack(
     from corpclaw_lite.extensions.bootstrap import load_extensions
 
     skill_registry, plugin_registry, skill_matcher = load_extensions(
+        full_settings,
         PROJECT_ROOT,
         registry,
         full_settings.skills,

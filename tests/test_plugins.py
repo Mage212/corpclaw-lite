@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from corpclaw_lite.config.settings import Settings
 from corpclaw_lite.departments.manager import DepartmentConfig, DepartmentManager
 from corpclaw_lite.departments.permissions import PermissionChecker
 from corpclaw_lite.extensions.plugins.base import Plugin, PluginManifest
@@ -147,7 +148,7 @@ def test_load_extensions_registers_plugin_tools_in_full_registry(
         tools=[DummyPluginTool()],
     )
 
-    def fake_load_directory(self: PluginRegistry, path: Path) -> None:
+    def fake_load_directory(self: PluginRegistry, path: Path, **kwargs: object) -> None:
         self.register(plugin)
 
     monkeypatch.setattr(PluginRegistry, "load_directory", fake_load_directory)
@@ -155,6 +156,7 @@ def test_load_extensions_registers_plugin_tools_in_full_registry(
     main_registry = ToolRegistry()
     full_registry = ToolRegistry()
     bootstrap.load_extensions(
+        Settings(),
         tmp_path,
         main_registry,
         bootstrap.SkillsSettings(),
@@ -182,13 +184,13 @@ async def test_plugin_tool_scope_filters_schema_and_execution(tmp_path: Path, mo
         tools=[DummyPluginTool()],
     )
 
-    def fake_load_directory(self: PluginRegistry, path: Path) -> None:
+    def fake_load_directory(self: PluginRegistry, path: Path, **kwargs: object) -> None:
         self.register(plugin)
 
     monkeypatch.setattr(PluginRegistry, "load_directory", fake_load_directory)
 
     registry = ToolRegistry()
-    bootstrap.load_extensions(tmp_path, registry, bootstrap.SkillsSettings())
+    bootstrap.load_extensions(Settings(), tmp_path, registry, bootstrap.SkillsSettings())
     tool = registry.get("plugin_tool")
     assert tool is not None
     assert tool.source_kind == "plugin"
@@ -224,3 +226,74 @@ async def test_plugin_tool_scope_filters_schema_and_execution(tmp_path: Path, mo
     )
     assert "Permission denied" in denied
     assert await registry.execute("plugin_tool", {}, user=hr, permission_checker=checker) == "ok"
+
+
+def test_load_extensions_overlay_plugin_overrides_default_tool(tmp_path: Path, monkeypatch) -> None:
+    """An overlay plugin with the same name and tool name overrides the default
+    plugin's tool in the registry (overlay wins, not default)."""
+    from corpclaw_lite.config.settings import ExtensionsSettings
+    from corpclaw_lite.extensions import bootstrap
+
+    class DefaultTool(Tool):
+        name = "shared_tool"
+        description = "default impl"
+        params = []
+
+        async def execute(self, **kwargs: object) -> str:
+            return "default"
+
+    class OverlayTool(Tool):
+        name = "shared_tool"
+        description = "overlay impl"
+        params = []
+
+        async def execute(self, **kwargs: object) -> str:
+            return "overlay"
+
+    default_plugin = Plugin(
+        manifest=PluginManifest(
+            name="corp",
+            version="1.0",
+            type="plugin",
+            description="default",
+            path=Path("default/corp"),
+        ),
+        tools=[DefaultTool()],
+    )
+    overlay_plugin = Plugin(
+        manifest=PluginManifest(
+            name="corp",
+            version="1.0",
+            type="plugin",
+            description="overlay",
+            path=Path("overlay/corp"),
+        ),
+        tools=[OverlayTool()],
+    )
+
+    # resolve_dirs("plugins", settings, project_root) returns
+    # [project_root/plugins, <overlay>/plugins]. Create the matching dirs.
+    project_root = tmp_path / "project"
+    overlay_root = tmp_path / "overlay"
+    default_plugins_dir = project_root / "plugins"
+    overlay_plugins_dir = overlay_root / "plugins"
+    default_plugins_dir.mkdir(parents=True)
+    overlay_plugins_dir.mkdir(parents=True)
+
+    def fake_load_directory(self: PluginRegistry, path: Path, **kwargs: object) -> None:
+        allow_replace = bool(kwargs.get("allow_replace", False))
+        if path == default_plugins_dir:
+            self.register(default_plugin)
+        else:
+            self.register(overlay_plugin, allow_replace=allow_replace)
+
+    monkeypatch.setattr(PluginRegistry, "load_directory", fake_load_directory)
+
+    settings = Settings(extensions=ExtensionsSettings(extra_paths=[str(overlay_root)]))
+    registry = ToolRegistry()
+    bootstrap.load_extensions(settings, project_root, registry, bootstrap.SkillsSettings())
+
+    tool = registry.get("shared_tool")
+    assert tool is not None
+    # Overlay description wins (overlay registered last with allow_replace=True).
+    assert tool.description == "overlay impl"
