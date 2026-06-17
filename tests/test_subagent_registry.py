@@ -101,3 +101,33 @@ def test_watcher_load_spec_matches_registry(tmp_path: Path) -> None:
     # Explicit checks for the previously-divergent field.
     assert from_watcher.direct_response is True
     assert from_watcher.max_wall_time_ms == 600000
+
+
+def test_subagent_overlay_override(tmp_path: Path, caplog) -> None:
+    """A subagent spec loaded later overrides an earlier one by id and logs a WARN."""
+    import logging
+
+    default_dir = tmp_path / "default"
+    overlay_dir = tmp_path / "overlay"
+    default_dir.mkdir()
+    overlay_dir.mkdir()
+
+    (default_dir / "research.yaml").write_text(
+        "id: research-agent\nname: Default Research\ndescription: default\n"
+        "allowed_tools: ['read_file']\nprompt_path: p1.md\n"
+    )
+    (overlay_dir / "research.yaml").write_text(
+        "id: research-agent\nname: Overlay Research\ndescription: overlay\n"
+        "allowed_tools: ['read_file', 'write_file']\nprompt_path: p2.md\n"
+    )
+
+    registry = SubagentRegistry()
+    with caplog.at_level(logging.WARNING, logger="corpclaw_lite.extensions.subagents.registry"):
+        registry.load_directory(default_dir)
+        registry.load_directory(overlay_dir)
+
+    spec = registry.get_spec("research-agent")
+    assert spec is not None
+    assert spec.name == "Overlay Research"  # overlay won
+    assert spec.prompt_path == "p2.md"
+    assert any("overridden by overlay" in r.message for r in caplog.records)

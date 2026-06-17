@@ -106,6 +106,30 @@ def test_plugin_registry(tmp_path: Path) -> None:
     assert registry.get_allowed_plugins(user_sales)[0].manifest.name == "p1"
 
 
+def test_plugin_registry_overlay_replace(tmp_path: Path) -> None:
+    """Overlay dir overrides a default plugin by name when allow_replace=True."""
+    default_dir = tmp_path / "default"
+    overlay_dir = tmp_path / "overlay"
+    default_dir.mkdir()
+    overlay_dir.mkdir()
+
+    (default_dir / "p1").mkdir()
+    (default_dir / "p1" / "manifest.yaml").write_text("name: p1\nallowed_departments: ['*']\n")
+    (overlay_dir / "p1").mkdir()
+    (overlay_dir / "p1" / "manifest.yaml").write_text("name: p1\nallowed_departments: [hr]\n")
+    (overlay_dir / "p2").mkdir()
+    (overlay_dir / "p2" / "manifest.yaml").write_text("name: p2\nallowed_departments: ['*']\n")
+
+    registry = PluginRegistry()
+    registry.load_directory(default_dir)
+    registry.load_directory(overlay_dir, allow_replace=True)
+
+    plugins = {p.manifest.name: p for p in registry.list_all()}
+    assert set(plugins) == {"p1", "p2"}
+    # Overlay p1 overrides default: allowed_departments is the overlay value.
+    assert plugins["p1"].manifest.allowed_departments == ["hr"]
+
+
 def test_load_extensions_registers_plugin_tools_in_full_registry(
     tmp_path: Path, monkeypatch
 ) -> None:
