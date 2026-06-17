@@ -204,7 +204,10 @@ def _build_security_stack(
 ) -> tuple[ToolGuard, PermissionChecker]:
     """Build ToolGuard + PermissionChecker from config."""
     from corpclaw_lite.config.settings import AgentSettings
-    from corpclaw_lite.departments.manager import DepartmentManager
+    from corpclaw_lite.departments.manager import (
+        DepartmentManager,
+        resolve_department_files,
+    )
     from corpclaw_lite.departments.permissions import PermissionChecker
     from corpclaw_lite.security.tool_guard import ToolGuard
 
@@ -218,9 +221,16 @@ def _build_security_stack(
         guard.load_file(guard_rules)
 
     dept_manager = DepartmentManager()
-    dept_config = PROJECT_ROOT / "config" / "departments.yaml"
-    if dept_config.exists():
-        dept_manager.load_file(dept_config)
+    dept_paths = resolve_department_files(settings, PROJECT_ROOT)
+    for index, dept_path in enumerate(dept_paths):
+        if index == 0:
+            # Default file: replace-mode (backward-compatible). Skip if absent.
+            if dept_path.exists():
+                dept_manager.load_file(dept_path)
+        else:
+            # Overlay files: union-merge. resolve_department_files already
+            # filtered these to existing paths.
+            dept_manager.load_file(dept_path, merge=True)
     return guard, PermissionChecker(dept_manager)
 
 
