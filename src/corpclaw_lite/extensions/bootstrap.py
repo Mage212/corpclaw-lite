@@ -1,8 +1,9 @@
-"""Shared extension initialization for CLI and Telegram channels.
+"""Shared extension initialization for the agent stack.
 
-Eliminates DRY violation: skill loading, plugin loading, plugin tool
-registration, and SkillMatcher creation were duplicated between
-``cli.py`` and ``runner.py``.
+Skill loading, plugin loading, plugin tool registration, and SkillMatcher
+creation are centralised here and called from ``factory.build_agent_stack()``
+(``agent/factory.py``), so every channel (CLI, Telegram, Web) shares identical
+extension-loading behaviour.
 """
 
 from __future__ import annotations
@@ -32,8 +33,9 @@ def load_extensions(
 ) -> tuple[SkillRegistry, PluginRegistry, SkillMatcher | None]:
     """Load skills, plugins, register plugin tools, and create SkillMatcher.
 
-    Shared between CLI ``cmd_chat`` and Telegram ``run_telegram_bot``
-    to ensure identical behaviour across channels.
+    Called from ``factory.build_agent_stack()`` (the single assembly point for
+    the agent stack), ensuring identical extension-loading behaviour across all
+    channels (CLI, Telegram, Web).
 
     Returns:
         (skill_registry, plugin_registry, skill_matcher_or_None)
