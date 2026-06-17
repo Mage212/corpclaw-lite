@@ -27,6 +27,26 @@ User → Channel (Web / Telegram / CLI) → AgentLoop (ReAct)
                               Response → Memory (SQLite) → Channel
 ```
 
+## Extending
+
+CorpClaw Lite is extended through manifests — skills (Markdown), plugins (`manifest.yaml`),
+subagents (YAML), and channels — without touching core code. Add a file to the right
+directory and it is picked up (with hot-reload).
+
+**Private extensions:** customizations that must not enter this public repo (internal tools,
+corporate skills, RBAC rules, system prompts) go into an **overlay** — a private directory
+whose layout mirrors the project. Configure it via `config/settings.yaml → extensions.extra_paths`;
+the core loads defaults plus overlays, with overlay entries overriding or extending defaults.
+
+```yaml
+extensions:
+  extra_paths:
+    - "${CORPCLAW_PRIVATE_EXTENSIONS}"
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md#private-extensions-overlay) for the overlay layout,
+override/merge semantics, and how to keep core changes public while keeping customizations private.
+
 ## Quick Start
 
 ### Prerequisites
