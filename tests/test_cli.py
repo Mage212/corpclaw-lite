@@ -62,7 +62,7 @@ Instructions here.
 def test_cmd_skill_list_empty(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("corpclaw_lite.paths.PROJECT_ROOT", tmp_path)
     (tmp_path / "skills").mkdir()
     cmd_skill_list()
     out, _ = capsys.readouterr()
@@ -72,7 +72,7 @@ def test_cmd_skill_list_empty(
 def test_cmd_skill_list_with_skills(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("corpclaw_lite.paths.PROJECT_ROOT", tmp_path)
     skills_dir = tmp_path / "skills"
     skills_dir.mkdir()
     (skills_dir / "test_skill.md").write_text(_SKILL_MD, encoding="utf-8")
@@ -90,7 +90,7 @@ def test_cmd_skill_list_with_skills(
 def test_cmd_plugin_list_empty(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("corpclaw_lite.paths.PROJECT_ROOT", tmp_path)
     (tmp_path / "plugins").mkdir()
     cmd_plugin_list()
     out, _ = capsys.readouterr()
@@ -100,7 +100,7 @@ def test_cmd_plugin_list_empty(
 def test_cmd_plugin_list_with_plugins(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("corpclaw_lite.paths.PROJECT_ROOT", tmp_path)
     plugin_dir = tmp_path / "plugins" / "test_plugin"
     plugin_dir.mkdir(parents=True)
     (plugin_dir / "manifest.yaml").write_text(_PLUGIN_MANIFEST, encoding="utf-8")
