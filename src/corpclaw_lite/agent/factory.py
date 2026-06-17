@@ -349,15 +349,20 @@ def _build_memory_stack(
     return memory, consolidator, compressor
 
 
-def _build_system_prompt() -> str | None:
+def _build_system_prompt(settings: Settings, project_root: Path) -> str | None:
     """Load bootstrap system prompt."""
     from corpclaw_lite.config.bootstrap import BootstrapLoader
+    from corpclaw_lite.extensions.paths import resolve_dirs as _resolve_dirs
 
-    bootstrap_dir = PROJECT_ROOT / "config" / "bootstrap"
-    bootstrap = BootstrapLoader(bootstrap_dir)
+    bootstrap_dirs = _resolve_dirs("bootstrap", settings, project_root)
+    bootstrap = BootstrapLoader(bootstrap_dirs)
     system_prompt = bootstrap.get_system_prompt() or None
     if system_prompt:
-        logger.info("Loaded system prompt from %s (%d chars)", bootstrap_dir, len(system_prompt))
+        logger.info(
+            "Loaded system prompt from %s (%d chars)",
+            bootstrap_dirs,
+            len(system_prompt),
+        )
     else:
         logger.warning("No bootstrap/*.md files found — using minimal default system prompt")
     return system_prompt
@@ -498,7 +503,7 @@ def build_agent_stack(
             ", ".join(str(p) for p in mcp_paths),
         )
 
-    system_prompt = _build_system_prompt()
+    system_prompt = _build_system_prompt(full_settings, PROJECT_ROOT)
 
     # Load calibrated few-shots (if any) for injection into every run()
     few_shots: list[dict[str, Any]] | None = None
