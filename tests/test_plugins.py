@@ -131,6 +131,60 @@ def test_plugin_registry_overlay_replace(tmp_path: Path) -> None:
     assert plugins["p1"].manifest.allowed_departments == ["hr"]
 
 
+def test_plugin_loader_reads_requires_core(tmp_path: Path) -> None:
+    """requires_core is read from manifest.yaml into PluginManifest."""
+    plugin_dir = tmp_path / "corp_plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "manifest.yaml").write_text(
+        "name: corp_plugin\n"
+        "version: '1.0'\n"
+        "type: plugin\n"
+        "description: Corp\n"
+        'requires_core: "^0.1.11"\n',
+        encoding="utf-8",
+    )
+
+    plugin = PluginLoader.load_plugin(plugin_dir)
+    assert plugin is not None
+    assert plugin.manifest.requires_core == "^0.1.11"
+
+
+def test_register_skips_plugin_on_core_mismatch() -> None:
+    """A plugin whose requires_core is not satisfied is skipped (warn-and-skip)."""
+    registry = PluginRegistry()
+    plugin = Plugin(
+        manifest=PluginManifest(
+            name="future_plugin",
+            version="1.0",
+            type="plugin",
+            description="Needs a newer core",
+            requires_core="^99.0.0",
+        ),
+    )
+
+    registry.register(plugin)
+
+    assert registry.get("future_plugin") is None
+    assert registry.list_all() == []
+
+
+def test_register_loads_plugin_when_core_satisfies() -> None:
+    """A plugin with an empty requires_core (the default) is always loaded."""
+    registry = PluginRegistry()
+    plugin = Plugin(
+        manifest=PluginManifest(
+            name="ok_plugin",
+            version="1.0",
+            type="plugin",
+            description="No constraint",
+        ),
+    )
+
+    registry.register(plugin)
+
+    assert registry.get("ok_plugin") is not None
+
+
 def test_load_extensions_registers_plugin_tools_in_full_registry(
     tmp_path: Path, monkeypatch
 ) -> None:

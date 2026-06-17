@@ -29,6 +29,7 @@ class PluginManifest:
     description: str
     allowed_departments: list[str] = field(default_factory=lambda: ["*"])
     components: dict[str, str] = field(default_factory=lambda: {})
+    requires_core: str = ""
     path: Path | None = None
 
 

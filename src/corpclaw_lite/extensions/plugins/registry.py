@@ -42,6 +42,23 @@ class PluginRegistry:
         logger.info("Loaded %d plugins from %s", loaded_count, dir_path)
 
     def register(self, plugin: Plugin, *, allow_replace: bool = False) -> None:
+        # Core-version compatibility check. This is the single chokepoint that
+        # all load paths hit (bootstrap load_directory, CLI cmd_plugin_list, and
+        # the PluginHotReloader's direct register call). Warn-and-skip — never
+        # raise — so the hot-reloader doesn't leave orphaned tools/skills behind.
+        from corpclaw_lite.extensions.plugins.core_version import (
+            get_core_version,
+            satisfies_core_version,
+        )
+
+        if not satisfies_core_version(plugin.manifest.requires_core):
+            logger.warning(
+                "Plugin '%s' requires_core '%s' not satisfied by core '%s' — skipping",
+                plugin.manifest.name,
+                plugin.manifest.requires_core,
+                get_core_version(),
+            )
+            return
         if plugin.manifest.name in self._plugins and not allow_replace:
             raise ValueError(f"Plugin '{plugin.manifest.name}' is already registered.")
         if plugin.manifest.name in self._plugins and allow_replace:

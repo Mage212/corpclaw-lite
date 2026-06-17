@@ -38,6 +38,7 @@ class PluginLoader:
                 description=data.get("description", "No description"),
                 allowed_departments=data.get("allowed_departments", ["*"]),
                 components=data.get("components", {}),
+                requires_core=str(data.get("requires_core", "")),
                 path=path,
             )
         except Exception as e:
