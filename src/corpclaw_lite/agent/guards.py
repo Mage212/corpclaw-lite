@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import time
 from dataclasses import dataclass, field
@@ -90,6 +91,64 @@ class SimpleProgressGuard:
     def reset(self) -> None:
         """Reset guard state for new conversation."""
         self.state = SimpleProgressGuardState()
+
+
+@dataclass
+class ResultDedupGuardConfig:
+    """Configuration for the result-based dedup guard (B-055).
+
+    Complementary to :class:`SimpleProgressGuard`: the progress guard detects
+    repeated *errors* (normalized by ``_normalize_error``), while this guard
+    detects repeated *successful results* — the case where a local LLM keeps
+    calling the same tool with the same arguments and getting the same answer
+    back. Prompt-only "do not loop" instructions are ignored under sampling
+    pressure (confirmed by the GAIA eval taxonomy), so a deterministic
+    result-hash counter is the reliable signal.
+    """
+
+    enabled: bool = True
+    # How many identical (by hash) tool results in a row count as a loop.
+    max_repeats: int = 2
+
+
+class ResultDedupGuard:
+    """Detects loops where a tool returns the same successful result repeatedly.
+
+    The dedup key is the SHA-256 hash of the result string (truncated to 12
+    chars, matching ``_payload_hash`` in loop.py), **not** the arguments. This
+    is the key insight from the GAIA reference: identical arguments do not
+    imply a loop (the underlying file may have changed between calls), but an
+    identical result does. The caller injects a recovery hint and lets the
+    model try again with that context.
+    """
+
+    def __init__(self, config: ResultDedupGuardConfig | None = None) -> None:
+        self.config = config or ResultDedupGuardConfig()
+        self._seen: dict[str, int] = {}
+
+    def _result_hash(self, result: str) -> str:
+        return hashlib.sha256(result.encode("utf-8")).hexdigest()[:12]
+
+    def detect(self, tool_name: str, result: str) -> bool:
+        """Record ``result`` and return True if it has now been seen ``max_repeats`` times.
+
+        ``tool_name`` is accepted for symmetry with :meth:`SimpleProgressGuard.detect_loop`
+        and for trace logging; the dedup key is the result hash only.
+        """
+        _ = tool_name  # accepted for API symmetry, not used in the key
+        if not self.config.enabled:
+            return False
+        key = self._result_hash(result)
+        self._seen[key] = self._seen.get(key, 0) + 1
+        return self._seen[key] >= self.config.max_repeats
+
+    def last_count(self, result: str) -> int:
+        """Return how many times ``result`` has been seen (for trace fields)."""
+        return self._seen.get(self._result_hash(result), 0)
+
+    def reset(self) -> None:
+        """Reset guard state for new conversation."""
+        self._seen.clear()
 
 
 @dataclass
@@ -333,6 +392,8 @@ class TerminalToolMandate:
 
 __all__ = [
     "BudgetExceededError",
+    "ResultDedupGuard",
+    "ResultDedupGuardConfig",
     "SimpleBudgetGuard",
     "SimpleBudgetGuardConfig",
     "SimpleProgressGuard",

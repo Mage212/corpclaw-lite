@@ -1071,6 +1071,64 @@ async def test_loop_detection_gives_second_chance(
 
 
 @pytest.mark.asyncio
+async def test_dedup_triggers_on_repeated_identical_tool_result(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """B-055: a tool returning the same successful result repeatedly triggers
+    the result-dedup guard, which injects a recovery hint and lets the model
+    try again with that context."""
+
+    class StaleTool:
+        name = "stale_tool"
+        description = ""
+        params: list[Any] = []
+        terminal = False
+
+        async def execute(self, **kwargs: Any) -> str:
+            return "rows: 42"  # identical successful result every call
+
+    empty_registry._tools["stale_tool"] = StaleTool()  # type: ignore
+
+    saw_dedup_instruction: list[bool] = []
+
+    class TrackingProvider(MockProvider):
+        async def chat(  # type: ignore[override]
+            self,
+            messages: list[dict[str, Any]],
+            tools: Any = None,
+            system: Any = None,
+        ) -> LLMResponse:
+            # The B-055 dedup instruction must appear in the system prompt.
+            saw_dedup_instruction.append(
+                "returned the same result it returned before" in str(system or "")
+            )
+            return await super().chat(messages, tools, system)
+
+    # Two identical tool calls → second triggers dedup → third response is a
+    # real final answer (model "recovers" and answers directly).
+    provider = TrackingProvider(
+        responses=[
+            LLMResponse(
+                content="",
+                tool_calls=[ToolCall(id="0", name="stale_tool", arguments={})],
+            ),
+            LLMResponse(
+                content="",
+                tool_calls=[ToolCall(id="1", name="stale_tool", arguments={})],
+            ),
+            LLMResponse(content="The answer is 42."),
+        ]
+    )
+    settings = AgentSettings(max_steps=20, max_tool_calls=100)
+    loop = AgentLoop(AgentConfig(provider, empty_registry, settings))
+    result, stats = await loop.run(test_user, "do it")
+
+    assert result == "The answer is 42."
+    assert any(saw_dedup_instruction), "B-055 dedup instruction must be injected"
+    assert stats.status == "ok"
+
+
+@pytest.mark.asyncio
 async def test_loop_guard_echo_is_not_returned_to_user(
     test_user: User, empty_registry: ToolRegistry
 ) -> None:
