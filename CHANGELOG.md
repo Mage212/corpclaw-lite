@@ -4,6 +4,113 @@
 
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/).
 
+## [0.1.12] — 2026-06-18
+
+Фокус версии — **архитектура приватных расширений (overlay)**. Корпоративные
+доработки (skills, plugins, subagents, bootstrap-промпты, RBAC-правила, MCP)
+работают поверх публичного ядра через отдельный приватный репозиторий
+(`corpclaw-corp`, sibling публичного), который компонуется с ядром в рантайме
+через путь — никогда через git-merge. Ни один приватный файл физически не
+попадает в публичный репозиторий; ядро не требует правок для нового расширения
+(99% корпоративных доработок — это новый контент в overlay, а не код `src/`).
+
+Контракт: overlay-entries переопределяют дефолты по id/name (skills/plugins/
+subagents/bootstrap — replace; departments — union-merge), plugins декларируют
+`requires_core` для fail-loud при несовместимости ядра. Подробности — D-050.
+
+### Added
+
+- **PR-1 — Центральный path resolver.** `src/corpclaw_lite/extensions/paths.py`
+  → `resolve_dirs(kind, settings, project_root) -> list[Path]` возвращает
+  `[default, ...overlays]` для каждого `ExtensionKind` (skills/plugins/
+  subagents/mcp/bootstrap). Фильтрует пустые строки (страховка от cwd-leak при
+  `${VAR}`→`""`) и несуществующие пути. `ExtensionsSettings.extra_paths` в
+  `settings.yaml` — единая точка конфигурации overlay. Mirror-layout: каждый
+  overlay-путь повторяет структуру проекта.
+- **PR-2 — Multi-directory loading + override-семантика (8 call-site'ов).**
+  Все реестры и загрузчики переведены на `resolve_dirs`: skills, plugins,
+  subagents, bootstrap-промпты, MCP, watchers (skills/plugins/subagents/mcp),
+  `agent.factory._build_extensions_stack`, `cli cmd_skill_list`/`cmd_plugin_list`,
+  telegram orchestrator. Override: `load_directory(*, allow_replace=index > 0)` —
+  skills/plugins/subagents/bootstrap логируют WARN и заменяют по id/name;
+  plugin-tools честно переопределяются (unregister старых → register overlay
+  tools, чтобы не было orphan tools при drop/rename tool'а в overlay). MCP
+  merge'ит `servers:` по имени (last wins). Bootstrap переопределяет по filename
+  на верхнем уровне и first-match high→low для departments/users/subagents.
+- **PR-3 — Departments union-merge.** `DepartmentManager.load_file(*, merge=True)`
+  для overlay-индексов: allowlists объединяются с wildcard-нормализацией
+  (`["*"] + [x] → ["*"]`), budget (`max_iterations`/`max_tool_calls`)
+  переопределяется где overlay указывает. `max_time_ms` **никогда** не мерджится
+  — всегда из settings (D-037). Отдельный resolver `resolve_department_files`
+  (не `resolve_dirs`), т.к. departments merge, а не replace.
+- **PR-4 — `requires_core` version contract для plugins.**
+  `extensions/plugins/core_version.py`: `get_core_version()` (через
+  `importlib.metadata.version` с fallback), `satisfies_core_version(constraint)`
+  — caret-совместимый парсер (`^0.1.11` пинит minor для 0.x, major для 1.x+;
+  bare = exact). Поле `requires_core: str = ""` в `PluginManifest`. Единственный
+  chokepoint проверки — `PluginRegistry.register` (warn-and-skip, не raise),
+  покрывает все пути загрузки (bootstrap, CLI, hot-reload). Контракт применяется
+  только к plugins (не skills/subagents).
+- **W7 — End-to-end верификация overlay.** `tests/test_overlay_e2e.py` (11
+  тестов) активирует sibling `corpclaw-corp` через `Settings(extra_paths=[...])`
+  и проверяет четыре гарантии: (a) каждый вид расширения грузится иusable через
+  overlay, включая реальный `execute()` plugin tool.py через полный путь
+  `PluginToolProxy → sandbox_worker` subprocess; (b) overlay выигрывает по
+  id/name (replace для skills/subagents/bootstrap, union для departments);
+  (c) приватные файлы не утекают в публичный репо (git status clean, scan
+  `_plugin_tool*.pyc`, `resolve_dirs` без overlay → только default, diff
+  директорий до/после); (d) следов не остаётся. **Skip-if-missing**: без
+  corpclaw-corp → 11 skip за ~1s (CI чистый); с corpclaw-corp → 11 pass за ~5s.
+  README "Extending" секция документирует запуск.
+- **W8 — Документация overlay.** `CONTRIBUTING.md` — секция "Private Extensions
+  (Overlay)" (mirror-layout, override/union-семантика, requires_core, split-core-
+  and-overlay правило); исправлен Development Workflow (feature-ветки от
+  `pre-release`, не main); tiered commit policy. `README.md` — overlay-сниппет +
+  ссылка на CONTRIBUTING.md.
+
+### Changed
+
+- **`docs/ARCHITECTURE.md`** — overhaul: новая секция Private Extensions Overlay
+  (two-repo модель, `resolve_dirs`, override-семантика таблицей, `requires_core`);
+  расширение §LLM Queue/Slot Affinity/KV-cache (`LLMRequestQueue`,
+  `SlotAffinityConfig`, `LLMCacheManager` L1/L2); новая подсекция Backend LLM
+  Streaming (`llm_streaming_enabled`, trace events, stall detection); 4-й watcher
+  (subagents); `requires_core` в plugin manifest example; refresh счётчиков и
+  версии проекта (0.1.7 → 0.1.12).
+- **`README.md` / `README_RU.md`** — Features table: актуализованы счётчики
+  (tools, ToolGuard rules), disambiguated plugins/skills/subagents, добавлена
+  строка Private Extensions Overlay.
+- **`plans/corpclaw-lite-design.md`** (локальный, gitignored) — заморожен на v2.0
+  (Phase 5, 23 Mar 2026): убрано ложное «АКТУАЛЬНЫЙ», добавлен указатель на
+  `AGENTS.md` + per-feature plan docs как на авторитетные.
+
+### Decisions
+
+- **D-050 — Private extensions overlay: two-repo model (required).** Приватные
+  корпоративные расширения живут в отдельном приватном репо (`corpclaw-corp`) и
+  компонуются с публичным ядром в рантайме через
+  `config/settings.yaml → extensions.extra_paths`, никогда через git-merge.
+  Приватные файлы НИКОГДА не в публичном репо — даже в gitignored-папке (gitignore
+  не гарантирует от утечки). Зависимость однонаправленная: overlay декларирует
+  `requires_core`, ядро ничего не знает про overlay. Hard rules: (1) никогда не
+  класть приватные файлы в публичный репо; (2) держать контракт расширений
+  стабильным и аддитивным; (3) overlay декларирует `requires_core` и fail-loud
+  (warn-and-skip) при несовместимости; (4) фича, требующая и ядра, и overlay →
+  split на два PR. Known limitation: `requires_core` грубоват (minor-уровень для
+  0.x), тонкую несовместимость не поймает — компенсируется стабильной границей
+  расширений.
+
+### Verified
+
+- `uv run ruff check src/ tests/` — clean.
+- `uv run pyright src/` — `0 errors`.
+- `uv run pytest tests/test_overlay_e2e.py tests/test_extensions_paths.py
+  tests/test_plugin_core_version.py tests/test_department_manager.py
+  tests/test_skills.py tests/test_plugins.py tests/test_subagent_registry.py
+  tests/test_bootstrap.py tests/test_mcp.py -q` — `79 passed`.
+- `tests/test_overlay_e2e.py` — `11 passed` с sibling `corpclaw-corp`,
+  `11 skipped` без него (CI-совместимо).
+
 ## [non-version] — 2026-06-05
 
 ### Changed

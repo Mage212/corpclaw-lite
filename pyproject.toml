@@ -1,6 +1,6 @@
 [project]
 name = "corpclaw-lite"
-version = "0.1.11"
+version = "0.1.12"
 description = "CorpClaw Lite - streamlined agent project"
 readme = "README.md"
 requires-python = ">=3.12"
