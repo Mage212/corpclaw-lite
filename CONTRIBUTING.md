@@ -85,8 +85,31 @@ uv run ruff check src/ --fix && uv run ruff format src/ && uv run pyright src/ &
 
 - `ruff check` — linting (rules: E, F, I, UP, B, C4, SIM, G, A, PERF)
 - `ruff format` — formatting
-- `pyright` — type checking in strict mode
+- `pyright` — type checking in strict mode (pinned to a specific version in `pyproject.toml`; bump deliberately)
 - `pytest` — all tests must pass
+
+CI runs on `push`/`pull_request` to **both** `main` and `pre-release`, so every PR is gated before merge — not just at release time.
+
+### Pre-push hook (local quality gate)
+
+The repo ships a versioned `pre-push` hook that runs the same four gates locally **before** a push is allowed, so you get fast feedback instead of waiting for CI. It lives in `.githooks/` (version-controlled) and is activated once after clone:
+
+```bash
+# one-time setup after clone:
+bash scripts/install-hooks.sh
+#   or manually:  git config core.hooksPath .githooks
+```
+
+The hook runs, in order (fail-fast — stops at the first failing gate):
+
+1. `uv run ruff check src/ tests/`
+2. `uv run ruff format --check src/ tests/`
+3. `uv run pyright src/`
+4. `uv run pytest tests/ -x`   (full suite, stop on first failing test)
+
+**Bypassing:** `git push --no-verify` (native git) or `CORPCLAW_SKIP_HOOKS=1 git push`. Use only when CI will still run on the target branch, and call it out in the PR. Tag pushes (`refs/tags/*`) are skipped automatically.
+
+> Note: the local hook and CI use the **same pinned pyright version** (see `pyproject.toml`). If the hook passes locally, CI's pyright job passes too — no version-drift surprises.
 
 ## Writing Tests
 
