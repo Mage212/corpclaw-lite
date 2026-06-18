@@ -251,9 +251,7 @@ class TelegramBotOrchestrator:
         # Hot-reloaders — watch default + overlay dirs from extensions.extra_paths.
         from corpclaw_lite.extensions.paths import resolve_dirs as _resolve_dirs
 
-        skills_dirs: list[str | Path] = list(
-            _resolve_dirs("skills", self._settings, PROJECT_ROOT)
-        )
+        skills_dirs: list[str | Path] = list(_resolve_dirs("skills", self._settings, PROJECT_ROOT))
         plugins_dirs: list[str | Path] = list(
             _resolve_dirs("plugins", self._settings, PROJECT_ROOT)
         )
