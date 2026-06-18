@@ -47,6 +47,20 @@ extensions:
 See [CONTRIBUTING.md](CONTRIBUTING.md#private-extensions-overlay) for the overlay layout,
 override/merge semantics, and how to keep core changes public while keeping customizations private.
 
+The overlay contract is verified end-to-end by
+[`tests/test_overlay_e2e.py`](tests/test_overlay_e2e.py): it activates a sibling
+`corpclaw-corp` overlay and asserts that every extension kind loads and is
+usable through it, that overlay entries override defaults by id/name (and that
+departments union-merge rather than replace), that no private files leak into
+this public repository, and that no traces are left behind. The tests
+**skip automatically** when the `corpclaw-corp` sibling is absent, so CI without
+the private overlay still passes. Run them locally (with `corpclaw-corp` checked
+out next to this repo):
+
+```bash
+uv run pytest tests/test_overlay_e2e.py -v
+```
+
 ## Quick Start
 
 ### Prerequisites
