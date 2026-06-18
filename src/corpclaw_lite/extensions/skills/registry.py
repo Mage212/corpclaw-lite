@@ -20,8 +20,12 @@ class SkillRegistry:
     def __init__(self) -> None:
         self._skills: dict[str, Skill] = {}
 
-    def load_directory(self, skills_dir: Path | str) -> None:
-        """Load all .md files from a directory."""
+    def load_directory(self, skills_dir: Path | str, *, allow_replace: bool = False) -> None:
+        """Load all .md files from a directory.
+
+        When ``allow_replace=True`` (overlay loading), a skill with the same id
+        as an existing one overrides it and a WARN is logged.
+        """
         dir_path = Path(skills_dir)
         if not dir_path.exists() or not dir_path.is_dir():
             logger.warning("Skills directory not found: %s", dir_path)
@@ -31,7 +35,7 @@ class SkillRegistry:
         for md_file in dir_path.glob("*.md"):
             skill = SkillLoader.load_from_file(md_file)
             if skill:
-                self.register(skill)
+                self.register(skill, allow_replace=allow_replace)
                 loaded_count += 1
 
         logger.info("Loaded %d skills from %s", loaded_count, dir_path)
@@ -40,6 +44,8 @@ class SkillRegistry:
         """Register a single skill."""
         if skill.id in self._skills and not allow_replace:
             raise ValueError(f"Skill '{skill.id}' is already registered.")
+        if skill.id in self._skills and allow_replace:
+            logger.warning("Skill '%s' overridden by overlay: %s", skill.id, skill.path)
         self._skills[skill.id] = skill
 
     def unregister(self, skill_id: str) -> None:

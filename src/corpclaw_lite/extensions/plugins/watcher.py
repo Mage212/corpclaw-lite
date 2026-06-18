@@ -38,31 +38,37 @@ logger = logging.getLogger(__name__)
 
 class PluginHotReloader:
     """
-    File-mtime watcher for the plugins/ directory.
+    File-mtime watcher for one or more plugins/ directories.
 
-    Tracks per-plugin state:
-    - ``_plugin_tools``: plugin_name → list of registered tool names
-    - ``_plugin_skill``: plugin_name → registered skill id (or None)
+    Tracks per-plugin state keyed by the plugin directory Path (not the
+    directory basename), so multiple overlay root directories whose plugin
+    subdirs share a basename don't clobber each other:
+    - ``_plugin_tools``: plugin_dir → list of registered tool names
+    - ``_plugin_skill``: plugin_dir → registered skill id (or None)
     - ``_mtimes``: plugin_dir → max mtime across all files in that dir
     - ``_known_dirs``: set of currently tracked plugin directories
     """
 
     def __init__(
         self,
-        plugins_dir: Path | str,
+        plugins_dir: Path | str | list[str | Path],
         plugin_registry: PluginRegistry,
         tool_registry: ToolRegistry,
         skill_registry: SkillRegistry,
         poll_interval: float = 10.0,
     ) -> None:
-        self._dir = Path(plugins_dir)
+        if isinstance(plugins_dir, list):
+            self._dirs: list[Path] = [Path(d) for d in plugins_dir]
+        else:
+            self._dirs = [Path(plugins_dir)]
         self._plugin_registry = plugin_registry
         self._tool_registry = tool_registry
         self._skill_registry = skill_registry
         self._poll_interval = poll_interval
 
-        self._plugin_tools: dict[str, list[str]] = {}  # plugin_name → [tool_name, ...]
-        self._plugin_skill: dict[str, str | None] = {}  # plugin_name → skill_id | None
+        self._plugin_tools: dict[Path, list[str]] = {}  # plugin_dir → [tool_name, ...]
+        self._plugin_skill: dict[Path, str | None] = {}  # plugin_dir → skill_id | None
+        self._plugin_names: dict[Path, str] = {}  # plugin_dir → manifest name (cached)
         self._mtimes: dict[Path, float] = {}  # plugin_dir → max(mtime)
         self._known_dirs: set[Path] = set()
 
@@ -72,7 +78,7 @@ class PluginHotReloader:
         """Start the background polling task."""
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._poll_loop())
-            logger.info("PluginHotReloader started watching: %s", self._dir)
+            logger.info("PluginHotReloader started watching: %s", self._dirs)
 
     def stop(self) -> None:
         """Cancel the background polling task."""
@@ -106,57 +112,59 @@ class PluginHotReloader:
 
     async def _scan(self) -> None:
         """Detect added/removed/changed plugin directories and apply changes."""
-        if not self._dir.exists():
-            return
-
         current_dirs: dict[Path, float] = {}
-        for sub in self._dir.iterdir():
-            if sub.is_dir() and (sub / "manifest.yaml").exists():
-                current_dirs[sub] = self._max_mtime(sub)
+        for root in self._dirs:
+            if not root.exists():
+                continue
+            for sub in root.iterdir():
+                if sub.is_dir() and (sub / "manifest.yaml").exists():
+                    current_dirs[sub] = self._max_mtime(sub)
 
         current_paths = set(current_dirs.keys())
 
         # ── Removed plugins ───────────────────────────────────────────────
         for removed in self._known_dirs - current_paths:
-            plugin_name = removed.name
-            logger.info("PluginHotReloader: plugin '%s' removed", plugin_name)
-            await self._unregister_plugin(plugin_name)
+            logger.info("PluginHotReloader: plugin '%s' removed", removed.name)
+            await self._unregister_plugin(removed)
 
         # ── New plugins ───────────────────────────────────────────────────
         for added in current_paths - self._known_dirs:
-            plugin_name = added.name
-            logger.info("PluginHotReloader: plugin '%s' added", plugin_name)
+            logger.info("PluginHotReloader: plugin '%s' added", added.name)
             self._load_and_register(added)
             self._mtimes[added] = current_dirs[added]
 
         # ── Changed plugins ───────────────────────────────────────────────
         for existing in current_paths & self._known_dirs:
             if current_dirs[existing] > self._mtimes.get(existing, 0.0):
-                plugin_name = existing.name
-                logger.info("PluginHotReloader: plugin '%s' changed, reloading", plugin_name)
-                await self._unregister_plugin(plugin_name)
+                logger.info("PluginHotReloader: plugin '%s' changed, reloading", existing.name)
+                await self._unregister_plugin(existing)
                 self._load_and_register(existing)
                 self._mtimes[existing] = current_dirs[existing]
 
         self._known_dirs = current_paths
 
-    async def _unregister_plugin(self, plugin_name: str) -> None:
+    async def _unregister_plugin(self, plugin_dir: Path) -> None:
         """Unregister all tools and skill contributed by this plugin."""
         from corpclaw_lite.extensions.plugins.sandbox_proxy import PluginToolProxy
 
-        for tool_name in self._plugin_tools.pop(plugin_name, []):
+        for tool_name in self._plugin_tools.pop(plugin_dir, []):
             tool = self._tool_registry.get(tool_name)
             if isinstance(tool, PluginToolProxy):
                 await tool.kill()
             self._tool_registry.unregister(tool_name)
             logger.debug("PluginHotReloader: unregistered tool '%s'", tool_name)
 
-        skill_id = self._plugin_skill.pop(plugin_name, None)
+        skill_id = self._plugin_skill.pop(plugin_dir, None)
         if skill_id:
             self._skill_registry.unregister(skill_id)
             logger.debug("PluginHotReloader: unregistered skill '%s'", skill_id)
 
-        self._plugin_registry.unregister(plugin_name)
+        # The plugin registry is keyed by manifest name. Use the name cached at
+        # load time — the plugin dir may already be gone from disk (removal
+        # detection), so we cannot re-read the manifest here.
+        plugin_name = self._plugin_names.pop(plugin_dir, None)
+        if plugin_name is not None:
+            self._plugin_registry.unregister(plugin_name)
 
     def _load_and_register(self, plugin_dir: Path) -> None:
         """Load a plugin and register its tools + skill."""
@@ -193,7 +201,7 @@ class PluginHotReloader:
 
         skill_id: str | None = None
         if plugin.skill:
-            self._skill_registry.register(plugin.skill)
+            self._skill_registry.register(plugin.skill, allow_replace=True)
             skill_id = plugin.skill.id
             logger.info(
                 "PluginHotReloader: plugin '%s' registered skill '%s'",
@@ -201,6 +209,7 @@ class PluginHotReloader:
                 skill_id,
             )
 
-        self._plugin_registry.register(plugin)
-        self._plugin_tools[plugin_name] = registered_tools
-        self._plugin_skill[plugin_name] = skill_id
+        self._plugin_registry.register(plugin, allow_replace=True)
+        self._plugin_tools[plugin_dir] = registered_tools
+        self._plugin_skill[plugin_dir] = skill_id
+        self._plugin_names[plugin_dir] = plugin_name

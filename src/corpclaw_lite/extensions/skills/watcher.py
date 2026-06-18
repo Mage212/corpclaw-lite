@@ -27,11 +27,14 @@ class SkillHotReloader:
 
     def __init__(
         self,
-        skills_dir: Path | str,
+        skills_dir: Path | str | list[str | Path],
         registry: SkillRegistry,
         poll_interval: float = 5.0,
     ) -> None:
-        self._dir = Path(skills_dir)
+        if isinstance(skills_dir, list):
+            self._dirs: list[Path] = [Path(d) for d in skills_dir]
+        else:
+            self._dirs = [Path(skills_dir)]
         self._registry = registry
         self._poll_interval = poll_interval
         self._mtimes: dict[Path, float] = {}
@@ -42,7 +45,7 @@ class SkillHotReloader:
         """Start the background polling task."""
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._poll_loop())
-            logger.info("SkillHotReloader started for: %s", self._dir)
+            logger.info("SkillHotReloader started for: %s", self._dirs)
 
     def stop(self) -> None:
         """Cancel the background polling task."""
@@ -51,7 +54,7 @@ class SkillHotReloader:
             logger.info("SkillHotReloader stopped.")
 
     async def _poll_loop(self) -> None:
-        """Poll the directory for mtime changes on .md files."""
+        """Poll the directories for mtime changes on .md files."""
         # Do an initial scan on startup
         await self._scan()
         while True:
@@ -62,16 +65,16 @@ class SkillHotReloader:
                 logger.error("SkillHotReloader error during scan: %s", e)
 
     async def _scan(self) -> None:
-        """Check all .md files in the directory, reload any that changed."""
-        aio_dir = anyio.Path(self._dir)
-        if not await aio_dir.exists():
-            return
-
+        """Check all .md files across the directories, reload any that changed."""
         current_files: dict[Path, float] = {}
-        async for p in aio_dir.glob("*.md"):
-            sync_p = Path(p)
-            stat = await p.stat()
-            current_files[sync_p] = stat.st_mtime
+        for directory in self._dirs:
+            aio_dir = anyio.Path(directory)
+            if not await aio_dir.exists():
+                continue
+            async for p in aio_dir.glob("*.md"):
+                sync_p = Path(p)
+                stat = await p.stat()
+                current_files[sync_p] = stat.st_mtime
 
         current_paths = set(current_files.keys())
 

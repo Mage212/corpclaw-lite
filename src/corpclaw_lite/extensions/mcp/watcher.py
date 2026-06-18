@@ -42,12 +42,15 @@ class MCPHotReloader:
 
     def __init__(
         self,
-        config_path: Path | str,
+        config_path: Path | str | list[str | Path],
         manager: MCPManager,
         registry: ToolRegistry,
         poll_interval: float = 10.0,
     ) -> None:
-        self._path = Path(config_path)
+        if isinstance(config_path, list):
+            self._paths: list[Path] = [Path(p) for p in config_path]
+        else:
+            self._paths = [Path(config_path)]
         self._manager = manager
         self._registry = registry
         self._poll_interval = poll_interval
@@ -58,7 +61,9 @@ class MCPHotReloader:
         """Start the background polling task."""
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._poll_loop())
-            logger.info("MCPHotReloader started watching: %s", self._path)
+            logger.info(
+                "MCPHotReloader started watching: %s", ", ".join(str(p) for p in self._paths)
+            )
 
     def stop(self) -> None:
         """Cancel the background polling task."""
@@ -80,19 +85,28 @@ class MCPHotReloader:
                 logger.error("MCPHotReloader error: %s", e)
 
     async def _check(self) -> None:
-        """Check if mtime changed; trigger reload if so."""
-        if not self._path.exists():
+        """Check if any watched config file changed; reload if so.
+
+        Tracks the maximum mtime across all config files, so an edit to any
+        overlay file triggers a reload.
+        """
+        current_mtime = 0.0
+        any_exists = False
+        for path in self._paths:
+            if path.exists():
+                any_exists = True
+                current_mtime = max(current_mtime, path.stat().st_mtime)
+        if not any_exists:
             return
-        mtime = self._path.stat().st_mtime
         if self._last_mtime is None:
             # First check after start — record mtime, no reload needed
-            self._last_mtime = mtime
+            self._last_mtime = current_mtime
             return
-        if mtime <= self._last_mtime:
+        if current_mtime <= self._last_mtime:
             return
 
         logger.info("MCPHotReloader: config changed, reloading MCP servers...")
-        self._last_mtime = mtime
+        self._last_mtime = current_mtime
         await self._reload()
 
     async def _reload(self) -> None:

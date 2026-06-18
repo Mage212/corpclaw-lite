@@ -49,10 +49,28 @@ class MCPManager:
     Call ``await manager.disconnect_all()`` on shutdown.
     """
 
-    def __init__(self, config_path: str | Path = "config/mcp_servers.yaml") -> None:
-        self._config_path = Path(config_path)
+    def __init__(
+        self, config_path: str | Path | list[str | Path] = "config/mcp_servers.yaml"
+    ) -> None:
+        """Create the manager.
+
+        Args:
+            config_path: One or more mcp_servers.yaml paths. When several are
+                given, their ``servers:`` lists are merged in order (later paths
+                override earlier ones by server ``name``). A single path keeps
+                backward compatibility.
+        """
+        if isinstance(config_path, list):
+            self._config_paths: list[Path] = [Path(p) for p in config_path]
+        else:
+            self._config_paths = [Path(config_path)]
         self._clients: dict[str, MCPClient] = {}  # server_name → client
         self._server_tools: dict[str, list[str]] = {}  # server_name → [tool_name, ...]
+
+    @property
+    def config_paths(self) -> list[Path]:
+        """All config file paths this manager reads from (for watchers/tests)."""
+        return list(self._config_paths)
 
     async def connect_all(self, registry: ToolRegistry) -> int:
         """
@@ -99,17 +117,25 @@ class MCPManager:
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _load_config(self) -> list[dict[str, Any]]:
-        """Read and interpolate mcp_servers.yaml. Returns empty list if not found."""
-        if not self._config_path.exists():
-            logger.debug("No MCP config found at %s, skipping.", self._config_path)
-            return []
+        """Read and interpolate all mcp_servers.yaml files, merge servers by name.
 
-        with self._config_path.open(encoding="utf-8") as f:
-            raw = yaml.safe_load(f) or {}
-
-        # Apply ${VAR:-default} interpolation to the full structure
-        data = cast(dict[str, Any], interpolate_recursive(raw))
-        return cast(list[dict[str, Any]], data.get("servers", []))
+        Files are processed in order; a server ``name`` defined in a later file
+        overrides an earlier definition (last wins). Missing files are skipped.
+        Returns the merged ``servers`` list.
+        """
+        merged_by_name: dict[str, dict[str, Any]] = {}
+        for path in self._config_paths:
+            if not path.exists():
+                logger.debug("No MCP config found at %s, skipping.", path)
+                continue
+            with path.open(encoding="utf-8") as f:
+                raw = yaml.safe_load(f) or {}
+            data = cast(dict[str, Any], interpolate_recursive(raw))
+            servers = cast(list[dict[str, Any]], data.get("servers", []))
+            for server in servers:
+                name = str(server.get("name", "unknown"))
+                merged_by_name[name] = server
+        return list(merged_by_name.values())
 
     def _parse_command(self, server_cfg: dict[str, Any]) -> list[str]:
         """Support both formats:

@@ -58,6 +58,10 @@ class SubagentRegistry:
         logger.info("Loaded %d subagents from %s", loaded_count, dir_path)
 
     def register(self, spec: SubagentSpec) -> None:
+        if spec.id in self._subagents:
+            logger.warning(
+                "Subagent '%s' overridden by overlay: %s", spec.id, spec.prompt_path or spec.id
+            )
         self._subagents[spec.id] = spec
 
     def get(self, subagent_id: str) -> SubagentSpec | None:

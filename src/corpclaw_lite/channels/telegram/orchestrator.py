@@ -248,40 +248,44 @@ class TelegramBotOrchestrator:
         except ImportError:
             logger.info("aiohttp not installed — health endpoint disabled")
 
-        # Hot-reloaders
-        skills_dir = PROJECT_ROOT / "skills"
-        plugins_dir = PROJECT_ROOT / "plugins"
+        # Hot-reloaders — watch default + overlay dirs from extensions.extra_paths.
+        from corpclaw_lite.extensions.paths import resolve_dirs as _resolve_dirs
+
+        skills_dirs = _resolve_dirs("skills", self._settings, PROJECT_ROOT)
+        plugins_dirs = _resolve_dirs("plugins", self._settings, PROJECT_ROOT)
 
         if skill_registry is not None:
-            self._reloader = SkillHotReloader(skills_dir, skill_registry)
+            self._reloader = SkillHotReloader(skills_dirs, skill_registry)
             self._reloader.start()
-            logger.info("Skill hot-reloader started watching %s", skills_dir)
+            logger.info("Skill hot-reloader started watching %s", skills_dirs)
 
         if mcp_manager is not None:
             from corpclaw_lite.extensions.mcp.watcher import MCPHotReloader
 
-            mcp_cfg_path = PROJECT_ROOT / "config" / "mcp_servers.yaml"
-            self._mcp_reloader = MCPHotReloader(mcp_cfg_path, mcp_manager, tool_registry)
+            mcp_cfg_paths = _resolve_dirs("mcp", self._settings, PROJECT_ROOT)
+            self._mcp_reloader = MCPHotReloader(mcp_cfg_paths, mcp_manager, tool_registry)
             self._mcp_reloader.start()
-            logger.info("MCP hot-reloader started watching %s", mcp_cfg_path)
+            logger.info("MCP hot-reloader started watching %s", mcp_cfg_paths)
 
         if plugin_registry is not None and skill_registry is not None:
             self._plugin_reloader = PluginHotReloader(
-                plugins_dir, plugin_registry, tool_registry, skill_registry
+                plugins_dirs, plugin_registry, tool_registry, skill_registry
             )
             self._plugin_reloader.start()
-            logger.info("Plugin hot-reloader started watching %s", plugins_dir)
+            logger.info("Plugin hot-reloader started watching %s", plugins_dirs)
 
         if stack.subagent_registry is not None:
             from corpclaw_lite.extensions.subagents.watcher import SubagentHotReloader
 
-            subagents_dir = PROJECT_ROOT / "config" / "subagents"
-            if subagents_dir.exists():
+            subagents_dirs = [
+                d for d in _resolve_dirs("subagents", self._settings, PROJECT_ROOT) if d.exists()
+            ]
+            if subagents_dirs:
                 self._subagent_reloader = SubagentHotReloader(
-                    subagents_dir, stack.subagent_registry
+                    subagents_dirs, stack.subagent_registry
                 )
                 self._subagent_reloader.start()
-                logger.info("Subagent hot-reloader started watching %s", subagents_dir)
+                logger.info("Subagent hot-reloader started watching %s", subagents_dirs)
 
         # Start
         logger.info("Starting Telegram bot...")
