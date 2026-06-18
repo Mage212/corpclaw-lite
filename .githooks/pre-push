@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# pre-push quality gate — runs the same 4 checks as CI before allowing a push.
+#
+# Gates (in order, fail-fast):
+#   1. ruff check src/ tests/        — lint
+#   2. ruff format --check src/ tests/ — formatting
+#   3. pyright src/                  — type check (pinned to match CI; see pyproject.toml)
+#   4. pytest tests/ -x              — full test suite, stop on first failure
+#
+# Bypass:
+#   - `git push --no-verify`            — native git bypass; use only when CI will run
+#                                         (e.g. PRs into pre-release/main) and explain in the PR.
+#   - `CORPCLAW_SKIP_HOOKS=1 git push`  — env-var bypass, same discipline.
+#
+# Activation (one-time after clone):
+#   git config core.hooksPath .githooks
+#   # or: bash scripts/install-hooks.sh
+#
+# Tag pushes (refs/tags/*) are skipped — tags carry no code.
+
+set -euo pipefail
+
+# Skip the hook entirely if asked.
+if [[ "${CORPCLAW_SKIP_HOOKS:-0}" == "1" ]]; then
+  echo "pre-push: CORPCLAW_SKIP_HOOKS=1 — skipping quality gate (CI will still run)."
+  exit 0
+fi
+
+# Git feeds pre-push one line per ref being pushed:
+#   <local-ref> <local-sha> <remote-ref> <remote-sha>
+# Skip if every ref is a tag (tags carry no code to lint/typecheck/test).
+pushing_code=0
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+  if [[ "$remote_ref" != refs/tags/* ]]; then
+    pushing_code=1
+    break
+  fi
+done
+if [[ "$pushing_code" == "0" ]]; then
+  exit 0
+fi
+
+# Run a gate: print a header, run the command, print ✓/✗.
+# Aborts the push (exit 1) on first failure.
+run_gate() {
+  local label="$1"
+  shift
+  echo "▶ $label"
+  if "$@"; then
+    echo "✓ $label"
+    echo
+  else
+    echo "✗ $label FAILED — push aborted."
+    echo "  Bypass with 'git push --no-verify' only if CI will run and you explain why."
+    exit 1
+  fi
+}
+
+echo "── pre-push quality gate ──────────────────────────────────────────"
+run_gate "ruff check"            uv run ruff check src/ tests/
+run_gate "ruff format --check"   uv run ruff format --check src/ tests/
+run_gate "pyright"               uv run pyright src/
+# -x / --exitfirst: stop on first failing test rather than running the whole suite.
+run_gate "pytest"                uv run pytest tests/ -x
+echo "✅ All quality gates passed — pushing."
