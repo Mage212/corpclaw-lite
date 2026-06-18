@@ -1,7 +1,7 @@
 # CorpClaw Lite — Архитектура проекта
 
-> Версия документа: 2026-06-05
-> Версия проекта: 0.1.7 — ~141 Python-модуль, ~28.5K LOC, 1056 pytest-кейсов
+> Версия документа: 2026-06-18
+> Версия проекта: 0.1.12 — ~144 Python-модуля, ~30.6K LOC, 1215 pytest-кейсов
 
 ---
 
@@ -27,16 +27,74 @@
 
 ### LLM Queue, Slot Affinity и KV-cache
 
-Текущая эксплуатационная модель CorpClaw Lite: **один активный рабочий поток на
-пользователя**. Поэтому persistent KV-cache scoped по пользователю, агенту, модели,
+Проект оптимизирован под локальные LLM, где главный bottleneck — prompt processing
+больших контекстов и ограниченная конкурентность GPU. Поэтому LLM-вызовы проходят
+через очередь, которая ограничивает реальную параллельность и старается сохранять
+горячий KV-cache. Текущая эксплуатационная модель — **один активный рабочий поток на
+пользователя**, поэтому persistent KV-cache scoped по пользователю, агенту, модели,
 system prompt и набору tools; полноценный `conversation_id/session_id` пока не
 вводится.
+
+Ключевые модули (`llm/queue.py`, `llm/cache.py`):
+
+- **`LLMRequestQueue`** — ограничивает число одновременных inference-запросов через
+  `llm.max_concurrent_requests` и тречит позицию/ожидание в очереди (`LLMQueueStatus`).
+  Ожидание в очереди **не сжигает agent budget**: `SimpleBudgetGuard` ставится на pause
+  на время ожидания слота и возобновляется после его получения. Классифицирует вызовы
+  по `LLMLoadClass` (interactive/subagent/vision/compression/consolidation/calibration/
+  maintenance).
+- **Slot affinity** (`SlotAffinityConfig`, strategy `slot_affinity`) — применяется
+  только к провайдерам из `provider_names` (по умолчанию `llamacpp`); для остальных
+  провайдеров очередь работает как обычный concurrency limiter без `id_slot`/`cache_prompt`.
+  Sticky-слоты закрепляются за активными пользователями на `idle_ttl_seconds`;
+  overflow-слот принимает нагрузку сверх sticky-ёмкости и вспомогательные вызовы при
+  `auxiliary_policy: "overflow_only"`. В запрос к llama.cpp добавляются `id_slot` и
+  `cache_prompt`, чтобы backend переиспользовал slot KV-cache между запросами.
+- **`LLMCacheManager`** — два уровня cache: **L1** — живой cache в текущем слоте;
+  **L2** — экспериментальный файловый cache через llama-server slot save/restore/erase
+  API. L2 по умолчанию **отключён** (`persistent_cache.enabled: false`), чтобы не
+  создавать write-нагрузку на SSD. Cache scope строится по пользователю +
+  `conversation_id` + `agent_id` + провайдер + модель + preset + hash system prompt +
+  hash набора tools — отдельно для основного агента и субагентов. После restore cache
+  валидируется по реальным prompt/cache usage-метрикам (reuse ratio); при несоответствии
+  слот очищается и запрос повторяется без доверия к старому cache.
 
 Команда `/new` очищает память пользователя и помечает LLM cache как сброшенный:
 следующий запрос этого пользователя не восстанавливает L2 cache и очищает live slot
 перед новым prompt processing. Если в будущем появятся несколько параллельных потоков
 на пользователя (Telegram topics, mission sessions, независимые CLI-сессии), cache
-scope нужно расширить реальным `conversation_id` или `session_id`.
+scope нужно расширить реальным `conversation_id` или `session_id`. Подробности —
+`plans/llm-concurrency-and-slot-affinity.md`, `plans/persistent-kv-cache-scheduler.md`.
+
+### Backend LLM Streaming
+
+Основной `AgentLoop` использует streaming **только как внутренний слой наблюдения и
+диагностики**, а не как пользовательский streaming-ответ. Контракт:
+
+```
+LLM stream events → telemetry/status/debug → собрать полный LLMResponse
+→ только потом parsing reasoning/tool_calls/XML fallback → ReAct decision
+```
+
+- `Provider.chat()` остаётся совместимым fallback-контрактом; если провайдер
+  реализует `StreamingProvider.chat_streamed()`, основной `AgentLoop` использует его
+  при `agent.llm_streaming_enabled: true` (включён только для основного агента —
+  subagents/vision/compression/consolidation/onboarding/calibration/ToolGuard
+  остаются на обычном `chat()`).
+- Tool calls **нельзя** исполнять на лету по partial stream-delta — сначала собирается
+  полный `LLMResponse`, затем применяется обычная логика tool_calls/XML fallback.
+- Reasoning (`reasoning_content`) сохраняется в `response.reasoning`, логируется и
+  может сохраняться для audit, но **не попадает** обратно в agent context и не
+  отправляется пользователю.
+- Telegram/CLI по-прежнему отправляют финальный ответ целиком. Streaming используется
+  для статусов «думаю»/«готовлю действие»/«собираю ответ» и для диагностики зависаний.
+
+Stall detection: при отсутствии delta дольше `llm_stream_stall_seconds` (по умолчанию
+20с) эмитится `llm_stream_stalled`, при невозможности стрима — `llm_stream_fallback`
+на обычный `chat()`. Ключевые trace-события (`logs/agent_trace.jsonl`):
+`llm_stream_started`, `llm_stream_stage`, `llm_stream_delta` (только при
+`logging.trace_level: debug_preview|full`), `llm_stream_stalled`, `llm_stream_fallback`,
+`llm_stream_finished`. Уровни трейса: `metadata` (по умолчанию) / `debug_preview` / `full`.
 
 ---
 
@@ -50,7 +108,7 @@ corpclaw-lite/
 │   ├── onboarding/         # Гибридный онбординг пользователей
 │   ├── llm/                # LLM провайдеры (OpenAI, Anthropic, XML fallback, presets, router)
 │   ├── extensions/
-│   │   ├── tools/          # Инструменты + registry (27 builtin tool names) + YAML overrides
+│   │   ├── tools/          # Инструменты + registry (28 builtin tool names) + YAML overrides
 │   │   ├── skills/         # Markdown-скиллы + TF-IDF matcher + hot-reload (5s)
 │   │   ├── plugins/        # Плагины с manifest.yaml + sandbox worker + hot-reload (10s)
 │   │   ├── subagents/      # Специализированные субагенты (5 builtin)
@@ -329,7 +387,7 @@ class Tool(ABC):
 - `load_overrides(path)` — YAML description overrides (калибровка)
 - `to_schemas()` / `to_schemas_for_user()` — OpenAI function schemas
 
-**Builtin Tools (27):**
+**Builtin Tools (28):**
 
 | Tool | Risk | Назначение |
 |------|------|------------|
@@ -432,6 +490,7 @@ version: "1.0.0"
 type: plugin
 description: "Does something"
 allowed_departments: ["*"]
+requires_core: "^0.1.12"   # caret-совместимый constraint; warn-and-skip при несовпадении
 components:
   skill: skill.md
   tool: tool.py
@@ -466,6 +525,55 @@ servers:
 - `MCPToolAdapter` — адаптация MCP tool → внутренний Tool (risk_level=MEDIUM)
 - `MCPWatcher` — hot-reload (10s polling), diff old vs new servers
 
+### Private Extensions Overlay (`extensions/paths.py`)
+
+CorpClaw Lite — опенсорс-проект, но корпоративные доработки (инструменты/скилы/
+субагенты под внутренние системы, RBAC-правила, системные промпты) не должны попадать
+в публичный репозиторий. Решение — **overlay-модель**: приватный репозиторий
+(`corpclaw-corp`, sibling публичного) компонуется с ядром в **рантайме через путь**,
+никогда через git-merge. Принцип — граница проходит по данным, а не по коду: 99%
+корпоративных доработок это новый контент (`.md`, `.yaml`, `manifest.yaml`, `tool.py`)
+в overlay, а не код `src/`.
+
+**Центральный resolver:** `resolve_dirs(kind, settings, project_root) -> list[Path]`
+возвращает `[default, ...overlays]` для каждого `ExtensionKind` (skills/plugins/
+subagents/mcp/bootstrap). Все загрузчики и реестры потребляют этот список. Overlay-пути
+конфигурируются в `config/settings.yaml`:
+
+```yaml
+extensions:
+  extra_paths:
+    - "${CORPCLAW_PRIVATE_EXTENSIONS}"
+```
+
+Каждый overlay-путь повторяет структуру проекта (**mirror-layout**): `<extra>/skills/`,
+`<extra>/plugins/`, `<extra>/config/subagents/`, `<extra>/config/bootstrap/`,
+`<extra>/config/departments.yaml`, `<extra>/config/mcp_servers.yaml`. Пустые строки
+фильтруются (страховка от `${VAR}`→`""`→cwd-leak), несуществующие пути пропускаются.
+
+**Семантика merge/override по виду расширения:**
+
+| Вид | Канал | Поведение |
+|-----|-------|-----------|
+| skills | replace по `id` | overlay выигрывает, WARN в лог |
+| plugins | replace по `manifest.name` | tools overlay-плагина заменяют default'ные (unregister→register, чтобы не было orphan tools) |
+| subagents | replace по `id` | overlay выигрывает, WARN в лог |
+| bootstrap (top-level) | replace по filename | overlay `SOUL.md` заменяет default `SOUL.md`; уникальные имена добавляются в alpha-сорте |
+| bootstrap (dept/user) | first match high→low | overlay выигрывает, если есть |
+| mcp | merge по server `name` | более поздний файл выигрывает |
+| departments | **union-merge** | allowlists объединяются с wildcard-нормализацией, budget переопределяется где overlay указывает |
+
+**Version contract:** plugins декларируют `requires_core` в манифесте (`^0.1.12` =
+совместим с 0.1.x; bare = exact). Ядро проверяет в едином chokepoint
+(`PluginRegistry.register`) — при несовместимости warn-and-skip, никогда молча.
+Контракт применяется только к plugins.
+
+**Двух-репо-модель:** приватный overlay физически лежит в отдельном приватном репо и
+монтируется в деплое через env `CORPCLAW_PRIVATE_EXTENSIONS`. Зависимость однонаправленная:
+overlay зависит от ядра (через `requires_core`), ядро ничего не знает про overlay.
+Подробности, hard rules и known limitations — `CONTRIBUTING.md#private-extensions-overlay`
+и decision D-050.
+
 ---
 
 ## 4. Security Layer
@@ -487,7 +595,7 @@ User Message
          │
          ▼
 ┌─────────────────┐
-│    ToolGuard    │  ← 20+ YAML rules + Smart Approvals (LLM-based)
+│    ToolGuard    │  ← 31 YAML rules + Smart Approvals (LLM-based)
 └────────┬────────┘
          │
          ▼
@@ -509,7 +617,7 @@ User Message
 
 ### ToolGuard (`security/tool_guard.py`)
 
-**Правила:** 20+ YAML правил с regex patterns на tool arguments.
+**Правила:** 31 YAML правило с regex patterns на tool arguments.
 
 | Severity | Действие |
 |----------|----------|
@@ -600,6 +708,7 @@ Production-ready интеграция:
 | `rate_limit.py` | Sliding window limiter (10 msg/min) |
 | `admin_notifier.py` | Broadcast сообщений администраторам |
 | `callback_data.py` | Роутинг callback-данных |
+| `transport.py` | Низкоуровневый транспорт Telegram API (отправка/редактирование, throttling) |
 
 **Режимы:** `/chat` (чистый диалог), `/execute` (с инструментами)
 
@@ -765,7 +874,8 @@ skills:
 | Лог | Формат | Назначение |
 |-----|--------|------------|
 | `corpclaw.log` | Текст | DEBUG, человекочитаемый |
-| `agent_activity.jsonl` | JSONL | Структурированный, аналитика |
+| `agent_activity.jsonl` | JSONL | Per-request активность, аналитика |
+| `agent_trace.jsonl` | JSONL | Per-run trace-события агента: tool calls, LLM-вызовы, streaming-события (`llm_stream_*`), queue/wait. Уровень детализации через `logging.trace_level`: `metadata` (по умолчанию) / `debug_preview` / `full` |
 
 ### AgentLogger
 
@@ -861,13 +971,14 @@ skills:
 
 ## 12. Hot Reload & Watchers
 
-### Три watcher'а
+### Четыре watcher'а
 
 | Watcher | Что отслеживает | Интервал | Файл |
 |---------|----------------|----------|------|
 | `SkillHotReloader` | `skills/*.md` | 5s | `extensions/skills/watcher.py` |
 | `PluginWatcher` | `plugins/*/manifest.yaml` | 10s | `extensions/plugins/watcher.py` |
 | `MCPWatcher` | `config/mcp_servers.yaml` | 10s | `extensions/mcp/watcher.py` |
+| `SubagentHotReloader` | `config/subagents/*.yaml` | 10s | `extensions/subagents/watcher.py` |
 
 ### Принцип работы
 
@@ -876,31 +987,36 @@ skills:
 - Корректно останавливаются через `GracefulShutdown`
 - Detect: создание, изменение, удаление
 - Plugin watcher: unregister old tools (kills subprocesses) → reload → re-register
+- Все watcher'ы опрашивают полный список директорий из `resolve_dirs` — overlay-директории
+  подхватываются наравне с дефолтными
 
 ---
 
 ## Ключевые метрики
 
+> Per-component breakdown приблизительный (модули переезжали между пакетами с момента
+> последнего точного подсчёта); totals проверены на 0.1.12.
+
 | Компонент | LOC | Файлов |
 |-----------|-----|--------|
-| Agent Core | ~2,823 | 10 |
-| Calibration | ~1,522 | 8 |
+| Agent Core | ~2,800 | 10 |
+| Calibration | ~1,520 | 8 |
 | Onboarding | ~630 | 5 |
-| LLM Providers | ~3,671 | 9 |
-| Extensions | ~7,395 | 47 |
-| Security | ~562 | 5 |
-| Channels | ~6,313 | 22 |
-| Container | ~833 | 6 |
+| LLM Providers + Queue + Cache | ~5,300 | 11 |
+| Extensions | ~7,400 | 48 |
+| Security | ~560 | 5 |
+| Channels | ~6,300 | 22 |
+| Container | ~830 | 6 |
 | Memory | ~510 | 3 |
-| Config + RBAC | ~634 | 6 |
-| Departments | ~198 | 3 |
+| Config + RBAC | ~640 | 6 |
+| Departments | ~200 | 3 |
 | Users | ~955 | 3 |
 | Runtime | ~47 | 2 |
-| Logging | ~359 | 4 |
-| Root (cli, etc.) | ~1,265 | 4 |
-| **Исходники** | **~28,522** | **~141** |
-| **Тесты** | **~22,258** | **~106** |
-| **Тест-кейсов pytest** | **1056** | |
+| Logging | ~430 | 4 |
+| Root (cli, etc.) | ~1,270 | 4 |
+| **Исходники** | **~30,600** | **~144** |
+| **Тесты** | **~22,700** | **~98** |
+| **Тест-кейсов pytest** | **1215** | |
 
 ---
 

@@ -847,14 +847,24 @@ def cmd_prune() -> None:
 
 
 def cmd_skill_list() -> None:
-    """List all loaded skills from the skills/ directory."""
+    """List all loaded skills from the skills/ directories (default + overlays)."""
+    from corpclaw_lite.config.loader import load_settings
+    from corpclaw_lite.extensions.paths import resolve_dirs
     from corpclaw_lite.extensions.skills.registry import SkillRegistry
+    from corpclaw_lite.paths import PROJECT_ROOT
 
+    settings = load_settings(PROJECT_ROOT / "config" / "settings.yaml")
     registry = SkillRegistry()
-    registry.load_directory("skills")
+    skills_loaded = False
+    for index, skills_dir in enumerate(resolve_dirs("skills", settings, PROJECT_ROOT)):
+        if not skills_dir.exists():
+            continue
+        registry.load_directory(skills_dir, allow_replace=index > 0)
+        skills_loaded = True
     skills = registry.list_all()
     if not skills:
-        print("No skills found in skills/")
+        where = "skills/" if not skills_loaded else "the configured skills directories"
+        print(f"No skills found in {where}")
         return
     print(f"{'ID':<30} {'Version':<10} {'Departments'}")
     print("-" * 60)
@@ -864,14 +874,24 @@ def cmd_skill_list() -> None:
 
 
 def cmd_plugin_list() -> None:
-    """List all loaded plugins from the plugins/ directory."""
+    """List all loaded plugins from the plugins/ directories (default + overlays)."""
+    from corpclaw_lite.config.loader import load_settings
+    from corpclaw_lite.extensions.paths import resolve_dirs
     from corpclaw_lite.extensions.plugins.registry import PluginRegistry
+    from corpclaw_lite.paths import PROJECT_ROOT
 
+    settings = load_settings(PROJECT_ROOT / "config" / "settings.yaml")
     registry = PluginRegistry()
-    registry.load_directory("plugins")
+    plugins_loaded = False
+    for index, plugins_dir in enumerate(resolve_dirs("plugins", settings, PROJECT_ROOT)):
+        if not plugins_dir.exists():
+            continue
+        registry.load_directory(plugins_dir, allow_replace=index > 0)
+        plugins_loaded = True
     plugins = registry.list_all()
     if not plugins:
-        print("No plugins found in plugins/")
+        where = "plugins/" if not plugins_loaded else "the configured plugins directories"
+        print(f"No plugins found in {where}")
         return
     print(f"{'Name':<30} {'Version':<10} {'Description'}")
     print("-" * 70)

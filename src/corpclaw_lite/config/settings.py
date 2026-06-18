@@ -10,6 +10,7 @@ __all__ = [
     "AgentSettings",
     "CompressionSettings",
     "ContainerSettings",
+    "ExtensionsSettings",
     "LLMSettings",
     "LoggingSettings",
     "PersistentCacheSettings",
@@ -236,6 +237,19 @@ class SkillsSettings(BaseModel):
     keyword_boost: float = 0.5
 
 
+class ExtensionsSettings(BaseModel):
+    """Extra overlay paths for private extensions (mirror-layout).
+
+    Each path mirrors the project structure: <path>/skills/, <path>/plugins/,
+    <path>/config/subagents/, <path>/config/bootstrap/, <path>/config/mcp_servers.yaml.
+    Used for private/corporate extensions that must not enter the public repo.
+    Empty/unset entries (e.g. from an unresolved ``${VAR}``) and non-existent
+    paths are skipped by ``resolve_dirs``.
+    """
+
+    extra_paths: list[str] = []
+
+
 class LoggingSettings(BaseModel):
     """Settings for the logging pipeline."""
 
@@ -259,6 +273,7 @@ class Settings(BaseSettings):
     container: ContainerSettings = ContainerSettings()
     telegram: TelegramSettings = TelegramSettings()
     skills: SkillsSettings = SkillsSettings()
+    extensions: ExtensionsSettings = ExtensionsSettings()
     logging: LoggingSettings = LoggingSettings()
 
     model_config = {"env_nested_delimiter": "__"}

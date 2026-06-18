@@ -48,3 +48,41 @@ def test_skill_registry(tmp_path: Path) -> None:
     # Dev sees s1 (*) and s2 (dev)
     allowed_d = registry.get_allowed_skills(user_dev)
     assert len(allowed_d) == 2
+
+
+def test_skill_registry_overlay_replace(tmp_path: Path) -> None:
+    """Overlay dir overrides a default skill by id when allow_replace=True."""
+    default_dir = tmp_path / "default"
+    overlay_dir = tmp_path / "overlay"
+    default_dir.mkdir()
+    overlay_dir.mkdir()
+
+    (default_dir / "shared.md").write_text("---\nid: shared\n---\nfrom default")
+    (overlay_dir / "shared.md").write_text("---\nid: shared\n---\nfrom overlay")
+    (overlay_dir / "extra.md").write_text("---\nid: extra\n---\noverlay-only")
+
+    registry = SkillRegistry()
+    registry.load_directory(default_dir)
+    registry.load_directory(overlay_dir, allow_replace=True)
+
+    skills = {s.id: s for s in registry.list_all()}
+    assert set(skills) == {"shared", "extra"}
+    assert skills["shared"].instructions == "from overlay"
+    assert skills["extra"].instructions == "overlay-only"
+
+
+def test_skill_registry_overlay_without_replace_raises(tmp_path: Path) -> None:
+    """Without allow_replace, a duplicate id from a second dir raises ValueError."""
+    default_dir = tmp_path / "default"
+    overlay_dir = tmp_path / "overlay"
+    default_dir.mkdir()
+    overlay_dir.mkdir()
+    (default_dir / "shared.md").write_text("---\nid: shared\n---\nfrom default")
+    (overlay_dir / "shared.md").write_text("---\nid: shared\n---\nfrom overlay")
+
+    registry = SkillRegistry()
+    registry.load_directory(default_dir)
+    import pytest
+
+    with pytest.raises(ValueError, match="already registered"):
+        registry.load_directory(overlay_dir)

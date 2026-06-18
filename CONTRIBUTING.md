@@ -18,10 +18,16 @@ uv run ruff check src/ --fix && uv run ruff format src/ && uv run pyright src/ &
 
 ## Development Workflow
 
-1. Create a branch from `main`: `git checkout -b feature/your-feature`
+The project uses two long-lived branches:
+
+- **`main`** — stable release branch. Tagged with `vX.Y.Z`. Never commit directly; only
+  updated by merging from `pre-release` on release.
+- **`pre-release`** — integration branch. All work lands here first via feature branches and PRs.
+
+1. Create a branch from `pre-release`: `git checkout -b feature/your-feature pre-release`
 2. Make changes
 3. Run the full check before committing (see below)
-4. Open a pull request against `main`
+4. Open a pull request against **`pre-release`** (not `main`)
 
 ## Code Style
 
@@ -177,6 +183,79 @@ prompt_path: "config/bootstrap/subagents/my-agent.md"
 
 Create the corresponding prompt in `config/bootstrap/subagents/my-agent.md`.
 
+## Private Extensions (Overlay)
+
+CorpClaw Lite is open source, but you may have customizations (tools/skills/subagents
+for internal systems, RBAC rules, system prompts) that must not enter the public repo.
+The extension system is designed so that **99% of customizations are new content, not
+core code** — so the private/public boundary runs **by data, not by code**.
+
+### What is public vs private
+
+| Public (this repo) | Private (overlay) |
+|--------------------|-------------------|
+| RBAC engine, loop, providers, `ToolRegistry`, `BootstrapLoader` (generic code in `src/`) | `skills/*.md`, `plugins/*/`, `config/subagents/*.yaml`, `config/bootstrap/*.md`, `config/mcp_servers.yaml`, `config/departments*.yaml`, additions to `tool_guard_rules.yaml`/`network_policy.yaml` |
+
+If a change touches `src/` (loop, guards, providers, registries), it is a **core change** →
+PR to this repo. If it only adds an extension file, it is a **private customization** →
+belongs in your overlay.
+
+### How overlays work
+
+Configure overlay paths in `config/settings.yaml`:
+
+```yaml
+extensions:
+  extra_paths:
+    - "${CORPCLAW_PRIVATE_EXTENSIONS}"   # e.g. /opt/corpclaw-private
+```
+
+Each overlay path **mirrors the project layout** (mirror-layout). The core loads
+extensions from the default directories **plus** each overlay path:
+
+```
+/opt/corpclaw-private/
+├── skills/*.md                       → overlay skills
+├── plugins/<name>/manifest.yaml      → overlay plugins
+├── config/
+│   ├── bootstrap/*.md                → overlay system prompt (per-file override)
+│   ├── subagents/*.yaml              → overlay subagents
+│   ├── mcp_servers.yaml              → overlay MCP servers (merged by name)
+│   └── departments.yaml              → overlay departments (union-merged)
+```
+
+**Override semantics** (overlay wins):
+- `skills` / `plugins` / `subagents` / `bootstrap` → an overlay entry with the same id/name
+  **replaces** the default one (e.g. a private `excel_normalizer` overrides the public one).
+- `departments` → **union-merged**: allowlists are combined (a wildcard `["*"]` absorbs
+  additions). Budget's `max_iterations`/`max_tool_calls` are overridden by the overlay
+  when present.
+
+Overlay files are hot-reloaded alongside the defaults — editing a private skill or plugin
+takes effect without a restart.
+
+### Version contract for plugins
+
+A plugin can declare the core version it depends on, so it fails loudly (warn-and-skip at
+load) instead of silently breaking when the core moves on:
+
+```yaml
+# plugins/crm-integration/manifest.yaml
+requires_core: "^0.1.11"   # compatible with 0.1.x; 0.2.0 will skip this plugin
+```
+
+Supported syntax: `^` caret (pins minor for 0.x, major for 1.x+), bare version (exact
+match), or empty (no constraint).
+
+### Decision rule
+
+Before writing code, answer: **kernel or extension?**
+
+- New tool/skill/subagent → 99% an **extension** (goes in your overlay; core untouched).
+- Edit to `loop.py`, `tool_guard.py`, `ToolRegistry`, providers → **core change** (PR here).
+- A feature that needs both → **split into two PRs**: a generic hook (public) + a private
+  extension (overlay).
+
 ## Architecture Notes
 
 Before contributing, understand these core principles:
@@ -194,10 +273,16 @@ For full architecture documentation, see [docs/ARCHITECTURE.md](docs/ARCHITECTUR
 
 - English, concise, conventional commit style
 - Examples: `feat: add web_fetch tool`, `fix: handle timeout in container IPC`, `docs: update README`
+- **Tiered commit policy**:
+  - **`main`** — never commit directly; only updated by merging from `pre-release` on release.
+  - **`pre-release`** — a direct commit is acceptable for **trivial** changes (docstrings,
+    comments, docs, formatting, typo fixes). **Functional** changes (new features, behavior
+    changes, architecture, `src/` runtime edits) require a feature branch off `pre-release`
+    plus a pull request with review.
 
 ## Pull Requests
 
-- PRs go to `main`
+- PRs target **`pre-release`** (not `main`). `main` is updated only by release merges.
 - Ensure all CI checks pass
 - Keep PRs focused — one feature or fix per PR
 - Include tests for new functionality

@@ -204,7 +204,10 @@ def _build_security_stack(
 ) -> tuple[ToolGuard, PermissionChecker]:
     """Build ToolGuard + PermissionChecker from config."""
     from corpclaw_lite.config.settings import AgentSettings
-    from corpclaw_lite.departments.manager import DepartmentManager
+    from corpclaw_lite.departments.manager import (
+        DepartmentManager,
+        resolve_department_files,
+    )
     from corpclaw_lite.departments.permissions import PermissionChecker
     from corpclaw_lite.security.tool_guard import ToolGuard
 
@@ -218,13 +221,22 @@ def _build_security_stack(
         guard.load_file(guard_rules)
 
     dept_manager = DepartmentManager()
-    dept_config = PROJECT_ROOT / "config" / "departments.yaml"
-    if dept_config.exists():
-        dept_manager.load_file(dept_config)
+    dept_paths = resolve_department_files(settings, PROJECT_ROOT)
+    for index, dept_path in enumerate(dept_paths):
+        if index == 0:
+            # Default file: replace-mode (backward-compatible). Skip if absent.
+            if dept_path.exists():
+                dept_manager.load_file(dept_path)
+        else:
+            # Overlay files: union-merge. resolve_department_files already
+            # filtered these to existing paths.
+            dept_manager.load_file(dept_path, merge=True)
     return guard, PermissionChecker(dept_manager)
 
 
 def _build_extensions_stack(
+    settings: Settings,
+    project_root: Path,
     agent_settings: AgentSettings,
     web_settings: WebSettings,
     research_settings: ResearchSettings,
@@ -240,6 +252,7 @@ def _build_extensions_stack(
     """Register subagents, MCP, host-side tools."""
     from corpclaw_lite.agent.subagent import SubagentDispatcher
     from corpclaw_lite.agent.vision import VisionProcessor
+    from corpclaw_lite.extensions.paths import resolve_dirs
     from corpclaw_lite.extensions.subagents.registry import SubagentRegistry
     from corpclaw_lite.extensions.tools.builtin.dispatch import DispatchSubagentTool
     from corpclaw_lite.extensions.tools.builtin.image import ReadImageTool
@@ -250,8 +263,9 @@ def _build_extensions_stack(
     from corpclaw_lite.extensions.tools.builtin.web import WebFetchTool, WebSearchTool
 
     subagent_registry = SubagentRegistry()
-    subagent_dir = PROJECT_ROOT / "config" / "subagents"
-    if subagent_dir.exists():
+    for subagent_dir in resolve_dirs("subagents", settings, project_root):
+        if not subagent_dir.exists():
+            continue
         subagent_registry.load_directory(subagent_dir)
 
     web_fetch_tool = WebFetchTool(web_settings)
@@ -345,15 +359,20 @@ def _build_memory_stack(
     return memory, consolidator, compressor
 
 
-def _build_system_prompt() -> str | None:
+def _build_system_prompt(settings: Settings, project_root: Path) -> str | None:
     """Load bootstrap system prompt."""
     from corpclaw_lite.config.bootstrap import BootstrapLoader
+    from corpclaw_lite.extensions.paths import resolve_dirs as _resolve_dirs
 
-    bootstrap_dir = PROJECT_ROOT / "config" / "bootstrap"
-    bootstrap = BootstrapLoader(bootstrap_dir)
+    bootstrap_dirs = _resolve_dirs("bootstrap", settings, project_root)
+    bootstrap = BootstrapLoader(bootstrap_dirs)
     system_prompt = bootstrap.get_system_prompt() or None
     if system_prompt:
-        logger.info("Loaded system prompt from %s (%d chars)", bootstrap_dir, len(system_prompt))
+        logger.info(
+            "Loaded system prompt from %s (%d chars)",
+            bootstrap_dirs,
+            len(system_prompt),
+        )
     else:
         logger.warning("No bootstrap/*.md files found — using minimal default system prompt")
     return system_prompt
@@ -455,6 +474,7 @@ def build_agent_stack(
     from corpclaw_lite.extensions.bootstrap import load_extensions
 
     skill_registry, plugin_registry, skill_matcher = load_extensions(
+        full_settings,
         PROJECT_ROOT,
         registry,
         full_settings.skills,
@@ -462,6 +482,8 @@ def build_agent_stack(
     )
 
     subagent_registry = _build_extensions_stack(
+        full_settings,
+        PROJECT_ROOT,
         agent_settings,
         full_settings.web,
         full_settings.research,
@@ -480,14 +502,18 @@ def build_agent_stack(
     _load_calibrated_tool_overrides(registry, full_tool_reg)
 
     mcp_manager: MCPManager | None = None
-    mcp_config = PROJECT_ROOT / "config" / "mcp_servers.yaml"
-    if mcp_config.exists():
-        from corpclaw_lite.extensions.mcp.manager import MCPManager
+    from corpclaw_lite.extensions.mcp.manager import MCPManager
+    from corpclaw_lite.extensions.paths import resolve_dirs as _resolve_mcp_dirs
 
-        mcp_manager = MCPManager(config_path=mcp_config)
-        logger.info("MCPManager ready (config=%s) — callers must await connect_all()", mcp_config)
+    mcp_paths = [p for p in _resolve_mcp_dirs("mcp", full_settings, PROJECT_ROOT) if p.exists()]
+    if mcp_paths:
+        mcp_manager = MCPManager(config_path=mcp_paths)
+        logger.info(
+            "MCPManager ready (configs=%s) — callers must await connect_all()",
+            ", ".join(str(p) for p in mcp_paths),
+        )
 
-    system_prompt = _build_system_prompt()
+    system_prompt = _build_system_prompt(full_settings, PROJECT_ROOT)
 
     # Load calibrated few-shots (if any) for injection into every run()
     few_shots: list[dict[str, Any]] | None = None

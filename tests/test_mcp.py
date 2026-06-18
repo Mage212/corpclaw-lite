@@ -181,3 +181,41 @@ async def test_mcp_tool_scope_filters_schema_and_execution(tmp_path: Any) -> Non
     )
 
     await manager.disconnect_all()
+
+
+def test_mcp_manager_multi_file_merge_by_name(tmp_path: Any) -> None:
+    """Multiple config files are merged; a server name in a later file overrides."""
+    default_cfg = tmp_path / "mcp_servers.yaml"
+    overlay_cfg = tmp_path / "overlay" / "mcp_servers.yaml"
+    overlay_cfg.parent.mkdir()
+
+    default_cfg.write_text(
+        "servers:\n"
+        "  - name: shared\n    command: ['echo', 'default']\n"
+        "  - name: only-default\n    command: ['echo', 'd2']\n",
+        encoding="utf-8",
+    )
+    overlay_cfg.write_text(
+        "servers:\n"
+        "  - name: shared\n    command: ['echo', 'overlay']\n"
+        "  - name: only-overlay\n    command: ['echo', 'o2']\n",
+        encoding="utf-8",
+    )
+
+    manager = MCPManager(config_path=[default_cfg, overlay_cfg])
+    merged = manager.load_config_raw()
+
+    by_name = {str(s.get("name")): s for s in merged}
+    assert set(by_name) == {"shared", "only-default", "only-overlay"}
+    # Overlay wins for "shared".
+    assert by_name["shared"]["command"] == ["echo", "overlay"]
+
+
+def test_mcp_manager_single_path_backward_compat(tmp_path: Any) -> None:
+    """Single path (str or Path) still works as before."""
+    config = tmp_path / "mcp_servers.yaml"
+    config.write_text("servers:\n  - name: s1\n    command: ['echo']\n", encoding="utf-8")
+
+    manager = MCPManager(config_path=config)
+    assert manager.config_paths == [config]
+    assert len(manager.load_config_raw()) == 1

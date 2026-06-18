@@ -182,6 +182,16 @@ skills:
   tfidf_threshold: 0.08
   keyword_boost: 0.5
 
+# Extra overlay directories for private extensions (mirror-layout).
+# Each path must mirror the project structure:
+#   <path>/skills/, <path>/plugins/, <path>/config/subagents/,
+#   <path>/config/bootstrap/, <path>/config/mcp_servers.yaml
+# Used for private/corporate extensions that must not enter the public repo.
+# Env interpolation supported, e.g. "${CORPCLAW_PRIVATE_EXTENSIONS}".
+# Empty/unset entries and non-existent paths are skipped by resolve_dirs.
+extensions:
+  extra_paths: []
+
 logging:
   level: "DEBUG"
   console_level: "INFO"
