@@ -138,10 +138,11 @@ React build is missing, the backend returns an explicit warning page instead of 
 | LLM Router | Route tasks to specific providers (local/cloud) |
 | Model Presets | Per-model inference params and reasoning strategies |
 | XML Tool Calling | Fallback parser for local LLMs without function calling |
-| 27 Built-in Tools | File ops, SQL queries, charts, PDF, Excel workbook/inspection, web search/fetch, research workflows, and more |
+| 28 Built-in Tools | File ops, SQL queries, charts, PDF, Excel workbook/inspection, web search/fetch, research workflows, and more |
 | Docker Sandbox | Per-user containers with resource limits and network deny-by-default |
-| ToolGuard | 20+ YAML security rules with LLM-based Smart Approvals |
-| 5 Skills / Plugins / 5 Subagents | Markdown skills with scope filtering, trusted subprocess plugins, isolated subagents |
+| ToolGuard | 31 YAML security rules with LLM-based Smart Approvals |
+| 5 Skills + 5 Subagents | Markdown skills with scope filtering and isolated subagents; plugins are a framework (no plugins shipped) |
+| Private Extensions Overlay | Keep corporate customizations in a separate private repo, composed at runtime — no private files in this public repo ([docs](CONTRIBUTING.md#private-extensions-overlay)) |
 | TF-IDF Matching | Bilingual (RU+EN) semantic skill selection |
 | Web + Telegram Channels | Browser chat, collapsible file manager, single statusline, approvals, rate limiting |
 | Workspace Isolation | Unified per-human workspace across linked Telegram and web logins |
