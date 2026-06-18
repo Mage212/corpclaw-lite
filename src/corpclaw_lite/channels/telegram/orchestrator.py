@@ -251,8 +251,12 @@ class TelegramBotOrchestrator:
         # Hot-reloaders — watch default + overlay dirs from extensions.extra_paths.
         from corpclaw_lite.extensions.paths import resolve_dirs as _resolve_dirs
 
-        skills_dirs = _resolve_dirs("skills", self._settings, PROJECT_ROOT)
-        plugins_dirs = _resolve_dirs("plugins", self._settings, PROJECT_ROOT)
+        skills_dirs: list[str | Path] = list(
+            _resolve_dirs("skills", self._settings, PROJECT_ROOT)
+        )
+        plugins_dirs: list[str | Path] = list(
+            _resolve_dirs("plugins", self._settings, PROJECT_ROOT)
+        )
 
         if skill_registry is not None:
             self._reloader = SkillHotReloader(skills_dirs, skill_registry)
@@ -262,7 +266,9 @@ class TelegramBotOrchestrator:
         if mcp_manager is not None:
             from corpclaw_lite.extensions.mcp.watcher import MCPHotReloader
 
-            mcp_cfg_paths = _resolve_dirs("mcp", self._settings, PROJECT_ROOT)
+            mcp_cfg_paths: list[str | Path] = list(
+                _resolve_dirs("mcp", self._settings, PROJECT_ROOT)
+            )
             self._mcp_reloader = MCPHotReloader(mcp_cfg_paths, mcp_manager, tool_registry)
             self._mcp_reloader.start()
             logger.info("MCP hot-reloader started watching %s", mcp_cfg_paths)
@@ -277,7 +283,7 @@ class TelegramBotOrchestrator:
         if stack.subagent_registry is not None:
             from corpclaw_lite.extensions.subagents.watcher import SubagentHotReloader
 
-            subagents_dirs = [
+            subagents_dirs: list[str | Path] = [
                 d for d in _resolve_dirs("subagents", self._settings, PROJECT_ROOT) if d.exists()
             ]
             if subagents_dirs:
