@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from corpclaw_lite.agent.context import ContextBuilder
 from corpclaw_lite.agent.guards import (
     BudgetExceededError,
+    PlanningTextGuard,
     ResultDedupGuard,
     SimpleBudgetGuard,
     SimpleBudgetGuardConfig,
@@ -629,6 +630,10 @@ class AgentLoop:
         # the progress guard detects repeated *errors*, this one detects repeated
         # identical *successful* results (the common loop mode for local LLMs).
         result_dedup = ResultDedupGuard()
+        # B-056: planning-text guard. Detects intent-statements ("let me now...")
+        # and Qwen3/Gemma tool-artifacts ([tool:<name>]) emitted as final answers,
+        # and gives the model a bounded number of correction turns.
+        planning_guard = PlanningTextGuard()
         soft_deadline = SoftDeadline(
             SoftDeadlineConfig(ratio=self._settings.soft_deadline_ratio),
             max_time_ms=self._settings.max_wall_time_ms,
@@ -919,6 +924,22 @@ class AgentLoop:
                         final = _XML_TOOL_CALL_FALLBACK
                         stats.status = "error"
                         stats.error = "malformed_xml_tool_call"
+                    # B-056: planning-text / tool-artifact guard. If the final
+                    # answer is a statement of intent ("Let me now...") or a
+                    # Qwen3/Gemma tool-artifact ([tool:<name>]) instead of an
+                    # action or real answer, inject a correction and give the
+                    # model another turn — bounded by max_corrections.
+                    if planning_guard.detect(final):
+                        context.add_user_message(planning_guard.correction_message())
+                        log_event(
+                            "planning_text_blocked",
+                            stats.run_id,
+                            iteration=stats.iterations,
+                            content_hash=_payload_hash(final),
+                            corrections_used=planning_guard.corrections_used,
+                        )
+                        planning_guard.note_correction()
+                        continue
                     if _is_loop_guard_echo(final):
                         final = _LOOP_FALLBACK
                         stats.status = "loop"

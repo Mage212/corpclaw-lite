@@ -152,6 +152,133 @@ class ResultDedupGuard:
 
 
 @dataclass
+class PlanningTextGuardConfig:
+    """Configuration for the planning-text guard (B-056).
+
+    Local LLMs sometimes emit a statement of intent ("Let me now search the
+    document...", "I'll check that for you...") as a *final* answer instead of
+    taking action, or emit a Qwen3/Gemma-specific tool-call artifact like
+    ``[tool:query_specific_file]`` as plain text. The guard detects both cases
+    and lets the caller inject a correction so the model gets another turn.
+
+    Reference: GAIA base/agent.py:3506-3671.
+    """
+
+    enabled: bool = True
+    # Only short answers are considered planning-text; a long legitimate answer
+    # that happens to start with "let me" must not be blocked.
+    max_length: int = 500
+    # Hard cap on corrections per run — after this the guard goes neutral so a
+    # stuck model is not kept alive indefinitely.
+    max_corrections: int = 2
+
+
+class PlanningTextGuard:
+    """Detects planning-text / tool-artifact final answers and gives the model
+    a bounded number of correction turns (B-056).
+
+    The correction itself is returned by :meth:`correction_message`; the caller
+    is responsible for appending it as a user message and continuing the loop.
+    Idempotent via an internal correction counter that caps repeats at
+    ``max_corrections``.
+    """
+
+    # Bilingual planning-phrase list. EN is the GAIA reference set; RU covers
+    # the project's Russian prompts (local LLMs on RU prompts emit RU phrases).
+    _PLANNING_PHRASES: tuple[str, ...] = (
+        # EN (from GAIA base/agent.py:3506)
+        "let me now",
+        "i'll check",
+        "let me search",
+        "i'll retrieve",
+        "let me look",
+        "i'll find",
+        "let me gather",
+        "i'll fetch",
+        "now i will",
+        "let me read",
+        "i'll analyze",
+        "let me get",
+        "i'll examine",
+        "let me investigate",
+        "i'll look into",
+        "let me see",
+        "i'll start by",
+        "let me first",
+        "i'll try to",
+        # RU (Russian equivalents for RU-prompted local LLMs)
+        "сейчас я",
+        "давайте я",
+        "я сейчас",
+        "я проверю",
+        "я посмотрю",
+        "позвольте мне",
+        "я найду",
+        "я поищу",
+        "я изучу",
+        "я проанализирую",
+        "сначала я",
+        "начну с того",
+        "я попробую",
+        "давайте проверим",
+        "я подготовлю",
+    )
+    # Qwen3/Gemma-specific: model emits [tool:<name>] as text instead of a real
+    # tool call. Length-independent — any such artifact is always blocking.
+    _TOOL_ARTIFACT_RE = re.compile(r"^\s*\[tool:[a-zA-Z_]+\]\s*$")
+
+    def __init__(self, config: PlanningTextGuardConfig | None = None) -> None:
+        self.config = config or PlanningTextGuardConfig()
+        self._corrections_used = 0
+
+    def detect(self, final: str) -> bool:
+        """Return True when ``final`` is a planning-text or tool-artifact answer.
+
+        Once ``max_corrections`` has been reached, the guard goes neutral so a
+        stuck model is not kept alive indefinitely.
+        """
+        if not self.config.enabled:
+            return False
+        if self._corrections_used >= self.config.max_corrections:
+            return False
+        # Tool-artifact: always blocking regardless of length.
+        if self._TOOL_ARTIFACT_RE.match(final):
+            return True
+        # Planning-text: only short answers, to avoid blocking a long
+        # legitimate answer that happens to start with "let me".
+        if len(final) >= self.config.max_length:
+            return False
+        lowered = final.lower()
+        return any(phrase in lowered for phrase in self._PLANNING_PHRASES)
+
+    def correction_message(self) -> str:
+        """The user-visible correction appended when planning-text is detected.
+
+        EN is universal for local LLMs (they follow EN instructions even in RU
+        context); if telemetry shows RU drift we add a RU variant.
+        """
+        return (
+            'You produced a statement of intent (such as "I will now...") or a '
+            "tool-call artifact instead of taking action or giving a final answer. "
+            "Either call the relevant tool right now, or — if your work is already "
+            "complete — give the final answer directly. Do not describe what you "
+            "plan to do; do it."
+        )
+
+    def note_correction(self) -> None:
+        """Record that a correction was issued. Call after injecting it."""
+        self._corrections_used += 1
+
+    @property
+    def corrections_used(self) -> int:
+        return self._corrections_used
+
+    def reset(self) -> None:
+        """Reset guard state for new conversation."""
+        self._corrections_used = 0
+
+
+@dataclass
 class SimpleBudgetGuardConfig:
     """Configuration for simple budget guard."""
 
@@ -392,6 +519,8 @@ class TerminalToolMandate:
 
 __all__ = [
     "BudgetExceededError",
+    "PlanningTextGuard",
+    "PlanningTextGuardConfig",
     "ResultDedupGuard",
     "ResultDedupGuardConfig",
     "SimpleBudgetGuard",
