@@ -364,7 +364,7 @@ def _build_system_prompt(settings: Settings, project_root: Path) -> str | None:
     from corpclaw_lite.config.bootstrap import BootstrapLoader
     from corpclaw_lite.extensions.paths import resolve_dirs as _resolve_dirs
 
-    bootstrap_dirs = _resolve_dirs("bootstrap", settings, project_root)
+    bootstrap_dirs: list[str | Path] = list(_resolve_dirs("bootstrap", settings, project_root))
     bootstrap = BootstrapLoader(bootstrap_dirs)
     system_prompt = bootstrap.get_system_prompt() or None
     if system_prompt:
@@ -505,7 +505,9 @@ def build_agent_stack(
     from corpclaw_lite.extensions.mcp.manager import MCPManager
     from corpclaw_lite.extensions.paths import resolve_dirs as _resolve_mcp_dirs
 
-    mcp_paths = [p for p in _resolve_mcp_dirs("mcp", full_settings, PROJECT_ROOT) if p.exists()]
+    mcp_paths: list[str | Path] = [
+        p for p in _resolve_mcp_dirs("mcp", full_settings, PROJECT_ROOT) if p.exists()
+    ]
     if mcp_paths:
         mcp_manager = MCPManager(config_path=mcp_paths)
         logger.info(

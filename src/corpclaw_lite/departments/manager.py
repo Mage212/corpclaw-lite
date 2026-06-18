@@ -129,9 +129,10 @@ class DepartmentManager:
         # max_time_ms is never merged (D-037: always from settings).
         overlay_budget = overlay_data.get("budget")
         if isinstance(overlay_budget, dict):
+            budget_dict = cast(dict[str, Any], overlay_budget)
             merged.budget = SimpleBudgetGuardConfig(
-                max_iterations=overlay_budget.get("max_iterations", existing.budget.max_iterations),
-                max_tool_calls=overlay_budget.get("max_tool_calls", existing.budget.max_tool_calls),
+                max_iterations=budget_dict.get("max_iterations", existing.budget.max_iterations),
+                max_tool_calls=budget_dict.get("max_tool_calls", existing.budget.max_tool_calls),
                 max_time_ms=300000,
             )
         else:
