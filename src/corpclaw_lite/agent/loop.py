@@ -61,6 +61,7 @@ if TYPE_CHECKING:
     from corpclaw_lite.calibration.trajectory import TrajectoryRecorder
     from corpclaw_lite.departments.permissions import PermissionChecker
     from corpclaw_lite.memory.consolidation import MemoryConsolidator
+    from corpclaw_lite.memory.file_changes import FileChangeDAO
     from corpclaw_lite.security.tool_guard import ToolGuard
 
 logger = logging.getLogger(__name__)
@@ -252,6 +253,9 @@ class AgentConfig:
     # subagents — the guard is neutral then.
     terminal_tool: str | None = None
     required_before_terminal: list[str] = field(default_factory=list[str])
+    # B-040: file-change journal DAO. When set, the loop injects a
+    # <recent_files> block into the system prompt at run start.
+    file_change_dao: FileChangeDAO | None = None
 
 
 class AgentLoop:
@@ -272,6 +276,7 @@ class AgentLoop:
         self._workspace_base = config.workspace_base
         self._terminal_tool = config.terminal_tool
         self._required_before_terminal = config.required_before_terminal
+        self._file_change_dao = config.file_change_dao
         self._approval_lock = asyncio.Lock()
 
     @property
@@ -590,11 +595,26 @@ class AgentLoop:
                 lines = [f"- {f['key']}: {f['value']}" for f in facts]
                 user_facts_block = "\n\n## Known Facts About This User\n" + "\n".join(lines)
 
+        # B-040: inject recently-touched files so the agent has cross-session
+        # memory of what the user worked on.
+        recent_files_block = ""
+        recent_files_count = 0
+        if self._file_change_dao is not None:
+            try:
+                recent_changes = await self._file_change_dao.list_recent_for_user(mem_key, limit=3)
+            except StorageError:
+                logger.error("[user=%s] Failed to load recent files", user.id)
+                recent_changes = []
+            if recent_changes:
+                recent_files_count = len(recent_changes)
+                lines = [f"- {c.file_path} ({c.tool_name})" for c in recent_changes]
+                recent_files_block = "\n\n## Recently Touched Files\n" + "\n".join(lines)
+
         dynamic_prompt = (
             f"Current User Context:\n"
             f"- Name: {user.name}\n"
             f"- Department: {user.department}\n"
-            f"{user_facts_block}\n\n"
+            f"{user_facts_block}{recent_files_block}\n\n"
             f"{base_prompt}"
         )
 
@@ -666,6 +686,7 @@ class AgentLoop:
             stats.run_id,
             history_count=len(history),
             facts_count=facts_count,
+            recent_files_count=recent_files_count,
             tools_available_count=len(tools_schema or []),
             system_prompt_chars=len(context.system_prompt or ""),
             message_count=context.message_count,
