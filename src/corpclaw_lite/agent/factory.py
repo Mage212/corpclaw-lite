@@ -39,6 +39,7 @@ __all__ = [
 if TYPE_CHECKING:
     from corpclaw_lite.agent.compressor import ContextCompressor
     from corpclaw_lite.agent.file_snapshots import FileSnapshotStore
+    from corpclaw_lite.agent.file_state import FileStateRegistry
     from corpclaw_lite.config.settings import AgentSettings, ResearchSettings, Settings, WebSettings
     from corpclaw_lite.container.ipc import ContainerIPC
     from corpclaw_lite.container.manager import ContainerManager
@@ -390,14 +391,17 @@ def _wrap_office_tools_with_file_tracking(
     *,
     dao: FileChangeDAO | None = None,
     snapshot_store: FileSnapshotStore | None = None,
-) -> tuple[FileChangeDAO | None, FileSnapshotStore | None]:
-    """Wrap office tools with file-change tracking (B-040).
+    file_state: FileStateRegistry | None = None,
+) -> tuple[FileChangeDAO | None, FileSnapshotStore | None, FileStateRegistry | None]:
+    """Wrap office tools with file-change tracking (B-040) + cross-agent
+    stale-write detection (B-058).
 
-    The DAO and snapshot store are created once (first call) and reused on
-    subsequent calls (e.g. for full_tool_registry) so both registries share
-    the same journal and backup dir.
+    The DAO, snapshot store and file-state registry are created once (first
+    call) and reused on subsequent calls (e.g. for full_tool_registry) so both
+    registries share the same journal, backup dir and stale-write state.
     """
     from corpclaw_lite.agent.file_snapshots import FileSnapshotStore
+    from corpclaw_lite.agent.file_state import FileStateRegistry
     from corpclaw_lite.extensions.tools.file_tracked import FileTrackedTool
     from corpclaw_lite.memory.file_changes import FileChangeDAO
 
@@ -405,6 +409,12 @@ def _wrap_office_tools_with_file_tracking(
         dao = FileChangeDAO()
     if snapshot_store is None:
         snapshot_store = FileSnapshotStore(workspace_base=workspace_base)
+    if file_state is None:
+        file_state = FileStateRegistry()
+
+    # Wire the registry so read tools (read_file/excel_inspect/pdf_reader)
+    # record their reads into the shared file-state.
+    registry.set_file_state(file_state)
 
     for tname, cfg in _OFFICE_TRACKED_TOOLS.items():
         raw = registry.get(tname)
@@ -417,11 +427,12 @@ def _wrap_office_tools_with_file_tracking(
                 raw,
                 dao=dao,
                 snapshot_store=snapshot_store,
+                file_state=file_state,
                 **cfg,
             ),
             allow_replace=True,
         )
-    return dao, snapshot_store
+    return dao, snapshot_store, file_state
 
 
 def _build_system_prompt(settings: Settings, project_root: Path) -> str | None:
@@ -564,12 +575,16 @@ def build_agent_stack(
     memory, consolidator, compressor = _build_memory_stack(
         agent_settings, provider, registry, full_tool_registry=full_tool_reg
     )
-    file_change_dao, snapshot_store = _wrap_office_tools_with_file_tracking(
+    file_change_dao, snapshot_store, file_state = _wrap_office_tools_with_file_tracking(
         registry, workspace_base
     )
     if full_tool_reg is not registry:
         _wrap_office_tools_with_file_tracking(
-            full_tool_reg, workspace_base, dao=file_change_dao, snapshot_store=snapshot_store
+            full_tool_reg,
+            workspace_base,
+            dao=file_change_dao,
+            snapshot_store=snapshot_store,
+            file_state=file_state,
         )
     _load_calibrated_tool_overrides(registry, full_tool_reg)
 

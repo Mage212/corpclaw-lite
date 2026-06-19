@@ -14,10 +14,19 @@ __all__ = [
 ]
 
 if TYPE_CHECKING:
+    from corpclaw_lite.agent.file_state import FileStateRegistry
     from corpclaw_lite.llm.queue import LLMQueueStatus
     from corpclaw_lite.users.models import User
 
 logger = logging.getLogger(__name__)
+
+# B-058: read-tool → kwarg holding the path being read. record_read is called
+# after these tools so the FileStateRegistry can flag stale overwrites.
+_READ_TOOLS_PATH_PARAM: dict[str, str] = {
+    "read_file": "path",
+    "excel_inspect": "path",
+    "pdf_reader": "path",
+}
 
 
 class ToolRegistry:
@@ -26,6 +35,13 @@ class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
         self._description_overrides: dict[str, dict[str, Any]] = {}
+        # B-058: optional cross-agent file-state registry. When set, read tools
+        # record their reads so writes can detect staleness.
+        self._file_state: FileStateRegistry | None = None
+
+    def set_file_state(self, file_state: FileStateRegistry | None) -> None:
+        """Wire in a FileStateRegistry (B-058). Called from factory wiring."""
+        self._file_state = file_state
 
     def register(self, tool: Tool, *, allow_replace: bool = False) -> None:
         """Register a tool.
@@ -138,9 +154,36 @@ class ToolRegistry:
             logger.exception("Tool '%s' execution failed", name)
             return f"Error executing '{name}': {type(e).__name__}: {e}"
 
+        # B-058: record file reads so subsequent writes can detect staleness.
+        # Covers read_file/excel_inspect/pdf_reader + excel_workbook(action=read).
+        if self._file_state is not None and run_id is not None:
+            read_path = self._extract_read_path(name, arguments)
+            if read_path is not None:
+                try:
+                    resolved_read = Path(read_path).resolve(strict=False)
+                    if resolved_read.exists() and resolved_read.is_file():
+                        self._file_state.record_read_path(resolved_read, task_id=run_id)
+                except (OSError, ValueError):
+                    pass  # silent — read tracking is best-effort
+
         from corpclaw_lite.security.credential_scrubber import scrub_text
 
         return scrub_text(result)
+
+    @staticmethod
+    def _extract_read_path(name: str, arguments: dict[str, Any]) -> str | None:
+        """Return the path a read-tool is reading, or None if not a read tool."""
+        param = _READ_TOOLS_PATH_PARAM.get(name)
+        if param is not None:
+            val = arguments.get(param)
+            return val if isinstance(val, str) and val else None
+        # excel_workbook is a read tool only when action == "read".
+        if name == "excel_workbook":
+            action = arguments.get("action")
+            if action == "read":
+                val = arguments.get("path")
+                return val if isinstance(val, str) and val else None
+        return None
 
     def _build_schema(self, tool: Tool) -> dict[str, Any]:
         """Build a single OpenAI function-calling schema for a tool.

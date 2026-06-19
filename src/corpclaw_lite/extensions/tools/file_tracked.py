@@ -33,6 +33,7 @@ from corpclaw_lite.security.path_validator import resolve_and_validate_path
 
 if TYPE_CHECKING:
     from corpclaw_lite.agent.file_snapshots import FileSnapshotStore
+    from corpclaw_lite.agent.file_state import FileStateRegistry
     from corpclaw_lite.extensions.tools.base import Tool
     from corpclaw_lite.memory.file_changes import FileChangeDAO
 
@@ -75,15 +76,16 @@ class FileTrackedTool(ScopedTool):
         snapshot_store: FileSnapshotStore | None,
         path_param: str = "path",
         tracks_output: bool = False,
+        file_state: FileStateRegistry | None = None,
     ) -> None:
         super().__init__(tool, source_kind="builtin", source_name=tool.name)
         self._dao = dao
         self._snap = snapshot_store
         self._path_param = path_param
         self._tracks_output = tracks_output
-        # B-058: cross-agent stale-write registry. Wired in a follow-up commit;
-        # stays None here so this wrapper is B-040-only for now.
-        self._file_state: Any = None
+        # B-058: cross-agent stale-write registry. Optional; when None the
+        # check_stale/note_write hooks are skipped.
+        self._file_state = file_state
 
     # ─── output path resolution ──────────────────────────────────────────────
 
@@ -186,7 +188,34 @@ class FileTrackedTool(ScopedTool):
                 )
                 backup_rel = None
 
+        # B-058: cross-agent stale-write check. For in-place tools we check the
+        # source path; for new-file tools we check the output path if it
+        # already exists (re-running normalize on the same name). The warning
+        # is *prepended* to the tool result (model-facing, non-blocking),
+        # mirroring the existing excel_workbook read-before-write warning.
+        stale_warning: str | None = None
+        if self._file_state is not None:
+            check_path = (
+                str(source_path)
+                if self._tracks_output
+                else (str(output_path_pre) if output_path_pre is not None else None)
+            )
+            if check_path is not None and (self._tracks_output or output_existed_before):
+                stale_warning = self._file_state.check_stale(path=check_path, task_id=run_id)
+
         result = await self._tool.execute(**kwargs)
+
+        # B-058: record this write as the latest writer for the output path.
+        if self._file_state is not None:
+            try:
+                after_path_for_note = self._resolve_output_path(source_path, kwargs)
+                if after_path_for_note is not None:
+                    self._file_state.note_write(path=str(after_path_for_note), task_id=run_id)
+            except Exception:
+                logger.debug("file_tracked: note_write skipped", exc_info=True)
+
+        if stale_warning is not None:
+            result = f"[File state warning] {stale_warning}\n\n{result}"
 
         # Record the change. Best-effort: never let journaling break the tool.
         try:

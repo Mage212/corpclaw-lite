@@ -29,7 +29,20 @@ from pathlib import Path
 __all__ = [
     "atomic_save_via",
     "atomic_write_text",
+    "file_signature",
 ]
+
+
+def file_signature(path: Path) -> str:
+    """Cheap change-detection signature (mtime-ns + size).
+
+    Used by the read-before-write guard in excel_workbook and by the
+    FileStateRegistry (B-058) read-stamp logic. Comparing signatures across a
+    read→write sequence detects if the file was touched in between; it is
+    stateless and safe across the container per-call process boundary.
+    """
+    st = path.stat()
+    return f"{st.st_mtime_ns}-{st.st_size}"
 
 
 def _temp_path_for(target: Path) -> Path:
