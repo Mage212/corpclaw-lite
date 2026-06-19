@@ -16,6 +16,7 @@ from typing import Any
 from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
 from corpclaw_lite.extensions.tools.builtin.files import resolve_and_validate_path
 from corpclaw_lite.utils.async_helpers import run_in_thread
+from corpclaw_lite.utils.fs import atomic_save_via
 
 __all__ = ["ExcelWorkbookTool"]
 
@@ -342,7 +343,7 @@ def _fill_cells(
                 return f"Error writing to {addr}: {e}"
 
         try:
-            wb.save(str(output_path))
+            atomic_save_via(wb.save, Path(str(output_path)))
         except Exception as e:
             return f"Error saving file: {e}"
 
