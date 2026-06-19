@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING, Any, Literal
 from corpclaw_lite.agent.context import ContextBuilder
 from corpclaw_lite.agent.guards import (
     BudgetExceededError,
+    PlanningTextGuard,
+    ResultDedupGuard,
     SimpleBudgetGuard,
     SimpleBudgetGuardConfig,
     SimpleProgressGuard,
@@ -74,6 +76,15 @@ _LOOP_RECOVERY_INSTRUCTION = (
     "Internal recovery instruction: the previous tool action repeated the same error. "
     "Change strategy now: stop using the failing tool if possible, try different inputs or "
     "another tool, or explain the tool limitation to the user. Do not quote this instruction."
+)
+# B-055: injected into the system prompt when a tool returns the same successful
+# result multiple times in a row. Distinct from _LOOP_RECOVERY_INSTRUCTION, which
+# targets repeated *errors*; this one targets repeated identical *successes*.
+_DEDUP_INSTRUCTION = (
+    "Internal recovery instruction: a tool returned the same result it returned before. "
+    "Calling it again with the same arguments will not produce new information. Either "
+    "answer directly from the data you have already retrieved, or use a different tool or "
+    "different input. Do not quote this instruction."
 )
 _LOOP_FALLBACK = "I detected a loop and stopped to avoid repeating the same actions."
 _XML_TOOL_CALL_FALLBACK = (
@@ -154,6 +165,35 @@ def _append_loop_recovery_instruction(context: ContextBuilder) -> None:
         context.system_prompt += f"\n\n---\n{_LOOP_RECOVERY_INSTRUCTION}"
     else:
         context.system_prompt = _LOOP_RECOVERY_INSTRUCTION
+
+
+def _append_dedup_instruction(context: ContextBuilder) -> None:
+    """Add the result-dedup recovery hint (B-055), idempotent per run."""
+    if _DEDUP_INSTRUCTION in context.system_prompt:
+        return
+
+    if context.system_prompt:
+        context.system_prompt += f"\n\n---\n{_DEDUP_INSTRUCTION}"
+    else:
+        context.system_prompt = _DEDUP_INSTRUCTION
+
+
+def _detect_result_dedup(
+    guard: ResultDedupGuard,
+    action_results: list[tuple[str, str]],
+) -> tuple[str | None, str]:
+    """Run the result-dedup guard over one tool batch (B-055).
+
+    Only non-error results are considered: error loops are the responsibility of
+    :class:`SimpleProgressGuard`. Returns ``(tool_name, result)`` of the first
+    result that triggered dedup, or ``(None, "")`` if no loop was detected.
+    """
+    for tool_name, result in action_results:
+        if result.startswith(TOOL_ERROR_PREFIX):
+            continue
+        if guard.detect(tool_name, result):
+            return tool_name, result
+    return None, ""
 
 
 def _is_loop_guard_echo(content: str) -> bool:
@@ -586,6 +626,14 @@ class AgentLoop:
             )
         budget = SimpleBudgetGuard(guard_config)
         progress = SimpleProgressGuard()
+        # B-055: result-based dedup guard. Complementary to SimpleProgressGuard:
+        # the progress guard detects repeated *errors*, this one detects repeated
+        # identical *successful* results (the common loop mode for local LLMs).
+        result_dedup = ResultDedupGuard()
+        # B-056: planning-text guard. Detects intent-statements ("let me now...")
+        # and Qwen3/Gemma tool-artifacts ([tool:<name>]) emitted as final answers,
+        # and gives the model a bounded number of correction turns.
+        planning_guard = PlanningTextGuard()
         soft_deadline = SoftDeadline(
             SoftDeadlineConfig(ratio=self._settings.soft_deadline_ratio),
             max_time_ms=self._settings.max_wall_time_ms,
@@ -876,6 +924,22 @@ class AgentLoop:
                         final = _XML_TOOL_CALL_FALLBACK
                         stats.status = "error"
                         stats.error = "malformed_xml_tool_call"
+                    # B-056: planning-text / tool-artifact guard. If the final
+                    # answer is a statement of intent ("Let me now...") or a
+                    # Qwen3/Gemma tool-artifact ([tool:<name>]) instead of an
+                    # action or real answer, inject a correction and give the
+                    # model another turn — bounded by max_corrections.
+                    if planning_guard.detect(final):
+                        context.add_user_message(planning_guard.correction_message())
+                        log_event(
+                            "planning_text_blocked",
+                            stats.run_id,
+                            iteration=stats.iterations,
+                            content_hash=_payload_hash(final),
+                            corrections_used=planning_guard.corrections_used,
+                        )
+                        planning_guard.note_correction()
+                        continue
                     if _is_loop_guard_echo(final):
                         final = _LOOP_FALLBACK
                         stats.status = "loop"
@@ -934,6 +998,30 @@ class AgentLoop:
                         context.add_tool_result(tc.id, tc.name, result)
                         stats.tools_used.append(tc.name)
                         action_results.append((tc.name, result))
+                    # B-047 FIRST: the wall-clock deadline is time-critical and must
+                    # always get a chance to nudge/restrict, even if the same tools
+                    # keep returning identical results (B-055) or errors
+                    # (SimpleProgressGuard). Without this ordering, a dedup/error
+                    # loop would burn the whole budget before the mandate fires.
+                    tools_schema = self._apply_workflow_mandate(
+                        mandate, tools_schema, context, stats
+                    )
+                    # B-055: result-based dedup. Catches repeated identical
+                    # successful results (the common loop mode for local LLMs).
+                    # Only considers non-error results; error loops are handled
+                    # below by SimpleProgressGuard.detect_loop_for_results.
+                    dedup_tool, dedup_result = _detect_result_dedup(result_dedup, action_results)
+                    if dedup_tool is not None:
+                        _append_dedup_instruction(context)
+                        log_event(
+                            "dedup_result_triggered",
+                            stats.run_id,
+                            iteration=stats.iterations,
+                            tool_name=dedup_tool,
+                            result_hash=_payload_hash(dedup_result),
+                            repeat_count=result_dedup.last_count(dedup_result),
+                        )
+                        continue
                     loop_detected = progress.detect_loop_for_results(action_results)
                     if loop_detected:
                         _append_loop_recovery_instruction(context)
@@ -941,10 +1029,6 @@ class AgentLoop:
                         if loop_warning_count >= 2:
                             break
                         continue
-                    # B-047: push toward the mandatory terminal tool as budget runs low.
-                    tools_schema = self._apply_workflow_mandate(
-                        mandate, tools_schema, context, stats
-                    )
                 else:
                     action_results: list[tuple[str, str]] = []
                     for tc in response.tool_calls:
@@ -1002,6 +1086,24 @@ class AgentLoop:
                             )
                             return result, stats
 
+                    # B-047 FIRST (see parallel branch): wall-clock deadline wins
+                    # over dedup/error-loop detection.
+                    tools_schema = self._apply_workflow_mandate(
+                        mandate, tools_schema, context, stats
+                    )
+                    # B-055: result-based dedup (sequential branch).
+                    dedup_tool, dedup_result = _detect_result_dedup(result_dedup, action_results)
+                    if dedup_tool is not None:
+                        _append_dedup_instruction(context)
+                        log_event(
+                            "dedup_result_triggered",
+                            stats.run_id,
+                            iteration=stats.iterations,
+                            tool_name=dedup_tool,
+                            result_hash=_payload_hash(dedup_result),
+                            repeat_count=result_dedup.last_count(dedup_result),
+                        )
+                        continue
                     loop_detected = progress.detect_loop_for_results(action_results)
                     if loop_detected:
                         _append_loop_recovery_instruction(context)
@@ -1009,10 +1111,6 @@ class AgentLoop:
                         if loop_warning_count >= 2:
                             break
                         continue
-                    # B-047: push toward the mandatory terminal tool as budget runs low.
-                    tools_schema = self._apply_workflow_mandate(
-                        mandate, tools_schema, context, stats
-                    )
 
         except BudgetExceededError as e:
             health.increment("errors")

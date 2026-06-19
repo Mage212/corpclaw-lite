@@ -312,6 +312,14 @@ def _build_extensions_stack(
         full_tool_registry.register(read_image_tool)
         for tool in research_tools:
             full_tool_registry.register(tool)
+        # B-057: universal explicit terminator for subagent inner loops.
+        # Registered on full_tool_registry only (not the main registry) — the
+        # main agent terminates naturally via a final answer without tool calls,
+        # so it does not need submit_report. SubagentDispatcher forces this tool
+        # into every isolated subagent registry regardless of allowed_tools.
+        from corpclaw_lite.extensions.tools.builtin.submit_report import SubmitReportTool
+
+        full_tool_registry.register(SubmitReportTool())
 
     return subagent_registry
 

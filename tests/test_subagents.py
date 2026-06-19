@@ -70,6 +70,159 @@ async def test_subagent_dispatcher():
 
 
 @pytest.mark.asyncio
+async def test_submit_report_always_in_isolated_registry() -> None:
+    """B-057: submit_report is forced into every subagent's isolated registry
+    regardless of allowed_tools filtering — so every subagent has an explicit
+    completion signal available."""
+    from corpclaw_lite.extensions.tools.builtin.submit_report import SubmitReportTool
+
+    registry = ToolRegistry()
+    registry.register(DummyToolA())
+    registry.register(DummyToolB())
+    registry.register(SubmitReportTool())  # available in main_registry
+
+    dispatcher = SubagentDispatcher(
+        provider=DummyProvider(), main_registry=registry, settings=AgentSettings()
+    )  # type: ignore
+
+    # A spec with a tight allowed_tools list that does NOT include submit_report.
+    spec = SubagentSpec(
+        id="narrow-agent",
+        name="Narrow Agent",
+        description="Testing",
+        allowed_tools=["tool_a"],
+    )
+    user = User(id=1, name="User", department="dev")
+
+    with patch("corpclaw_lite.agent.subagent.AgentLoop") as MockLoop:
+        mock_loop_instance = MockLoop.return_value
+        mock_loop_instance.run = AsyncMock(return_value=("result", RunStats()))
+        await dispatcher.dispatch(spec, user, "Do something")
+
+        call_args = MockLoop.call_args
+        agent_config = call_args.args[0] if call_args.args else call_args.kwargs["config"]
+        isolated_registry = agent_config.registry
+        # submit_report is present despite not being in allowed_tools.
+        assert "submit_report" in isolated_registry._tools
+        # And allowed_tools filtering is still respected for other tools.
+        assert "tool_a" in isolated_registry._tools
+        assert "tool_b" not in isolated_registry._tools
+
+
+@pytest.mark.asyncio
+async def test_submit_report_in_research_agent_registry() -> None:
+    """B-057: research-agent also gets submit_report, even though it already
+    has research_finalize as its own terminal tool (B-047). The prompt instructs
+    preferring research_finalize, but submit_report is available as a fallback."""
+    from corpclaw_lite.extensions.tools.builtin.submit_report import SubmitReportTool
+
+    registry = ToolRegistry()
+    registry.register(DummyToolA())
+    registry.register(SubmitReportTool())
+
+    dispatcher = SubagentDispatcher(
+        provider=DummyProvider(), main_registry=registry, settings=AgentSettings()
+    )  # type: ignore
+
+    spec = SubagentSpec(
+        id="research-agent",
+        name="Research Agent",
+        description="Research",
+        allowed_tools=["*"],
+        terminal_tool="research_finalize",
+    )
+    user = User(id=1, name="User", department="dev")
+
+    with patch("corpclaw_lite.agent.subagent.AgentLoop") as MockLoop:
+        mock_loop_instance = MockLoop.return_value
+        mock_loop_instance.run = AsyncMock(return_value=("result", RunStats()))
+        await dispatcher.dispatch(spec, user, "research it")
+
+        call_args = MockLoop.call_args
+        agent_config = call_args.args[0] if call_args.args else call_args.kwargs["config"]
+        isolated_registry = agent_config.registry
+        assert "submit_report" in isolated_registry._tools
+
+
+@pytest.mark.asyncio
+async def test_subagent_system_prompt_includes_submit_report_instruction() -> None:
+    """B-057: the universal one-liner about submit_report is appended to the
+    system prompt of every subagent."""
+    from corpclaw_lite.extensions.tools.builtin.submit_report import SubmitReportTool
+
+    registry = ToolRegistry()
+    registry.register(DummyToolA())
+    registry.register(SubmitReportTool())
+
+    dispatcher = SubagentDispatcher(
+        provider=DummyProvider(), main_registry=registry, settings=AgentSettings()
+    )  # type: ignore
+
+    spec = SubagentSpec(
+        id="doc-agent",
+        name="Document Agent",
+        description="Docs",
+        allowed_tools=["*"],
+    )
+    user = User(id=1, name="User", department="dev")
+
+    captured_system: list[str] = []
+
+    with patch("corpclaw_lite.agent.subagent.AgentLoop") as MockLoop:
+        mock_loop_instance = MockLoop.return_value
+
+        async def fake_run(*args: Any, **kwargs: Any) -> tuple[str, RunStats]:
+            captured_system.append(kwargs.get("system_prompt") or "")
+            return ("result", RunStats())
+
+        mock_loop_instance.run = fake_run
+        await dispatcher.dispatch(spec, user, "do it")
+
+    assert captured_system
+    assert "submit_report" in captured_system[0]
+    assert "terminates your run" in captured_system[0]
+
+
+@pytest.mark.asyncio
+async def test_research_subagent_prompt_prefers_research_finalize() -> None:
+    """B-057: for research-agent the prompt adds the preference note."""
+    from corpclaw_lite.extensions.tools.builtin.submit_report import SubmitReportTool
+
+    registry = ToolRegistry()
+    registry.register(DummyToolA())
+    registry.register(SubmitReportTool())
+
+    dispatcher = SubagentDispatcher(
+        provider=DummyProvider(), main_registry=registry, settings=AgentSettings()
+    )  # type: ignore
+
+    spec = SubagentSpec(
+        id="research-agent",
+        name="Research Agent",
+        description="Research",
+        allowed_tools=["*"],
+        terminal_tool="research_finalize",
+    )
+    user = User(id=1, name="User", department="dev")
+
+    captured_system: list[str] = []
+
+    with patch("corpclaw_lite.agent.subagent.AgentLoop") as MockLoop:
+        mock_loop_instance = MockLoop.return_value
+
+        async def fake_run(*args: Any, **kwargs: Any) -> tuple[str, RunStats]:
+            captured_system.append(kwargs.get("system_prompt") or "")
+            return ("result", RunStats())
+
+        mock_loop_instance.run = fake_run
+        await dispatcher.dispatch(spec, user, "research it")
+
+    assert captured_system
+    assert "research_finalize" in captured_system[0]
+    assert "prefer" in captured_system[0].lower()
+
+
+@pytest.mark.asyncio
 async def test_subagent_loop_keeps_allowed_tools_even_if_department_lacks_direct_tool_access():
     """Subagent allowed_tools are the authority inside the isolated subagent loop."""
     registry = ToolRegistry()

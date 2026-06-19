@@ -163,6 +163,12 @@ class SubagentDispatcher:
         for tool_name, tool in self._main_registry.items().items():
             if "*" in spec.allowed_tools or tool_name in spec.allowed_tools:
                 isolated_registry.register(tool)
+        # B-057: submit_report is always available to every subagent as an
+        # explicit completion signal, regardless of allowed_tools filtering.
+        # Without it, local LLMs often loop or fall silent after finishing.
+        submit_tool = self._main_registry.get("submit_report")
+        if submit_tool is not None and "submit_report" not in isolated_registry.items():
+            isolated_registry.register(submit_tool)
 
         registered_names = list(isolated_registry.items().keys())
         logger.debug(
@@ -174,6 +180,20 @@ class SubagentDispatcher:
 
         # Load system prompt: calibrated override > prompt_path > description fallback
         system_prompt = f"You are a specialized subagent: {spec.name}.\n{spec.description}\n"
+        # B-057: universal explicit-terminator instruction for all subagents.
+        # Guarantees coverage of every subagent without per-spec prompt edits;
+        # research-agent additionally prefers research_finalize (its own
+        # terminal tool with source-grounding validation).
+        system_prompt += (
+            "\n\nWhen your work is complete, call `submit_report(result_text)` with "
+            "your final result; this terminates your run and returns the result to "
+            "the parent agent. Do not just stop or repeat tool calls.\n"
+        )
+        if spec.terminal_tool == "research_finalize":
+            system_prompt += (
+                "For research tasks prefer `research_finalize`; use `submit_report` "
+                "only if research_finalize is not applicable.\n"
+            )
         if spec.prompt_path:
             from pathlib import Path
 
