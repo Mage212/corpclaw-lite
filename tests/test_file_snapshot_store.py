@@ -68,11 +68,16 @@ def test_backup_preserves_nested_relative_path(
 
 
 def test_backup_rejects_source_outside_workspace(
-    tmp_path: Path, store: FileSnapshotStore, user: User
+    tmp_path: Path, store: FileSnapshotStore, user: User, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Run with a cwd that does NOT contain the candidate, so neither the
+    # canonical layout nor the cwd-fallback accepts it.
+    other = tmp_path / "other_cwd"
+    other.mkdir()
+    monkeypatch.chdir(other)
     outside = tmp_path / "outside.txt"
     outside.write_text("nope")
-    with pytest.raises(ValueError, match="outside user workspace"):
+    with pytest.raises(ValueError, match="outside workspace"):
         store.backup(user, "run-1", outside)
 
 
@@ -120,7 +125,7 @@ def test_restore_missing_backup_raises(
 
 
 def test_restore_rejects_target_outside_workspace(
-    tmp_path: Path, store: FileSnapshotStore, user: User
+    tmp_path: Path, store: FileSnapshotStore, user: User, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ws = _workspace_root(tmp_path, user)
     ws.mkdir(parents=True)
@@ -128,9 +133,53 @@ def test_restore_rejects_target_outside_workspace(
     source.write_text("data")
     rel = store.backup(user, "run-1", source)
 
+    # cwd-fallback must not rescue an arbitrary outside path.
+    other = tmp_path / "other_cwd"
+    other.mkdir()
+    monkeypatch.chdir(other)
     outside = tmp_path / "outside.txt"
-    with pytest.raises(ValueError, match="outside user workspace"):
+    with pytest.raises(ValueError, match="outside workspace"):
         store.restore(user, "run-1", rel, outside)
+
+
+# ─── non-default workspace (B-040 regression: eval harness uses .eval_workspace/) ──
+
+
+def test_backup_accepts_source_in_nondefault_workspace(
+    tmp_path: Path, store: FileSnapshotStore, user: User, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: when the agent runs against a working directory that is NOT
+    the canonical ``<workspace_base>/user_<key>/`` layout (e.g. the eval harness
+    chdir's into ``.eval_workspace/guards_on/``), backup must fall back to the
+    current working directory as the workspace root rather than rejecting the
+    source as 'outside workspace'."""
+    custom_ws = tmp_path / "custom_workspace"
+    custom_ws.mkdir()
+    source = custom_ws / "data.xlsx"
+    source.write_bytes(b"xlsx")
+    monkeypatch.chdir(custom_ws)
+
+    rel = store.backup(user, "run-1", source)
+    assert rel == "data.xlsx"
+    # Backup landed in the snapshot dir keyed by run, preserving the relative path.
+    backup_file = tmp_path / f"user_{user.workspace_key()}" / ".snapshots" / "run-1" / "data.xlsx"
+    assert backup_file.read_bytes() == b"xlsx"
+
+
+def test_restore_to_nondefault_workspace(
+    tmp_path: Path, store: FileSnapshotStore, user: User, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Restore must write back to the non-default workspace (cwd), mirroring backup."""
+    custom_ws = tmp_path / "custom_workspace"
+    custom_ws.mkdir()
+    source = custom_ws / "data.xlsx"
+    source.write_bytes(b"original")
+    monkeypatch.chdir(custom_ws)
+
+    rel = store.backup(user, "run-1", source)
+    source.write_bytes(b"mutated")
+    store.restore(user, "run-1", rel, source)
+    assert source.read_bytes() == b"original"
 
 
 # ─── prune ───────────────────────────────────────────────────────────────────
