@@ -93,6 +93,7 @@ class DispatchSubagentTool(Tool):
             if callable(raw_on_subagent_llm_queue_status)
             else None
         )
+        parent_trajectory_recorder = kwargs.get("parent_trajectory_recorder")
 
         if not isinstance(subagent_id, str) or not isinstance(task, str):
             return "Error: 'subagent_id' and 'task' are required string parameters."
@@ -152,6 +153,7 @@ class DispatchSubagentTool(Tool):
             user,
             task,
             parent_run_id=parent_run_id,
+            parent_trajectory_recorder=parent_trajectory_recorder,
             on_subagent_tool_start=on_subagent_tool_start,
             on_subagent_tool_batch_start=on_subagent_tool_batch_start,
             on_subagent_llm_stage=on_subagent_llm_stage,

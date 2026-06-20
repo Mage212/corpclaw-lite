@@ -648,12 +648,14 @@ class AgentLoop:
         progress = SimpleProgressGuard()
         # B-055: result-based dedup guard. Complementary to SimpleProgressGuard:
         # the progress guard detects repeated *errors*, this one detects repeated
-        # identical *successful* results (the common loop mode for local LLMs).
-        result_dedup = ResultDedupGuard()
+        # identical *successful results* (the common loop mode for local LLMs).
+        # Config is sourced from AgentSettings so the eval harness (B-060) can run
+        # A/B passes with the guard disabled, and operators can tune thresholds.
+        result_dedup = ResultDedupGuard(self._settings.result_dedup_guard)
         # B-056: planning-text guard. Detects intent-statements ("let me now...")
         # and Qwen3/Gemma tool-artifacts ([tool:<name>]) emitted as final answers,
         # and gives the model a bounded number of correction turns.
-        planning_guard = PlanningTextGuard()
+        planning_guard = PlanningTextGuard(self._settings.planning_text_guard)
         soft_deadline = SoftDeadline(
             SoftDeadlineConfig(ratio=self._settings.soft_deadline_ratio),
             max_time_ms=self._settings.max_wall_time_ms,
@@ -1466,6 +1468,7 @@ class AgentLoop:
                 on_subagent_tool_batch_start=on_subagent_tool_batch_start,
                 on_subagent_llm_stage=on_subagent_llm_stage,
                 on_subagent_llm_queue_status=on_subagent_llm_queue_status,
+                parent_trajectory_recorder=trajectory_recorder,
             )
             status = "error" if result.startswith("Error") else "ok"
             if status == "error":

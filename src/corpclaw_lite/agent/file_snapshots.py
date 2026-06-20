@@ -53,6 +53,23 @@ class FileSnapshotStore:
     def _user_workspace_root(self, user: User) -> Path:
         return (self._workspace_base / f"user_{user.workspace_key()}").resolve()
 
+    def _workspace_root_for(self, user: User, candidate: Path) -> Path:
+        """Resolve the workspace root a file belongs to.
+
+        Normally files live under ``<workspace_base>/user_<key>/``. But when the
+        agent runs against a different working directory (e.g. the eval harness
+        materialises scenarios under ``.eval_workspace/<pass>/``), the source
+        path is outside that canonical layout. In that case the agent's current
+        working directory IS the workspace — fall back to it so backup/restore
+        keep working in non-default deployments.
+        """
+        canonical = self._user_workspace_root(user)
+        try:
+            candidate.relative_to(canonical)
+            return canonical
+        except ValueError:
+            return Path.cwd().resolve()
+
     # ─── backup ──────────────────────────────────────────────────────────────
 
     def backup(self, user: User, run_id: str, source: Path) -> str:
@@ -60,19 +77,16 @@ class FileSnapshotStore:
 
         Returns the *relative* backup path (forward-slash-joined, as stored in
         the DAO's ``backup_path`` column). The source must already live inside
-        the user workspace; we preserve its path relative to the workspace root
-        so restore can write it back to the same place.
+        the agent workspace (canonical per-user layout, or the current working
+        directory in non-default deployments); we preserve its path relative to
+        the workspace root so restore can write it back to the same place.
         """
-        ws_root = self._user_workspace_root(user)
         source = Path(source).resolve()
+        ws_root = self._workspace_root_for(user, source)
         try:
             rel = source.relative_to(ws_root)
         except ValueError:
-            # Source is outside the workspace (shouldn't happen — the caller
-            # validated the path). Fail loudly.
-            raise ValueError(
-                f"backup source '{source}' is outside user workspace '{ws_root}'"
-            ) from None
+            raise ValueError(f"backup source '{source}' is outside workspace '{ws_root}'") from None
 
         backup_target = self._snapshot_dir(user, run_id) / rel
         backup_target.parent.mkdir(parents=True, exist_ok=True)
@@ -89,18 +103,17 @@ class FileSnapshotStore:
 
         ``backup_rel`` is the relative path returned by :meth:`backup`.
         """
-        ws_root = self._user_workspace_root(user)
         backup_path = self._snapshot_dir(user, run_id) / backup_rel
         if not backup_path.exists():
             raise FileNotFoundError(f"backup '{backup_rel}' for run '{run_id}' not found")
 
         target = Path(target).resolve()
-        # Target must also be inside the workspace.
+        ws_root = self._workspace_root_for(user, target)
         try:
             target.relative_to(ws_root)
         except ValueError:
             raise ValueError(
-                f"restore target '{target}' is outside user workspace '{ws_root}'"
+                f"restore target '{target}' is outside workspace '{ws_root}'"
             ) from None
 
         target.parent.mkdir(parents=True, exist_ok=True)

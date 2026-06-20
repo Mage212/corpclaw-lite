@@ -13,6 +13,7 @@ import anyio
 
 from corpclaw_lite.agent.loop import AgentConfig, AgentLoop
 from corpclaw_lite.agent.task_run import TaskRun
+from corpclaw_lite.calibration.trajectory import TrajectoryRecorder
 from corpclaw_lite.config.settings import AgentSettings
 from corpclaw_lite.extensions.subagents.base import SubagentSpec
 from corpclaw_lite.extensions.tools.builtin.research import detect_language
@@ -128,12 +129,20 @@ class SubagentDispatcher:
         task_context: str,
         *,
         parent_run_id: str | None = None,
+        parent_trajectory_recorder: TrajectoryRecorder | None = None,
         on_subagent_tool_start: Callable[[str, str], None] | None = None,
         on_subagent_tool_batch_start: Callable[[str, list[str]], None] | None = None,
         on_subagent_llm_stage: Callable[[str, str], None] | None = None,
         on_subagent_llm_queue_status: Callable[[str, LLMQueueStatus], None] | None = None,
     ) -> str:
-        """Run the subagent on a specific task."""
+        """Run the subagent on a specific task.
+
+        When ``parent_trajectory_recorder`` is set (eval harness), the subagent's
+        inner tool calls are recorded and merged into the parent trajectory via
+        ``record_nested`` — so the eval harness can see ``table_query`` and
+        friends that ran inside the dispatched subagent, not just the
+        ``dispatch_subagent`` call itself.
+        """
         subagent_run_id = uuid.uuid4().hex
         logger.info("Dispatching subagent %s for user %s", spec.id, user.id)
         log_event(
@@ -310,7 +319,17 @@ class SubagentDispatcher:
                 if on_subagent_llm_queue_status is not None:
                     on_subagent_llm_queue_status(subagent_name, status)
 
-            result, _ = await asyncio.wait_for(
+            # B-060: when the parent wants visibility into the subagent's tool
+            # calls, record them in an inner recorder and merge into the parent
+            # trajectory after the run completes. This is how the eval harness
+            # sees table_query/excel_workbook/etc. that ran inside the dispatch.
+            inner_recorder = (
+                TrajectoryRecorder(f"{spec.id}#inner")
+                if parent_trajectory_recorder is not None
+                else None
+            )
+
+            result, stats_inner = await asyncio.wait_for(
                 loop.run(
                     user,
                     effective_task_context,
@@ -327,10 +346,20 @@ class SubagentDispatcher:
                     on_llm_queue_status=(
                         forward_queue_status if on_subagent_llm_queue_status is not None else None
                     ),
+                    trajectory_recorder=inner_recorder,
                     run_id=subagent_run_id,
                 ),
                 timeout=timeout_seconds,
             )
+            if inner_recorder is not None and parent_trajectory_recorder is not None:
+                inner_traj = inner_recorder.finalize(
+                    result,
+                    iterations=stats_inner.iterations,
+                    tools_used=list(stats_inner.tools_used),
+                    duration_ms=stats_inner.duration_ms,
+                    status=stats_inner.status,
+                )
+                parent_trajectory_recorder.record_nested(spec.id, inner_traj.steps)
             if spec.id == "research-agent":
                 result = _ensure_research_sources_section(result)
             elapsed = time.monotonic() - t0
