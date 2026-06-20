@@ -80,6 +80,23 @@ def test_null_answer_ambiguous_needs_judge() -> None:
     assert res.judge_needed
 
 
+def test_behavioral_null_defers_to_judge_not_hallucinated() -> None:
+    """Regression: a turn with expected_tools but NO expected_answer is a
+    behavioural scenario (grade the tool path, not the answer). It must NOT
+    fall into the adversarial null-answer branch (which would flag any number
+    in the response as 'hallucinated_source'). The judge must score it."""
+    turn = ScenarioTurn(
+        user_message="Create a file",
+        expected_answer=None,
+        expected_tools=["write_file"],
+    )
+    res = scorer.score_turn(
+        turn, "Created todo.txt with the requested content.", tools_called=["write_file"]
+    )
+    assert res.judge_needed
+    assert res.score.failure_category is None  # not hallucinated_source
+
+
 # ─────────────────────────── ground-truth branch ───────────────────────────
 
 

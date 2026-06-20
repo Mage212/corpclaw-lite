@@ -81,8 +81,22 @@ class DeterministicScorer:
 
         expected = turn.expected_answer
 
-        # Null-answer branch: ground truth asserts NO answer exists.
+        # Null expected_answer has two distinct meanings:
+        #  - behavioural (expected_tools set, no ground-truth answer): the
+        #    scenario grades the tool-selection path, not the answer text. The
+        #    judge must score it.
+        #  - adversarial (no expected_answer AND no expected_tools): the ground
+        #    truth asserts NO answer exists in the source; null-answer logic
+        #    applies ("don't know" = 10, invention = 0).
         if expected is None:
+            if turn.expected_tools:
+                return DeterministicResult(
+                    score=TurnScore(
+                        reasoning="Behavioural scenario (expected_tools, no ground truth); "
+                        "judge required to score tool-selection path."
+                    ),
+                    judge_needed=True,
+                )
             return self._score_null_answer(answer, tools_called)
 
         # Non-null ground truth: zero-rules + exact-match.
