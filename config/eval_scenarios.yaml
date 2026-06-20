@@ -1,0 +1,263 @@
+# Eval scenario corpus for the GAIA-style eval harness (B-060).
+#
+# 12 scenarios: office tools (Phase 1 file-cowork) + adversarial (Phase 0 guards)
+# + multi-turn retention. Designed to be run twice (guards on/off) to measure
+# whether B-055 (result-dedup) and B-056 (planning-text) guards improve outcomes
+# on local LLMs.
+#
+# Binary fixtures (xlsx/csv) are referenced via copy_from_corpus and expected to
+# live in config/eval/corpus/<source>. Ship minimal fixtures inline as text
+# (csv) where possible; xlsx fixtures are created by a fixtures generator.
+#
+# expected_answer semantics (judge_turn.md):
+#   - string: ground truth to match (zero-rules apply: wrong number, wrong name,
+#     lazy refusal, hallucinated source → correctness=0)
+#   - null:   asserts NO answer exists in the source; agent should say "don't
+#     know" (correctness up to 10); inventing an answer = 0.
+
+scenarios:
+  # ───────────────────────── Office tools (Phase 1 file-cowork) ──────────────
+
+  - id: csv_aggregate_total
+    category: office_aggregation
+    severity: normal
+    description: >
+      Aggregate a CSV via table_query. The file is too large to read verbatim,
+      so the agent must use SQL aggregation, not read_file + eyeballing.
+    setup:
+      files:
+        - path: "sales_q1.csv"
+          content: |
+            region,product,units,revenue
+            North,Widget,10,500
+            South,Widget,7,350
+            North,Gadget,3,900
+            South,Gadget,5,1500
+            East,Widget,8,400
+    turns:
+      - user_message: "Посчитай общий доход (revenue) по файлу sales_q1.csv и назови число."
+        expected_answer: "3650"
+        expected_tools: ["table_query"]
+        success_criteria: "Agent must aggregate via SQL, not read_file the whole CSV."
+
+  - id: csv_top_performer
+    category: office_aggregation
+    severity: normal
+    description: Top performer by revenue requires SQL ordering, not manual scan.
+    setup:
+      files:
+        - path: "sales_q1.csv"
+          content: |
+            region,product,units,revenue
+            North,Widget,10,500
+            South,Widget,7,350
+            North,Gadget,3,900
+            South,Gadget,5,1500
+            East,Widget,8,400
+    turns:
+      - user_message: "Какой регион показал наибольшую выручку (revenue) в sales_q1.csv?"
+        expected_answer: "South"
+        expected_tools: ["table_query"]
+
+  - id: csv_convert_format
+    category: office_convert
+    severity: normal
+    description: Convert CSV to a different format via convert_format.
+    setup:
+      files:
+        - path: "contacts.csv"
+          content: |
+            name,email,phone
+            Alice,alice@example.com,555-0100
+            Bob,bob@example.com,555-0200
+    turns:
+      - user_message: "Конвертируй contacts.csv в JSON и сохрани как contacts.json."
+        expected_tools: ["convert_format"]
+        success_criteria: "contacts.json must exist and be valid JSON with both records."
+
+  - id: multi_file_read_combine
+    category: office_multistep
+    severity: normal
+    description: Read two files, combine into a summary. Tests multi-step tool use.
+    setup:
+      files:
+        - path: "q1_report.txt"
+          content: "Q1 revenue: 12000. Q1 expenses: 8000."
+        - path: "q2_report.txt"
+          content: "Q2 revenue: 15000. Q2 expenses: 9500."
+    turns:
+      - user_message: "Прочитай q1_report.txt и q2_report.txt и назови общую выручку за два квартала."
+        expected_answer: "27000"
+        expected_tools: ["read_file"]
+        success_criteria: "Agent must read both files and sum the revenue figures."
+
+  - id: write_file_tracked
+    category: office_write
+    severity: normal
+    description: >
+      Write a new file. Verifies Phase 1 file-tracking records the op as 'create'
+      and the file appears in recent_files context on a subsequent turn.
+    turns:
+      - user_message: "Создай файл todo.txt с содержимым: 'Review Q3 budget'."
+        expected_tools: ["write_file"]
+        success_criteria: "todo.txt must exist with the exact content."
+
+  - id: normalize_excel_structure
+    category: office_normalize
+    severity: normal
+    description: >
+      Normalize an Excel workbook structure (headers, trim whitespace). Requires
+      excel_workbook to inspect then normalize_excel to fix. Binary fixture.
+    setup:
+      copy_from_corpus:
+        - dest: "messy.xlsx"
+          source: "messy_headers.xlsx"
+    turns:
+      - user_message: "В файле messy.xlsx почищай заголовки: убери лишние пробелы и приведи к нижнему регистру. Сохрани результат."
+        expected_tools: ["excel_workbook", "normalize_excel"]
+        success_criteria: "Normalized workbook must exist with clean lowercase headers."
+
+  # ───────────────────────── Adversarial (Phase 0 guards) ─────────────────────
+
+  - id: null_answer_not_in_document
+    category: adversarial_null_answer
+    severity: adversarial
+    description: >
+      The asked-for fact does NOT exist in the source. The agent must say it
+      doesn't know rather than invent. Tests the hallucinated-source zero-rule.
+    setup:
+      files:
+        - path: "policy.txt"
+          content: |
+            Отпуск: 28 календарных дней в год.
+            Больничный: оплачивается до 5 дней без справки.
+            Командировки: компенсация проживания до 5000/сутки.
+    turns:
+      - user_message: "Сколько дней дополнительного отпуска положено за стаж 10 лет согласно policy.txt?"
+        expected_answer: null
+        success_criteria: >
+          FAIL if the agent invents a number. PASS if the agent states the
+          document does not specify this. expected_answer is null by design.
+
+  - id: negation_policy_must_respect
+    category: adversarial_negation
+    severity: adversarial
+    description: >
+      The policy explicitly states something is NOT allowed. The agent must not
+      ignore the negation. Tests wrong-answer detection.
+    setup:
+      files:
+        - path: "policy.txt"
+          content: |
+            Компенсация питания: предоставляется сотрудникам офиса.
+            Удалённым сотрудникам компенсация питания НЕ предоставляется.
+            Проезд: компенсируется всем сотрудникам до 2000/мес.
+    turns:
+      - user_message: "Положена ли компенсация питания удалённому сотруднику согласно policy.txt?"
+        expected_answer: "нет"
+        success_criteria: "Agent must respect the explicit negation, not default to 'yes'."
+
+  - id: buried_fact_navigation
+    category: adversarial_buried_fact
+    severity: adversarial
+    description: >
+      The fact is buried in a later section of a long document. The agent must
+      read/navigate to it rather than guessing from the opening. Tests lazy
+      refusal and tool_selection.
+    setup:
+      files:
+        - path: "manual.md"
+          content: |
+            # Справочник по системе
+
+            ## Раздел 1. Введение
+            Добро пожаловать. Это общий обзор.
+
+            ## Раздел 2. Установка
+            Стандартная процедура установки.
+
+            ## Раздел 3. Настройка
+            Базовые параметры конфигурации.
+
+            ...
+
+            ## Раздел 52. Ограничения
+            Максимальный размер загружаемого файла — 48 МБ.
+            Пароль должен быть не короче 14 символов.
+    turns:
+      - user_message: "Какой максимальный размер загружаемого файла указан в manual.md (Раздел 52)?"
+        expected_answer: "48"
+        expected_tools: ["read_file"]
+        success_criteria: "Agent must find the Section 52 limit, not guess from the intro."
+
+  - id: csv_loop_pressure_dedup
+    category: adversarial_loop_pressure
+    severity: adversarial
+    description: >
+      A large-ish CSV that tempts repeated list_file/read_file calls. Tests
+      whether B-055 result-dedup catches the agent re-reading the same file.
+      With guards ON, the loop should terminate faster.
+    setup:
+      files:
+        - path: "big_inventory.csv"
+          content: |
+            sku,name,qty,warehouse
+            A001,Widget,142,North
+            A002,Gadget,87,North
+            A003,Sprocket,203,South
+            A004,Gizmo,56,South
+            A005,Doohickey,318,East
+            A006,Thingamajig,91,East
+            A007,Whatchamacallit,44,West
+            A008,Whosiwhatsit,177,West
+    turns:
+      - user_message: "Сколько всего позиций (sku) в файле big_inventory.csv?"
+        expected_answer: "8"
+        expected_tools: ["table_query"]
+        success_criteria: >
+          FAIL if the agent calls read_file/list_file 3+ times with identical
+          results (the B-055 dedup trigger condition). With guards OFF this
+          scenario is expected to loop more often.
+
+  # ──────────────────────── Multi-turn retention ─────────────────────────────
+
+  - id: multi_turn_yoy_then_q4
+    category: multi_turn_retention
+    severity: normal
+    description: >
+      Turn 1 establishes a computed value (YoY). Turn 2 asks a follow-up that
+      requires remembering the Turn 1 result. Tests context_retention dimension.
+    setup:
+      files:
+        - path: "financials.txt"
+          content: |
+            2023 revenue: 100000
+            2024 revenue: 120000
+            Q4 2024 revenue: 35000
+    turns:
+      - user_message: "Какой рост выручки (в процентах) год к году по financials.txt за 2024?"
+        expected_answer: "20"
+        expected_tools: ["read_file"]
+      - user_message: "А сколько составила выручка в Q4 того же года?"
+        expected_answer: "35000"
+        success_criteria: >
+          Agent must answer Turn 2 without re-reading the file (context_retention).
+          Cap context_retention at 4 if it re-reads established info.
+
+  - id: multi_turn_persona_accumulation
+    category: multi_turn_retention
+    severity: normal
+    description: >
+      Across turns the agent accumulates user-stated facts. Final turn asks it to
+      recall all of them. Tests memory/context retention without a file.
+    turns:
+      - user_message: "Запомни: меня зовут Анна, я работаю в отделе маркетинга."
+        success_criteria: "Agent should acknowledge."
+      - user_message: "Также запомни: мой приоритет — автоматизация отчётов по Excel."
+        success_criteria: "Agent should acknowledge."
+      - user_message: "Напомни, как меня зовут, в каком я отделе и какой у меня приоритет?"
+        expected_answer: "Анна"
+        must_contain: "маркетинг"
+        success_criteria: >
+          Agent must recall name (Анна), department (маркетинг) and priority
+          (Excel/automation). context_retention scored on completeness.
