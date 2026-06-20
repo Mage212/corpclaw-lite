@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, NoReturn
 from corpclaw_lite.exceptions import StartupConfigurationError
 
 if TYPE_CHECKING:
+    from corpclaw_lite.eval.judge import LLMJudge
     from corpclaw_lite.extensions.skills.base import Skill
     from corpclaw_lite.users.manager import UserManager
 
@@ -43,6 +44,7 @@ __all__ = [
     "cmd_calibrate",
     "cmd_chat",
     "cmd_containers",
+    "cmd_eval",
     "cmd_generate",
     "cmd_plugin_list",
     "cmd_prune",
@@ -297,6 +299,39 @@ def _build_parser() -> argparse.ArgumentParser:
         "--reset",
         action="store_true",
         help="Clear previous calibration before starting",
+    )
+
+    # eval (B-060): GAIA-style eval harness with A/B guard toggling
+    eval_p = sub.add_parser("eval", help="Run the eval harness (B-060) over a scenario corpus")
+    eval_p.add_argument(
+        "--scenarios",
+        default="config/eval_scenarios.yaml",
+        help="Path to eval scenarios YAML",
+    )
+    eval_p.add_argument(
+        "--judge-provider",
+        default="cloud",
+        help="Named provider for the cloud LLM judge (default: 'cloud')",
+    )
+    eval_p.add_argument(
+        "--no-judge",
+        action="store_true",
+        help="Deterministic-only scoring (no cloud judge) — useful offline",
+    )
+    eval_p.add_argument(
+        "--no-ab",
+        action="store_true",
+        help="Single-pass mode (guards on only); skip the guards-off comparison",
+    )
+    eval_p.add_argument(
+        "--corpus-dir",
+        default=None,
+        help="Directory with binary fixtures referenced by copy_from_corpus",
+    )
+    eval_p.add_argument(
+        "--output",
+        default="reports/eval",
+        help="Directory to write eval reports (default: reports/eval)",
     )
 
     return parser
@@ -945,6 +980,77 @@ def cmd_calibrate(
     asyncio.run(loop.run())
 
 
+def cmd_eval(
+    scenarios: str,
+    judge_provider: str,
+    no_judge: bool,
+    ab_guards: bool,
+    corpus_dir: str | None,
+    output_dir: str,
+) -> None:
+    """Run the eval harness (B-060) over a scenario corpus."""
+    from corpclaw_lite.config.loader import load_settings
+    from corpclaw_lite.logging.agent_logger import setup_logging
+    from corpclaw_lite.paths import PROJECT_ROOT
+
+    _settings = load_settings(PROJECT_ROOT / "config" / "settings.yaml")
+    _log = _settings.logging
+    setup_logging(
+        log_dir=PROJECT_ROOT / _log.log_dir,
+        level=_log.level,
+        console_level=_log.console_level,
+        trace_enabled=_log.trace_enabled,
+        trace_level=_log.trace_level,
+        trace_preview_chars=_log.trace_preview_chars,
+    )
+
+    judge: LLMJudge | None = None
+    if not no_judge:
+        judge = _resolve_judge(judge_provider)
+        if judge is None:
+            print(
+                f"\n⚠️  Judge provider '{judge_provider}' not available; "
+                "falling back to deterministic-only scoring. "
+                "Set --no-judge to silence this."
+            )
+
+    from corpclaw_lite.eval.loop import EvalLoop
+
+    loop = EvalLoop(
+        scenarios_path=scenarios,
+        judge=judge,
+        corpus_dir=corpus_dir,
+        output_dir=output_dir,
+        ab_guards=ab_guards,
+    )
+    asyncio.run(loop.run())
+
+
+def _resolve_judge(provider_name: str) -> LLMJudge | None:
+    """Resolve a cloud provider for the LLM judge.
+
+    Returns None (gracefully) if the provider isn't registered — the eval loop
+    then falls back to deterministic-only scoring. This keeps the command usable
+    in closed-circuit deployments without cloud access.
+    """
+    from corpclaw_lite.config.loader import load_settings
+    from corpclaw_lite.config.providers import ProviderRegistry
+    from corpclaw_lite.eval.judge import LLMJudge
+    from corpclaw_lite.llm.router import LLMRouter
+    from corpclaw_lite.paths import PROJECT_ROOT
+
+    provider_registry = ProviderRegistry.from_env()
+    cloud_conn = provider_registry.get(provider_name)
+    if not cloud_conn:
+        return None
+    settings = load_settings(PROJECT_ROOT / "config" / "settings.yaml")
+    router = LLMRouter.from_settings(settings.llm, provider_registry)
+    # Prefer an explicit 'eval' routing rule, else fall back to the default rule.
+    task = "eval" if router.has_task_route("eval") else "default"
+    provider = router.for_task(task)
+    return LLMJudge(provider)
+
+
 def cmd_generate(ext_type: str, name: str) -> None:
     """Scaffold a new skill, plugin, or subagent."""
     from pathlib import Path
@@ -1100,6 +1206,15 @@ def main() -> None:
                 max_iterations=args.max_iterations,
                 dry_run=args.dry_run,
                 reset=args.reset,
+            )
+        elif args.command == "eval":
+            cmd_eval(
+                scenarios=args.scenarios,
+                judge_provider=args.judge_provider,
+                no_judge=args.no_judge,
+                ab_guards=not args.no_ab,
+                corpus_dir=args.corpus_dir,
+                output_dir=args.output,
             )
         else:
             parser.print_help()
