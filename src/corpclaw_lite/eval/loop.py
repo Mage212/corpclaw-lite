@@ -122,6 +122,12 @@ class EvalLoop:
         stack = build_agent_stack(settings)
         agent_loop = stack.loop
 
+        # Enrich the judge with the main agent's actual tool surface so it does
+        # not penalise delegation (dispatch_subagent) for execution tools the
+        # agent does not have directly (D-028 router+executor pattern).
+        if self._judge is not None and getattr(self._judge, "_agent_tools", None) is None:
+            self._judge._agent_tools = list(stack.tool_registry.items().keys())  # type: ignore[attr-defined]
+
         # engineering department → allowed_tools ["*"] (same rationale as calibration).
         eval_user = User(
             id=0,

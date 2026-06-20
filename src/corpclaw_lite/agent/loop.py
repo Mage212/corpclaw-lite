@@ -1468,6 +1468,7 @@ class AgentLoop:
                 on_subagent_tool_batch_start=on_subagent_tool_batch_start,
                 on_subagent_llm_stage=on_subagent_llm_stage,
                 on_subagent_llm_queue_status=on_subagent_llm_queue_status,
+                parent_trajectory_recorder=trajectory_recorder,
             )
             status = "error" if result.startswith("Error") else "ok"
             if status == "error":

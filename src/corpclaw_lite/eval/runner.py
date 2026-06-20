@@ -230,7 +230,7 @@ class EvalRunner:
     async def _score_turn(self, tr: TurnRunResult, turn_index: int) -> TurnScore:
         if tr.status == "error":
             return self._zero_turn(f"Turn crashed: {tr.error}")
-        det = self._scorer.score_turn(tr.turn, tr.final_answer, tr.tools_called)
+        det = self._scorer.score_turn(tr.turn, tr.final_answer, tr.trajectory)
         if not det.judge_needed:
             return det.score
         if self._judge is None:

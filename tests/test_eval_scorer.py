@@ -4,10 +4,31 @@ from __future__ import annotations
 
 import pytest
 
+from corpclaw_lite.calibration.trajectory import Trajectory, TrajectoryStep
 from corpclaw_lite.eval.scenarios import ScenarioTurn
 from corpclaw_lite.eval.scorer import DeterministicScorer
 
 scorer = DeterministicScorer()
+
+
+def _traj(tools: list[str] | None = None, dispatch_ids: list[str] | None = None) -> Trajectory:
+    """Build a minimal Trajectory from a flat tool-call sequence.
+
+    ``dispatch_ids`` adds dispatch_subagent calls with the given subagent_id
+    args (needed for expected_subagent checks).
+    """
+    steps: list[TrajectoryStep] = [
+        TrajectoryStep(step_type="tool_call", tool_name=t) for t in tools or []
+    ]
+    steps.extend(
+        TrajectoryStep(
+            step_type="tool_call",
+            tool_name="dispatch_subagent",
+            tool_args={"subagent_id": sid, "task": "do it"},
+        )
+        for sid in dispatch_ids or []
+    )
+    return Trajectory(scenario_id="t", steps=steps)
 
 
 def _turn(
@@ -25,7 +46,7 @@ def _turn(
 
 
 def test_empty_answer_fails_wrong_answer() -> None:
-    res = scorer.score_turn(_turn("42"), "", tools_called=[])
+    res = scorer.score_turn(_turn("42"), "", trajectory=_traj([]))
     assert not res.judge_needed
     assert res.score.failure_category == "wrong_answer"
     assert res.score.scores["correctness"] == 0.0
@@ -33,14 +54,14 @@ def test_empty_answer_fails_wrong_answer() -> None:
 
 
 def test_tool_artifact_fails_garbled() -> None:
-    res = scorer.score_turn(_turn("42"), "[tool:query_files]", tools_called=[])
+    res = scorer.score_turn(_turn("42"), "[tool:query_files]", trajectory=_traj([]))
     assert not res.judge_needed
     assert res.score.failure_category == "garbled_output"
     assert res.score.scores["correctness"] == 0.0
 
 
 def test_json_leak_fails_garbled() -> None:
-    res = scorer.score_turn(_turn("42"), '{"chunks": [], "result": "x"}', tools_called=[])
+    res = scorer.score_turn(_turn("42"), '{"chunks": [], "result": "x"}', trajectory=_traj([]))
     assert not res.judge_needed
     assert res.score.failure_category == "garbled_output"
 
@@ -50,7 +71,9 @@ def test_json_leak_fails_garbled() -> None:
 
 def test_null_answer_invention_fails() -> None:
     """Inventing a number when expected_answer is null → correctness 0."""
-    res = scorer.score_turn(_turn(), "За стаж 10 лет положено 5 дней.", tools_called=["read_file"])
+    res = scorer.score_turn(
+        _turn(), "За стаж 10 лет положено 5 дней.", trajectory=_traj(["read_file"])
+    )
     assert not res.judge_needed
     assert res.score.failure_category == "hallucinated_source"
     assert res.score.scores["correctness"] == 0.0
@@ -58,7 +81,7 @@ def test_null_answer_invention_fails() -> None:
 
 def test_null_answer_dont_know_passes() -> None:
     res = scorer.score_turn(
-        _turn(), "В документе нет информации об этом.", tools_called=["read_file"]
+        _turn(), "В документе нет информации об этом.", trajectory=_traj(["read_file"])
     )
     assert not res.judge_needed
     assert res.score.failure_category is None
@@ -67,7 +90,9 @@ def test_null_answer_dont_know_passes() -> None:
 
 
 def test_null_answer_dont_know_english() -> None:
-    res = scorer.score_turn(_turn(), "I don't know — it's not in the document.", tools_called=[])
+    res = scorer.score_turn(
+        _turn(), "I don't know — it's not in the document.", trajectory=_traj([])
+    )
     assert not res.judge_needed
     assert res.score.scores["correctness"] == 10.0
 
@@ -75,7 +100,7 @@ def test_null_answer_dont_know_english() -> None:
 def test_null_answer_ambiguous_needs_judge() -> None:
     """A hedge that's neither 'don't know' nor an invented number → judge."""
     res = scorer.score_turn(
-        _turn(), "This depends on several factors we'd need to verify.", tools_called=[]
+        _turn(), "This depends on several factors we'd need to verify.", trajectory=_traj([])
     )
     assert res.judge_needed
 
@@ -91,7 +116,7 @@ def test_behavioral_null_defers_to_judge_not_hallucinated() -> None:
         expected_tools=["write_file"],
     )
     res = scorer.score_turn(
-        turn, "Created todo.txt with the requested content.", tools_called=["write_file"]
+        turn, "Created todo.txt with the requested content.", trajectory=_traj(["write_file"])
     )
     assert res.judge_needed
     assert res.score.failure_category is None  # not hallucinated_source
@@ -102,7 +127,7 @@ def test_behavioral_null_defers_to_judge_not_hallucinated() -> None:
 
 def test_exact_match_settles_correct() -> None:
     res = scorer.score_turn(
-        _turn("3650"), "Общий доход: 3650 рублей.", tools_called=["table_query"]
+        _turn("3650"), "Общий доход: 3650 рублей.", trajectory=_traj(["table_query"])
     )
     assert not res.judge_needed
     assert res.score.scores["correctness"] == 10.0
@@ -110,14 +135,14 @@ def test_exact_match_settles_correct() -> None:
 
 
 def test_exact_match_case_insensitive_and_normalized() -> None:
-    res = scorer.score_turn(_turn("South"), " SOUTH ", tools_called=["table_query"])
+    res = scorer.score_turn(_turn("South"), " SOUTH ", trajectory=_traj(["table_query"]))
     assert not res.judge_needed
     assert res.score.scores["correctness"] == 10.0
 
 
 def test_wrong_number_fails() -> None:
     """Ground truth 3650, answer 3000 (>5% off) → correctness 0."""
-    res = scorer.score_turn(_turn("3650"), "Общий доход: 3000.", tools_called=["table_query"])
+    res = scorer.score_turn(_turn("3650"), "Общий доход: 3000.", trajectory=_traj(["table_query"]))
     assert not res.judge_needed
     assert res.score.failure_category == "wrong_number"
     assert res.score.scores["correctness"] == 0.0
@@ -125,13 +150,13 @@ def test_wrong_number_fails() -> None:
 
 def test_number_within_tolerance_passes_exact() -> None:
     """3650 vs 3650.1 → exact-match branch fires first (contains 3650 substring)."""
-    res = scorer.score_turn(_turn("3650"), "3650.1", tools_called=["table_query"])
+    res = scorer.score_turn(_turn("3650"), "3650.1", trajectory=_traj(["table_query"]))
     # normalize keeps the digits; exact-match substring applies.
     assert not res.judge_needed
 
 
 def test_lazy_refusal_without_query_tool_fails() -> None:
-    res = scorer.score_turn(_turn("48"), "I can't find that information.", tools_called=[])
+    res = scorer.score_turn(_turn("48"), "I can't find that information.", trajectory=_traj([]))
     assert not res.judge_needed
     assert res.score.failure_category == "lazy_refusal"
 
@@ -140,14 +165,14 @@ def test_lazy_refusal_with_query_tool_needs_judge() -> None:
     """If the agent DID call a query tool then said 'can't find', the zero-rule
     does not fire — the judge must decide."""
     res = scorer.score_turn(
-        _turn("48"), "I can't find that information.", tools_called=["read_file"]
+        _turn("48"), "I can't find that information.", trajectory=_traj(["read_file"])
     )
     assert res.judge_needed
 
 
 def test_must_contain_miss_fails() -> None:
     res = scorer.score_turn(
-        _turn("Анна", must_contain="маркетинг"), "Вася из отдела продаж.", tools_called=[]
+        _turn("Анна", must_contain="маркетинг"), "Вася из отдела продаж.", trajectory=_traj([])
     )
     assert not res.judge_needed
     assert res.score.failure_category == "missing_required_content"
@@ -158,7 +183,7 @@ def test_no_match_no_zero_rule_needs_judge() -> None:
     res = scorer.score_turn(
         _turn("3650"),
         "Приблизительно три с половиной тысячи.",
-        tools_called=["table_query"],
+        trajectory=_traj(["table_query"]),
     )
     assert res.judge_needed
     assert res.score.failure_category is None
@@ -170,13 +195,13 @@ def test_no_match_no_zero_rule_needs_judge() -> None:
 def test_settled_correct_overall_above_threshold() -> None:
     from corpclaw_lite.eval.scores import PASS_MIN_OVERALL
 
-    res = scorer.score_turn(_turn("3650"), "3650", tools_called=["table_query"])
+    res = scorer.score_turn(_turn("3650"), "3650", trajectory=_traj(["table_query"]))
     assert res.score.overall_score >= PASS_MIN_OVERALL
     assert res.score.passed
 
 
 def test_zero_overall_is_zero() -> None:
-    res = scorer.score_turn(_turn("3650"), "3000", tools_called=["table_query"])
+    res = scorer.score_turn(_turn("3650"), "3000", trajectory=_traj(["table_query"]))
     assert res.score.overall_score == 0.0
     assert not res.score.passed
 

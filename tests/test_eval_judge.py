@@ -215,6 +215,82 @@ async def test_prompt_contains_rubric_scenario_and_transcript() -> None:
 
 
 @pytest.mark.asyncio
+async def test_judge_prompt_contains_tool_surface_when_provided() -> None:
+    """When agent_tools is set, the prompt must warn the judge that execution
+    tools are subagent-only, so it does not penalise delegation."""
+    provider = _CannedProvider(_passing_verdict())
+    judge = LLMJudge(
+        provider,
+        agent_tools=[
+            "read_file",
+            "list_files",
+            "search_files",
+            "excel_inspect",
+            "dispatch_subagent",
+            "web_fetch",
+            "read_image",
+            "memory_store",
+            "memory_recall",
+        ],
+    )
+    await judge.judge_turn(
+        ScenarioTurn(user_message="x", expected_answer="3650"),
+        final_answer="3650",
+        trajectory=_trajectory_with_tools(),
+    )
+    prompt = provider.last_messages[0]["content"]  # type: ignore[index]
+    assert "Tools Available to the Agent" in prompt
+    assert "dispatch_subagent" in prompt
+    assert "NOT directly available" in prompt  # delegation warning
+
+
+@pytest.mark.asyncio
+async def test_judge_prompt_omits_tool_surface_when_not_provided() -> None:
+    provider = _CannedProvider(_passing_verdict())
+    judge = LLMJudge(provider)
+    await judge.judge_turn(
+        ScenarioTurn(user_message="x", expected_answer="3650"),
+        final_answer="3650",
+        trajectory=_empty_trajectory(),
+    )
+    prompt = provider.last_messages[0]["content"]  # type: ignore[index]
+    assert "Tools Available to the Agent" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_transcript_renders_nested_subagent_calls_with_prefix() -> None:
+    """Nested subagent tool calls must be prefixed with the subagent id."""
+    from corpclaw_lite.calibration.trajectory import Trajectory, TrajectoryStep
+
+    provider = _CannedProvider(_passing_verdict())
+    judge = LLMJudge(provider)
+    traj = Trajectory(
+        scenario_id="s1",
+        steps=[
+            TrajectoryStep(
+                step_type="tool_call",
+                tool_name="dispatch_subagent",
+                tool_args={"subagent_id": "data-agent"},
+            ),
+            TrajectoryStep(
+                step_type="tool_call",
+                tool_name="table_query",
+                tool_args={"query": "SELECT 1"},
+                subagent_id="data-agent",
+            ),
+        ],
+    )
+    await judge.judge_turn(
+        ScenarioTurn(user_message="x", expected_answer="3650"),
+        final_answer="3650",
+        trajectory=traj,
+    )
+    prompt = provider.last_messages[0]["content"]  # type: ignore[index]
+    assert "[data-agent]" in prompt  # nested prefix present
+    assert "table_query" in prompt
+
+
+@pytest.mark.asyncio
 async def test_prompt_null_expected_answer_rendered() -> None:
     provider = _CannedProvider(_passing_verdict())
     judge = LLMJudge(provider)

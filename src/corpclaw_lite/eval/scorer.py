@@ -16,6 +16,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from corpclaw_lite.calibration.trajectory import Trajectory
 from corpclaw_lite.eval.scenarios import ScenarioTurn
 from corpclaw_lite.eval.scores import (
     TurnScore,
@@ -67,9 +68,10 @@ class DeterministicScorer:
         self,
         turn: ScenarioTurn,
         final_answer: str,
-        tools_called: list[str],
+        trajectory: Trajectory,
     ) -> DeterministicResult:
         answer = (final_answer or "").strip()
+        tools_called = trajectory.tool_calls_sequence()
 
         # STEP 1 — pre-check.
         precheck = self._precheck(answer)
@@ -78,6 +80,18 @@ class DeterministicScorer:
                 score=self._settled_zero(precheck),
                 judge_needed=False,
             )
+
+        # Delegation check (D-028 router+executor). When expected_subagent is
+        # set, the main agent must delegate to that subagent — the execution
+        # tool is only available inside it. A wrong/missing delegation is a
+        # deterministic fail on tool_selection.
+        if turn.expected_subagent is not None:
+            delegated = trajectory.dispatch_subagent_ids()
+            if turn.expected_subagent not in delegated:
+                return DeterministicResult(
+                    score=self._settled_zero("wrong_subagent"),
+                    judge_needed=False,
+                )
 
         expected = turn.expected_answer
 
@@ -89,11 +103,11 @@ class DeterministicScorer:
         #    truth asserts NO answer exists in the source; null-answer logic
         #    applies ("don't know" = 10, invention = 0).
         if expected is None:
-            if turn.expected_tools:
+            if turn.expected_tools or turn.expected_subagent:
                 return DeterministicResult(
                     score=TurnScore(
-                        reasoning="Behavioural scenario (expected_tools, no ground truth); "
-                        "judge required to score tool-selection path."
+                        reasoning="Behavioural scenario (expected_tools/expected_subagent, "
+                        "no ground truth); judge required to score tool-selection path."
                     ),
                     judge_needed=True,
                 )

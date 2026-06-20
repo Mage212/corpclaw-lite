@@ -50,12 +50,14 @@ class LLMJudge:
         self,
         provider: Provider,
         rubric_path: Path | str | None = None,
+        agent_tools: list[str] | None = None,
     ) -> None:
         self._provider = provider
         path = Path(rubric_path) if rubric_path else _DEFAULT_RUBRIC_PATH
         if not path.exists():
             raise FileNotFoundError(f"Judge rubric not found: {path}")
         self._rubric = path.read_text(encoding="utf-8")
+        self._agent_tools = agent_tools
 
     async def judge_turn(
         self,
@@ -97,11 +99,12 @@ class LLMJudge:
         )
         behavior_line = ", ".join(turn.expected_tools) if turn.expected_tools else "(not specified)"
         criteria_line = turn.success_criteria or "(none)"
+        tool_surface = self._render_tool_surface()
         return f"""# Scenario Turn Evaluation
 
 ## Rubric
 {self._rubric}
-
+{tool_surface}
 ## Scenario Turn (turn #{turn_index + 1} of {turn_index + 1})
 
 - **User question**: {turn.user_message}
@@ -123,20 +126,54 @@ Apply the rubric STEP 1 (pre-check), STEP 2 (zero-rules), STEP 3 (score each
 dimension 0-10) and STEP 4 (pass/fail). Return ONLY the JSON object specified in
 the rubric's OUTPUT FORMAT section."""
 
+    def _render_tool_surface(self) -> str:
+        """Render the agent's actual tool surface as a judge-facing note.
+
+        The main agent follows a router+executor pattern (D-028): it has only
+        inspection + routing tools. Execution tools (table_query, write_file,
+        convert_format, ...) are only available inside dispatched subagents.
+        Without this note the judge penalises the agent for using
+        ``dispatch_subagent`` instead of an execution tool it does not have.
+        """
+        if not self._agent_tools:
+            return ""
+        tools_list = ", ".join(self._agent_tools)
+        return f"""
+## IMPORTANT — Tools Available to the Agent
+The agent under test has ONLY these tools: {tools_list}.
+
+Office execution tools (table_query, write_file, convert_format,
+normalize_excel, excel_workbook, chart_generate, edit_file, exec_script,
+pdf_reader, diff_text) are NOT directly available to the agent. The agent
+MUST delegate via ``dispatch_subagent`` to a subagent that has them. Delegation
+is the CORRECT behaviour, not a tool-selection error. Do NOT penalise
+tool_selection merely because the agent used ``dispatch_subagent`` instead of
+an execution tool it lacks — instead judge whether the delegation was to the
+right subagent and whether the task was completed. Nested subagent tool calls
+appear in the transcript prefixed with the subagent id (e.g. ``[data-agent]``).
+"""
+
     def _render_transcript(self, trajectory: Trajectory) -> str:
-        """Render the trajectory as a readable transcript for the judge."""
+        """Render the trajectory as a readable transcript for the judge.
+
+        Nested subagent tool calls are prefixed with ``[<subagent_id>]`` so the
+        judge can see the full execution path, including delegated work.
+        """
         if not trajectory.steps:
             return "(no tool calls recorded)"
         lines: list[str] = []
         for step in trajectory.steps:
+            prefix = ""
+            if step.subagent_id:
+                prefix = f"[{step.subagent_id}] "
             if step.step_type == "tool_call" and step.tool_name:
                 args = json.dumps(step.tool_args or {}, ensure_ascii=False)
-                lines.append(f"- TOOL CALL: {step.tool_name}({args})")
+                lines.append(f"- {prefix}TOOL CALL: {step.tool_name}({args})")
             elif step.step_type == "tool_result" and step.tool_name:
                 result = (step.tool_result or "").strip()
                 if len(result) > 300:
                     result = result[:300] + "…"
-                lines.append(f"  → RESULT: {result}")
+                lines.append(f"  {prefix}→ RESULT: {result}")
         if not lines:
             return "(no tool calls recorded; agent answered directly)"
         return "\n".join(lines)

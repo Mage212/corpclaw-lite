@@ -43,6 +43,13 @@ class ScenarioTurn:
     # tools the agent should call, in order. Extras are tolerated. Used by the
     # tool_selection dimension and the deterministic scorer.
     expected_tools: list[str] = field(default_factory=lambda: list[str]())
+    # For router+executor scenarios (D-028): the subagent the main agent should
+    # delegate to. When set, the deterministic scorer checks the trajectory for a
+    # dispatch_subagent call with this subagent_id. Office execution tools
+    # (table_query, write_file, ...) live inside subagents, so expected_tools for
+    # such scenarios is typically ["dispatch_subagent"] and expected_subagent
+    # names the specialist.
+    expected_subagent: str | None = None
     # Free-form clause the judge evaluates (e.g. "FAIL if agent re-reads the
     # file after it was already read in turn 1"). Not parsed mechanically.
     success_criteria: str = ""
@@ -85,6 +92,7 @@ def _parse_turn(raw: dict[str, Any]) -> ScenarioTurn:
         user_message=raw["user_message"],
         expected_answer=raw.get("expected_answer"),
         expected_tools=raw.get("expected_tools", []),
+        expected_subagent=raw.get("expected_subagent"),
         success_criteria=raw.get("success_criteria", ""),
         must_contain=raw.get("must_contain"),
     )
@@ -140,6 +148,7 @@ def load_scenarios(path: Path | str) -> list[EvalScenario]:
                         for k in (
                             "expected_answer",
                             "expected_tools",
+                            "expected_subagent",
                             "success_criteria",
                             "must_contain",
                         )
