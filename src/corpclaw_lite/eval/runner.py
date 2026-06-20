@@ -16,6 +16,7 @@ the eval harness:
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 from collections.abc import Callable
 from pathlib import Path
@@ -123,38 +124,50 @@ class EvalRunner:
         scenarios: list[EvalScenario],
         on_progress: Callable[[str, bool, int, int], None] | None = None,
     ) -> list[ScenarioScore]:
-        """Run all scenarios and return scored results."""
-        results: list[ScenarioScore] = []
-        for idx, scenario in enumerate(scenarios):
-            logger.info(
-                "[eval] Running scenario %d/%d: %s (%d turn(s))",
-                idx + 1,
-                len(scenarios),
-                scenario.id,
-                len(scenario.turns),
-            )
-            self._setup_workspace(scenario)
-            try:
-                run_result = await self._run_scenario(scenario)
-                score = await self._score_scenario_async(run_result)
-                results.append(score)
-                log_fn = logger.info if score.passed else logger.warning
-                log_fn(
-                    "[eval] %s %s: overall=%.2f",
-                    "✅" if score.passed else "❌",
-                    scenario.id,
-                    score.overall_score,
-                )
-            except Exception as e:  # noqa: BLE001 — crash must not abort the run
-                logger.exception("[eval] Scenario %s crashed", scenario.id)
-                results.append(self._crash_score(scenario, e))
-            finally:
-                self._cleanup_workspace(scenario)
-                if self._agent_loop.memory:
-                    await self._agent_loop.memory.clear(str(self._user.id))
+        """Run all scenarios and return scored results.
 
-            if on_progress is not None:
-                on_progress(scenario.id, results[-1].passed, idx + 1, len(scenarios))
+        The process working directory is changed to ``workspace_dir`` for the
+        duration of the run so that the agent's file tools (list_files,
+        read_file, table_query) resolve paths against the materialised setup
+        files rather than the project root. The original cwd is restored in a
+        finally block.
+        """
+        results: list[ScenarioScore] = []
+        original_cwd = Path.cwd()
+        os.chdir(self._workspace_dir)
+        try:
+            for idx, scenario in enumerate(scenarios):
+                logger.info(
+                    "[eval] Running scenario %d/%d: %s (%d turn(s))",
+                    idx + 1,
+                    len(scenarios),
+                    scenario.id,
+                    len(scenario.turns),
+                )
+                self._setup_workspace(scenario)
+                try:
+                    run_result = await self._run_scenario(scenario)
+                    score = await self._score_scenario_async(run_result)
+                    results.append(score)
+                    log_fn = logger.info if score.passed else logger.warning
+                    log_fn(
+                        "[eval] %s %s: overall=%.2f",
+                        "✅" if score.passed else "❌",
+                        scenario.id,
+                        score.overall_score,
+                    )
+                except Exception as e:  # noqa: BLE001 — crash must not abort the run
+                    logger.exception("[eval] Scenario %s crashed", scenario.id)
+                    results.append(self._crash_score(scenario, e))
+                finally:
+                    self._cleanup_workspace(scenario)
+                    if self._agent_loop.memory:
+                        await self._agent_loop.memory.clear(str(self._user.id))
+
+                if on_progress is not None:
+                    on_progress(scenario.id, results[-1].passed, idx + 1, len(scenarios))
+        finally:
+            os.chdir(original_cwd)
         return results
 
     # ──────────────────────────── execution ──────────────────────────────

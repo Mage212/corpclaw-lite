@@ -310,6 +310,60 @@ async def test_memory_cleared_between_scenarios(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_chdir_into_workspace_during_run(tmp_path: Path) -> None:
+    """Regression: the agent's file tools resolve against os.getcwd(), so the
+    runner MUST chdir into the workspace for the duration of the run — otherwise
+    setup files written to workspace_dir are invisible to the agent."""
+    import os
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    seen_cwds: list[str] = []
+
+    class _CwdCapturingLoop(_FakeAgentLoop):
+        async def run(self, **kwargs: Any) -> tuple[str, _FakeRunStats]:
+            seen_cwds.append(os.getcwd())
+            return await super().run(**kwargs)
+
+    loop = _CwdCapturingLoop(answers=["done"], tools_per_call=[["table_query"]])
+    runner = EvalRunner(loop, _user(), "sys", workspace)
+    scenario = EvalScenario(
+        id="s1",
+        category="c",
+        turns=[ScenarioTurn(user_message="m")],
+    )
+    original_cwd = os.getcwd()
+    await runner.run_all([scenario])
+    # During the run, cwd was the workspace (resolved, so compare real paths).
+    import pathlib
+
+    assert pathlib.Path(seen_cwds[0]).resolve() == workspace.resolve()
+    # After the run, the original cwd is restored.
+    assert os.getcwd() == original_cwd
+
+
+@pytest.mark.asyncio
+async def test_chdir_restored_even_on_crash(tmp_path: Path) -> None:
+    """The original cwd must be restored even if a scenario crashes."""
+    import os
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    loop = _FakeAgentLoop(answers=[])
+
+    async def crashing_run(**kwargs: Any) -> tuple[str, _FakeRunStats]:
+        raise RuntimeError("boom")
+
+    loop.run = crashing_run  # type: ignore[method-assign]
+    runner = EvalRunner(loop, _user(), "sys", workspace)
+    original_cwd = os.getcwd()
+    await runner.run_all(
+        [EvalScenario(id="s1", category="c", turns=[ScenarioTurn(user_message="m")])]
+    )
+    assert os.getcwd() == original_cwd
+
+
+@pytest.mark.asyncio
 async def test_scenario_crash_does_not_abort_run(tmp_path: Path) -> None:
     loop = _FakeAgentLoop(answers=[])
     call_count = {"n": 0}
