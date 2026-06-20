@@ -69,3 +69,10 @@ src/*.egg-info/
 
 # ZCode CLI local state
 .zcode/
+
+# Temporary eval runner (live keys via env, never commit)
+run_eval_ab.py
+run_eval_gemma.py
+
+# Eval harness working directory (materialised scenarios per pass)
+.eval_workspace/
