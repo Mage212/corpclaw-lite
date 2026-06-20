@@ -261,3 +261,136 @@ scenarios:
         success_criteria: >
           Agent must recall name (Анна), department (маркетинг) and priority
           (Excel/automation). context_retention scored on completeness.
+
+  # ─────────────── Loop-pressure scenarios (exercise B-055 dedup) ────────────
+  # These intentionally tempt the model to re-call the same tool with identical
+  # or near-identical arguments. With B-055 ON, the dedup guard should catch
+  # the repeat and push the model toward an answer; OFF, the loop runs longer.
+
+  - id: large_csv_double_query
+    category: loop_pressure
+    severity: adversarial
+    description: >
+      A 30-row CSV. The question asks for a total; a weak model may call
+      table_query, get a result, then re-call table_query (same or equivalent
+      query) before answering. B-055 should catch the repeated result.
+    setup:
+      files:
+        - path: "inventory.csv"
+          content: |
+            sku,name,qty,warehouse
+            A001,Widget,142,North
+            A002,Gadget,87,North
+            A003,Sprocket,203,South
+            A004,Gizmo,56,South
+            A005,Doohickey,318,East
+            A006,Thingamajig,91,East
+            A007,Whatchamacallit,44,West
+            A008,Whosiwhatsit,177,West
+            A009,Contraption,65,North
+            A010,Apparatus,112,South
+            A011,Widget,98,East
+            A012,Gadget,150,West
+            A013,Sprocket,39,North
+            A014,Gizmo,204,South
+            A015,Doohickey,17,East
+            A016,Thingamajig,88,West
+            A017,Whatchamacallit,301,North
+            A018,Whosiwhatsit,46,South
+            A019,Contraption,73,East
+            A020,Apparatus,159,West
+            A021,Widget,51,North
+            A022,Gadget,196,South
+            A023,Sprocket,84,East
+            A024,Gizmo,27,West
+            A025,Doohickey,143,North
+            A026,Thingamajig,79,South
+            A027,Whatchamacallit,212,East
+            A028,Whosiwhatsit,38,West
+            A029,Contraption,167,North
+            A030,Apparatus,95,South
+    turns:
+      - user_message: "Посчитай суммарное количество единиц (qty) по всем позициям в inventory.csv и назови число."
+        expected_answer: "3418"
+        expected_tools: ["table_query"]
+        success_criteria: >
+          FAIL efficiency if the agent calls table_query (or read_file) 3+
+          times with identical results (the B-055 dedup trigger condition).
+
+  - id: multi_metric_same_table
+    category: loop_pressure
+    severity: adversarial
+    description: >
+      Two metrics from the same small table. A weak model may issue a separate
+      query per metric even when one suffices, or re-query the table. B-055
+      dedup should fire if the second query returns the same result.
+    setup:
+      files:
+        - path: "sales.csv"
+          content: |
+            region,q1,q2
+            North,100,150
+            South,80,120
+            East,60,90
+            West,110,140
+    turns:
+      - user_message: "По файлу sales.csv: назови сумму всех значений q1 и сумму всех значений q2 (два числа)."
+        expected_answer: "350"
+        must_contain: "500"
+        expected_tools: ["table_query"]
+        success_criteria: >
+          FAIL efficiency if the agent calls table_query 3+ times on the same
+          table with overlapping queries. Two separate single-purpose queries
+          are acceptable; a loop is not.
+
+  - id: verbose_planning_pressure
+    category: planning_text_pressure
+    severity: adversarial
+    description: >
+      An open-ended analytical question. Weak local models often answer with a
+      statement of intent ("Let me now analyse the data...") instead of taking
+      action or giving the answer. B-056 planning-text guard should catch that
+      and push the model to act.
+    setup:
+      files:
+        - path: "report.txt"
+          content: |
+            Выручка Q1: 120000. Расходы Q1: 80000.
+            Выручка Q2: 150000. Расходы Q2: 95000.
+            Выручка Q3: 130000. Расходы Q3: 78000.
+    turns:
+      - user_message: "Проанализируй report.txt: назови квартал с наибольшей чистой прибылью (выручка минус расходы) и саму эту прибыль числом."
+        expected_answer: "55000"
+        expected_tools: ["read_file"]
+        success_criteria: >
+          FAIL if the agent's first answer is a planning statement
+          ("сейчас я проанализирую...", "давайте я проверю...") instead of the
+          computed figure. This is the B-056 trigger condition.
+
+  - id: buried_multi_field
+    category: loop_pressure
+    severity: adversarial
+    description: >
+      A fact buried among similar-looking fields. The model must not re-scan
+      the whole file repeatedly; one read + answer suffices. Re-reads trigger
+      B-055 (identical result from read_file).
+    setup:
+      files:
+        - path: "ledger.txt"
+          content: |
+            2024-01-15 invoice #1042 client Acme amount 4200
+            2024-01-22 invoice #1043 client Globex amount 1800
+            2024-02-03 invoice #1044 client Acme amount 3600
+            2024-02-19 invoice #1045 client Initech amount 5200
+            2024-03-07 invoice #1046 client Acme amount 2900
+            2024-03-21 invoice #1047 client Globex amount 6100
+            2024-04-02 invoice #1048 client Initech amount 3400
+            2024-04-18 invoice #1049 client Acme amount 4700
+    turns:
+      - user_message: "Прочитай ledger.txt и назови сумму всех счетов клиента Acme."
+        expected_answer: "15400"
+        expected_tools: ["read_file"]
+        success_criteria: >
+          FAIL efficiency if the agent calls read_file on ledger.txt 3+ times
+          (B-055 dedup trigger on identical results).
+
