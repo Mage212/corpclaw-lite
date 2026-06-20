@@ -16,6 +16,7 @@ from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
 from corpclaw_lite.extensions.tools.builtin.files import resolve_and_validate_path
 from corpclaw_lite.extensions.tools.builtin.table_query import detect_csv_encoding
 from corpclaw_lite.utils.async_helpers import run_in_thread
+from corpclaw_lite.utils.fs import atomic_save_via, atomic_write_text
 
 __all__ = ["ConvertFormatTool"]
 
@@ -113,20 +114,25 @@ def _load_markdown(path: Path) -> list[dict[str, str]]:
 
 
 def _write_csv(data: list[dict[str, Any]], path: Path) -> None:
-    if not data:
-        path.write_text("", encoding="utf-8-sig")
-        return
-    fieldnames = list(data[0].keys())
-    # utf-8-sig writes BOM so Excel correctly recognises Cyrillic.
-    with open(path, "w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        for row in data:
-            writer.writerow({k: (v if v is not None else "") for k, v in row.items()})
+    def _writer(target: Path) -> None:
+        if not data:
+            atomic_write_text(target, "", encoding="utf-8-sig")
+            return
+        fieldnames = list(data[0].keys())
+        # utf-8-sig writes BOM so Excel correctly recognises Cyrillic.
+        with open(target, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in data:
+                writer.writerow({k: (v if v is not None else "") for k, v in row.items()})
+
+    atomic_save_via(_writer, path)
 
 
 def _write_json(data: list[dict[str, Any]], path: Path) -> None:
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    atomic_write_text(
+        path, json.dumps(data, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
+    )
 
 
 def _apply_cell_value(cell: Any, value: Any) -> None:
@@ -161,7 +167,7 @@ def _write_xlsx(data: list[dict[str, Any]], path: Path) -> None:
     ws = wb.active
     assert ws is not None  # openpyxl Workbook always has an active sheet
     if not data:
-        wb.save(str(path))
+        atomic_save_via(wb.save, path)
         return
     headers = list(data[0].keys())
     for col, h in enumerate(headers, 1):
@@ -169,12 +175,12 @@ def _write_xlsx(data: list[dict[str, Any]], path: Path) -> None:
     for row_idx, row in enumerate(data, 2):
         for col, h in enumerate(headers, 1):
             _apply_cell_value(ws.cell(row=row_idx, column=col), row.get(h))
-    wb.save(str(path))
+    atomic_save_via(wb.save, path)
 
 
 def _write_markdown(data: list[dict[str, Any]], path: Path) -> None:
     if not data:
-        path.write_text("", encoding="utf-8")
+        atomic_write_text(path, "", encoding="utf-8")
         return
     headers = list(data[0].keys())
     col_widths = [len(h) for h in headers]
@@ -191,7 +197,7 @@ def _write_markdown(data: list[dict[str, Any]], path: Path) -> None:
         + " |"
         for row in data
     )
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    atomic_write_text(path, "\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _do_convert(input_path: Path, output_format: str, output_path: Path | None) -> str:

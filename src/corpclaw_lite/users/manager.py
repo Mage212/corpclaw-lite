@@ -789,9 +789,9 @@ class UserManager:
     def _save_whitelist(self, entries: list[dict[str, int | str]]) -> None:
         """Save whitelist entries to JSON file (atomic write) and update cache."""
         self._whitelist_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._whitelist_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(entries, indent=2), encoding="utf-8")
-        tmp.replace(self._whitelist_path)
+        from corpclaw_lite.utils.fs import atomic_write_text
+
+        atomic_write_text(self._whitelist_path, json.dumps(entries, indent=2), encoding="utf-8")
         self._whitelist_cache = entries
 
     def seed_whitelist(self, telegram_ids: list[int], default_department: str) -> None:
@@ -869,9 +869,9 @@ class UserManager:
 
     def _save_revoked(self, revoked: set[int]) -> None:
         self._revoked_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._revoked_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(sorted(revoked)), encoding="utf-8")
-        tmp.replace(self._revoked_path)
+        from corpclaw_lite.utils.fs import atomic_write_text
+
+        atomic_write_text(self._revoked_path, json.dumps(sorted(revoked)), encoding="utf-8")
         self._revoked_cache = revoked
 
     def revoke_session(self, telegram_id: int) -> None:
