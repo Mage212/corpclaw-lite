@@ -82,16 +82,16 @@ class DeterministicScorer:
             )
 
         # Delegation check (D-028 router+executor). When expected_subagent is
-        # set, the main agent must delegate to that subagent — the execution
-        # tool is only available inside it. A wrong/missing delegation is a
-        # deterministic fail on tool_selection.
-        if turn.expected_subagent is not None:
-            delegated = trajectory.dispatch_subagent_ids()
-            if turn.expected_subagent not in delegated:
-                return DeterministicResult(
-                    score=self._settled_zero("wrong_subagent"),
-                    judge_needed=False,
-                )
+        # set, the main agent SHOULD delegate to that subagent for execution
+        # tools it lacks. But a model that solves the task directly with its
+        # inspection tools (e.g. reads a small CSV and sums it) is NOT wrong —
+        # delegation is an efficiency/tool_selection preference, not a
+        # correctness gate. So we do NOT zero-out on a missing delegation; we
+        # just record whether it happened so the judge can factor it into the
+        # tool_selection dimension. The zero-rule fires only on behavioural
+        # scenarios with no ground truth (handled below).
+        delegated = trajectory.dispatch_subagent_ids()
+        delegation_ok = turn.expected_subagent is None or turn.expected_subagent in delegated
 
         expected = turn.expected_answer
 
@@ -104,6 +104,18 @@ class DeterministicScorer:
         #    applies ("don't know" = 10, invention = 0).
         if expected is None:
             if turn.expected_tools or turn.expected_subagent:
+                # Behavioural scenario. If expected_subagent is set and the
+                # agent delegated to it, that is a deterministic pass on the
+                # path (correct delegation). Otherwise defer to the judge to
+                # score whether solving the task via inspection tools alone
+                # was acceptable.
+                if turn.expected_subagent is not None and delegation_ok:
+                    return DeterministicResult(
+                        score=self._settled_correct(
+                            reasoning=f"Delegated to expected subagent '{turn.expected_subagent}'."
+                        ),
+                        judge_needed=False,
+                    )
                 return DeterministicResult(
                     score=TurnScore(
                         reasoning="Behavioural scenario (expected_tools/expected_subagent, "

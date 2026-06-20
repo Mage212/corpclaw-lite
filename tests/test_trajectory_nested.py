@@ -116,8 +116,8 @@ def test_to_dict_includes_subagent_id_field() -> None:
 # ──────────────────── expected_subagent scoring ─────────────────────────────
 
 
-def test_expected_subagent_correct_delegation_passes() -> None:
-    """When expected_subagent matches a dispatched subagent, no zero-rule fires."""
+def test_expected_subagent_correct_delegation_with_answer_passes() -> None:
+    """expected_answer + correct delegation → exact match settles correct."""
     turn = ScenarioTurn(
         user_message="sum the revenue",
         expected_answer="3650",
@@ -133,35 +133,14 @@ def test_expected_subagent_correct_delegation_passes() -> None:
         ]
     )
     res = scorer.score_turn(turn, "3650", traj)
-    # Exact match on expected_answer → settles correct, no judge needed.
     assert not res.judge_needed
     assert res.score.scores["correctness"] == 10.0
 
 
-def test_expected_subagent_wrong_delegation_fails() -> None:
-    """Delegating to the wrong subagent triggers wrong_subagent zero-rule."""
-    turn = ScenarioTurn(
-        user_message="sum the revenue",
-        expected_answer="3650",
-        expected_subagent="data-agent",
-    )
-    traj = _traj(
-        [
-            TrajectoryStep(
-                step_type="tool_call",
-                tool_name="dispatch_subagent",
-                tool_args={"subagent_id": "filesystem-agent", "task": "..."},
-            ),
-        ]
-    )
-    res = scorer.score_turn(turn, "3650", traj)
-    assert not res.judge_needed
-    assert res.score.failure_category == "wrong_subagent"
-    assert res.score.scores["correctness"] == 0.0
-
-
-def test_expected_subagent_no_delegation_fails() -> None:
-    """No dispatch_subagent call at all → wrong_subagent."""
+def test_expected_answer_correct_without_delegation_still_passes() -> None:
+    """A correct answer solved via inspection tools alone is NOT failed just
+    because the agent didn't delegate. Delegation is a tool_selection/efficiency
+    concern, scored by the judge — not a correctness gate."""
     turn = ScenarioTurn(
         user_message="sum the revenue",
         expected_answer="3650",
@@ -169,7 +148,50 @@ def test_expected_subagent_no_delegation_fails() -> None:
     )
     traj = _traj([TrajectoryStep(step_type="tool_call", tool_name="read_file")])
     res = scorer.score_turn(turn, "3650", traj)
-    assert res.score.failure_category == "wrong_subagent"
+    # Exact match → correctness 10 regardless of delegation.
+    assert not res.judge_needed
+    assert res.score.scores["correctness"] == 10.0
+
+
+def test_behavioural_expected_subagent_correct_delegation_settles() -> None:
+    """No expected_answer + expected_subagent + correct delegation → settled
+    correct (the delegation path is the signal being graded)."""
+    turn = ScenarioTurn(
+        user_message="create a file",
+        expected_subagent="filesystem-agent",
+    )
+    traj = _traj(
+        [
+            TrajectoryStep(
+                step_type="tool_call",
+                tool_name="dispatch_subagent",
+                tool_args={"subagent_id": "filesystem-agent", "task": "create file"},
+            ),
+        ]
+    )
+    res = scorer.score_turn(turn, "Created todo.txt.", traj)
+    assert not res.judge_needed
+    assert res.score.scores["correctness"] == 10.0
+
+
+def test_behavioural_expected_subagent_wrong_delegation_defers_to_judge() -> None:
+    """No expected_answer + wrong delegation → judge decides. Not a zero-rule."""
+    turn = ScenarioTurn(
+        user_message="create a file",
+        expected_subagent="filesystem-agent",
+    )
+    traj = _traj(
+        [
+            TrajectoryStep(
+                step_type="tool_call",
+                tool_name="dispatch_subagent",
+                tool_args={"subagent_id": "research-agent", "task": "..."},
+            ),
+        ]
+    )
+    res = scorer.score_turn(turn, "Created todo.txt.", traj)
+    assert res.judge_needed
+    assert res.score.failure_category is None
 
 
 def test_no_expected_subagent_no_delegation_check() -> None:
