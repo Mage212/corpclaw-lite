@@ -63,12 +63,17 @@ class ScenarioSetup:
     """Workspace state to materialise before running the scenario.
 
     Inline text files are written verbatim; binary fixtures are copied from a
-    corpus directory (so xlsx/csv blobs are not embedded in YAML).
+    corpus directory (so xlsx/csv blobs are not embedded in YAML); images are
+    generated programmatically (deterministic, no external files).
     """
 
     files: list[tuple[str, str]] = field(default_factory=lambda: list[tuple[str, str]]())
     # (relative_dest_path, source_path_within_corpus_dir)
     copy_from_corpus: list[tuple[str, str]] = field(default_factory=lambda: list[tuple[str, str]]())
+    # (relative_dest_path, generator_id) — deterministic PNG generation for
+    # vision scenarios. Supported generator ids live in
+    # corpclaw_lite.eval.vision_fixtures.generate_image.
+    generated_images: list[tuple[str, str]] = field(default_factory=lambda: list[tuple[str, str]]())
 
 
 @dataclass
@@ -103,7 +108,10 @@ def _parse_setup(raw: dict[str, Any] | None) -> ScenarioSetup | None:
         return None
     files = [(f["path"], f["content"]) for f in raw.get("files", [])]
     copy_from_corpus = [(c["dest"], c["source"]) for c in raw.get("copy_from_corpus", [])]
-    return ScenarioSetup(files=files, copy_from_corpus=copy_from_corpus)
+    generated_images = [(g["dest"], g["generator"]) for g in raw.get("generated_images", [])]
+    return ScenarioSetup(
+        files=files, copy_from_corpus=copy_from_corpus, generated_images=generated_images
+    )
 
 
 def load_scenarios(path: Path | str) -> list[EvalScenario]:

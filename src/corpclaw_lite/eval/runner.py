@@ -20,7 +20,7 @@ import os
 import shutil
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from corpclaw_lite.calibration.trajectory import Trajectory, TrajectoryRecorder
 from corpclaw_lite.eval.scenarios import EvalScenario, ScenarioTurn
@@ -38,6 +38,8 @@ __all__ = [
 ]
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable
+
     from corpclaw_lite.agent.loop import AgentLoop
     from corpclaw_lite.eval.judge import LLMJudge
     from corpclaw_lite.users.models import User
@@ -163,6 +165,14 @@ class EvalRunner:
                     self._cleanup_workspace(scenario)
                     if self._agent_loop.memory:
                         await self._agent_loop.memory.clear(str(self._user.id))
+                        # B-060: also clear stored memory_facts so a scenario's
+                        # memory_store calls do not leak into the next scenario
+                        # (memory.clear() only wipes the conversation, not facts).
+                        clear_facts = getattr(self._agent_loop.memory, "clear_facts", None)
+                        if callable(clear_facts):
+                            await cast("Callable[[str], Awaitable[None]]", clear_facts)(
+                                str(self._user.id)
+                            )
 
                 if on_progress is not None:
                     on_progress(scenario.id, results[-1].passed, idx + 1, len(scenarios))
@@ -304,12 +314,22 @@ class EvalRunner:
             dest_path = self._workspace_dir / dest
             dest_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(src_path, dest_path)
+        # Deterministic PNG fixtures for vision scenarios.
+        for dest, generator_id in scenario.setup.generated_images:
+            from corpclaw_lite.eval.vision_fixtures import generate_image
+
+            dest_path = self._workspace_dir / dest
+            try:
+                generate_image(generator_id, dest_path)
+            except ValueError as e:
+                logger.warning("[eval] %s: %s", scenario.id, e)
 
     def _cleanup_workspace(self, scenario: EvalScenario) -> None:
         if scenario.setup is None:
             return
         all_paths = [p for p, _ in scenario.setup.files]
         all_paths += [d for d, _ in scenario.setup.copy_from_corpus]
+        all_paths += [d for d, _ in scenario.setup.generated_images]
         for rel_path in all_paths:
             full = self._workspace_dir / rel_path
             if full.exists():
