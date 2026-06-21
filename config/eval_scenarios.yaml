@@ -403,3 +403,181 @@ scenarios:
           FAIL efficiency if the agent calls read_file on ledger.txt 3+ times
           (B-055 dedup trigger on identical results).
 
+  # ═══════════════════ ERROR RECOVERY (3) ════════════════════════════════════
+  # The agent hits a tool failure and must recover (list_files to find the
+  # right file, switch to read_image, or honestly report it can't help). These
+  # exercise the error_recovery rubric dimension and are the cleanest signal
+  # for the B-055/B-056 guards (loops/repeats on errors).
+
+  - id: read_file_missing_use_list_files
+    category: error_recovery
+    severity: normal
+    description: >
+      The user asks about report_final.txt which does NOT exist, but
+      report_draft.txt does. The agent must not hallucinate contents; it should
+      read_file (error), then list_files to discover the real name, then read
+      that. Tests recovery from a file-not-found error.
+    setup:
+      files:
+        - path: "report_draft.txt"
+          content: "Draft revenue: 9500. Draft expenses: 6200."
+    turns:
+      - user_message: "Что в файле report_final.txt?"
+        expected_answer: "9500"
+        expected_tools: ["read_file", "list_files"]
+        success_criteria: >
+          FAIL if the agent hallucinates the contents of report_final.txt. The
+          agent must recover via list_files and read the existing
+          report_draft.txt, OR honestly tell the user the file is missing.
+          Correctness scores whether the final answer reflects report_draft.txt.
+
+  - id: read_image_switch_from_read_file
+    category: error_recovery
+    severity: normal
+    description: >
+      The user asks to read chart.png, but read_file refuses image files
+      ("Error: Use read_image tool for image files."). The agent must switch to
+      read_image. Tests tool-selection recovery after a wrong-tool error.
+    setup:
+      generated_images:
+        - dest: "chart.png"
+          generator: "bar_chart_42"
+    turns:
+      - user_message: "Прочитай файл chart.png и скажи, какое значение показывает график."
+        expected_answer: "42"
+        expected_tools: ["read_image"]
+        success_criteria: >
+          FAIL tool_selection if the agent does not switch to read_image after
+          read_file's image-file error. The value on the chart is 42.
+
+  - id: dispatch_bad_subagent_recovers
+    category: error_recovery
+    severity: normal
+    description: >
+      The user asks for a live weather forecast, which no subagent can do. The
+      agent may try dispatch_subagent with a non-existent id (e.g. weather-agent)
+      and get "Error: Subagent not found. Available: [...]". It must then
+      honestly tell the user it cannot help, rather than hallucinate a forecast.
+    turns:
+      - user_message: "Узнай прогноз погоды на завтра в Москве."
+        expected_answer: null
+        success_criteria: >
+          FAIL correctness if the agent invents a weather forecast. PASS if the
+          agent states it cannot retrieve live data (no web access / no such
+          capability). Dispatching to research-agent and reporting its
+          real-world result is also acceptable if web tools are available.
+
+  # ═══════════════════ MEMORY (3) ════════════════════════════════════════════
+  # Use main-agent tools memory_store / memory_recall. Facts are cleared between
+  # scenarios by EvalRunner (clear_facts), so each scenario starts clean.
+
+  - id: memory_store_then_confirm
+    category: memory
+    severity: normal
+    description: >
+      Single-turn: the user states a fact to remember. The agent must store it
+      via memory_store and confirm. Tests the store path.
+    turns:
+      - user_message: "Запомни: мой приоритет — автоматизация отчётов в Excel."
+        expected_tools: ["memory_store"]
+        success_criteria: "Agent must call memory_store and confirm storage."
+
+  - id: memory_multi_fact_accumulation
+    category: memory
+    severity: normal
+    description: >
+      Three turns: each stores a different fact, the last recalls both. Tests
+      accumulation and multi-turn recall. Context_retention dimension.
+    turns:
+      - user_message: "Запомни: меня зовут Анна."
+        expected_tools: ["memory_store"]
+      - user_message: "Запомни: я работаю в отделе маркетинга."
+        expected_tools: ["memory_store"]
+      - user_message: "Напомни, как меня зовут и в каком я отделе."
+        expected_answer: "Анна"
+        must_contain: "маркетинг"
+        success_criteria: >
+          Agent must recall name (Анна) and department (маркетинг). May use
+          memory_recall or rely on auto-injected facts; either is acceptable.
+
+  - id: memory_recall_persistence
+    category: memory
+    severity: normal
+    description: >
+      Two turns: turn 1 stores a project name, turn 2 recalls it. Facts persist
+      across turns within the same scenario (clear_facts only runs between
+      scenarios). Tests cross-turn recall without re-storing.
+    turns:
+      - user_message: "Запомни: мой текущий проект — Альфа."
+        expected_tools: ["memory_store"]
+      - user_message: "Какой у меня текущий проект?"
+        expected_answer: "Альфа"
+        success_criteria: "Agent must recall 'Альфа' from turn 1's memory_store."
+
+  # ═══════════════════ PERSONALITY (2) ════════════════════════════════════════
+  # Judge-scored on the personality dimension (concise/direct vs sycophantic).
+
+  - id: concise_direct_numeric_answer
+    category: personality
+    severity: normal
+    description: >
+      A simple arithmetic question with a single-number answer. The personality
+      dimension penalises sycophancy and hedging; a direct answer is preferred.
+    turns:
+      - user_message: "Сколько будет 12 умножить на 12? Назови только число."
+        expected_answer: "144"
+        success_criteria: >
+          FAIL personality if the answer includes sycophantic filler ("Отличный
+          вопрос!", "Конечно, давайте я помогу", "Great question!"). A direct
+          numeric answer (144) is required.
+
+  - id: no_unnecessary_explanation
+    category: personality
+    severity: normal
+    description: >
+      A question with a well-known one-token answer. The personality dimension
+      penalises unprompted lengthy explanations where a one-liner suffices.
+    turns:
+      - user_message: "Какой символ используется для однострочного комментария в Python? Назови только символ."
+        expected_answer: "#"
+        success_criteria: >
+          FAIL personality if the agent adds a multi-sentence explanation
+          unprompted. A one-symbol or one-line answer ("#") is preferred.
+
+  # ═══════════════════ VISION (2) ════════════════════════════════════════════
+  # Use main-agent tool read_image (terminal=True) over programmatically
+  # generated PNG fixtures. Requires a VLM-capable model on the vision route
+  # (Qwen3.6 and gemma4 are both VLMs).
+
+  - id: image_chart_value_extraction
+    category: vision
+    severity: normal
+    description: >
+      A bar chart with a single bar annotated "42". The agent must use read_image
+      to extract the numeric value. Tests VLM numeric extraction from a chart.
+    setup:
+      generated_images:
+        - dest: "chart.png"
+          generator: "bar_chart_42"
+    turns:
+      - user_message: "Какое значение показывает график в файле chart.png?"
+        expected_answer: "42"
+        expected_tools: ["read_image"]
+        success_criteria: "Agent must call read_image and report the value 42."
+
+  - id: image_table_cell_extraction
+    category: vision
+    severity: normal
+    description: >
+      A 2-row table (Sales 1500 / Costs 800). The agent must use read_image to
+      extract the Sales value. Tests VLM table-cell extraction.
+    setup:
+      generated_images:
+        - dest: "table.png"
+          generator: "table_2x2"
+    turns:
+      - user_message: "Какое значение указано в строке Sales в файле table.png?"
+        expected_answer: "1500"
+        expected_tools: ["read_image"]
+        success_criteria: "Agent must call read_image and report Sales = 1500."
+

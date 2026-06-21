@@ -157,7 +157,7 @@ def test_shipped_corpus_loads() -> None:
     from corpclaw_lite.paths import PROJECT_ROOT
 
     scenarios = load_scenarios(PROJECT_ROOT / "config" / "eval_scenarios.yaml")
-    assert len(scenarios) == 16
+    assert len(scenarios) == 26
     ids = {s.id for s in scenarios}
     # A representative subset that pins the corpus shape.
     assert "csv_aggregate_total" in ids
@@ -165,6 +165,11 @@ def test_shipped_corpus_loads() -> None:
     assert "multi_turn_yoy_then_q4" in ids
     assert "large_csv_double_query" in ids  # loop-pressure (B-055)
     assert "verbose_planning_pressure" in ids  # planning-text (B-056)
+    # GAIA-gap fillers (error_recovery / memory / personality / vision).
+    assert "read_file_missing_use_list_files" in ids
+    assert "memory_multi_fact_accumulation" in ids
+    assert "concise_direct_numeric_answer" in ids
+    assert "image_chart_value_extraction" in ids
     # Every scenario has at least one turn with a user_message.
     for s in scenarios:
         assert s.turns, f"scenario {s.id} has no turns"
