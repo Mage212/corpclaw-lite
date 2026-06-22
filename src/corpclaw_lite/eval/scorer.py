@@ -151,36 +151,36 @@ class DeterministicScorer:
 
     # ─────────────────────────── null answer ─────────────────────────────
 
+    # Phrases signalling the agent correctly acknowledged the information is
+    # absent. Checked BEFORE the number rule: a correct "no info" answer may
+    # quote context numbers from the source (e.g. "no extra leave for tenure,
+    # only the standard 28 days") — those are not hallucinations.
+    _DONT_KNOW_PHRASES: tuple[str, ...] = (
+        "don't know",
+        "do not know",
+        "not in the document",
+        "not mentioned",
+        "no information",
+        "нет информации",
+        "нет данных",
+        "не знаю",
+        "не указан",
+        "не упом",
+        "не предусмотр",
+        "не содерж",
+        "в документе нет",
+        "документ не",
+    )
+
     def _score_null_answer(self, answer: str, tools_called: list[str]) -> DeterministicResult:
         lowered = answer.lower()
-        # Did the agent invent a specific number when none exists?
-        if extract_numbers(answer):
-            # Inventing a specific figure for a null-answer turn = correctness 0.
-            return DeterministicResult(
-                score=self._settled_zero("hallucinated_source"),
-                judge_needed=False,
-            )
-        # Said "I don't know" / "not in the document" — correct behaviour.
-        dont_know = any(
-            p in lowered
-            for p in (
-                "don't know",
-                "do not know",
-                "not in the document",
-                "not mentioned",
-                "no information",
-                "не знаю",
-                "не указан",
-                "не упом",
-                "нет данных",
-                "в документе нет",
-                "документ не",
-            )
-        )
+        # Correct refusal first. A correct "don't know" may include numbers
+        # quoted from the source as context ("only 28 days are documented") —
+        # those are NOT hallucinations. Detect the refusal before any number.
+        dont_know = any(p in lowered for p in self._DONT_KNOW_PHRASES)
         if dont_know:
-            # The agent did the right thing; let the judge score the remaining
-            # dims, but correctness is effectively 10. We settle without judge
-            # for the common clean case.
+            # The agent did the right thing; settle without judge. Numbers in
+            # the answer are context (quoted from the source), not inventions.
             scores: dict[str, float] = {
                 "correctness": 10.0,
                 "tool_selection": 8.0,
@@ -198,6 +198,20 @@ class DeterministicScorer:
             score.overall_score = self._overall(score.scores)
             score.passed = self._pass(score.scores, score.overall_score)
             return DeterministicResult(score=score, judge_needed=False)
+        # No explicit refusal, but the answer contains a number. This is a
+        # potential hallucination, but deterministically we cannot reliably
+        # distinguish an invented figure from a legitimate factual aside. Defer
+        # to the judge rather than zeroing out — the judge sees the transcript
+        # and the success_criteria and can settle correctness properly.
+        if extract_numbers(answer):
+            return DeterministicResult(
+                score=TurnScore(
+                    failure_category="hallucinated_source",
+                    reasoning="Null-answer turn with a number but no refusal phrase; "
+                    "judge must classify as hallucination or context.",
+                ),
+                judge_needed=True,
+            )
         # Ambiguous: neither a clear "don't know" nor an invented number. The
         # judge must decide whether this is a hedge (ok) or an evasion (fail).
         return DeterministicResult(

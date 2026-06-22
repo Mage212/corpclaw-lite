@@ -121,12 +121,30 @@ def aggregate_scenario(scenario_id: str, turn_scores: list[TurnScore]) -> Scenar
 # ───────────────────────── normalization helpers ────────────────────────────
 
 _NUMBER_RE = re.compile(r"-?\d+(?:[.,]\d+)?")
+# Space / NBSP / thin-space / narrow-no-break-space used as a thousands
+# separator BETWEEN digits (e.g. "27 000", "1 200 500", "5\u00a0000").
+# Matched lazily so ordinary inter-word spaces are never touched.
+_THOUSANDS_SEP_RE = re.compile(r"(?<=\d)[ \u00a0\u2009\u202f](?=\d)")
+
+
+def _strip_thousands_separators(text: str) -> str:
+    """Remove space/NBSP/thin-space used as thousands separators.
+
+    Only spaces **between digits** are removed, so normal prose is untouched:
+    "27 000" → "27000", "1 200 500" → "1200500", but "вверх по течению" stays.
+    """
+    return _THOUSANDS_SEP_RE.sub("", text)
 
 
 def extract_numbers(text: str) -> list[float]:
-    """Extract all numeric values from ``text`` as floats (commas → dots)."""
+    """Extract all numeric values from ``text`` as floats (commas → dots).
+
+    Thousands separators (space/NBSP between digits) are collapsed first so
+    that "27 000" yields a single ``27000.0`` rather than ``[27.0, 0.0]``.
+    """
+    collapsed = _strip_thousands_separators(text)
     out: list[float] = []
-    for match in _NUMBER_RE.finditer(text):
+    for match in _NUMBER_RE.finditer(collapsed):
         try:
             out.append(float(match.group().replace(",", ".")))
         except ValueError:
@@ -135,12 +153,18 @@ def extract_numbers(text: str) -> list[float]:
 
 
 def normalize_answer(text: str) -> str:
-    """Lowercase, collapse whitespace, strip common punctuation for matching."""
+    """Lowercase, collapse whitespace, strip common punctuation for matching.
+
+    Thousands separators (space/NBSP between digits) are collapsed so that
+    "27 000" and "27000" compare equal.
+    """
     lowered = text.lower().strip()
     lowered = re.sub(r"[ \t]+", " ", lowered)
     lowered = re.sub(r"\s*\n\s*", " ", lowered)
-    # Strip currency symbols and thousands separators around numbers.
+    # Strip currency symbols around numbers.
     lowered = lowered.replace("₽", "").replace("$", "").replace("€", "")
+    # Collapse thousands separators between digits ("27 000" → "27000").
+    lowered = _strip_thousands_separators(lowered)
     return lowered.strip(" .,;:!?\"'()[]")
 
 
