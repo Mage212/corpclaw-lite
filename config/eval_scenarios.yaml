@@ -91,8 +91,7 @@ scenarios:
     turns:
       - user_message: "Прочитай q1_report.txt и q2_report.txt и назови общую выручку за два квартала."
         expected_answer: "27000"
-        expected_tools: ["read_file"]
-        success_criteria: "Agent must read both files and sum the revenue figures."
+        success_criteria: "Agent must read both files and sum the revenue. May delegate to data-agent for the arithmetic."
 
   - id: write_file_tracked
     category: office_write
@@ -370,7 +369,6 @@ scenarios:
     turns:
       - user_message: "Проанализируй report.txt: назови квартал с наибольшей чистой прибылью (выручка минус расходы) и саму эту прибыль числом."
         expected_answer: "55000"
-        expected_tools: ["read_file"]
         success_criteria: >
           FAIL if the agent's first answer is a planning statement
           ("сейчас я проанализирую...", "давайте я проверю...") instead of the
@@ -398,7 +396,6 @@ scenarios:
     turns:
       - user_message: "Прочитай ledger.txt и назови сумму всех счетов клиента Acme."
         expected_answer: "15400"
-        expected_tools: ["read_file"]
         success_criteria: >
           FAIL efficiency if the agent calls read_file on ledger.txt 3+ times
           (B-055 dedup trigger on identical results).

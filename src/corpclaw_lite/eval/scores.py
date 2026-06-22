@@ -42,6 +42,12 @@ class TurnScore:
     # Whether the LLM judge was consulted. False when the deterministic layer
     # settled correctness=0 (pre-check / zero-rule) or exact-match (10).
     judge_used: bool = False
+    # Trajectory observability (B-060): populated by EvalRunner._score_turn so
+    # the JSON report shows what the agent actually said and did, not just the
+    # score. Automatic propagation via asdict() in to_dict().
+    final_answer: str = ""
+    tools_called: list[str] = field(default_factory=lambda: list[str]())
+    transcript: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

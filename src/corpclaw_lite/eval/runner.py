@@ -238,6 +238,17 @@ class EvalRunner:
         return aggregate_scenario(run_result.scenario.id, turn_scores)
 
     async def _score_turn(self, tr: TurnRunResult, turn_index: int) -> TurnScore:
+        """Score one turn, then decorate with trajectory observability."""
+        from corpclaw_lite.eval.judge import render_transcript
+
+        score = await self._score_turn_inner(tr, turn_index)
+        # B-060: persist what the agent actually did for debugging.
+        score.final_answer = tr.final_answer
+        score.tools_called = list(tr.tools_called)
+        score.transcript = render_transcript(tr.trajectory)
+        return score
+
+    async def _score_turn_inner(self, tr: TurnRunResult, turn_index: int) -> TurnScore:
         if tr.status == "error":
             return self._zero_turn(f"Turn crashed: {tr.error}")
         det = self._scorer.score_turn(tr.turn, tr.final_answer, tr.trajectory)
