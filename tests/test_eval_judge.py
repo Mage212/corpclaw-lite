@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 
 from corpclaw_lite.calibration.trajectory import Trajectory, TrajectoryRecorder, TrajectoryStep
-from corpclaw_lite.eval.judge import JudgeError, LLMJudge, _strip_code_fence
+from corpclaw_lite.eval.judge import JudgeError, LLMJudge, _strip_code_fence, render_transcript
 from corpclaw_lite.eval.scenarios import ScenarioTurn
 from corpclaw_lite.llm.base import LLMResponse, Provider
 
@@ -354,3 +354,33 @@ def test_trajectory_step_truncation_independent_of_judge() -> None:
     its own shorter view. The two are independent."""
     step = TrajectoryStep(step_type="tool_result", tool_name="t", tool_result="y" * 800)
     assert len(step.tool_result) == 800  # raw field untruncated
+
+
+def test_render_transcript_empty_trajectory() -> None:
+    traj = Trajectory(scenario_id="s1")
+    assert "no tool calls" in render_transcript(traj)
+
+
+def test_render_transcript_with_tool_calls() -> None:
+    rec = TrajectoryRecorder("s1")
+    rec.record_tool_call("read_file", {"path": "data.txt"})
+    rec.record_tool_result("read_file", "hello world")
+    traj = rec.finalize("done")
+    rendered = render_transcript(traj)
+    assert "read_file" in rendered
+    assert "hello world" in rendered
+
+
+def test_render_transcript_with_nested_subagent() -> None:
+    rec = TrajectoryRecorder("s1")
+    rec.record_tool_call("dispatch_subagent", {"subagent_id": "data-agent"})
+    rec.record_nested(
+        "data-agent",
+        [
+            TrajectoryStep(step_type="tool_call", tool_name="table_query"),
+        ],
+    )
+    traj = rec.finalize("done")
+    rendered = render_transcript(traj)
+    assert "[data-agent]" in rendered
+    assert "table_query" in rendered

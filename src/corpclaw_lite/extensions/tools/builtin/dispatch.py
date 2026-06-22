@@ -25,16 +25,24 @@ class DispatchSubagentTool(Tool):
 
     name = "dispatch_subagent"
     description = (
-        "Delegate a task to a specialized subagent. "
-        "Use when the task requires specialized capabilities beyond available tools. "
-        "For web research, fact-checking, source comparison, or URL analysis, use "
-        "subagent_id='research-agent' and pass the full research question."
+        "Delegate a task to a specialized subagent. Available subagents: "
+        "data-agent (SQL queries, charts, format conversion, Excel data analysis), "
+        "document-agent (reports, Excel normalization, PDF text, document editing), "
+        "filesystem-agent (file navigation, multi-file search), "
+        "research-agent (web research, fact-checking), "
+        "execution-agent (scripts, shell commands). "
+        "If you get a 'Subagent not found' error, the message lists valid IDs — "
+        "retry with one of them. If no subagent can do the task, tell the user "
+        "honestly. Do not fabricate a result."
     )
     params = [
         ToolParam(
             name="subagent_id",
             type="string",
-            description="The ID of the subagent to dispatch",
+            description=(
+                "The subagent to dispatch: data-agent, document-agent, "
+                "filesystem-agent, research-agent, or execution-agent"
+            ),
         ),
         ToolParam(
             name="task",

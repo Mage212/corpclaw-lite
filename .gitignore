@@ -31,8 +31,9 @@ token_usage.json
 *.log
 .python-version
 
-# Calibration (machine/model-specific)
-config/calibrated/
+# Calibration (machine/model-specific) — keep few_shots.yaml public, ignore the rest
+config/calibrated/*
+!config/calibrated/few_shots.yaml
 .calibration_workspace/
 
 # Per-user onboarding profiles (auto-generated, contain personal data)

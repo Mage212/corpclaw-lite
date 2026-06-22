@@ -43,6 +43,33 @@ class JudgeError(Exception):
     """Raised when the judge model returns an unparseable or malformed verdict."""
 
 
+def render_transcript(trajectory: Trajectory) -> str:
+    """Render a trajectory as a readable transcript (tool calls + results).
+
+    Nested subagent tool calls are prefixed with ``[<subagent_id>]`` so the full
+    execution path — including delegated work — is visible. Used both by the
+    LLM judge (in its prompt) and by the eval report (for observability).
+    """
+    if not trajectory.steps:
+        return "(no tool calls recorded)"
+    lines: list[str] = []
+    for step in trajectory.steps:
+        prefix = ""
+        if step.subagent_id:
+            prefix = f"[{step.subagent_id}] "
+        if step.step_type == "tool_call" and step.tool_name:
+            args = json.dumps(step.tool_args or {}, ensure_ascii=False)
+            lines.append(f"- {prefix}TOOL CALL: {step.tool_name}({args})")
+        elif step.step_type == "tool_result" and step.tool_name:
+            result = (step.tool_result or "").strip()
+            if len(result) > 300:
+                result = result[:300] + "…"
+            lines.append(f"  {prefix}→ RESULT: {result}")
+    if not lines:
+        return "(no tool calls recorded; agent answered directly)"
+    return "\n".join(lines)
+
+
 class LLMJudge:
     """Score a turn via a cloud model using the 7-dimension rubric."""
 
@@ -159,24 +186,7 @@ appear in the transcript prefixed with the subagent id (e.g. ``[data-agent]``).
         Nested subagent tool calls are prefixed with ``[<subagent_id>]`` so the
         judge can see the full execution path, including delegated work.
         """
-        if not trajectory.steps:
-            return "(no tool calls recorded)"
-        lines: list[str] = []
-        for step in trajectory.steps:
-            prefix = ""
-            if step.subagent_id:
-                prefix = f"[{step.subagent_id}] "
-            if step.step_type == "tool_call" and step.tool_name:
-                args = json.dumps(step.tool_args or {}, ensure_ascii=False)
-                lines.append(f"- {prefix}TOOL CALL: {step.tool_name}({args})")
-            elif step.step_type == "tool_result" and step.tool_name:
-                result = (step.tool_result or "").strip()
-                if len(result) > 300:
-                    result = result[:300] + "…"
-                lines.append(f"  {prefix}→ RESULT: {result}")
-        if not lines:
-            return "(no tool calls recorded; agent answered directly)"
-        return "\n".join(lines)
+        return render_transcript(trajectory)
 
     # ────────────────────────────── parsing ──────────────────────────────
 

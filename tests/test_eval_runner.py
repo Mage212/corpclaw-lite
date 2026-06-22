@@ -385,6 +385,33 @@ async def test_chdir_restored_even_on_crash(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_turn_score_contains_trajectory_observability(tmp_path: Path) -> None:
+    """B-060: TurnScore must carry final_answer, tools_called, and transcript
+    so the eval JSON report shows what the agent actually did (not just scores).
+    Without this, debugging failures is guesswork."""
+    loop = _FakeAgentLoop(answers=["3650"], tools_per_call=[["table_query"]])
+    runner = EvalRunner(loop, _user(), "sys", tmp_path)
+    scenario = EvalScenario(
+        id="s1",
+        category="office",
+        turns=[ScenarioTurn(user_message="total?", expected_answer="3650")],
+    )
+    scores = await runner.run_all([scenario])
+    ts = scores[0].turns[0]
+    # final_answer and tools_called come from RunStats (populated even in mock).
+    assert ts.final_answer == "3650"
+    assert "table_query" in ts.tools_called
+    # transcript comes from TrajectoryRecorder — in the fake loop it's empty
+    # (no real tool calls recorded). In a live run it would contain the calls.
+    assert isinstance(ts.transcript, str)
+    # Verify propagation to dict (asdict picks up new fields automatically).
+    d = ts.to_dict()
+    assert d["final_answer"] == "3650"
+    assert "table_query" in d["tools_called"]
+    assert "transcript" in d
+
+
+@pytest.mark.asyncio
 async def test_scenario_crash_does_not_abort_run(tmp_path: Path) -> None:
     loop = _FakeAgentLoop(answers=[])
     call_count = {"n": 0}
