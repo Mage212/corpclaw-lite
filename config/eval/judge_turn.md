@@ -66,6 +66,27 @@ When `expected_answer` IS non-null, these force **correctness=0**:
 - **error_recovery** (5%): Handles tool failures gracefully.
   10=graceful, 7=recovered after retry, 4=partial, 0=gave up.
 
+### Border-case determinations (apply exactly, no discretion)
+
+These recurring situations have a fixed scoring floor so the judge does not
+introduce variance across runs that behave identically:
+
+- **File genuinely absent**: if the transcript shows the agent looked for a
+  requested file (via read_file / list_files / search_files) and the file does
+  NOT exist in the workspace, then reporting "file not found" is the correct
+  outcome — NOT a failure. Score **correctness 9-10** (10 if it confirmed via
+  list_files/search_files, 9 if it only tried read_file). Do NOT penalise for
+  "not dispatching the subagent" when the input it would need is missing.
+- **Null answer with context number**: if `expected_answer` is null and the
+  agent stated the information is unavailable while quoting a number from the
+  source as context (e.g. "no extra leave for tenure, only the standard 28
+  days"), score **correctness 9-10**. The context number is not a
+  hallucination.
+- **Correct refusal of an impossible task**: if the scenario asks for something
+  the agent genuinely cannot do (live data, real-time info, no matching
+  subagent capability) and the agent honestly says so, score **correctness
+  9-10** and **error_recovery 9-10**.
+
 ## STEP 4 — OVERALL SCORE AND PASS/FAIL
 
 ```

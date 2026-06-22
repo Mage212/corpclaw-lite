@@ -69,14 +69,36 @@ def test_json_leak_fails_garbled() -> None:
 # ──────────────────────────── null-answer branch ───────────────────────────
 
 
-def test_null_answer_invention_fails() -> None:
-    """Inventing a number when expected_answer is null → correctness 0."""
+def test_null_answer_invention_needs_judge() -> None:
+    """Regression: a number without an explicit refusal phrase is no longer a
+    deterministic zero. It is a *potential* hallucination, but the scorer cannot
+    reliably distinguish an invented figure from a factual aside, so the judge
+    must classify it. (Previously this was a hard hallucinated_source zero,
+    which caused false positives — see test_null_answer_context_number_passes.)"""
     res = scorer.score_turn(
         _turn(), "За стаж 10 лет положено 5 дней.", trajectory=_traj(["read_file"])
     )
-    assert not res.judge_needed
+    assert res.judge_needed
     assert res.score.failure_category == "hallucinated_source"
-    assert res.score.scores["correctness"] == 0.0
+
+
+def test_null_answer_context_number_passes() -> None:
+    """Regression (live A/B on Qwen/gemma): the agent correctly stated the
+    information is unavailable while quoting a number from the source as
+    context — "В документе policy.txt нет информации о доп. отпуске за стаж.
+    Указаны только базовые 28 дней." Previously any number triggered a hard
+    hallucinated_source zero. Now the refusal is detected first and the context
+    number is allowed."""
+    res = scorer.score_turn(
+        _turn(),
+        "В документе policy.txt нет информации о дополнительном отпуске за стаж. "
+        "Указаны только базовые 28 дней.",
+        trajectory=_traj(["read_file"]),
+    )
+    assert not res.judge_needed
+    assert res.score.failure_category is None
+    assert res.score.scores["correctness"] == 10.0
+    assert res.score.passed
 
 
 def test_null_answer_dont_know_passes() -> None:
@@ -95,6 +117,22 @@ def test_null_answer_dont_know_english() -> None:
     )
     assert not res.judge_needed
     assert res.score.scores["correctness"] == 10.0
+
+
+def test_null_answer_extended_refusal_phrases() -> None:
+    """Newly added refusal phrases: 'нет информации', 'не предусмотр',
+    'не содержит'. Each must settle as a correct refusal even when a number
+    is present in the answer."""
+    cases = [
+        "Нет информации о доплатах в этом документе.",
+        "Доплата за стаж не предусмотрена.",
+        "Документ не содержит упоминания о премии.",
+    ]
+    for answer in cases:
+        res = scorer.score_turn(_turn(), answer, trajectory=_traj(["read_file"]))
+        assert not res.judge_needed, f"Expected settled pass for: {answer!r}"
+        assert res.score.scores["correctness"] == 10.0
+        assert res.score.passed
 
 
 def test_null_answer_ambiguous_needs_judge() -> None:
@@ -258,6 +296,64 @@ def test_extract_numbers_handles_comma_decimal() -> None:
     nums = extract_numbers("1200,50")
     assert 1200.5 in nums or 200.5 in nums
     assert 1200.5 in extract_numbers("1200,50") or 200.5 in extract_numbers("1200,50")
+
+
+# ──────────────────── thousands separator (Gap 2) ─────────────────────────
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("27 000", [27000.0]),
+        ("1 200 500", [1200500.0]),
+        ("выручка 27 000 рублей", [27000.0]),
+        ("5\u00a0000", [5000.0]),  # NBSP (U+00A0)
+        ("1\u2009000", [1000.0]),  # thin space (U+2009)
+    ],
+)
+def test_extract_numbers_collapses_thousands_separators(text: str, expected: list[float]) -> None:
+    """Regression (live A/B on gemma): '27 000' was parsed as [27.0, 0.0],
+    which caused a false wrong_number zero in multi_file_read_combine. The
+    space/NBSP/thin-space between digits must be treated as a thousands
+    separator and collapsed before parsing."""
+    from corpclaw_lite.eval.scores import extract_numbers
+
+    assert extract_numbers(text) == expected
+
+
+def test_extract_numbers_keeps_prose_spaces() -> None:
+    """Ordinary inter-word spaces must NOT be touched — only digit-to-digit
+    spaces are thousands separators."""
+    from corpclaw_lite.eval.scores import extract_numbers
+
+    # "20 квартир по 50" → 20 and 50, not 2050.
+    nums = extract_numbers("20 квартир по 50 метров")
+    assert nums == [20.0, 50.0]
+
+
+def test_normalize_answer_collapses_thousands_separators() -> None:
+    """normalize_answer must collapse '27 000' → '27000' so that exact-match
+    substring comparison succeeds against an expected '27000'."""
+    from corpclaw_lite.eval.scores import normalize_answer
+
+    assert normalize_answer("27 000") == "27000"
+    assert normalize_answer("1 200 500") == "1200500"
+    # Prose spaces preserved.
+    assert " " in normalize_answer("вверх по течению")
+
+
+def test_exact_match_with_thousands_separator_passes() -> None:
+    """Regression (live A/B on gemma, multi_file_read_combine): expected_answer
+    '27000', agent answered 'Общая выручка 27 000.' Previously failed as
+    wrong_number; now must settle as an exact normalized match."""
+    res = scorer.score_turn(
+        _turn("27000"),
+        "Общая выручка за два квартала составляет 27 000.",
+        trajectory=_traj(["read_file", "read_file"]),
+    )
+    assert not res.judge_needed
+    assert res.score.scores["correctness"] == 10.0
+    assert res.score.passed
 
 
 def test_aggregate_scenario_all_pass() -> None:
