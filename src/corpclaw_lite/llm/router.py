@@ -190,9 +190,14 @@ class LLMRouter:
         def _get_or_create(
             provider_name: str,
             model: str,
+            sampling_name: str | None,
+            model_profile_name: str | None,
             preset_name: str | None,
         ) -> Provider | None:
-            cache_key = (provider_name, model, preset_name)
+            # Sampling profile name wins over legacy preset name (D-056). When a
+            # sampling profile is given, it also carries the model reference;
+            # an explicit model_profile_name overrides the referenced ModelProfile.
+            cache_key = (provider_name, model, sampling_name or preset_name)
             if cache_key in cache:
                 return cache[cache_key]
 
@@ -200,19 +205,30 @@ class LLMRouter:
             if conn is None:
                 return None
 
-            # Prefer the split-profile API (D-056): a name registered either as
-            # a new-style model/sampling profile or as a legacy preset resolves
-            # to the same name in both registries, so we look it up in both.
             model_profile: ModelProfile | None = None
             sampling_profile: SamplingProfile | None = None
             legacy_preset: ModelPreset | None = None
-            if preset_name and preset_registry:
+
+            if sampling_name and preset_registry:
+                # New-style sampling reference (preferred).
+                sampling_profile = preset_registry.get_sampling_profile(sampling_name)
+                if sampling_profile is None:
+                    logger.warning("Unknown sampling profile '%s', ignoring", sampling_name)
+                # Resolve the ModelProfile: explicit override > sampling's
+                # referenced model > same-name model profile (back-compat).
+                ref_model = model_profile_name or (
+                    sampling_profile.model if sampling_profile else None
+                )
+                if ref_model and preset_registry:
+                    model_profile = preset_registry.get_model_profile(ref_model)
+            elif preset_name and preset_registry:
+                # Legacy combined preset — resolve via the back-compat bridge:
+                # the name maps to both a model profile and a sampling profile
+                # (sharing the preset name), plus the legacy ModelPreset object.
                 model_profile = preset_registry.get_model_profile(preset_name)
                 sampling_profile = preset_registry.get_sampling_profile(preset_name)
                 legacy_preset = preset_registry.get(preset_name)
                 if model_profile is None and sampling_profile is None and legacy_preset is None:
-                    # Truly unknown name — no model profile, no sampling profile,
-                    # no legacy combined preset. Fall back to provider defaults.
                     logger.warning("Unknown preset '%s', ignoring", preset_name)
 
             provider = build_provider(
@@ -228,7 +244,7 @@ class LLMRouter:
             )
             if provider is not None:
                 cache[cache_key] = provider
-                provider_meta[id(provider)] = (provider_name, model, preset_name)
+                provider_meta[id(provider)] = (provider_name, model, sampling_name or preset_name)
             return provider
 
         # Process routing rules
@@ -253,7 +269,13 @@ class LLMRouter:
                 logger.warning("Routing rule '%s': no model specified, skipping", rule_label)
                 continue
 
-            provider = _get_or_create(rule.provider, rule.model, rule.preset)
+            provider = _get_or_create(
+                rule.provider,
+                rule.model,
+                sampling_name=rule.sampling,
+                model_profile_name=rule.model_profile,
+                preset_name=rule.preset,
+            )
             if provider is None:
                 logger.warning(
                     "Routing rule '%s': failed to build provider '%s' with model '%s', skipping",
@@ -263,12 +285,19 @@ class LLMRouter:
                 )
                 continue
 
+            profile_tag = (
+                f" sampling={rule.sampling}"
+                if rule.sampling
+                else f" preset={rule.preset}"
+                if rule.preset
+                else ""
+            )
             logger.info(
                 "  [route] %s → provider=%s model=%s%s",
                 rule_label,
                 rule.provider,
                 rule.model,
-                f" preset={rule.preset}" if rule.preset else "",
+                profile_tag,
             )
             routing.append((rule.task_kind, rule.subagent_id, provider, rule.provider))
 

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from pydantic_settings import BaseSettings
 
 from corpclaw_lite.agent.guards import (
@@ -19,6 +19,7 @@ __all__ = [
     "LLMSettings",
     "LoggingSettings",
     "PersistentCacheSettings",
+    "PhasePolicySettings",
     "QueueSettings",
     "ResearchSettings",
     "RoutingRule",
@@ -35,14 +36,79 @@ class RoutingRule(BaseModel):
     """Rule for routing tasks to specific providers with model selection.
 
     Each rule specifies a provider (registered via ``PROVIDER_*__*`` env vars),
-    a model from that provider, and an optional preset.
+    a model from that provider, and profile selection for inference/thinking.
+
+    Profile selection (D-056) — two equivalent styles:
+
+    - **New (preferred):** ``sampling`` references a SamplingProfile in
+      ``config/model_presets.yaml`` (``sampling:`` block). ``model_profile``
+      optionally overrides the ModelProfile; if absent it is inferred from the
+      SamplingProfile's ``model`` field or looked up by the rule's ``model``.
+    - **Legacy (back-compat):** ``preset`` references a combined ModelPreset
+      (the old ``presets:`` block). Internally split into a
+      (ModelProfile, SamplingProfile) pair sharing the preset name.
+
+    If both ``sampling`` and ``preset`` are set, ``sampling`` wins.
     """
 
     task_kind: str | None = None
     subagent_id: str | None = None
     provider: str = "default"
     model: str | None = None
+    # D-056 split-profile references (preferred):
+    model_profile: str | None = None
+    sampling: str | None = None
+    # DEPRECATED: legacy combined preset (back-compat → split internally).
     preset: str | None = None
+
+
+class PhasePolicySettings(BaseModel):
+    """Phase-based per-call thinking overrides (D-056 PR2).
+
+    Configures :class:`~corpclaw_lite.agent.phase_policy.DefaultPhasePolicy`,
+    which switches model thinking on/off/budget per-call based on the current
+    task phase, via the per-call ``RequestOptions`` contextvar.
+
+    Enabled by default (``enabled: true``): the policy is a no-op for the main
+    agent in its default phase (no override returned), so it only takes effect
+    in closing mode (budget pressure) and for workflow subagents (research).
+    """
+
+    enabled: bool = True
+    # Semantic primary signal: tool names whose presence in the previous turn
+    # marks the aggregation/finalization phase (about to write the final report).
+    aggregation_markers: list[str] = ["research_list_facts"]
+    # Semantic signal: tool names whose presence in the previous turn marks the
+    # gathering phase (still collecting raw material).
+    gathering_tools: list[str] = [
+        "research_search",
+        "research_fetch_source",
+        "research_read_source",
+        "research_list_sources",
+        "research_store_fact",
+    ]
+    # Per-phase thinking overrides (Literal matches ThinkingOverride.mode).
+    closing_thinking: Literal["default", "off", "budget"] = "off"
+    gathering_thinking: Literal["default", "off", "budget"] = "off"
+    aggregation_thinking: Literal["default", "off", "budget"] = "default"
+
+    @field_validator(
+        "closing_thinking", "gathering_thinking", "aggregation_thinking", mode="before"
+    )
+    @classmethod
+    def _coerce_thinking_yaml_bool(cls, v: Any) -> Any:
+        """Coerce YAML-bool forms (``off``→False, ``on``→True) to string literals.
+
+        YAML 1.1 parses unquoted ``off``/``on``/``yes``/``no`` as booleans; an
+        operator writing ``closing_thinking: off`` gets ``False`` and the
+        Literal rejects it. Maps: ``False``/``off``→``"off"``,
+        ``True``/``on``/``yes``/``None``→``"default"``.
+        """
+        if v is False or v == "off":
+            return "off"
+        if v is True or v in ("on", "yes") or v is None:
+            return "default"
+        return v
 
 
 class SlotAffinitySettings(BaseModel):
@@ -155,6 +221,11 @@ class AgentSettings(BaseModel):
     # pre-B-060 behaviour (guards on with original thresholds).
     result_dedup_guard: ResultDedupGuardConfig = ResultDedupGuardConfig()
     planning_text_guard: PlanningTextGuardConfig = PlanningTextGuardConfig()
+    # D-056 PR2: per-call thinking overrides based on task phase
+    # (closing mode / research gathering / research aggregation). The policy is
+    # a no-op for the main agent in its default phase, so enabling it by default
+    # does not change main-agent behaviour unless the budget runs out.
+    phase_policy: PhasePolicySettings = PhasePolicySettings()
 
 
 class WebSettings(BaseModel):

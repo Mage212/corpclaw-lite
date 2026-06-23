@@ -1,102 +1,131 @@
-# CorpClaw Lite — Model Presets
+# CorpClaw Lite — Model Profiles + Sampling Profiles
 #
-# Named presets define inference parameters and thinking/reasoning configuration
-# for specific models. Reference a preset by name in settings.yaml routing rules:
+# Split (D-056) of the legacy combined ``presets:`` into two orthogonal layers:
+#
+#   models:     ModelProfile — properties of a *model* (thinking parser,
+#                system_prompt_prefix, default_inference). Bound to a model id,
+#                rarely changes. Corresponds to the model-bound half of the old
+#                combined preset.
+#
+#   sampling:   SamplingProfile — properties of a *task / phase* (thinking_mode
+#                default|off|budget, thinking_budget, inference_overrides).
+#                Changes freely, references a ModelProfile by ``model:`` name.
+#                Corresponds to the task-bound half of the old preset.
+#
+# Reference a sampling profile by name in config/settings.yaml routing rules:
 #
 #   llm:
 #     routing:
 #       - task_kind: "default"
-#         provider: "ollama"
-#         model: "qwen3.5-4b"
-#         preset: "qwen3.5-thinking"    # ← uses this preset
+#         provider: "llamacpp"
+#         model: "qwen3.6-35b-a3b"
+#         sampling: "temperature-0.4"   # ← uses this sampling profile
 #
-# All fields are optional — include only what the model needs.
-# Priority: request-level params > preset params > provider defaults.
+# Legacy combined format (``presets:``) is still parsed by the back-compat
+# reader in src/corpclaw_lite/llm/presets.py, so overlays and un-migrated
+# config keep working. New deployments should use the split format below.
 
-presets:
-  # ── Main ────────────────────────────────────────────────────────────────
-  temperature-0.4:
-    inference_params:
-      temperature: 0.4
-
-  # ── Gemma 4 ────────────────────────────────────────────────────────────────
-  gemma4-thinking:
-    description: "Gemma 4 with extended thinking via <|think|> tag injection"
-    system_prompt_prefix: "<|think|>"
-    thinking:
-      open_tag: "<|channel>thought"
-      close_tag: "<channel|>"
-      source: "content"
-    inference_params:
-      temperature: 1.0
-      top_p: 0.95
-      top_k: 64
-
-  gemma4-fast:
-    description: "Gemma 4 without thinking — fast mode"
-    inference_params:
-      temperature: 0.7
-      top_p: 0.9
-
-  # ── Qwen 3 / 3.5 ──────────────────────────────────────────────────────────
-  #
-  # SAFETY NOTES (from LM Studio docs):
-  #   presence_penalty  — penalizes tokens already present in INPUT (prompt + tool schemas).
-  #                       NEVER use with tool calling — it blocks tool name generation.
-  #   repeat_penalty    — penalizes tokens repeated in OUTPUT only.
-  #                       Safe for tool calling, prevents looping. (routed via extra_body)
-  #   frequency_penalty — like repeat_penalty but proportional to occurrence count. Safe.
-  #
-  qwen3.5-thinking:
-    description: "Qwen3.5 with native reasoning_content field"
-    thinking:
+models:
+  # ── Qwen 3.6 (35B A3B MoE) ──────────────────────────────────────────────
+  qwen3.6-35b-a3b:
+    description: "Qwen3.6-35B-A3B with native reasoning_content field"
+    thinking_parser:
       source: "native"
-    # thinking_budget_tokens: 1024
-    inference_params:
+    default_inference:
       temperature: 0.7
       top_p: 0.95
       top_k: 20
       min_p: 0.0
-      repeat_penalty: 1.1           # safe for tool calling (output-only penalty)
-      # presence_penalty: DO NOT USE — kills tool calling (see notes above)
+      # SAFETY (from LM Studio docs): repeat_penalty penalizes OUTPUT-only
+      # repetitions — safe for tool calling. presence_penalty penalizes INPUT
+      # tokens (prompt + tool schemas) and KILLS tool name generation — never
+      # use it with tool calling.
+      repeat_penalty: 1.1
 
-  # ── Structured Output (example for models ≥7B) ─────────────────────────────
-  #
-  # LM Studio supports response_format with JSON Schema (same as OpenAI Structured Output).
-  # The model will only generate valid JSON conforming to the provided schema.
-  #
-  # LIMITATIONS:
-  #   - Models <7B parameters may not reliably follow the schema (LM Studio docs warning)
-  #   - NOT COMPATIBLE with tool calling in the same request — use separately
-  #   - For GGUF: uses grammar-based sampling via llama.cpp
-  #   - For MLX: uses Outlines
-  #
-  # USE CASE:
-  #   Suitable for structured data extraction tasks (document parsing, NER, classification)
-  #   where tool calling is not needed.
-  #
-  # qwen3-structured:
-  #   description: "Qwen3 with structured JSON output (no tool calling)"
-  #   thinking:
-  #     source: "native"
-  #   thinking_budget_tokens: 512
-  #   inference_params:
-  #     temperature: 0.3              # low temp for deterministic structured output
-  #     top_p: 0.9
-  #     response_format:              # OpenAI-compatible, passed as standard param
-  #       type: "json_schema"
-  #       json_schema:
-  #         name: "extraction_result"
-  #         strict: true
-  #         schema:
-  #           type: "object"
-  #           properties:
-  #             entities:
-  #               type: "array"
-  #               items:
-  #                 type: "object"
-  #                 properties:
-  #                   name: { type: "string" }
-  #                   type: { type: "string", enum: ["person", "org", "location"] }
-  #                 required: ["name", "type"]
-  #           required: ["entities"]
+  # ── Gemma 4 (26B QAT) ────────────────────────────────────────────────────
+  gemma4-26b-qat:
+    description: "Gemma 4 with extended thinking via <|think|> tag injection"
+    system_prompt_prefix: "<|think|>"
+    thinking_parser:
+      open_tag: "<|channel>thought"
+      close_tag: "<channel|>"
+      source: "content"
+    default_inference:
+      temperature: 0.7
+      top_p: 0.9
+      top_k: 64
+
+sampling:
+  # ── Default (natural thinking, model's inference defaults) ───────────────
+  qwen3.6-default:
+    model: qwen3.6-35b-a3b
+    thinking_mode: default
+
+  gemma4-default:
+    description: "Gemma 4 natural thinking"
+    model: gemma4-26b-qat
+    thinking_mode: default
+    inference_overrides:
+      temperature: 1.0
+
+  gemma4-fast:
+    description: "Gemma 4 without thinking — fast mode"
+    model: gemma4-26b-qat
+    thinking_mode: off
+    inference_overrides:
+      temperature: 0.7
+      top_p: 0.9
+
+  # ── Auxiliary: thinking off for extraction / summarization ──────────────
+  # Used by vision / compress / consolidate routes — these calls do not need
+  # reasoning, only extraction, so thinking is disabled for speed.
+  aux-no-thinking:
+    model: qwen3.6-35b-a3b
+    thinking_mode: off
+    inference_overrides:
+      temperature: 0.2
+
+  # ── Temperature-only overrides (equivalents of the old single-param presets) ──
+  temperature-0.4:
+    model: qwen3.6-35b-a3b
+    thinking_mode: default
+    inference_overrides:
+      temperature: 0.4
+
+  # ── Thinking-budget capped (soft cap, model-dependent effectiveness) ─────
+  # Example: cap reasoning output at N tokens. Uncomment and reference via
+  # sampling: "qwen3.6-budget-128" to experiment with budgeted thinking.
+  # qwen3.6-budget-128:
+  #   model: qwen3.6-35b-a3b
+  #   thinking_mode: budget
+  #   thinking_budget: 128
+
+# ── Structured Output (example for models ≥7B) ─────────────────────────────
+#
+# LM Studio supports response_format with JSON Schema (same as OpenAI Structured
+# Output). The model will only generate valid JSON conforming to the provided
+# schema. NOT COMPATIBLE with tool calling in the same request.
+#
+# structured-extraction:
+#   model: qwen3.6-35b-a3b
+#   thinking_mode: off
+#   inference_overrides:
+#     temperature: 0.3                    # low temp for deterministic output
+#     top_p: 0.9
+#     response_format:                    # OpenAI-compatible standard param
+#       type: "json_schema"
+#       json_schema:
+#         name: "extraction_result"
+#         strict: true
+#         schema:
+#           type: "object"
+#           properties:
+#             entities:
+#               type: "array"
+#               items:
+#                 type: "object"
+#                 properties:
+#                   name: { type: "string" }
+#                   type: { type: "string", enum: ["person", "org", "location"] }
+#                 required: ["name", "type"]
+#           required: ["entities"]

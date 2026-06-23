@@ -375,6 +375,106 @@ def test_preset_applied_from_routing_rule(tmp_path: None) -> None:  # type: igno
         preset_path.unlink(missing_ok=True)
 
 
+def test_sampling_rule_resolves_split_profiles(tmp_path: None) -> None:  # type: ignore[misc]
+    """D-056 PR2: routing rule with sampling: → SamplingProfile resolved on provider."""
+    import textwrap
+    from pathlib import Path
+
+    registry = _make_registry()
+
+    # New split format: a sampling profile referencing a model profile.
+    from corpclaw_lite.llm.presets import PresetRegistry
+
+    preset_yaml = textwrap.dedent("""\
+        models:
+          qwen-test:
+            default_inference:
+              temperature: 0.7
+              top_k: 20
+        sampling:
+          fast-off:
+            model: qwen-test
+            thinking_mode: off
+            inference_overrides:
+              temperature: 0.2
+    """)
+    preset_path = Path("/tmp/_test_sampling_router.yaml")
+    preset_path.write_text(preset_yaml, encoding="utf-8")
+    try:
+        preset_reg = PresetRegistry.from_yaml(preset_path)
+        settings = _make_settings(
+            [
+                RoutingRule(
+                    task_kind="default",
+                    provider="ollama",
+                    model="qwen3.5-4b",
+                    sampling="fast-off",
+                ),
+            ]
+        )
+        router = LLMRouter.from_settings(settings, registry, preset_reg)
+        provider = router.default
+        assert provider is not None
+        # Model profile resolved from the sampling profile's model reference.
+        assert provider._model_profile is not None  # type: ignore[attr-defined]
+        assert provider._model_profile.default_inference["temperature"] == 0.7  # type: ignore[attr-defined]
+        # Sampling profile resolved with the configured thinking_mode.
+        assert provider._sampling is not None  # type: ignore[attr-defined]
+        assert provider._sampling.thinking_mode == "off"  # type: ignore[attr-defined]
+        assert provider._sampling.inference_overrides["temperature"] == 0.2  # type: ignore[attr-defined]
+        # No legacy preset (new-style rule).
+        assert provider._preset is None  # type: ignore[attr-defined]
+    finally:
+        preset_path.unlink(missing_ok=True)
+
+
+def test_sampling_wins_over_legacy_preset_field() -> None:
+    """When a rule has both sampling and preset, sampling wins (D-056)."""
+    import textwrap
+    from pathlib import Path
+
+    from corpclaw_lite.llm.presets import PresetRegistry
+
+    registry = _make_registry()
+    preset_yaml = textwrap.dedent("""\
+        models:
+          qwen-test:
+            default_inference:
+              temperature: 0.7
+        sampling:
+          sampling-rule:
+            model: qwen-test
+            thinking_mode: off
+        presets:
+          legacy-rule:
+            inference_params:
+              temperature: 0.9
+    """)
+    preset_path = Path("/tmp/_test_sampling_wins.yaml")
+    preset_path.write_text(preset_yaml, encoding="utf-8")
+    try:
+        preset_reg = PresetRegistry.from_yaml(preset_path)
+        settings = _make_settings(
+            [
+                RoutingRule(
+                    task_kind="default",
+                    provider="ollama",
+                    model="qwen3.5-4b",
+                    sampling="sampling-rule",
+                    preset="legacy-rule",  # legacy, ignored in favor of sampling
+                ),
+            ]
+        )
+        router = LLMRouter.from_settings(settings, registry, preset_reg)
+        provider = router.default
+        assert provider is not None
+        # Sampling resolved → thinking off.
+        assert provider._sampling is not None  # type: ignore[attr-defined]
+        assert provider._sampling.thinking_mode == "off"  # type: ignore[attr-defined]
+    finally:
+        preset_path.unlink(missing_ok=True)
+
+
 def test_unknown_preset_name_ignored() -> None:
     """Routing rule with unknown preset name → preset is None, provider still built."""
     registry = _make_registry()
