@@ -146,8 +146,8 @@ class EvalRunner:
                     scenario.id,
                     len(scenario.turns),
                 )
-                self._setup_workspace(scenario)
                 try:
+                    self._setup_workspace(scenario)
                     run_result = await self._run_scenario(scenario)
                     score = await self._score_scenario_async(run_result)
                     results.append(score)
@@ -312,16 +312,18 @@ class EvalRunner:
             full.write_text(content, encoding="utf-8")
         for dest, src in scenario.setup.copy_from_corpus:
             if self._corpus_dir is None:
-                logger.warning(
-                    "[eval] Scenario %s wants %s from corpus but no corpus_dir set",
-                    scenario.id,
-                    src,
+                raise FileNotFoundError(
+                    f"[eval] Scenario {scenario.id} requires corpus fixture '{src}' "
+                    f"(dest={dest}) but no corpus_dir is set. "
+                    f"Pass --corpus-dir or use generated_workbooks."
                 )
-                continue
             src_path = self._corpus_dir / src
             if not src_path.exists():
-                logger.warning("[eval] Corpus fixture missing: %s", src_path)
-                continue
+                raise FileNotFoundError(
+                    f"[eval] Scenario {scenario.id} requires corpus fixture '{src}' "
+                    f"at {src_path}, but the file does not exist. "
+                    f"Pass --corpus-dir or use generated_workbooks."
+                )
             dest_path = self._workspace_dir / dest
             dest_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(src_path, dest_path)
@@ -334,6 +336,12 @@ class EvalRunner:
                 generate_image(generator_id, dest_path)
             except ValueError as e:
                 logger.warning("[eval] %s: %s", scenario.id, e)
+        # Deterministic xlsx fixtures for office scenarios.
+        for dest, generator_id in scenario.setup.generated_workbooks:
+            from corpclaw_lite.eval.corpus_fixtures import generate_workbook
+
+            dest_path = self._workspace_dir / dest
+            generate_workbook(generator_id, dest_path)
 
     def _cleanup_workspace(self, scenario: EvalScenario) -> None:
         if scenario.setup is None:
@@ -341,6 +349,7 @@ class EvalRunner:
         all_paths = [p for p, _ in scenario.setup.files]
         all_paths += [d for d, _ in scenario.setup.copy_from_corpus]
         all_paths += [d for d, _ in scenario.setup.generated_images]
+        all_paths += [d for d, _ in scenario.setup.generated_workbooks]
         for rel_path in all_paths:
             full = self._workspace_dir / rel_path
             if full.exists():

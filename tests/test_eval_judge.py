@@ -384,3 +384,77 @@ def test_render_transcript_with_nested_subagent() -> None:
     rendered = render_transcript(traj)
     assert "[data-agent]" in rendered
     assert "table_query" in rendered
+
+
+# ──────────────────── Judge ensemble (D-052) ──────────────────────────────
+
+
+class _RotatingProvider(Provider):
+    """Returns a different canned response on each call, cycling through a list."""
+
+    def __init__(self, responses: list[str]) -> None:
+        self._responses = responses
+        self.call_count = 0
+
+    async def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        system: str | None = None,
+    ) -> LLMResponse:
+        resp = self._responses[self.call_count % len(self._responses)]
+        self.call_count += 1
+        return LLMResponse(content=resp)
+
+
+def _verdict(correctness: int, reasoning: str = "") -> str:
+    """Build a verdict JSON with all dimensions set, varying correctness."""
+    return json.dumps(
+        {
+            "scores": {
+                "correctness": correctness,
+                "tool_selection": 8,
+                "context_retention": 8,
+                "completeness": 8,
+                "efficiency": 8,
+                "personality": 8,
+                "error_recovery": 8,
+            },
+            "overall_score": correctness,
+            "pass": correctness >= 4,
+            "failure_category": None,
+            "reasoning": reasoning,
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_ensemble_median_filters_outlier() -> None:
+    """3 verdicts: [9, 9, 4] → median correctness = 9 (outlier filtered)."""
+    provider = _RotatingProvider([_verdict(9), _verdict(9), _verdict(4)])
+    judge = LLMJudge(provider, ensemble=3)
+    turn = ScenarioTurn(user_message="q", expected_answer="3650")
+    score = await judge.judge_turn(turn, "3650", _empty_trajectory())
+    assert score.scores["correctness"] == 9  # median of [9,9,4] = 9
+    assert provider.call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_ensemble_partial_failure_tolerated() -> None:
+    """2 of 3 succeed (1st returns garbage) → median of the 2 survivors."""
+    provider = _RotatingProvider(["not json at all", _verdict(8), _verdict(8)])
+    judge = LLMJudge(provider, ensemble=3)
+    turn = ScenarioTurn(user_message="q", expected_answer="3650")
+    score = await judge.judge_turn(turn, "3650", _empty_trajectory())
+    assert score.scores["correctness"] == 8  # median of [8,8] = 8
+
+
+@pytest.mark.asyncio
+async def test_ensemble_single_equals_ensemble_1() -> None:
+    """ensemble=1 calls the provider once (identical to default)."""
+    provider = _CannedProvider(_passing_verdict())
+    judge = LLMJudge(provider, ensemble=1)
+    turn = ScenarioTurn(user_message="q", expected_answer="3650")
+    score = await judge.judge_turn(turn, "3650", _empty_trajectory())
+    assert provider.call_count == 1
+    assert score.scores["correctness"] == 9

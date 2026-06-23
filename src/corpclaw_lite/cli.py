@@ -346,6 +346,16 @@ def _build_parser() -> argparse.ArgumentParser:
             "verdicts on local LLMs. Only takes effect in A/B mode."
         ),
     )
+    eval_p.add_argument(
+        "--judge-ensemble",
+        type=int,
+        default=1,
+        help=(
+            "Number of judge samples per turn, aggregated by per-dimension "
+            "median. Default 1. Recommended 3 to reduce judge variance on "
+            "borderline answers."
+        ),
+    )
 
     return parser
 
@@ -1001,6 +1011,7 @@ def cmd_eval(
     corpus_dir: str | None,
     output_dir: str,
     seeds: int = 1,
+    judge_ensemble: int = 1,
 ) -> None:
     """Run the eval harness (B-060) over a scenario corpus."""
     from corpclaw_lite.config.loader import load_settings
@@ -1029,7 +1040,7 @@ def cmd_eval(
 
     judge: LLMJudge | None = None
     if not no_judge:
-        judge = _resolve_judge(judge_provider)
+        judge = _resolve_judge(judge_provider, ensemble=judge_ensemble)
         if judge is None:
             print(
                 f"\n⚠️  Judge provider '{judge_provider}' not available; "
@@ -1053,6 +1064,7 @@ def cmd_eval(
 def _resolve_judge(
     provider_name: str,
     settings_path: Path | str | None = None,
+    ensemble: int = 1,
 ) -> LLMJudge | None:
     """Resolve a cloud provider for the LLM judge.
 
@@ -1064,6 +1076,9 @@ def _resolve_judge(
     so the judge respects the same routing rules as the eval (e.g. an explicit
     ``eval`` route pointing at a cloud model, rather than falling back to the
     local ``default`` route).
+
+    ``ensemble`` (default 1) queries the judge N times per turn and aggregates
+    by per-dimension median, reducing judge variance.
     """
     from pathlib import Path
 
@@ -1083,7 +1098,7 @@ def _resolve_judge(
     # Prefer an explicit 'eval' routing rule, else fall back to the default rule.
     task = "eval" if router.has_task_route("eval") else "default"
     provider = router.for_task(task)
-    return LLMJudge(provider)
+    return LLMJudge(provider, ensemble=ensemble)
 
 
 def cmd_generate(ext_type: str, name: str) -> None:
@@ -1251,6 +1266,7 @@ def main() -> None:
                 corpus_dir=args.corpus_dir,
                 output_dir=args.output,
                 seeds=args.seeds,
+                judge_ensemble=args.judge_ensemble,
             )
         else:
             parser.print_help()
