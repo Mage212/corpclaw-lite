@@ -31,6 +31,9 @@ import sys
 import threading
 from typing import TYPE_CHECKING, NoReturn
 
+if TYPE_CHECKING:
+    from pathlib import Path
+
 from corpclaw_lite.exceptions import StartupConfigurationError
 
 if TYPE_CHECKING:
@@ -332,6 +335,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--output",
         default="reports/eval",
         help="Directory to write eval reports (default: reports/eval)",
+    )
+    eval_p.add_argument(
+        "--seeds",
+        type=int,
+        default=1,
+        help=(
+            "Number of A/B seed runs with median aggregation (D-052). "
+            "Default 1 (single seed). Recommended 3 for stable guard-impact "
+            "verdicts on local LLMs. Only takes effect in A/B mode."
+        ),
     )
 
     return parser
@@ -987,11 +1000,21 @@ def cmd_eval(
     ab_guards: bool,
     corpus_dir: str | None,
     output_dir: str,
+    seeds: int = 1,
 ) -> None:
     """Run the eval harness (B-060) over a scenario corpus."""
     from corpclaw_lite.config.loader import load_settings
     from corpclaw_lite.logging.agent_logger import setup_logging
     from corpclaw_lite.paths import PROJECT_ROOT
+
+    # Multi-seed only applies in A/B mode; warn and fall back in single-pass.
+    effective_seeds = seeds
+    if seeds > 1 and not ab_guards:
+        print(
+            f"\n⚠️  --seeds {seeds} requires A/B mode; ignoring in single-pass (--no-ab).",
+            file=sys.stderr,
+        )
+        effective_seeds = 1
 
     _settings = load_settings(PROJECT_ROOT / "config" / "settings.yaml")
     _log = _settings.logging
@@ -1022,17 +1045,28 @@ def cmd_eval(
         corpus_dir=corpus_dir,
         output_dir=output_dir,
         ab_guards=ab_guards,
+        seeds=effective_seeds,
     )
     asyncio.run(loop.run())
 
 
-def _resolve_judge(provider_name: str) -> LLMJudge | None:
+def _resolve_judge(
+    provider_name: str,
+    settings_path: Path | str | None = None,
+) -> LLMJudge | None:
     """Resolve a cloud provider for the LLM judge.
 
     Returns None (gracefully) if the provider isn't registered — the eval loop
     then falls back to deterministic-only scoring. This keeps the command usable
     in closed-circuit deployments without cloud access.
+
+    ``settings_path`` defaults to ``config/settings.yaml`` but can be overridden
+    so the judge respects the same routing rules as the eval (e.g. an explicit
+    ``eval`` route pointing at a cloud model, rather than falling back to the
+    local ``default`` route).
     """
+    from pathlib import Path
+
     from corpclaw_lite.config.loader import load_settings
     from corpclaw_lite.config.providers import ProviderRegistry
     from corpclaw_lite.eval.judge import LLMJudge
@@ -1043,7 +1077,8 @@ def _resolve_judge(provider_name: str) -> LLMJudge | None:
     cloud_conn = provider_registry.get(provider_name)
     if not cloud_conn:
         return None
-    settings = load_settings(PROJECT_ROOT / "config" / "settings.yaml")
+    path = Path(settings_path) if settings_path else (PROJECT_ROOT / "config" / "settings.yaml")
+    settings = load_settings(path)
     router = LLMRouter.from_settings(settings.llm, provider_registry)
     # Prefer an explicit 'eval' routing rule, else fall back to the default rule.
     task = "eval" if router.has_task_route("eval") else "default"
@@ -1215,6 +1250,7 @@ def main() -> None:
                 ab_guards=not args.no_ab,
                 corpus_dir=args.corpus_dir,
                 output_dir=args.output,
+                seeds=args.seeds,
             )
         else:
             parser.print_help()

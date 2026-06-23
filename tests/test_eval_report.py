@@ -140,6 +140,117 @@ def test_ab_report_write_files(tmp_path: Path) -> None:
     assert parsed["verdict"] == "guards_help"
 
 
+# ──────────────────── Multi-seed (D-052) ─────────────────────────────────
+
+
+from corpclaw_lite.eval.report import MultiSeedReport, ScenarioMultiSeed  # noqa: E402
+
+
+def _ab(on_overall: float, off_overall: float, sid: str = "s1") -> ABReport:
+    """Build a single-scenario A/B report with the given on/off scores."""
+    on = PassReport(
+        label="guards_on", scenario_scores=[_scenario_score(sid, on_overall, on_overall >= 6.0)]
+    )
+    off = PassReport(
+        label="guards_off", scenario_scores=[_scenario_score(sid, off_overall, off_overall >= 6.0)]
+    )
+    return ABReport.compare(on, off)
+
+
+def test_multiseed_median_filters_noise() -> None:
+    """3 seeds: off-pass has one random 0.0 (sampling noise) but two 8.5s.
+    Median should be 8.5, not dragged down by the outlier."""
+    reports = [
+        _ab(8.5, 0.0),  # seed 1: noise (random wrong-number)
+        _ab(8.5, 8.5),  # seed 2: stable
+        _ab(8.5, 8.5),  # seed 3: stable
+    ]
+    ms = MultiSeedReport.from_ab_reports(reports)
+    assert ms.seeds == 3
+    assert len(ms.per_scenario) == 1
+    s = ms.per_scenario[0]
+    assert s.on_median == 8.5
+    assert s.off_median == 8.5  # median filters the single 0.0
+    assert s.delta == 0.0
+    assert ms.verdict == "guards_neutral"
+
+
+def test_multiseed_stable_verdict_help() -> None:
+    """Guards genuinely help: on stable at 8.5, off stable at 4.0 across all seeds."""
+    reports = [_ab(8.5, 4.0), _ab(8.5, 4.0), _ab(8.5, 4.0)]
+    ms = MultiSeedReport.from_ab_reports(reports)
+    assert ms.mean_delta > 4.0
+    assert ms.verdict == "guards_help"
+    assert ms.improved_count == 1
+    assert ms.regressed_count == 0
+
+
+def test_multiseed_stable_verdict_hurt() -> None:
+    """Guards genuinely hurt: on stable at 3.0, off stable at 8.0."""
+    reports = [_ab(3.0, 8.0), _ab(3.0, 8.0)]
+    ms = MultiSeedReport.from_ab_reports(reports)
+    assert ms.verdict == "guards_hurt"
+    assert ms.regressed_count == 1
+
+
+def test_multiseed_noisy_scenario_flagged() -> None:
+    """on_scores=[8.5, 0.0, 8.5] → on is noisy (spread > 0.1)."""
+    reports = [_ab(8.5, 8.0), _ab(0.0, 8.0), _ab(8.5, 8.0)]
+    ms = MultiSeedReport.from_ab_reports(reports)
+    s = ms.per_scenario[0]
+    assert not s.on_stable  # spread 8.5 > 0.1
+    assert s.off_stable
+    assert s.noisy
+    assert ms.noisy_count == 1
+    assert ms.stable_count == 0
+
+
+def test_multiseed_to_dict_and_write(tmp_path: Path) -> None:
+    reports = [_ab(8.5, 4.0), _ab(8.5, 4.0)]
+    ms = MultiSeedReport.from_ab_reports(reports)
+    d = ms.to_dict()
+    assert d["seeds"] == 2
+    assert d["summary"]["verdict"] == "guards_help"
+    assert len(d["per_scenario"]) == 1
+
+    ms.write(tmp_path)
+    assert (tmp_path / "multi_seed_report.json").exists()
+    assert (tmp_path / "multi_seed_report.md").exists()
+    parsed = json.loads((tmp_path / "multi_seed_report.json").read_text(encoding="utf-8"))
+    assert parsed["seeds"] == 2
+
+
+def test_multiseed_mismatched_scenarios() -> None:
+    """Seed 1 has scenario 's1', seed 2 has 's1' and 's2'. Both aggregated."""
+    reports = [_ab(8.5, 4.0, sid="s1"), _ab(9.0, 5.0, sid="s1"), _ab(7.0, 6.0, sid="s2")]
+    ms = MultiSeedReport.from_ab_reports(reports)
+    ids = {s.scenario_id for s in ms.per_scenario}
+    assert ids == {"s1", "s2"}
+    s1 = next(s for s in ms.per_scenario if s.scenario_id == "s1")
+    assert len(s1.on_scores) == 2  # s1 appeared in seed 1 and 2 only
+
+
+def test_scenario_multiseed_delta_and_stability() -> None:
+    """Direct ScenarioMultiSeed unit test for edge cases."""
+    # Stable scenario
+    s_stable = ScenarioMultiSeed(
+        scenario_id="x", on_scores=[8.5, 8.5, 8.5], off_scores=[8.0, 8.0, 8.0]
+    )
+    assert s_stable.on_stable
+    assert not s_stable.noisy
+    assert s_stable.delta == 0.5
+    assert s_stable.improved  # delta exactly at threshold 0.5
+
+    # Noisy scenario (tiny spread within band still counts stable)
+    s_band = ScenarioMultiSeed(scenario_id="y", on_scores=[8.5, 8.45, 8.5])
+    assert s_band.on_stable  # spread 0.05 < 0.1
+
+    # Empty scores
+    s_empty = ScenarioMultiSeed(scenario_id="z")
+    assert s_empty.on_median == 0.0
+    assert s_empty.on_stable  # empty treated as stable
+
+
 def test_scenario_delta_signs() -> None:
     improved = ScenarioDelta("a", overall_on=8.0, overall_off=5.0, passed_on=True, passed_off=False)
     regressed = ScenarioDelta(

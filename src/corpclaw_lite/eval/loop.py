@@ -21,7 +21,7 @@ from corpclaw_lite.agent.guards import (
     PlanningTextGuardConfig,
     ResultDedupGuardConfig,
 )
-from corpclaw_lite.eval.report import ABReport, PassReport
+from corpclaw_lite.eval.report import ABReport, MultiSeedReport, PassReport
 from corpclaw_lite.eval.runner import EvalRunner
 from corpclaw_lite.eval.scenarios import load_scenarios
 from corpclaw_lite.paths import PROJECT_ROOT
@@ -47,6 +47,11 @@ class EvalLoop:
             compare. When False, run one pass with guards on.
         settings_path: path to settings.yaml (default config/settings.yaml).
         workspace_base: parent dir for the per-pass eval workspace.
+        seeds: number of A/B seed runs for median aggregation (D-052). Default 1
+            (single seed, backward-compatible). Seeds > 1 only take effect in
+            A/B mode; in single-pass mode they are ignored. Each seed is a full
+            A/B (2 passes) with isolated workspace and memory; the aggregation
+            takes the per-scenario median to filter sampling noise.
     """
 
     def __init__(
@@ -59,6 +64,7 @@ class EvalLoop:
         settings_path: Path | str | None = None,
         workspace_base: Path | str | None = None,
         on_scenario_progress: Callable[[str, bool, int, int], None] | None = None,
+        seeds: int = 1,
     ) -> None:
         self._scenarios_path = (
             Path(scenarios_path)
@@ -76,22 +82,32 @@ class EvalLoop:
             Path(workspace_base) if workspace_base else (PROJECT_ROOT / ".eval_workspace")
         )
         self._on_progress = on_scenario_progress
+        self._seeds = max(1, seeds)
 
-    async def run(self) -> ABReport | PassReport:
+    async def run(self) -> ABReport | PassReport | MultiSeedReport:
         """Run the eval and return the report.
 
-        Returns an :class:`ABReport` in A/B mode, otherwise a :class:`PassReport`.
+        Returns a :class:`MultiSeedReport` in multi-seed A/B mode (seeds > 1),
+        an :class:`ABReport` in single-seed A/B mode, otherwise a
+        :class:`PassReport`.
         """
         scenarios = load_scenarios(self._scenarios_path)
         logger.info("[eval] Loaded %d scenarios from %s", len(scenarios), self._scenarios_path)
 
-        on_report = await self._run_pass(scenarios, guards_enabled=True, label="guards_on")
-        self._print_pass(on_report)
+        # Multi-seed A/B runs each seed as a full on/off pair (no upfront pass).
+        if self._ab_guards and self._seeds > 1:
+            return await self._run_multi_seed(scenarios)
 
+        # Single-pass mode (guards on only).
         if not self._ab_guards:
+            on_report = await self._run_pass(scenarios, guards_enabled=True, label="guards_on")
+            self._print_pass(on_report)
             _write_pass(on_report, self._output_dir)
             return on_report
 
+        # Single-seed A/B.
+        on_report = await self._run_pass(scenarios, guards_enabled=True, label="guards_on")
+        self._print_pass(on_report)
         off_report = await self._run_pass(scenarios, guards_enabled=False, label="guards_off")
         self._print_pass(off_report)
 
@@ -99,6 +115,55 @@ class EvalLoop:
         ab.write(self._output_dir)
         self._print_verdict(ab)
         return ab
+
+    async def _run_single_ab(
+        self,
+        scenarios: list[Any],
+        *,
+        output_override: Path | None = None,
+        workspace_override: Path | None = None,
+    ) -> ABReport:
+        """Run one guards-on vs guards-off A/B comparison.
+
+        ``output_override`` redirects the ABReport JSON/MD to a subdirectory
+        (used by multi-seed to keep per-seed reports). ``workspace_override``
+        isolates the per-seed workspace so seeds do not collide on files/memory.
+        """
+        saved_workspace = self._workspace_base
+        if workspace_override is not None:
+            self._workspace_base = workspace_override
+        try:
+            on_report = await self._run_pass(scenarios, guards_enabled=True, label="guards_on")
+            self._print_pass(on_report)
+            off_report = await self._run_pass(scenarios, guards_enabled=False, label="guards_off")
+            self._print_pass(off_report)
+        finally:
+            self._workspace_base = saved_workspace
+
+        ab = ABReport.compare(on_report, off_report)
+        if output_override is not None:
+            ab.write(output_override)
+        return ab
+
+    async def _run_multi_seed(self, scenarios: list[Any]) -> MultiSeedReport:
+        """Run N A/B seeds, aggregate per-scenario medians (D-052)."""
+        ab_reports: list[ABReport] = []
+        for n in range(1, self._seeds + 1):
+            print(f"\n═══ Seed {n}/{self._seeds} ═══")
+            logger.info("[eval] Starting seed %d/%d", n, self._seeds)
+            seed_dir = self._output_dir / f"seed_{n}"
+            seed_workspace = self._workspace_base / f"seed_{n}"
+            ab = await self._run_single_ab(
+                scenarios,
+                output_override=seed_dir,
+                workspace_override=seed_workspace,
+            )
+            ab_reports.append(ab)
+
+        ms = MultiSeedReport.from_ab_reports(ab_reports)
+        ms.write(self._output_dir)
+        self._print_multiseed_verdict(ms)
+        return ms
 
     # ──────────────────────────── one pass ───────────────────────────────
 
@@ -184,6 +249,23 @@ class EvalLoop:
             f"{ab.guards_off.mean_overall:.2f} (off) → {ab.mean_overall_delta:+.2f}"
         )
         print(f"  improved: {ab.improved_count}, regressed: {ab.regressed_count}")
+        print(f"  reports written to {self._output_dir}/")
+
+    def _print_multiseed_verdict(self, ms: MultiSeedReport) -> None:
+        labels = {
+            "guards_help": "✅ Phase 0 guards HELPED (stable across seeds)",
+            "guards_hurt": "⚠️ Phase 0 guards HURT (stable across seeds)",
+            "guards_neutral": "➖ Guards made no significant difference (stable)",
+        }
+        print()
+        print(f"═══ Multi-seed verdict ({ms.seeds} seeds, D-052) ═══")
+        print(f"{labels[ms.verdict]}")
+        print(
+            f"  mean overall (median): {ms.mean_on_median:.2f} (on) vs "
+            f"{ms.mean_off_median:.2f} (off) → {ms.mean_delta:+.2f}"
+        )
+        print(f"  improved: {ms.improved_count}, regressed: {ms.regressed_count}")
+        print(f"  stable: {ms.stable_count}, noisy: {ms.noisy_count}")
         print(f"  reports written to {self._output_dir}/")
 
 
