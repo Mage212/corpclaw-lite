@@ -594,18 +594,19 @@ uv run pytest tests/ --cov=src/corpclaw_lite --cov-report=term-missing  # Пок
 
 | Компонент | LOC | Файлов |
 |-----------|-----|--------|
-| Agent Core | 2 823 | 10 |
-| Extensions | 7 395 | 47 |
-| Channels | 6 313 | 22 |
-| Calibration | 1 522 | 8 |
-| LLM Providers | 3 671 | 9 |
-| Container | 833 | 6 |
-| Security | 562 | 5 |
-| Memory | 510 | 3 |
-| Onboarding | 630 | 5 |
-| Прочее | ~6 429 | ~28 |
-| **Исходный код** | **~27 769** | **~141** |
-| **Тесты** | **~20 729** | **~97** (1018 тестов собрано) |
+| Agent Core | ~4 400 | 13 |
+| Extensions | ~9 100 | 51 |
+| Channels | ~6 500 | 22 |
+| Calibration | ~1 560 | 8 |
+| LLM Providers | ~4 000 | 9 |
+| Eval harness (B-060) | ~1 860 | 9 |
+| Container | ~830 | 6 |
+| Security | ~800 | 6 |
+| Memory | ~840 | 4 |
+| Onboarding | ~630 | 5 |
+| Прочее | ~3 170 | ~27 |
+| **Исходный код** | **~34 500** | **~160** |
+| **Тесты** | **~30 300** | **~139** (1476 тестов собрано) |
 
 ---
 

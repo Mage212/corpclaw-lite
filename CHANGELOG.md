@@ -4,6 +4,108 @@
 
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/).
 
+## [0.1.13] — 2026-06-23
+
+Фокус версии — **три фазы инфраструктуры агента**. Phase 0 добавляет
+детерминированные guards против характерных циклов локальных LLM (повторы
+результатов, остановки mid-workflow). Phase 1 строит файловый фундамент —
+tracked-инструменты с журналом изменений и cross-subagent безопасностью записи.
+Phase 2 вводит GAIA-style eval harness для измерения качества агента и A/B-замера
+эффекта guards на локальных моделях (Qwen3.6, gemma4).
+
+Ключевой методологический результат Phase 2: live A/B-прогоны на 26-сценарном
+корпусе (glm-5.2 judge) показали, что после исправлений харнесса обе модели
+достигают 88–100% pass rate (gemma4: 81%→100%), а Phase 0 guards дают стабильный
++8% на general-моделях в режиме без thinking. Харнесс выявил, что прежние провалы
+моделей были артефактами scorer'а (false zeros), а не реальной неспособностью.
+
+### Added
+
+- **B-055 — Result-based query/tool dedup guard.** `ResultDedupGuard` в
+  `agent/guards.py`: блокирует циклы по идентичному результату (hash → count;
+  `detect()` при `count >= max_repeats=2`). Wire в `loop.py` после
+  `add_tool_result`, ДО `SimpleProgressGuard` (success-loops vs error-loops —
+  разные пути). Не-error результаты только. `_DEDUP_INSTRUCTION` (idempotent per
+  run). Trace event `dedup_result_triggered`.
+- **B-056 — Planning-text guard.** `PlanningTextGuard` в `agent/guards.py`:
+  блокирует mid-workflow остановки — агент выдаёт planning-text ("Let me now
+  verify…") вместо tool call или финального ответа. `_PLANNING_PHRASES` (19 EN из
+  GAIA + 15 RU), `_TOOL_ARTIFACT_RE` regex, length-heuristic, идемпотентность
+  через `corrections_used <= max_corrections=2`. Wire в блок финального ответа
+  `loop.py`.
+- **B-057 — `submit_report` tool для субагентов.** Явный терминатор inner
+  agent-loop (`terminal=True`, `parallel_safe=False`). Регистрируется в
+  `full_tool_registry` только (main agent терминируется естественным ответом).
+  Универсальный one-liner в system_prompt всех субагентов. Сосуществует с B-047
+  closing-mode: `submit_report` бесплатный universal closing fallback.
+- **B-059 — Security-обёртки для file/exec tools.** `PathValidator`
+  (`security/path_validator.py`): symlink-defense, path-traversal protection,
+  workspace-root enforcement. Atomic write primitives (`utils/fs.py`):
+  `write_file_atomic` (temp + rename), `ensure_parent_dir`.
+- **B-040 — File cowork Phase 1: file-change journal + snapshots + recent_files.**
+  `FileSnapshotStore` (`agent/file_snapshots.py`): on-disk backup перед мутацией.
+  File-change journal (`memory/file_changes.py` + SQLite DAO): create/modify/delete
+  с before/after hash и backup-path. `recent_files` injection в system_prompt.
+  Двухуровневый read-before-write guard (per-turn `readFileHistory` + per-call
+  `beforeContent` exact-match, из OpenCowork).
+- **B-058 — `FileStateRegistry` — cross-subagent file safety.** Stale read/writer
+  tracking: агент A прочитал файл, агент B записал → A получает stale-read warning.
+  Запись после чтения требует `readFileHistory` match. Интегрирован в
+  `FileTrackedTool`.
+- **B-060 — GAIA-style eval harness.** Пакет `eval/` (9 модулей): `scenarios.py`
+  (schema + loader), `scorer.py` (детерминированный pre-check + zero-rules +
+  exact-match), `judge.py` (LLM-judge, 7-мерный рубрик), `runner.py` (multi-turn
+  execution + scoring pipeline), `loop.py` (A/B orchestration guards on/off),
+  `report.py` (PassReport/ABReport + per-scenario deltas), `scores.py`
+  (TurnScore/ScenarioScore + weighted overall + pass/fail decision),
+  `vision_fixtures.py` (deterministic PNG generator для vision-сценариев).
+  Router+executor aligned (D-028): subagent trajectory capture (`record_nested`),
+  soft-delegation scoring (delegation — tool_selection/efficiency signal, не
+  correctness gate), judge видит tool-surface агента. CLI `eval` subcommand.
+  Корпус: 26 сценариев (office aggregation, multi-step, adversarial null-answer,
+  negation, memory, error_recovery, vision, personality).
+- **B-060 (PR #24) — Harness improvements.** Anti-hallucination секция в
+  `config/bootstrap/BEHAVIOR.md` (5 правил: не выдумывать факты, явно говорить "не
+  знаю"). Переписанные tool descriptions (`read_file`, `list_files`,
+  `dispatch_subagent`) с error-recovery guidance. Few-shots
+  (`config/calibrated/few_shots.yaml`, 5 примеров: null-answer honesty,
+  read→list_files recovery, data-agent delegation, honest refusal, concise
+  answer). Eval trajectory observability: `TurnScore` теперь несёт `final_answer`,
+  `tools_called`, `transcript` per turn.
+- **B-060 (PR #25) — Scorer fixes из live A/B.** Три детерминированных gap'а:
+  (1) `hallucinated_source` false-positive — zero-rule срабатывал на ЛЮБОЕ число в
+  null-answer; фикс: don't-know check первым, контекстные числа разрешены
+  ("нет инфо, только 28 дней" → pass, не zero); (2) thousands separator —
+  `"27 000"` парсилось как `[27, 0]` → wrong_number; фикс: нормализация
+  space/NBSP/thin-space между цифрами в `extract_numbers` + `normalize_answer`;
+  (3) judge variance на border-кейсах — fixed scoring floors в рубрике
+  (`config/eval/judge_turn.md`): "файл отсутствует → correctness 9-10", "correct
+  refusal of impossible task → correctness + error_recovery 9-10".
+
+### Changed
+
+- **`agent/guards.py`** — `ResultDedupGuardConfig` и `PlanningTextGuardConfig` в
+  `AgentSettings` (`config/settings.py`): configurable `enabled`, `max_repeats`,
+  `max_corrections`, `max_length`. Guards читаются из settings в `loop.py`.
+- **`docs/ARCHITECTURE.md`** — refresh счётчиков и версии проекта (0.1.12 →
+  0.1.13): ~144→~160 модулей, ~30.6K→~34.5K LOC, 1215→1476 pytest-кейсов. Новая
+  секция Eval Harness (B-060). `^0.1.12`→`^0.1.13` в plugin-manifest examples.
+- **`AGENTS.md`** — §11 Hot Reload: "Три watcher'а" → "Четыре watcher'а" (+
+  SubagentHotReloader, добавлен в 0.1.12, не отражён в AGENTS.md). Calibration
+  scenarios: 14 → 21. Структура проекта: 28 → 29 builtin tools (добавлен
+  `submit_report`).
+- **`README.md` / `README_RU.md`** — Features table: 28 → 29 builtin tools.
+  Stats table (README_RU): синхронизирована с ARCHITECTURE (устранён дрейф
+  ~27.8K vs ~30.6K LOC; теперь ~34.5K / ~160 модулей / 1476 тестов).
+- **`CONTRIBUTING.md` / `CLAUDE.md`** — `requires_core` example: `^0.1.11` /
+  `^0.1.12` → `^0.1.13` (приведены к единой актуальной версии).
+
+### Verified
+
+- `uv run ruff check src/ tests/` — clean.
+- `uv run pyright src/` — `0 errors` (16 существующих matplotlib stub warnings).
+- `uv run pytest tests/ -q` — `1476 passed, 1 skipped`.
+
 ## [0.1.12] — 2026-06-18
 
 Фокус версии — **архитектура приватных расширений (overlay)**. Корпоративные

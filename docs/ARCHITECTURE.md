@@ -1,7 +1,7 @@
 # CorpClaw Lite — Архитектура проекта
 
-> Версия документа: 2026-06-18
-> Версия проекта: 0.1.12 — ~144 Python-модуля, ~30.6K LOC, 1215 pytest-кейсов
+> Версия документа: 2026-06-23
+> Версия проекта: 0.1.13 — ~160 Python-модулей, ~34.5K LOC, 1476 pytest-кейсов
 
 ---
 
@@ -387,7 +387,7 @@ class Tool(ABC):
 - `load_overrides(path)` — YAML description overrides (калибровка)
 - `to_schemas()` / `to_schemas_for_user()` — OpenAI function schemas
 
-**Builtin Tools (28):**
+**Builtin Tools (29):**
 
 | Tool | Risk | Назначение |
 |------|------|------------|
@@ -407,6 +407,7 @@ class Tool(ABC):
 | `excel_workbook` | MEDIUM | Чтение и заполнение Excel-книг с формулами и пагинацией |
 | `send_file` | MEDIUM | Отправка файла (20MB limit) |
 | `dispatch_subagent` | LOW | Делегирование субагенту (terminal=True) |
+| `submit_report` | LOW | Явный терминатор inner agent-loop для субагентов (terminal=True, subagent-only) |
 | `diff_text` | LOW | Сравнение текстов/файлов (unified/words/chars) |
 | `table_query` | MEDIUM | SQL-запросы к CSV/XLSX/JSON через DuckDB |
 | `chart_generate` | MEDIUM | Графики (bar, line, pie, scatter, histogram) |
@@ -490,7 +491,7 @@ version: "1.0.0"
 type: plugin
 description: "Does something"
 allowed_departments: ["*"]
-requires_core: "^0.1.12"   # caret-совместимый constraint; warn-and-skip при несовпадении
+requires_core: "^0.1.13"   # caret-совместимый constraint; warn-and-skip при несовпадении
 components:
   skill: skill.md
   tool: tool.py
@@ -563,7 +564,7 @@ extensions:
 | mcp | merge по server `name` | более поздний файл выигрывает |
 | departments | **union-merge** | allowlists объединяются с wildcard-нормализацией, budget переопределяется где overlay указывает |
 
-**Version contract:** plugins декларируют `requires_core` в манифесте (`^0.1.12` =
+**Version contract:** plugins декларируют `requires_core` в манифесте (`^0.1.13` =
 совместим с 0.1.x; bare = exact). Ядро проверяет в едином chokepoint
 (`PluginRegistry.register`) — при несовместимости warn-and-skip, никогда молча.
 Контракт применяется только к plugins.
@@ -906,7 +907,7 @@ skills:
 
 Одноразовый (или периодический) этап: облачная модель анализирует, как локальная модель справляется с типовыми сценариями, и автоматически правит конфигурации. После калибровки — **только локальная модель**.
 
-### Ключевые модули (`calibration/`, 1,498 LOC)
+### Ключевые модули (`calibration/`, 1,564 LOC)
 
 | Класс | Назначение |
 |-------|------------|
@@ -928,7 +929,7 @@ skills:
 | 3 | Skill Instructions | `skills/*.md` |
 | 4 | Few-shot Examples | `config/calibrated/few_shots.yaml` |
 
-### Сценарии калибровки (20+)
+### Сценарии калибровки (21)
 
 | Категория | Примеры |
 |-----------|---------|
@@ -995,28 +996,30 @@ skills:
 ## Ключевые метрики
 
 > Per-component breakdown приблизительный (модули переезжали между пакетами с момента
-> последнего точного подсчёта); totals проверены на 0.1.12.
+> последнего точного подсчёта); totals проверены на 0.1.13.
 
 | Компонент | LOC | Файлов |
 |-----------|-----|--------|
-| Agent Core | ~2,800 | 10 |
-| Calibration | ~1,520 | 8 |
+| Agent Core | ~4,400 | 13 |
+| Calibration | ~1,560 | 8 |
 | Onboarding | ~630 | 5 |
-| LLM Providers + Queue + Cache | ~5,300 | 11 |
-| Extensions | ~7,400 | 48 |
-| Security | ~560 | 5 |
-| Channels | ~6,300 | 22 |
+| LLM Providers + Queue + Cache | ~4,000 | 9 |
+| Extensions | ~9,100 | 51 |
+| Security | ~800 | 6 |
+| Channels | ~6,500 | 22 |
 | Container | ~830 | 6 |
-| Memory | ~510 | 3 |
-| Config + RBAC | ~640 | 6 |
-| Departments | ~200 | 3 |
+| Memory | ~840 | 4 |
+| Config + RBAC | ~700 | 6 |
+| Departments | ~300 | 3 |
 | Users | ~955 | 3 |
+| Eval harness (B-060) | ~1,860 | 9 |
 | Runtime | ~47 | 2 |
-| Logging | ~430 | 4 |
-| Root (cli, etc.) | ~1,270 | 4 |
-| **Исходники** | **~30,600** | **~144** |
-| **Тесты** | **~22,700** | **~98** |
-| **Тест-кейсов pytest** | **1215** | |
+| Logging | ~360 | 4 |
+| Utils | ~200 | 4 |
+| Root (cli, etc.) | ~1,410 | 5 |
+| **Исходники** | **~34,500** | **~160** |
+| **Тесты** | **~30,300** | **~139** |
+| **Тест-кейсов pytest** | **1476** | |
 
 ---
 
