@@ -179,3 +179,159 @@ async def test_single_pass_with_failing_answer(
     assert report is not None
     assert report.total == 1
     assert report.passed == 0
+
+
+# ──────────────────── Multi-seed mode (D-052) ────────────────────────────
+
+
+def _patch_rotating_answers(
+    monkeypatch: pytest.MonkeyPatch,
+    answers: list[str],
+    scenarios: list[EvalScenario],
+) -> None:
+    """Patch build_agent_stack to return a rotating sequence of answers.
+
+    Each call to build_agent_stack pops the next answer. With multi-seed A/B,
+    each seed consumes 2 answers (guards_on, guards_off), so N seeds need 2N
+    entries. This lets tests script per-seed on/off scores.
+    """
+    import corpclaw_lite.agent.factory as factory_module
+    import corpclaw_lite.config.bootstrap as bootstrap_module
+
+    call_state = {"idx": 0}
+
+    def fake_build(settings: Any) -> _FakeStack:
+        idx = call_state["idx"]
+        call_state["idx"] += 1
+        answer = answers[idx % len(answers)] if answers else "3650"
+        return _FakeStack(answer, [])
+
+    monkeypatch.setattr(factory_module, "build_agent_stack", fake_build)
+    monkeypatch.setattr(loop_module, "load_scenarios", lambda _path: scenarios)
+
+    class _FakeBootstrap:
+        def get_system_prompt(self) -> str:
+            return "sys"
+
+    monkeypatch.setattr(bootstrap_module, "BootstrapLoader", lambda *_a, **_k: _FakeBootstrap())
+
+
+@pytest.mark.asyncio
+async def test_multiseed_aggregates_median(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """3 seeds: off has one random 0.0 (wrong answer) but two correct answers.
+    Median should be 8.5 (the correct pass score), not dragged down by the outlier."""
+    scenarios = [_exact_match_scenario("s1", "3650")]
+    # Per-seed answers: [on, off] pairs. "3650" = correct (8.5), "9999" = wrong (0.0).
+    answers = [
+        "3650",
+        "9999",  # seed 1: on=correct, off=wrong (noise)
+        "3650",
+        "3650",  # seed 2: both correct
+        "3650",
+        "3650",  # seed 3: both correct
+    ]
+    _patch_rotating_answers(monkeypatch, answers, scenarios)
+
+    ev = EvalLoop(seeds=3, ab_guards=True, output_dir=tmp_path, workspace_base=tmp_path / "ws")
+    result = await ev.run()
+    from corpclaw_lite.eval.report import MultiSeedReport
+
+    assert isinstance(result, MultiSeedReport)
+    assert result.seeds == 3
+    s = result.per_scenario[0]
+    assert s.on_median == 8.5
+    assert s.off_median == 8.5  # median filters the single 0.0
+    assert s.delta == 0.0
+    assert result.verdict == "guards_neutral"
+
+
+@pytest.mark.asyncio
+async def test_multiseed_stable_verdict_help(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Guards genuinely help: on always correct, off always wrong across seeds."""
+    scenarios = [_exact_match_scenario("s1", "3650")]
+    answers = [
+        "3650",
+        "9999",  # seed 1: on=correct, off=wrong
+        "3650",
+        "9999",  # seed 2
+        "3650",
+        "9999",  # seed 3
+    ]
+    _patch_rotating_answers(monkeypatch, answers, scenarios)
+
+    ev = EvalLoop(seeds=3, ab_guards=True, output_dir=tmp_path, workspace_base=tmp_path / "ws")
+    result = await ev.run()
+    from corpclaw_lite.eval.report import MultiSeedReport
+
+    assert isinstance(result, MultiSeedReport)
+    assert result.verdict == "guards_help"
+    assert result.improved_count == 1
+    assert result.regressed_count == 0
+
+
+@pytest.mark.asyncio
+async def test_multiseed_noisy_scenario_flagged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """on_scores=[8.5, 0.0, 8.5] → on is noisy (spread > 0.1)."""
+    scenarios = [_exact_match_scenario("s1", "3650")]
+    answers = [
+        "3650",
+        "3650",  # seed 1: on=correct
+        "9999",
+        "3650",  # seed 2: on=wrong (noise)
+        "3650",
+        "3650",  # seed 3: on=correct
+    ]
+    _patch_rotating_answers(monkeypatch, answers, scenarios)
+
+    ev = EvalLoop(seeds=3, ab_guards=True, output_dir=tmp_path, workspace_base=tmp_path / "ws")
+    result = await ev.run()
+    from corpclaw_lite.eval.report import MultiSeedReport
+
+    assert isinstance(result, MultiSeedReport)
+    s = result.per_scenario[0]
+    assert not s.on_stable  # [8.5, 0.0, 8.5] spread > 0.1
+    assert s.noisy
+    assert result.noisy_count == 1
+
+
+@pytest.mark.asyncio
+async def test_multiseed_single_pass_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """seeds=3 with --no-ab → fallback to single pass (seeds ignored)."""
+    scenarios = [_exact_match_scenario("s1", "3650")]
+    _patch_rotating_answers(monkeypatch, ["3650"], scenarios)
+
+    ev = EvalLoop(seeds=3, ab_guards=False, output_dir=tmp_path, workspace_base=tmp_path / "ws")
+    result = await ev.run()
+    from corpclaw_lite.eval.report import PassReport
+
+    # Single-pass mode ignores seeds → returns PassReport.
+    assert isinstance(result, PassReport)
+    assert (tmp_path / "eval_report.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_multiseed_writes_per_seed_reports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Multi-seed writes per-seed eval_report.json + top-level multi_seed_report.json."""
+    scenarios = [_exact_match_scenario("s1", "3650")]
+    answers = ["3650", "3650", "3650", "3650"]  # 2 seeds × 2 passes, all correct
+    _patch_rotating_answers(monkeypatch, answers, scenarios)
+
+    ev = EvalLoop(seeds=2, ab_guards=True, output_dir=tmp_path, workspace_base=tmp_path / "ws")
+    result = await ev.run()
+    from corpclaw_lite.eval.report import MultiSeedReport
+
+    assert isinstance(result, MultiSeedReport)
+    # Per-seed reports.
+    assert (tmp_path / "seed_1" / "eval_report.json").exists()
+    assert (tmp_path / "seed_2" / "eval_report.json").exists()
+    # Top-level aggregated report.
+    assert (tmp_path / "multi_seed_report.json").exists()
+    assert (tmp_path / "multi_seed_report.md").exists()
