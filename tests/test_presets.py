@@ -421,3 +421,255 @@ def test_build_provider_anthropic_requires_key() -> None:
     conn = ProviderConnection(type="anthropic")
     provider = build_provider(conn, model="claude-3-haiku-20240307")
     assert provider is None
+
+
+# ── Split format (D-056): ModelProfile / SamplingProfile ─────────────────────
+
+
+def test_load_split_format_yaml(tmp_path: Path) -> None:
+    """New models:/sampling: format loads into separate registries."""
+    from corpclaw_lite.llm.presets import PresetRegistry
+
+    yaml_content = textwrap.dedent("""\
+        models:
+          gemma4:
+            thinking_parser:
+              open_tag: "<|channel>thought"
+              close_tag: "<channel|>"
+              source: "content"
+            system_prompt_prefix: "<|think|>"
+            default_inference:
+              temperature: 0.7
+              top_k: 64
+
+        sampling:
+          gemma4-default:
+            model: gemma4
+            thinking_mode: default
+            inference_overrides:
+              temperature: 1.0
+          gemma4-fast:
+            model: gemma4
+            thinking_mode: off
+          aux-no-thinking:
+            model: gemma4
+            thinking_mode: off
+            inference_overrides:
+              temperature: 0.2
+    """)
+    f = tmp_path / "presets.yaml"
+    f.write_text(yaml_content, encoding="utf-8")
+
+    registry = PresetRegistry.from_yaml(f)
+    assert registry.list_model_profiles() == ["gemma4"]
+    assert set(registry.list_sampling_profiles()) == {
+        "gemma4-default",
+        "gemma4-fast",
+        "aux-no-thinking",
+    }
+
+    mp = registry.get_model_profile("gemma4")
+    assert mp is not None
+    assert mp.system_prompt_prefix == "<|think|>"
+    assert mp.thinking_parser is not None
+    assert mp.thinking_parser.source == "content"
+    assert mp.default_inference["temperature"] == 0.7
+
+    sp = registry.get_sampling_profile("gemma4-fast")
+    assert sp is not None
+    assert sp.model == "gemma4"
+    assert sp.thinking_mode == "off"
+
+    sp_aux = registry.get_sampling_profile("aux-no-thinking")
+    assert sp_aux is not None
+    assert sp_aux.inference_overrides["temperature"] == 0.2
+
+
+def test_load_legacy_and_split_mixed(tmp_path: Path) -> None:
+    """Legacy presets: and new models:/sampling: coexist in one file."""
+    from corpclaw_lite.llm.presets import PresetRegistry
+
+    yaml_content = textwrap.dedent("""\
+        models:
+          qwen3:
+            default_inference:
+              temperature: 0.7
+
+        sampling:
+          qwen3-default:
+            model: qwen3
+
+        presets:
+          legacy-foo:
+            inference_params:
+              temperature: 0.5
+    """)
+    f = tmp_path / "presets.yaml"
+    f.write_text(yaml_content, encoding="utf-8")
+
+    registry = PresetRegistry.from_yaml(f)
+    # New-style entries.
+    assert registry.get_model_profile("qwen3") is not None
+    assert registry.get_sampling_profile("qwen3-default") is not None
+    # Legacy entry split into virtual (ModelProfile, SamplingProfile) pair.
+    assert registry.get_model_profile("legacy-foo") is not None
+    assert registry.get_sampling_profile("legacy-foo") is not None
+
+
+def test_legacy_get_back_compat_returns_combined_preset(tmp_path: Path) -> None:
+    """registry.get(name) (legacy) reconstructs a combined ModelPreset from a profile."""
+    from corpclaw_lite.llm.presets import PresetRegistry
+
+    yaml_content = textwrap.dedent("""\
+        models:
+          gemma4:
+            system_prompt_prefix: "<|think|>"
+            default_inference:
+              temperature: 0.7
+    """)
+    f = tmp_path / "presets.yaml"
+    f.write_text(yaml_content, encoding="utf-8")
+
+    registry = PresetRegistry.from_yaml(f)
+    combined = registry.get("gemma4")
+    assert combined is not None
+    assert combined.system_prompt_prefix == "<|think|>"
+    assert combined.inference_params["temperature"] == 0.7
+
+
+def test_list_all_union_of_profiles(tmp_path: Path) -> None:
+    """list_all() (legacy) returns the union of model + sampling names."""
+    from corpclaw_lite.llm.presets import PresetRegistry
+
+    yaml_content = textwrap.dedent("""\
+        models:
+          m1: {}
+          m2: {}
+        sampling:
+          s1: {model: m1}
+    """)
+    f = tmp_path / "presets.yaml"
+    f.write_text(yaml_content, encoding="utf-8")
+
+    registry = PresetRegistry.from_yaml(f)
+    names = set(registry.list_all())
+    assert names == {"m1", "m2", "s1"}
+
+
+def test_invalid_model_profile_skipped(tmp_path: Path) -> None:
+    """Invalid model profile (bad enum) is skipped, others load."""
+    from corpclaw_lite.llm.presets import PresetRegistry
+
+    yaml_content = textwrap.dedent("""\
+        models:
+          good:
+            default_inference:
+              temperature: 0.7
+          bad:
+            thinking_parser:
+              source: "bogus"
+    """)
+    f = tmp_path / "presets.yaml"
+    f.write_text(yaml_content, encoding="utf-8")
+
+    registry = PresetRegistry.from_yaml(f)
+    assert registry.get_model_profile("good") is not None
+    assert registry.get_model_profile("bad") is None
+
+
+def test_model_profile_to_preset_roundtrip() -> None:
+    """ModelProfile.to_preset() reconstructs a combined preset (back-compat)."""
+    from corpclaw_lite.llm.presets import ModelProfile, ThinkingConfig
+
+    mp = ModelProfile(
+        description="d",
+        thinking_parser=ThinkingConfig(source="native"),
+        system_prompt_prefix="P",
+        default_inference={"temperature": 0.7},
+    )
+    preset = mp.to_preset()
+    assert preset.description == "d"
+    assert preset.thinking is not None
+    assert preset.thinking.source == "native"
+    assert preset.system_prompt_prefix == "P"
+    assert preset.inference_params["temperature"] == 0.7
+
+
+# ── Split-apply methods (OpenAIProvider) ─────────────────────────────────────
+
+
+def _openai_with_profiles(model_profile: Any | None = None, sampling: Any | None = None) -> Any:
+    from corpclaw_lite.config.providers import ProviderSettings
+    from corpclaw_lite.llm.openai import OpenAIProvider
+
+    return OpenAIProvider(
+        ProviderSettings(model="test", api_key="key", base_url="http://localhost:1234/v1"),
+        model_profile=model_profile,
+        sampling=sampling,
+    )
+
+
+def test_apply_model_profile_injects_prefix_and_defaults() -> None:
+    from corpclaw_lite.llm.presets import ModelProfile
+
+    provider = _openai_with_profiles(
+        ModelProfile(
+            system_prompt_prefix="<|think|>",
+            default_inference={"temperature": 0.7, "top_k": 64},
+        )
+    )
+    kwargs: dict[str, Any] = {}
+    system = provider._apply_model_profile("You are helpful.", kwargs)
+    assert system == "<|think|>\nYou are helpful."
+    assert kwargs["temperature"] == 0.7
+    assert kwargs["extra_body"]["top_k"] == 64
+
+
+def test_apply_sampling_thinking_off_injects_chat_template_kwargs() -> None:
+    from corpclaw_lite.llm.presets import SamplingProfile
+
+    provider = _openai_with_profiles(sampling=SamplingProfile(thinking_mode="off"))
+    kwargs: dict[str, Any] = {}
+    provider._apply_sampling(kwargs)
+    assert kwargs["extra_body"]["chat_template_kwargs"]["enable_thinking"] is False
+
+
+def test_apply_sampling_budget_caps_max_tokens() -> None:
+    from corpclaw_lite.llm.presets import SamplingProfile
+
+    provider = _openai_with_profiles(
+        sampling=SamplingProfile(thinking_mode="budget", thinking_budget=256)
+    )
+    kwargs: dict[str, Any] = {}
+    provider._apply_sampling(kwargs)
+    assert kwargs["max_tokens"] == 256 + 1024
+
+
+def test_apply_sampling_default_is_noop() -> None:
+    from corpclaw_lite.llm.presets import SamplingProfile
+
+    provider = _openai_with_profiles(sampling=SamplingProfile(thinking_mode="default"))
+    kwargs: dict[str, Any] = {}
+    provider._apply_sampling(kwargs)
+    assert "extra_body" not in kwargs
+    assert "max_tokens" not in kwargs
+
+
+def test_parse_reasoning_uses_model_profile() -> None:
+    """_parse_reasoning reads ModelProfile.thinking_parser (new API)."""
+    from corpclaw_lite.llm.presets import ModelProfile, ThinkingConfig
+
+    provider = _openai_with_profiles(
+        ModelProfile(
+            thinking_parser=ThinkingConfig(
+                open_tag="<|channel>thought",
+                close_tag="<channel|>",
+                source="content",
+            )
+        )
+    )
+    msg = MagicMock()
+    msg.content = "<|channel>thought\nI think 2+2=4\n<channel|>The answer is 4."
+    reasoning, content = provider._parse_reasoning(msg)
+    assert reasoning == "I think 2+2=4"
+    assert content == "The answer is 4."

@@ -38,7 +38,12 @@ from corpclaw_lite.llm.base import (
     set_backend_request_options,
 )
 from corpclaw_lite.llm.cache import LLMCacheManager, config_from_settings
-from corpclaw_lite.llm.presets import ModelPreset, PresetRegistry
+from corpclaw_lite.llm.presets import (
+    ModelPreset,
+    ModelProfile,
+    PresetRegistry,
+    SamplingProfile,
+)
 from corpclaw_lite.llm.queue import (
     LLMLoadClass,
     LLMQueueStatus,
@@ -78,11 +83,29 @@ def build_provider(
     conn: ProviderConnection,
     model: str,
     preset: ModelPreset | None = None,
+    *,
+    model_profile: ModelProfile | None = None,
+    sampling: SamplingProfile | None = None,
 ) -> Provider | None:
-    """Build a concrete Provider from a connection + model + preset.
+    """Build a concrete Provider from a connection + model + (profiles | preset).
 
-    Returns None if the provider cannot be built (e.g., missing required API key).
+    Two equivalent input styles (D-056):
+
+    - **New (preferred):** ``model_profile=`` + ``sampling=`` — the split
+      ModelProfile/SamplingProfile pair.
+    - **Legacy (back-compat):** ``preset=`` — a combined :class:`ModelPreset`.
+      Internally split into a (ModelProfile, SamplingProfile) pair so the
+      provider always sees the same internal shape.
+
+    If both are given, ``model_profile``/``sampling`` win. Returns None if the
+    provider cannot be built (e.g., missing required API key).
     """
+    # Bridge legacy preset → profiles when the new-style args are absent.
+    if model_profile is None and sampling is None and preset is not None:
+        from corpclaw_lite.llm.presets import profile_from_legacy_preset
+
+        model_profile, sampling = profile_from_legacy_preset(preset)
+
     if conn.type == "anthropic":
         if not conn.api_key:
             return None  # Anthropic requires a key; skip silently
@@ -91,14 +114,24 @@ def build_provider(
         settings = ProviderSettings(
             type="anthropic", model=model, api_key=conn.api_key, base_url=conn.base_url
         )
-        return AnthropicProvider(settings, preset=preset)
+        return AnthropicProvider(
+            settings,
+            preset=preset,
+            model_profile=model_profile,
+            sampling=sampling,
+        )
 
     # Default: openai-compatible (Ollama, vLLM, LM Studio, OpenRouter, etc.)
     from corpclaw_lite.llm.openai import OpenAIProvider
 
     api_key = conn.api_key or "dummy"  # local models may not need a real key
     settings = ProviderSettings(type="openai", model=model, api_key=api_key, base_url=conn.base_url)
-    return OpenAIProvider(settings, preset=preset)
+    return OpenAIProvider(
+        settings,
+        preset=preset,
+        model_profile=model_profile,
+        sampling=sampling,
+    )
 
 
 class LLMRouter:
@@ -167,13 +200,32 @@ class LLMRouter:
             if conn is None:
                 return None
 
-            preset: ModelPreset | None = None
+            # Prefer the split-profile API (D-056): a name registered either as
+            # a new-style model/sampling profile or as a legacy preset resolves
+            # to the same name in both registries, so we look it up in both.
+            model_profile: ModelProfile | None = None
+            sampling_profile: SamplingProfile | None = None
+            legacy_preset: ModelPreset | None = None
             if preset_name and preset_registry:
-                preset = preset_registry.get(preset_name)
-                if preset is None:
+                model_profile = preset_registry.get_model_profile(preset_name)
+                sampling_profile = preset_registry.get_sampling_profile(preset_name)
+                legacy_preset = preset_registry.get(preset_name)
+                if model_profile is None and sampling_profile is None and legacy_preset is None:
+                    # Truly unknown name — no model profile, no sampling profile,
+                    # no legacy combined preset. Fall back to provider defaults.
                     logger.warning("Unknown preset '%s', ignoring", preset_name)
 
-            provider = build_provider(conn, model=model, preset=preset)
+            provider = build_provider(
+                conn,
+                model=model,
+                # Pass the legacy preset alongside so provider._preset stays
+                # populated for back-compat introspection when the name was a
+                # legacy combined preset. New-style profiles take precedence
+                # inside build_provider when both are non-None.
+                preset=legacy_preset,
+                model_profile=model_profile,
+                sampling=sampling_profile,
+            )
             if provider is not None:
                 cache[cache_key] = provider
                 provider_meta[id(provider)] = (provider_name, model, preset_name)
