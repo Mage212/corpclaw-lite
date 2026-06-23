@@ -110,11 +110,12 @@ scenarios:
     severity: normal
     description: >
       Normalize an Excel workbook structure (headers, trim whitespace). Requires
-      excel_workbook to inspect then normalize_excel to fix. Binary fixture.
+      excel_workbook to inspect then normalize_excel to fix. Binary fixture
+      generated deterministically by corpus_fixtures.py (messy_headers generator).
     setup:
-      copy_from_corpus:
+      generated_workbooks:
         - dest: "messy.xlsx"
-          source: "messy_headers.xlsx"
+          generator: "messy_headers"
     turns:
       - user_message: "В файле messy.xlsx почищай заголовки: убери лишние пробелы и приведи к нижнему регистру. Сохрани результат."
         expected_tools: ["dispatch_subagent"]
