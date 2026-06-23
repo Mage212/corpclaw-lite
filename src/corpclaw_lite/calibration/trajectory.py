@@ -1,8 +1,17 @@
-"""Structured trajectory recorder for agent execution.
+"""Trajectory recording for calibration and eval (B-060).
 
-Records every step of an AgentLoop run (LLM calls, tool calls, tool results,
-final answer) in a machine-readable format suitable for post-mortem analysis,
-calibration scoring, and audit logging.
+Records the sequence of tool calls and results during an AgentLoop run, so the
+calibration scorer / eval judge can inspect *what the agent did*, not just its
+final answer.
+
+Since the router+executor architecture (D-028) delegates execution to
+subagents, the main agent's trajectory sees only ``dispatch_subagent`` calls —
+not the inner ``table_query``/``excel_workbook`` calls the subagent made. To make
+the inner work visible to the eval harness, the recorder supports **nested
+steps**: inner tool calls are stamped with ``subagent_id`` and merged into the
+parent trajectory after the dispatch returns. ``tool_calls_sequence()`` filters
+them out by default (backward-compatible with the calibration scorer); pass
+``include_subagent=True`` to see the full path including delegated work.
 """
 
 from __future__ import annotations
@@ -11,16 +20,17 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-__all__ = [
-    "Trajectory",
-    "TrajectoryRecorder",
-    "TrajectoryStep",
-]
+__all__ = ["Trajectory", "TrajectoryRecorder", "TrajectoryStep"]
 
 
 @dataclass
 class TrajectoryStep:
-    """Single step in agent execution."""
+    """One recorded step: a tool call, its result, or the final answer.
+
+    ``subagent_id`` is set for steps that belong to a subagent's inner run
+    (captured via :meth:`TrajectoryRecorder.record_nested`). It is ``None`` for
+    steps the main agent executed directly.
+    """
 
     step_type: str  # "tool_call" | "tool_result" | "final_answer"
     tool_name: str | None = None
@@ -28,11 +38,12 @@ class TrajectoryStep:
     tool_result: str | None = None
     content: str | None = None
     timestamp_ms: float = 0.0
+    subagent_id: str | None = None
 
 
 @dataclass
 class Trajectory:
-    """Full execution trace for one scenario run."""
+    """Immutable snapshot of a finished run's trajectory."""
 
     scenario_id: str
     steps: list[TrajectoryStep] = field(default_factory=lambda: list[TrajectoryStep]())
@@ -43,41 +54,57 @@ class Trajectory:
     status: str = "ok"
     skills_selected: list[str] = field(default_factory=lambda: list[str]())
 
-    def tool_calls_sequence(self) -> list[str]:
-        """Return ordered list of tool names called."""
-        return [
-            s.tool_name
-            for s in self.steps
-            if s.step_type == "tool_call" and s.tool_name is not None
-        ]
+    def tool_calls_sequence(self, *, include_subagent: bool = False) -> list[str]:
+        """Ordered list of tool names called.
+
+        By default only the main agent's direct calls are returned (the
+        calibration scorer relies on this). Pass ``include_subagent=True`` to
+        also list tools called inside dispatched subagents, in execution order.
+        """
+        out: list[str] = []
+        for step in self.steps:
+            if step.step_type != "tool_call" or not step.tool_name:
+                continue
+            if step.subagent_id is not None and not include_subagent:
+                continue
+            out.append(step.tool_name)
+        return out
+
+    def dispatch_subagent_ids(self) -> list[str]:
+        """The subagent ids the main agent dispatched to, in call order."""
+        ids: list[str] = []
+        for step in self.steps:
+            if (
+                step.step_type == "tool_call"
+                and step.tool_name == "dispatch_subagent"
+                and step.tool_args
+            ):
+                sid = step.tool_args.get("subagent_id")
+                if isinstance(sid, str):
+                    ids.append(sid)
+        return ids
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to a JSON-compatible dictionary."""
         return {
             "scenario_id": self.scenario_id,
-            "final_answer": self.final_answer,
-            "iterations": self.iterations,
-            "tools_used": self.tools_used,
-            "duration_ms": self.duration_ms,
-            "status": self.status,
-            "skills_selected": self.skills_selected,
             "steps": [
                 {
                     "step_type": s.step_type,
                     "tool_name": s.tool_name,
                     "tool_args": s.tool_args,
-                    "tool_result": (
-                        s.tool_result[:500]
-                        if s.tool_result and len(s.tool_result) > 500
-                        else s.tool_result
-                    ),
-                    "content": (
-                        s.content[:500] if s.content and len(s.content) > 500 else s.content
-                    ),
-                    "timestamp_ms": s.timestamp_ms,
+                    "tool_result": (s.tool_result or "")[:500],
+                    "content": (s.content or "")[:500],
+                    "timestamp_ms": round(s.timestamp_ms, 2),
+                    "subagent_id": s.subagent_id,
                 }
                 for s in self.steps
             ],
+            "final_answer": self.final_answer,
+            "iterations": self.iterations,
+            "tools_used": self.tools_used,
+            "duration_ms": round(self.duration_ms, 2),
+            "status": self.status,
+            "skills_selected": self.skills_selected,
         }
 
 
@@ -108,12 +135,8 @@ class TrajectoryRecorder:
             )
         )
 
-    def record_skills(self, skills: list[str]) -> None:
-        """Record which skills were selected for this scenario."""
-        self._skills_selected = skills
-
     def record_tool_result(self, tool_name: str, result: str) -> None:
-        """Record a tool execution result."""
+        """Record a tool's result."""
         self._steps.append(
             TrajectoryStep(
                 step_type="tool_result",
@@ -123,15 +146,34 @@ class TrajectoryRecorder:
             )
         )
 
+    def record_nested(self, subagent_id: str, steps: list[TrajectoryStep]) -> None:
+        """Merge a subagent's inner steps into this (parent) trajectory.
+
+        Each step is re-stamped with ``subagent_id`` so callers can tell main
+        calls from delegated ones. Called by the parent AgentLoop after a
+        ``dispatch_subagent`` call returns.
+        """
+        now = time.monotonic() * 1000 - self._start_ms
+        for step in steps:
+            step.subagent_id = subagent_id
+            if step.timestamp_ms == 0.0:
+                step.timestamp_ms = now
+            self._steps.append(step)
+
+    def record_skills(self, skills: list[str]) -> None:
+        """Record which skills were selected for this scenario."""
+        self._skills_selected = skills
+
     def finalize(
         self,
         final_answer: str,
+        *,
         iterations: int = 0,
         tools_used: list[str] | None = None,
         duration_ms: float = 0.0,
         status: str = "ok",
     ) -> Trajectory:
-        """Build the final Trajectory from recorded steps."""
+        """Freeze the recorded steps into an immutable Trajectory."""
         self._steps.append(
             TrajectoryStep(
                 step_type="final_answer",
@@ -141,11 +183,11 @@ class TrajectoryRecorder:
         )
         return Trajectory(
             scenario_id=self._scenario_id,
-            steps=self._steps,
+            steps=list(self._steps),
             final_answer=final_answer,
             iterations=iterations,
             tools_used=tools_used or [],
             duration_ms=duration_ms,
             status=status,
-            skills_selected=self._skills_selected,
+            skills_selected=list(self._skills_selected),
         )

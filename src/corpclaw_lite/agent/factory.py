@@ -19,6 +19,7 @@ Dev mode (container.enabled=false):
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,6 +38,8 @@ __all__ = [
 
 if TYPE_CHECKING:
     from corpclaw_lite.agent.compressor import ContextCompressor
+    from corpclaw_lite.agent.file_snapshots import FileSnapshotStore
+    from corpclaw_lite.agent.file_state import FileStateRegistry
     from corpclaw_lite.config.settings import AgentSettings, ResearchSettings, Settings, WebSettings
     from corpclaw_lite.container.ipc import ContainerIPC
     from corpclaw_lite.container.manager import ContainerManager
@@ -49,6 +52,7 @@ if TYPE_CHECKING:
     from corpclaw_lite.extensions.tools.registry import ToolRegistry
     from corpclaw_lite.llm.base import Provider
     from corpclaw_lite.memory.consolidation import MemoryConsolidator
+    from corpclaw_lite.memory.file_changes import FileChangeDAO
     from corpclaw_lite.memory.sqlite import SQLiteMemory
     from corpclaw_lite.security.tool_guard import ToolGuard
 
@@ -312,6 +316,14 @@ def _build_extensions_stack(
         full_tool_registry.register(read_image_tool)
         for tool in research_tools:
             full_tool_registry.register(tool)
+        # B-057: universal explicit terminator for subagent inner loops.
+        # Registered on full_tool_registry only (not the main registry) — the
+        # main agent terminates naturally via a final answer without tool calls,
+        # so it does not need submit_report. SubagentDispatcher forces this tool
+        # into every isolated subagent registry regardless of allowed_tools.
+        from corpclaw_lite.extensions.tools.builtin.submit_report import SubmitReportTool
+
+        full_tool_registry.register(SubmitReportTool())
 
     return subagent_registry
 
@@ -357,6 +369,70 @@ def _build_memory_stack(
             agent_settings.compression.threshold_ratio,
         )
     return memory, consolidator, compressor
+
+
+# B-040: office tools wrapped with file-change tracking.
+# path_param: which kwarg holds the input path.
+# tracks_output: True when the tool mutates the input file in place (so a
+#   pre-write backup makes sense). False for tools that emit a *new* file —
+#   only the after-snapshot is recorded there.
+_OFFICE_TRACKED_TOOLS: dict[str, dict[str, Any]] = {
+    "excel_workbook": {"path_param": "path", "tracks_output": True},
+    "normalize_excel": {"path_param": "path", "tracks_output": False},
+    "convert_format": {"path_param": "input_path", "tracks_output": False},
+    "write_file": {"path_param": "path", "tracks_output": True},
+    "edit_file": {"path_param": "path", "tracks_output": True},
+}
+
+
+def _wrap_office_tools_with_file_tracking(
+    registry: ToolRegistry,
+    workspace_base: Path | None,
+    *,
+    dao: FileChangeDAO | None = None,
+    snapshot_store: FileSnapshotStore | None = None,
+    file_state: FileStateRegistry | None = None,
+) -> tuple[FileChangeDAO | None, FileSnapshotStore | None, FileStateRegistry | None]:
+    """Wrap office tools with file-change tracking (B-040) + cross-agent
+    stale-write detection (B-058).
+
+    The DAO, snapshot store and file-state registry are created once (first
+    call) and reused on subsequent calls (e.g. for full_tool_registry) so both
+    registries share the same journal, backup dir and stale-write state.
+    """
+    from corpclaw_lite.agent.file_snapshots import FileSnapshotStore
+    from corpclaw_lite.agent.file_state import FileStateRegistry
+    from corpclaw_lite.extensions.tools.file_tracked import FileTrackedTool
+    from corpclaw_lite.memory.file_changes import FileChangeDAO
+
+    if dao is None:
+        dao = FileChangeDAO()
+    if snapshot_store is None:
+        snapshot_store = FileSnapshotStore(workspace_base=workspace_base)
+    if file_state is None:
+        file_state = FileStateRegistry()
+
+    # Wire the registry so read tools (read_file/excel_inspect/pdf_reader)
+    # record their reads into the shared file-state.
+    registry.set_file_state(file_state)
+
+    for tname, cfg in _OFFICE_TRACKED_TOOLS.items():
+        raw = registry.get(tname)
+        if raw is None or isinstance(raw, FileTrackedTool):
+            continue
+        with contextlib.suppress(KeyError):
+            registry.unregister(tname)
+        registry.register(
+            FileTrackedTool(
+                raw,
+                dao=dao,
+                snapshot_store=snapshot_store,
+                file_state=file_state,
+                **cfg,
+            ),
+            allow_replace=True,
+        )
+    return dao, snapshot_store, file_state
 
 
 def _build_system_prompt(settings: Settings, project_root: Path) -> str | None:
@@ -499,6 +575,17 @@ def build_agent_stack(
     memory, consolidator, compressor = _build_memory_stack(
         agent_settings, provider, registry, full_tool_registry=full_tool_reg
     )
+    file_change_dao, snapshot_store, file_state = _wrap_office_tools_with_file_tracking(
+        registry, workspace_base
+    )
+    if full_tool_reg is not registry:
+        _wrap_office_tools_with_file_tracking(
+            full_tool_reg,
+            workspace_base,
+            dao=file_change_dao,
+            snapshot_store=snapshot_store,
+            file_state=file_state,
+        )
     _load_calibrated_tool_overrides(registry, full_tool_reg)
 
     mcp_manager: MCPManager | None = None
@@ -543,6 +630,7 @@ def build_agent_stack(
             compressor=compressor,
             default_system_prompt=system_prompt,
             workspace_base=workspace_base,
+            file_change_dao=file_change_dao,
         )
     )
     user_manager = UserManager()

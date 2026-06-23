@@ -16,6 +16,7 @@ from typing import Any
 from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
 from corpclaw_lite.extensions.tools.builtin.files import resolve_and_validate_path
 from corpclaw_lite.utils.async_helpers import run_in_thread
+from corpclaw_lite.utils.fs import atomic_save_via, file_signature
 
 __all__ = ["ExcelWorkbookTool"]
 
@@ -55,13 +56,13 @@ def _is_formula(value: Any) -> bool:
 
 
 def _file_signature(path: Path) -> str:
-    """Return a cheap change-detection signature (mtime-ns + size).
+    """Cheap change-detection signature (mtime-ns + size).
 
-    Compared across a read→fill sequence: a mismatch means the file was touched
-    in between. Stateless and safe across the container per-call process boundary.
+    Kept as a thin re-export of :func:`corpclaw_lite.utils.fs.file_signature`
+    for backward compatibility with the existing read→fill guard logic in
+    this module. New code should import the helper directly.
     """
-    st = path.stat()
-    return f"{st.st_mtime_ns}-{st.st_size}"
+    return file_signature(path)
 
 
 def _expand_cell_refs(refs: set[str]) -> set[str]:
@@ -342,7 +343,7 @@ def _fill_cells(
                 return f"Error writing to {addr}: {e}"
 
         try:
-            wb.save(str(output_path))
+            atomic_save_via(wb.save, Path(str(output_path)))
         except Exception as e:
             return f"Error saving file: {e}"
 

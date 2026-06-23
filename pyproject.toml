@@ -1,6 +1,6 @@
 [project]
 name = "corpclaw-lite"
-version = "0.1.12"
+version = "0.1.13"
 description = "CorpClaw Lite - streamlined agent project"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -47,13 +47,14 @@ venv = ".venv"
 asyncio_mode = "auto"
 pythonpath = ["src"]
 testpaths = ["tests"]
-addopts = "--ignore=tests/debug --ignore=tests/live_llm"
+addopts = "--ignore=tests/debug --ignore=tests/live_llm --ignore=tests/eval_live"
 markers = [
     "integration: Full pipeline integration test (requires LLM + optionally Docker)",
     "docker_required: Requires running Docker daemon and corpclaw-agent-base:latest image",
     "llm_required: Requires a real LLM provider (Anthropic API key or local Ollama)",
     "live_llm: Manual tests that require a real llama-server backend",
     "live_llm_slow: Slow manual tests that require CORPCLAW_LIVE_LLM_RUN_SLOW=1",
+    "eval_live: End-to-end eval run against a real llama-server (B-060)",
 ]
 
 [tool.ruff]
@@ -64,7 +65,10 @@ select = ["E", "F", "I", "UP", "B", "C4", "SIM", "G", "A", "PERF"]
 [dependency-groups]
 dev = [
     "hatchling>=1.27.0",
-    "pyright>=1.1.408",
+    # Pinned to match CI exactly. pyright point releases tighten type checks; letting CI
+    # drift to a newer version than local dev was the root cause of the 0.1.12 release-only
+    # pyright failure. Bump this deliberately, with a full pre-push gate run.
+    "pyright==1.1.410",
     "pytest>=9.0.2",
     "pytest-asyncio>=1.3.0",
     "pytest-cov>=7.0.0",

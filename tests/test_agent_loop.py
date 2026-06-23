@@ -1071,6 +1071,144 @@ async def test_loop_detection_gives_second_chance(
 
 
 @pytest.mark.asyncio
+async def test_dedup_triggers_on_repeated_identical_tool_result(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """B-055: a tool returning the same successful result repeatedly triggers
+    the result-dedup guard, which injects a recovery hint and lets the model
+    try again with that context."""
+
+    class StaleTool:
+        name = "stale_tool"
+        description = ""
+        params: list[Any] = []
+        terminal = False
+
+        async def execute(self, **kwargs: Any) -> str:
+            return "rows: 42"  # identical successful result every call
+
+    empty_registry._tools["stale_tool"] = StaleTool()  # type: ignore
+
+    saw_dedup_instruction: list[bool] = []
+
+    class TrackingProvider(MockProvider):
+        async def chat(  # type: ignore[override]
+            self,
+            messages: list[dict[str, Any]],
+            tools: Any = None,
+            system: Any = None,
+        ) -> LLMResponse:
+            # The B-055 dedup instruction must appear in the system prompt.
+            saw_dedup_instruction.append(
+                "returned the same result it returned before" in str(system or "")
+            )
+            return await super().chat(messages, tools, system)
+
+    # Two identical tool calls → second triggers dedup → third response is a
+    # real final answer (model "recovers" and answers directly).
+    provider = TrackingProvider(
+        responses=[
+            LLMResponse(
+                content="",
+                tool_calls=[ToolCall(id="0", name="stale_tool", arguments={})],
+            ),
+            LLMResponse(
+                content="",
+                tool_calls=[ToolCall(id="1", name="stale_tool", arguments={})],
+            ),
+            LLMResponse(content="The answer is 42."),
+        ]
+    )
+    settings = AgentSettings(max_steps=20, max_tool_calls=100)
+    loop = AgentLoop(AgentConfig(provider, empty_registry, settings))
+    result, stats = await loop.run(test_user, "do it")
+
+    assert result == "The answer is 42."
+    assert any(saw_dedup_instruction), "B-055 dedup instruction must be injected"
+    assert stats.status == "ok"
+
+
+@pytest.mark.asyncio
+async def test_planning_text_guard_gives_second_chance(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """B-056: a planning-text final answer ("Let me now check the file") triggers
+    a correction; the model gets another turn and produces a real answer."""
+
+    saw_correction: list[bool] = []
+
+    class TrackingProvider(MockProvider):
+        async def chat(  # type: ignore[override]
+            self,
+            messages: list[dict[str, Any]],
+            tools: Any = None,
+            system: Any = None,
+        ) -> LLMResponse:
+            # The B-056 correction appears as a user message in the next turn.
+            saw_correction.append(
+                any("statement of intent" in str(m.get("content", "")) for m in messages)
+            )
+            return await super().chat(messages, tools, system)
+
+    provider = TrackingProvider(
+        responses=[
+            LLMResponse(content="Let me now check the file for you."),
+            LLMResponse(content="The file contains 42 records."),
+        ]
+    )
+    settings = AgentSettings(max_steps=10, max_tool_calls=20)
+    loop = AgentLoop(AgentConfig(provider, empty_registry, settings))
+    result, stats = await loop.run(test_user, "check it")
+
+    assert result == "The file contains 42 records."
+    assert any(saw_correction), "B-056 correction message must be injected"
+    assert provider.call_count == 2
+    assert stats.status == "ok"
+
+
+@pytest.mark.asyncio
+async def test_planning_text_guard_tool_artifact_blocked(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """B-056: a Qwen3/Gemma tool-artifact ([tool:<name>]) as a final answer is
+    blocked and the model gets another turn."""
+
+    provider = MockProvider(
+        responses=[
+            LLMResponse(content="[tool:query_specific_file]"),
+            LLMResponse(content="Found 3 matching rows."),
+        ]
+    )
+    settings = AgentSettings(max_steps=10, max_tool_calls=20)
+    loop = AgentLoop(AgentConfig(provider, empty_registry, settings))
+    result, stats = await loop.run(test_user, "query it")
+
+    assert result == "Found 3 matching rows."
+    assert provider.call_count == 2
+    assert stats.status == "ok"
+
+
+@pytest.mark.asyncio
+async def test_planning_text_guard_neutral_on_long_legitimate_answer(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """B-056: a long legitimate answer starting with a planning phrase is NOT
+    blocked — only short planning-text answers are."""
+
+    long_answer = "Let me explain. " + ("Detail. " * 200)
+    assert len(long_answer) >= 500
+
+    provider = MockProvider(responses=[LLMResponse(content=long_answer)])
+    settings = AgentSettings(max_steps=10, max_tool_calls=20)
+    loop = AgentLoop(AgentConfig(provider, empty_registry, settings))
+    result, stats = await loop.run(test_user, "explain")
+
+    assert result == long_answer
+    assert provider.call_count == 1
+    assert stats.status == "ok"
+
+
+@pytest.mark.asyncio
 async def test_loop_guard_echo_is_not_returned_to_user(
     test_user: User, empty_registry: ToolRegistry
 ) -> None:

@@ -19,6 +19,7 @@ from typing import Any
 from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
 from corpclaw_lite.extensions.tools.builtin.files import resolve_and_validate_path
 from corpclaw_lite.utils.async_helpers import run_in_thread
+from corpclaw_lite.utils.fs import atomic_save_via
 
 __all__ = [
     "NormalizeExcelTool",
@@ -339,7 +340,7 @@ class NormalizeExcelTool(Tool):
         wb_out = _create_normalized_workbook(headers, data_rows, col_types)
 
         try:
-            wb_out.save(str(output_path))
+            atomic_save_via(wb_out.save, Path(str(output_path)))
         except Exception as e:
             return f"Error saving file: {e}"
 

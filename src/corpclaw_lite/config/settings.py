@@ -6,6 +6,11 @@ from typing import Literal
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings
 
+from corpclaw_lite.agent.guards import (
+    PlanningTextGuardConfig,
+    ResultDedupGuardConfig,
+)
+
 __all__ = [
     "AgentSettings",
     "CompressionSettings",
@@ -144,6 +149,12 @@ class AgentSettings(BaseModel):
     llm_stream_status_updates: bool = True
     max_facts_recall: int = 20
     vision_max_image_bytes: int = 10 * 1024 * 1024
+    # B-055/B-056: Phase 0 guard configuration. Exposed on AgentSettings so the
+    # eval harness (B-060) can run A/B passes with guards enabled/disabled, and
+    # operators can tune thresholds without code changes. Defaults preserve the
+    # pre-B-060 behaviour (guards on with original thresholds).
+    result_dedup_guard: ResultDedupGuardConfig = ResultDedupGuardConfig()
+    planning_text_guard: PlanningTextGuardConfig = PlanningTextGuardConfig()
 
 
 class WebSettings(BaseModel):

@@ -25,16 +25,24 @@ class DispatchSubagentTool(Tool):
 
     name = "dispatch_subagent"
     description = (
-        "Delegate a task to a specialized subagent. "
-        "Use when the task requires specialized capabilities beyond available tools. "
-        "For web research, fact-checking, source comparison, or URL analysis, use "
-        "subagent_id='research-agent' and pass the full research question."
+        "Delegate a task to a specialized subagent. Available subagents: "
+        "data-agent (SQL queries, charts, format conversion, Excel data analysis), "
+        "document-agent (reports, Excel normalization, PDF text, document editing), "
+        "filesystem-agent (file navigation, multi-file search), "
+        "research-agent (web research, fact-checking), "
+        "execution-agent (scripts, shell commands). "
+        "If you get a 'Subagent not found' error, the message lists valid IDs — "
+        "retry with one of them. If no subagent can do the task, tell the user "
+        "honestly. Do not fabricate a result."
     )
     params = [
         ToolParam(
             name="subagent_id",
             type="string",
-            description="The ID of the subagent to dispatch",
+            description=(
+                "The subagent to dispatch: data-agent, document-agent, "
+                "filesystem-agent, research-agent, or execution-agent"
+            ),
         ),
         ToolParam(
             name="task",
@@ -93,6 +101,7 @@ class DispatchSubagentTool(Tool):
             if callable(raw_on_subagent_llm_queue_status)
             else None
         )
+        parent_trajectory_recorder = kwargs.get("parent_trajectory_recorder")
 
         if not isinstance(subagent_id, str) or not isinstance(task, str):
             return "Error: 'subagent_id' and 'task' are required string parameters."
@@ -152,6 +161,7 @@ class DispatchSubagentTool(Tool):
             user,
             task,
             parent_run_id=parent_run_id,
+            parent_trajectory_recorder=parent_trajectory_recorder,
             on_subagent_tool_start=on_subagent_tool_start,
             on_subagent_tool_batch_start=on_subagent_tool_batch_start,
             on_subagent_llm_stage=on_subagent_llm_stage,

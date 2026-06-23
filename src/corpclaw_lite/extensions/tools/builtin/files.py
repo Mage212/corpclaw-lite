@@ -13,6 +13,8 @@ from typing import Any
 import anyio
 
 from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
+from corpclaw_lite.security.path_validator import resolve_and_validate_path
+from corpclaw_lite.utils.fs import atomic_write_text
 
 __all__ = [
     "EditFileTool",
@@ -29,38 +31,22 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 # Skip files larger than 1 MB in search to prevent memory spikes
 _MAX_FILE_SEARCH_BYTES = 1_048_576
 
-
-def resolve_and_validate_path(path_str: str) -> Path:
-    """Resolve path to absolute and ensure it exists within allowed workspace boundaries.
-
-    When container isolation is enabled, this function runs inside the container
-    where CWD=/workspace.  In dev mode (container.enabled=false), CWD is the
-    process working directory.
-    """
-    # Use CWD for initial Phase 1 boundary
-    workspace_root = Path.cwd().resolve()
-    target_path = Path(path_str)
-
-    # If it's relative, it relates to workspace_root
-    if not target_path.is_absolute():
-        target_path = workspace_root / target_path
-
-    resolved = target_path.resolve()
-
-    # Path traversal check (string startswith is bypassable — compare parents instead)
-    if not (resolved == workspace_root or workspace_root in resolved.parents):
-        raise PermissionError(
-            f"Access denied: Path '{path_str}' is outside of workspace '{workspace_root}'."
-        )
-
-    return resolved
+# NOTE: resolve_and_validate_path is now provided by
+# corpclaw_lite.security.path_validator (B-059). It is re-exported above for
+# backward compatibility with existing callers (`from ...files import ...`).
 
 
 class ReadFileTool(Tool):
     """Tool to read the contents of a text file."""
 
     name = "read_file"
-    description = "Read the contents of a text file. Not for images."
+    description = (
+        "Read the contents of a text file. Returns an 'Error:'-prefixed string on "
+        "failure (file not found, is a directory, is an image). On 'does not exist' "
+        "error, call list_files to find the correct filename. For images (.png, .jpg), "
+        "use read_image instead. Files over 1MB cannot be read directly — use "
+        "search_files or delegate to a subagent with table_query."
+    )
     params = [
         ToolParam(name="path", type="string", description="Relative or absolute path to the file"),
     ]
@@ -115,7 +101,7 @@ class WriteFileTool(Tool):
             await anyio.to_thread.run_sync(
                 partial(resolved.parent.mkdir, parents=True, exist_ok=True)
             )
-            await anyio.to_thread.run_sync(partial(resolved.write_text, content, encoding="utf-8"))
+            await anyio.to_thread.run_sync(partial(atomic_write_text, resolved, content))
             return f"Successfully wrote {len(content)} chars to '{resolved}'"
         except Exception as e:
             return f"Error writing file '{path}': {e}"
@@ -172,7 +158,7 @@ class EditFileTool(Tool):
                 content = content.replace(old_text, new_text, max_repl)
                 applied = min(total, max_repl)
 
-            await anyio.to_thread.run_sync(partial(resolved.write_text, content, encoding="utf-8"))
+            await anyio.to_thread.run_sync(partial(atomic_write_text, resolved, content))
             return f"Edited '{resolved}' ({applied} of {total} occurrence(s) replaced)."
         except Exception as e:
             return f"Error editing file '{path}': {e}"
@@ -192,17 +178,10 @@ class ListFilesTool(Tool):
 
     name = "list_files"
     description = (
-        "List all files and subdirectories in a specific directory. "
-        "Format output as plain lists — NEVER use tables or group by file type. "
-        "Always wrap file/directory names in backticks (``). "
-        "Group into two sections: files first, then directories. "
-        "Example format:\n"
-        "В директории найдено N файлов и M директорий:\n\n"
-        "**Файлы:**\n"
-        "- `filename.ext` — 4.9 KB\n"
-        "- `other.txt` — 128 B\n\n"
-        "**Директории:**\n"
-        "- `folder_name`"
+        "List files and subdirectories in a directory. Use this BEFORE read_file when "
+        "the exact filename is uncertain, or after a 'file not found' error to find "
+        "the correct name. Format: plain list with file sizes, files first then "
+        "directories."
     )
     params = [
         ToolParam(name="path", type="string", description="Path to the directory (empty for root)"),

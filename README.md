@@ -138,7 +138,7 @@ React build is missing, the backend returns an explicit warning page instead of 
 | LLM Router | Route tasks to specific providers (local/cloud) |
 | Model Presets | Per-model inference params and reasoning strategies |
 | XML Tool Calling | Fallback parser for local LLMs without function calling |
-| 28 Built-in Tools | File ops, SQL queries, charts, PDF, Excel workbook/inspection, web search/fetch, research workflows, and more |
+| 29 Built-in Tools | File ops, SQL queries, charts, PDF, Excel workbook/inspection, web search/fetch, research workflows, and more |
 | Docker Sandbox | Per-user containers with resource limits and network deny-by-default |
 | ToolGuard | 31 YAML security rules with LLM-based Smart Approvals |
 | 5 Skills + 5 Subagents | Markdown skills with scope filtering and isolated subagents; plugins are a framework (no plugins shipped) |

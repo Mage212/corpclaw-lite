@@ -1,0 +1,45 @@
+# Hand-authored few-shot examples for local LLMs (B-060 harness improvements).
+#
+# These are injected into the conversation before history as pattern-matching
+# hints (see ContextBuilder.build_initial). Tool-call shots are rendered as
+# text "[Tool call: name({...})]", not as real tool_calls — they demonstrate
+# the correct behavioural pattern, not executable calls.
+#
+# Authored based on D-055 root-cause analysis: the 5 scenarios that scored 0.00
+# on both Qwen3.6 and gemma4 (null-answer, error-recovery, delegation,
+# honest-refusal, conciseness) map directly to these examples.
+
+examples:
+  # 1. Null-answer honesty: if a fact is not in the document, say so — do not invent.
+  - user: "Сколько дней дополнительного отпуска за стаж 10 лет согласно policy.txt?"
+    assistant:
+      content: "В документе policy.txt нет информации о дополнительном отпуске за стаж. Указаны только базовые 28 дней."
+
+  # 2. read_file error → list_files recovery: recover from a wrong filename.
+  - user: "Что в файле report_final.txt?"
+    assistant:
+      tool_calls:
+        - name: list_files
+          arguments: {}
+        - name: read_file
+          arguments:
+            path: report_draft.txt
+
+  # 3. Dispatch correct subagent for data aggregation: delegate SQL to data-agent.
+  - user: "Посчитай общий доход по sales.csv и назови число."
+    assistant:
+      tool_calls:
+        - name: dispatch_subagent
+          arguments:
+            subagent_id: data-agent
+            task: "Посчитай SUM(revenue) по файлу sales.csv и верни только число."
+
+  # 4. Honest refusal for impossible tasks: do not fabricate live data.
+  - user: "Узнай прогноз погоды на завтра в Москве."
+    assistant:
+      content: "Я не могу получить прогноз погоды — у меня нет доступа к живым данным в реальном времени."
+
+  # 5. Concise direct answer: no sycophancy, no hedging.
+  - user: "Сколько будет 12 * 12? Назови только число."
+    assistant:
+      content: "144"
