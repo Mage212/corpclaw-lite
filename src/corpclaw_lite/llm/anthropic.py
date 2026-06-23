@@ -8,7 +8,7 @@ import anthropic
 
 from corpclaw_lite.config.providers import ProviderSettings
 from corpclaw_lite.llm.base import LLMResponse, Provider, StreamChunk, TokenUsage, ToolCall
-from corpclaw_lite.llm.presets import ModelPreset
+from corpclaw_lite.llm.presets import ModelPreset, ModelProfile, SamplingProfile
 
 __all__ = [
     "AnthropicProvider",
@@ -34,9 +34,23 @@ class AnthropicProvider(Provider):
         }
     )
 
-    def __init__(self, settings: ProviderSettings, preset: ModelPreset | None = None):
+    def __init__(
+        self,
+        settings: ProviderSettings,
+        preset: ModelPreset | None = None,
+        *,
+        model_profile: ModelProfile | None = None,
+        sampling: SamplingProfile | None = None,
+    ):
         self._model = settings.model
-        self._preset = preset
+        # Bridge legacy preset → split profiles (D-056), same as OpenAIProvider.
+        if model_profile is None and sampling is None and preset is not None:
+            from corpclaw_lite.llm.presets import profile_from_legacy_preset
+
+            model_profile, sampling = profile_from_legacy_preset(preset)
+        self._preset = preset  # deprecated, kept for back-compat introspection
+        self._model_profile = model_profile
+        self._sampling = sampling
         if not settings.api_key:
             raise ValueError("Anthropic requires an API key in settings")
 
@@ -58,26 +72,58 @@ class AnthropicProvider(Provider):
             }
         return tool
 
-    def _apply_preset(self, system: str | None, kwargs: dict[str, Any]) -> str | None:
-        """Merge preset inference params and inject system_prompt_prefix.
+    def _apply_model_profile(self, system: str | None, kwargs: dict[str, Any]) -> str | None:
+        """Apply the ModelProfile: default inference params + system_prompt_prefix.
 
-        Priority: request-level params > preset params > provider defaults.
+        Lowest inference priority (SamplingProfile / RequestOptions override
+        these). Anthropic accepts top_k as a standard param, so all params go
+        straight to kwargs (no extra_body split needed, unlike OpenAI).
         """
-        if not self._preset:
+        if not self._model_profile:
             return system
 
-        for k, v in self._preset.inference_params.items():
+        for k, v in self._model_profile.default_inference.items():
             if k in self._ANTHROPIC_STANDARD_PARAMS:
                 kwargs.setdefault(k, v)
 
-        if self._preset.thinking_budget_tokens:
-            budget = self._preset.thinking_budget_tokens
-            kwargs.setdefault("max_tokens", budget + 1024)
-
-        if self._preset.system_prompt_prefix:
-            prefix = self._preset.system_prompt_prefix
+        if self._model_profile.system_prompt_prefix:
+            prefix = self._model_profile.system_prompt_prefix
             return f"{prefix}\n{system}" if system else prefix
+        return system
 
+    def _apply_sampling(self, kwargs: dict[str, Any]) -> None:
+        """Apply the SamplingProfile: thinking mode/budget + inference overrides.
+
+        Middle inference priority (overrides ModelProfile defaults). Note:
+        Anthropic has no ``chat_template_kwargs`` control — ``thinking_mode=
+        "off"`` is effectively a no-op here (Anthropic reasoning is controlled
+        via the dedicated ``thinking`` API param, not yet wired). ``budget``
+        caps ``max_tokens`` as a soft signal.
+        """
+        if not self._sampling:
+            return
+
+        # Inference overrides — middle priority, wins over ModelProfile defaults.
+        # Direct assignment (not setdefault) so the task-level layer overrides
+        # the model-level defaults; per-call RequestOptions override these in turn.
+        # Inference overrides — middle priority, wins over ModelProfile defaults.
+        # Direct assignment (not setdefault) so the task-level layer overrides
+        # the model-level defaults; per-call RequestOptions override these in turn.
+        kwargs.update(
+            {
+                k: v
+                for k, v in self._sampling.inference_overrides.items()
+                if k in self._ANTHROPIC_STANDARD_PARAMS
+            }
+        )
+
+        if self._sampling.thinking_mode == "budget" and self._sampling.thinking_budget:
+            kwargs["max_tokens"] = self._sampling.thinking_budget + 1024
+
+    def _apply_preset(self, system: str | None, kwargs: dict[str, Any]) -> str | None:
+        """DEPRECATED: combined preset application (back-compat bridge)."""
+        system = self._apply_model_profile(system, kwargs)
+        self._apply_sampling(kwargs)
         return system
 
     async def chat(

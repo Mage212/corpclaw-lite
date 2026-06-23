@@ -13,14 +13,19 @@ __all__ = [
     "LLMStreamEvent",
     "LLMStreamStage",
     "Provider",
+    "RequestOptions",
     "StreamChunk",
     "StreamingProvider",
+    "ThinkingOverride",
     "TokenUsage",
     "ToolCall",
     "VisionProvider",
     "get_backend_request_options",
+    "get_request_options",
     "reset_backend_request_options",
+    "reset_request_options",
     "set_backend_request_options",
+    "set_request_options",
 ]
 
 LLMStreamStage = Literal[
@@ -87,6 +92,88 @@ def reset_backend_request_options(token: contextvars.Token[BackendRequestOptions
 def get_backend_request_options() -> BackendRequestOptions | None:
     """Return backend-specific request options for the current async context."""
     return _backend_request_options.get()
+
+
+@dataclass(frozen=True)
+class ThinkingOverride:
+    """Per-call override of model thinking/reasoning behaviour.
+
+    Independent of :class:`ModelProfile`/SamplingProfile: it overrides whatever
+    the routing-resolved profiles would produce, for a single LLM call.
+
+    Modes:
+        default:  the model's natural thinking (do not override).
+        off:      disable thinking entirely (e.g. ``chat_template_kwargs.
+                  enable_thinking=false`` for Qwen/gemma, or no ``<|think|>``
+                  prefix for gemma4). Fast extraction-style calls.
+        budget:   soft-cap reasoning output to ``budget`` tokens (sets
+                  ``thinking_budget_tokens`` semantics, model-dependent).
+    """
+
+    mode: Literal["default", "off", "budget"] = "default"
+    budget: int | None = None
+
+
+@dataclass(frozen=True)
+class RequestOptions:
+    """Per-call LLM request overrides, set via an async-context contextvar.
+
+    This is the second, independent rail next to :class:`BackendRequestOptions`.
+    ``BackendRequestOptions`` carries transport-level keys (``id_slot``,
+    ``cache_prompt``) set by the LLM queue/cache layer; ``RequestOptions``
+    carries inference + thinking overrides set per-call (e.g. by PhasePolicy).
+    Both are merged by the provider in ``_build_chat_kwargs`` with deterministic
+    priority::
+
+        model_profile defaults  (lowest)
+          < SamplingProfile overrides
+            < RequestOptions.inference / RequestOptions.thinking
+              (per-call, highest among inference)
+            < BackendRequestOptions.extra_body
+              (transport, lowest of its own layer)
+
+    Merge order is implemented in ``OpenAIProvider._build_chat_kwargs``; see
+    ``tests/test_request_options.py`` for the contract.
+
+    All fields are optional — ``None`` means "do not override".
+    """
+
+    inference: dict[str, Any] | None = None
+    thinking: ThinkingOverride | None = None
+
+
+_call_options: contextvars.ContextVar[RequestOptions | None] = contextvars.ContextVar(
+    "llm_call_options", default=None
+)
+
+
+def set_request_options(
+    options: RequestOptions | None,
+) -> contextvars.Token[RequestOptions | None]:
+    """Set per-call LLM request overrides for the current async context.
+
+    Use as a context manager replacement::
+
+        token = set_request_options(RequestOptions(thinking=ThinkingOverride(mode="off")))
+        try:
+            response = await provider.chat(...)
+        finally:
+            reset_request_options(token)
+
+    Independent of :func:`set_backend_request_options` — both contextvars may
+    be active simultaneously and are merged by the provider.
+    """
+    return _call_options.set(options)
+
+
+def reset_request_options(token: contextvars.Token[RequestOptions | None]) -> None:
+    """Reset per-call request overrides to the previous value."""
+    _call_options.reset(token)
+
+
+def get_request_options() -> RequestOptions | None:
+    """Return per-call request overrides for the current async context."""
+    return _call_options.get()
 
 
 class LLMResponse(BaseModel):

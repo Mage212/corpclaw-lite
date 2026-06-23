@@ -18,8 +18,9 @@ from corpclaw_lite.llm.base import (
     TokenUsage,
     ToolCall,
     get_backend_request_options,
+    get_request_options,
 )
-from corpclaw_lite.llm.presets import ModelPreset
+from corpclaw_lite.llm.presets import ModelPreset, ModelProfile, SamplingProfile
 from corpclaw_lite.llm.xml_tool_calling import parse_xml_tool_calls
 
 __all__ = [
@@ -108,9 +109,22 @@ class OpenAIProvider(Provider):
         self,
         settings: ProviderSettings,
         preset: ModelPreset | None = None,
+        *,
+        model_profile: ModelProfile | None = None,
+        sampling: SamplingProfile | None = None,
     ):
         self._model = settings.model
-        self._preset = preset
+        # Always store the split profiles as the canonical internal shape (D-056).
+        # Legacy ``preset=`` is bridged to a (ModelProfile, SamplingProfile) pair
+        # so every code path below deals with one representation. If both are
+        # supplied, the explicit profiles win.
+        if model_profile is None and sampling is None and preset is not None:
+            from corpclaw_lite.llm.presets import profile_from_legacy_preset
+
+            model_profile, sampling = profile_from_legacy_preset(preset)
+        self._preset = preset  # kept for back-compat introspection (deprecated)
+        self._model_profile = model_profile
+        self._sampling = sampling
         api_key = settings.api_key or "dummy"  # local models may not need a real key
         if settings.base_url:
             self._client = openai.AsyncOpenAI(api_key=api_key, base_url=settings.base_url)
@@ -143,54 +157,133 @@ class OpenAIProvider(Provider):
         }
     )
 
-    def _apply_preset(self, system: str | None, kwargs: dict[str, Any]) -> str | None:
-        """Merge preset inference params and inject system_prompt_prefix.
+    def _apply_model_profile(self, system: str | None, kwargs: dict[str, Any]) -> str | None:
+        """Apply the ModelProfile: default inference params + system_prompt_prefix.
 
-        Priority: request-level params > preset params > provider defaults.
-        Uses ``setdefault`` so request-level values are never overwritten.
-
-        Non-standard params (top_k, min_p, etc.) are routed to ``extra_body``
+        Lowest inference priority — SamplingProfile and RequestOptions override
+        these. ``setdefault`` is used so higher layers always win. Non-standard
+        params (top_k, min_p, repeat_penalty, ...) are routed to ``extra_body``
         so the OpenAI SDK doesn't reject them.
         """
-        if not self._preset:
+        if not self._model_profile:
             return system
 
         extra_body: dict[str, Any] = dict(kwargs.pop("extra_body", None) or {})
-
-        # 1. Merge inference params — split standard vs extended
-        for k, v in self._preset.inference_params.items():
+        for k, v in self._model_profile.default_inference.items():
             if k in self._OPENAI_STANDARD_PARAMS:
                 kwargs.setdefault(k, v)
             else:
                 extra_body.setdefault(k, v)
+        if extra_body:
+            kwargs["extra_body"] = extra_body
+
+        if self._model_profile.system_prompt_prefix:
+            prefix = self._model_profile.system_prompt_prefix
+            return f"{prefix}\n{system}" if system else prefix
+        return system
+
+    def _apply_sampling(self, kwargs: dict[str, Any]) -> None:
+        """Apply the SamplingProfile: thinking mode/budget + inference overrides.
+
+        Middle inference priority — overrides ModelProfile defaults, is itself
+        overridden by RequestOptions (per-call). Thinking mode maps to backend
+        controls:
+          - ``off``    → ``extra_body.chat_template_kwargs.enable_thinking=false``
+            (Qwen/gemma complete-disable, fastest). Note: this does not suppress
+            the ModelProfile's ``system_prompt_prefix`` (e.g. gemma4 ``<|think|>``)
+            — that is model-bound and applied in ``_apply_model_profile``.
+          - ``budget`` → cap ``max_tokens`` to ``budget + 1024`` (soft cap on
+            reasoning output, model-dependent effectiveness).
+          - ``default``→ the model's natural thinking.
+        """
+        if not self._sampling:
+            return
+
+        extra_body: dict[str, Any] = dict(kwargs.pop("extra_body", None) or {})
+
+        # Inference overrides — middle priority, wins over ModelProfile defaults.
+        # Direct assignment (not setdefault) so the task-level layer overrides
+        # the model-level defaults; per-call RequestOptions override these in turn.
+        for k, v in self._sampling.inference_overrides.items():
+            if k in self._OPENAI_STANDARD_PARAMS:
+                kwargs[k] = v
+            else:
+                extra_body[k] = v
+
+        # Thinking mode.
+        if self._sampling.thinking_mode == "off":
+            ctk = dict(extra_body.get("chat_template_kwargs") or {})
+            ctk.setdefault("enable_thinking", False)
+            extra_body["chat_template_kwargs"] = ctk
+        elif self._sampling.thinking_mode == "budget" and self._sampling.thinking_budget:
+            kwargs.setdefault("max_tokens", self._sampling.thinking_budget + 1024)
 
         if extra_body:
             kwargs["extra_body"] = extra_body
 
-        # 2. Thinking budget → cap max_tokens
-        if self._preset.thinking_budget_tokens:
-            budget = self._preset.thinking_budget_tokens
-            kwargs.setdefault("max_tokens", budget + 1024)
+    def _apply_request_options(self, kwargs: dict[str, Any]) -> None:
+        """Apply per-call RequestOptions (inference + thinking overrides).
 
-        # 3. System prompt prefix injection
-        if self._preset.system_prompt_prefix:
-            prefix = self._preset.system_prompt_prefix
-            return f"{prefix}\n{system}" if system else prefix
+        Highest inference priority — overrides ModelProfile and SamplingProfile.
+        Reads the per-call contextvar set by PhasePolicy (or callers). The
+        transport-level ``extra_body`` from ``BackendRequestOptions`` is merged
+        separately by ``_apply_backend_options``.
+        """
+        options = get_request_options()
+        if options is None:
+            return
 
+        extra_body: dict[str, Any] = dict(kwargs.pop("extra_body", None) or {})
+
+        if options.inference:
+            for k, v in options.inference.items():
+                if k in self._OPENAI_STANDARD_PARAMS:
+                    # Per-call override wins over profile/sampling → set directly.
+                    kwargs[k] = v
+                else:
+                    extra_body[k] = v
+
+        if options.thinking and options.thinking.mode != "default":
+            mode = options.thinking.mode
+            if mode == "off":
+                ctk = dict(extra_body.get("chat_template_kwargs") or {})
+                ctk["enable_thinking"] = False  # per-call override wins
+                extra_body["chat_template_kwargs"] = ctk
+            elif mode == "budget" and options.thinking.budget is not None:
+                kwargs["max_tokens"] = options.thinking.budget + 1024
+
+        if extra_body:
+            kwargs["extra_body"] = extra_body
+
+    def _apply_preset(self, system: str | None, kwargs: dict[str, Any]) -> str | None:
+        """DEPRECATED: combined preset application (back-compat).
+
+        New code should call ``_apply_model_profile`` + ``_apply_sampling``
+        + ``_apply_request_options``. Kept so any external caller of the old
+        private API keeps working.
+        """
+        system = self._apply_model_profile(system, kwargs)
+        self._apply_sampling(kwargs)
         return system
 
     def _parse_reasoning(self, message: Any) -> tuple[str, str]:
-        """Extract (reasoning, content) based on preset thinking config.
+        """Extract (reasoning, content) based on the model's thinking parser.
 
-        Returns:
-            (reasoning_text, clean_content) — reasoning is empty string if
-            no thinking config is set or no reasoning was found.
+        Reads ``ModelProfile.thinking_parser`` (new API) with a back-compat
+        fallback to the legacy ``ModelPreset.thinking``. Returns
+        (reasoning_text, clean_content) — reasoning is empty string if no
+        thinking config is set or no reasoning was found.
         """
-        if not self._preset or not self._preset.thinking:
-            # No preset / no thinking config — return content as-is
+        cfg = None
+        if self._model_profile is not None:
+            cfg = self._model_profile.thinking_parser
+        elif self._preset is not None:
+            cfg = self._preset.thinking
+
+        if cfg is None:
+            # No thinking config — return content as-is
             return "", message.content or ""
 
-        cfg = self._preset.thinking
         if cfg.source == "native":
             # Qwen3-style: API returns reasoning in a dedicated field
             reasoning = getattr(message, "reasoning_content", None) or ""
@@ -260,12 +353,26 @@ class OpenAIProvider(Provider):
         tools: list[dict[str, Any]] | None = None,
         system: str | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-        """Build OpenAI-compatible chat kwargs shared by full and streamed calls."""
+        """Build OpenAI-compatible chat kwargs shared by full and streamed calls.
+
+        Merge priority (each layer wins over the previous via setdefault /
+        direct assignment for per-call overrides):
+            ModelProfile.default_inference  (lowest)
+              < SamplingProfile.inference_overrides + thinking_mode
+                < RequestOptions.inference / RequestOptions.thinking (per-call)
+                  < BackendRequestOptions.extra_body (transport, lowest of its
+                    own layer — merged separately by ``_apply_backend_options``)
+        """
         final_messages: list[dict[str, Any]] = []
         kwargs: dict[str, Any] = {"model": self._model}
 
-        # Apply preset: merge inference params + inject system_prompt_prefix
-        system = self._apply_preset(system, kwargs)
+        # 1. Model profile (default inference + system_prompt_prefix).
+        system = self._apply_model_profile(system, kwargs)
+        # 2. Sampling profile (thinking mode + inference overrides).
+        self._apply_sampling(kwargs)
+        # 3. Per-call request options (PhasePolicy / caller overrides).
+        self._apply_request_options(kwargs)
+        # 4. Transport-level backend options (queue/cache extra_body).
         self._apply_backend_options(kwargs)
 
         if system:
@@ -555,21 +662,25 @@ class OpenAIProvider(Provider):
 
         kwargs: dict[str, Any] = {"model": self._model}
 
-        # Apply preset inference params (but NOT system_prompt_prefix for vision).
-        # Non-standard params (top_k, min_p, etc.) go into extra_body.
-        if self._preset:
-            # Thinking budget → cap max_tokens (same logic as chat())
-            if self._preset.thinking_budget_tokens:
-                budget = self._preset.thinking_budget_tokens
-                kwargs.setdefault("max_tokens", budget + 1024)
-            extra_body: dict[str, Any] = {}
-            for k, v in self._preset.inference_params.items():
+        # Apply the same profile/sampling/per-call layers as chat(), but NOT
+        # the ModelProfile's system_prompt_prefix — vision prompts must not
+        # receive the thinking prefix (e.g. gemma4 <|think|>). We reuse the
+        # split apply methods and inline only the model-profile inference
+        # defaults, skipping the prefix.
+        if self._model_profile:
+            extra_body: dict[str, Any] = dict(kwargs.pop("extra_body", None) or {})
+            for k, v in self._model_profile.default_inference.items():
                 if k in self._OPENAI_STANDARD_PARAMS:
                     kwargs.setdefault(k, v)
                 else:
                     extra_body.setdefault(k, v)
             if extra_body:
                 kwargs["extra_body"] = extra_body
+        # Sampling profile (thinking mode + inference overrides) — same as chat.
+        self._apply_sampling(kwargs)
+        # Per-call request options (PhasePolicy / caller overrides) — same as chat.
+        self._apply_request_options(kwargs)
+        # Transport-level backend options (queue/cache extra_body).
         self._apply_backend_options(kwargs)
 
         if system:
