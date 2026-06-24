@@ -170,9 +170,7 @@ class OpenAIProvider(Provider):
         if self._sampling is not None and self._sampling.thinking_mode == "off":
             return True
         opts = get_request_options()
-        if opts is not None and opts.thinking is not None and opts.thinking.mode == "off":
-            return True
-        return False
+        return opts is not None and opts.thinking is not None and opts.thinking.mode == "off"
 
     def _apply_model_profile(self, system: str | None, kwargs: dict[str, Any]) -> str | None:
         """Apply the ModelProfile: default inference params + system_prompt_prefix.

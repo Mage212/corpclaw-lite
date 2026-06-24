@@ -790,6 +790,7 @@ class AgentLoop:
                         nudge_injected=mandate.nudge_injected,
                         restricted=mandate.restricted,
                         prev_tool_calls=prev_turn_tools,
+                        tools_used=stats.tools_used,
                         aggregation_markers=self._phase_aggregation_markers,
                         gathering_tools=self._phase_gathering_tools,
                     )

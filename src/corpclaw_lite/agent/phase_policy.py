@@ -66,9 +66,14 @@ class PhaseContext:
     # fallback to detect a forced aggregation phase.
     nudge_injected: bool
     restricted: bool
-    # Tool names invoked in the PREVIOUS turn (per-turn, not cumulative).
-    # Empty on the first turn. The semantic primary signal.
+    # Tool names invoked in the PREVIOUS turn (per-turn snapshot). Empty on the
+    # first turn. Used for transition detection.
     prev_tool_calls: list[str]
+    # Cumulative tool names invoked across ALL turns so far (1..N-1). The
+    # monotonic phase signal: once an aggregation marker (e.g.
+    # ``research_list_facts``) appears anywhere in this set, the workflow has
+    # crossed into the aggregation phase and stays there.
+    tools_used: list[str]
     # Configured marker sets (from PhasePolicySettings).
     aggregation_markers: frozenset[str]
     gathering_tools: frozenset[str]
@@ -102,12 +107,23 @@ def _thinking_options(mode: str) -> RequestOptions | None:
 class DefaultPhasePolicy:
     """Built-in phase policy driven by :class:`PhasePolicySettings`.
 
+    For a workflow subagent (e.g. research-agent), the gathering→aggregation
+    transition is **monotonic**: once an aggregation marker (``research_list_facts``)
+    is invoked in ANY prior turn, every subsequent turn is the aggregation phase
+    (thinking on), because the workflow does not return to gathering after it
+    starts finalizing. This matches the intended semantics:
+
+      - gathering (search/fetch/read/store facts) → thinking OFF (just loading
+        context and recording facts; reasoning adds latency without value),
+      - aggregation (list_facts → finalize) → thinking ON (synthesise the
+        collected facts into a grounded final report).
+
     Decision order (first match wins):
 
-    1. ``closing_mode`` → ``closing_thinking`` (main agent budget pressure, and
-       also a workflow subagent whose budget is running out).
-    2. Workflow subagent, aggregation marker in previous turn →
-       ``aggregation_thinking`` (semantic primary).
+    1. ``closing_mode`` → ``closing_thinking`` (budget pressure for both the
+       main agent and a workflow subagent whose budget is running out).
+    2. Workflow subagent, aggregation marker in cumulative ``tools_used`` OR in
+       ``prev_tool_calls`` → ``aggregation_thinking`` (monotonic transition).
     3. Workflow subagent, nudge/restrict fired → ``aggregation_thinking``
        (wall-clock fallback — model is being forced to finalize).
     4. Workflow subagent, otherwise (gathering, incl. first turn) →
@@ -131,16 +147,19 @@ class DefaultPhasePolicy:
         if ctx.closing_mode:
             return _thinking_options(self._closing_thinking)
 
-        # 2-4. Workflow subagent (research): semantic primary + wall-clock fallback.
+        # 2-4. Workflow subagent (research): monotonic gathering→aggregation.
         if ctx.is_workflow_subagent:
-            prev_set = set(ctx.prev_tool_calls)
-            # Aggregation: previous turn reviewed facts → synthesis phase now.
-            if ctx.aggregation_markers & prev_set:
+            # Aggregation if an aggregation marker was invoked in ANY prior turn
+            # (cumulative tools_used) — monotonic transition — OR in the
+            # immediately previous turn (covers the turn that reviews facts and
+            # the turn that finalizes right after).
+            cumulative = set(ctx.tools_used) | set(ctx.prev_tool_calls)
+            if ctx.aggregation_markers & cumulative:
                 return _thinking_options(self._aggregation_thinking)
             # Wall-clock fallback: mandate nudged/restricted toward finalization.
             if ctx.nudge_injected or ctx.restricted:
                 return _thinking_options(self._aggregation_thinking)
-            # Gathering (incl. first turn where prev_tool_calls is empty).
+            # Gathering (incl. first turn where both sets are empty).
             return _thinking_options(self._gathering_thinking)
 
         # 5. Main agent default phase — no override.

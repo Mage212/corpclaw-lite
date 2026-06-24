@@ -354,9 +354,7 @@ def test_thinking_off_suppresses_system_prompt_prefix() -> None:
         system_prompt_prefix="<|think|>",
         thinking_parser=ThinkingConfig(source="content"),
     )
-    provider = _provider(
-        model_profile=mp, sampling=SamplingProfile(thinking_mode="off")
-    )
+    provider = _provider(model_profile=mp, sampling=SamplingProfile(thinking_mode="off"))
     out = provider._apply_model_profile("You are helpful.", {})
     assert "<|think|>" not in (out or "")
     assert "You are helpful." in (out or "")
@@ -365,9 +363,7 @@ def test_thinking_off_suppresses_system_prompt_prefix() -> None:
 def test_thinking_default_keeps_system_prompt_prefix() -> None:
     """thinking_mode=default keeps the prefix (model's natural thinking)."""
     mp = ModelProfile(system_prompt_prefix="<|think|>")
-    provider = _provider(
-        model_profile=mp, sampling=SamplingProfile(thinking_mode="default")
-    )
+    provider = _provider(model_profile=mp, sampling=SamplingProfile(thinking_mode="default"))
     out = provider._apply_model_profile("You are helpful.", {})
     assert out == "<|think|>\nYou are helpful."
 
@@ -375,9 +371,7 @@ def test_thinking_default_keeps_system_prompt_prefix() -> None:
 def test_per_call_thinking_off_suppresses_prefix() -> None:
     """Per-call RequestOptions thinking=off overrides default sampling → prefix off."""
     mp = ModelProfile(system_prompt_prefix="<|think|>")
-    provider = _provider(
-        model_profile=mp, sampling=SamplingProfile(thinking_mode="default")
-    )
+    provider = _provider(model_profile=mp, sampling=SamplingProfile(thinking_mode="default"))
     tok = set_request_options(RequestOptions(thinking=ThinkingOverride(mode="off")))
     try:
         out = provider._apply_model_profile("You are helpful.", {})

@@ -86,11 +86,12 @@ llm:
 
     # Eval judge (B-060): cloud model that scores agent answers against the
     # 7-dimension rubric. The agent-under-test stays on the `default` route
-    # (local LLM); only the judge uses this. Configure PROVIDER_*__* for a
-    # cloud provider in .env and uncomment, e.g.:
-    # - task_kind: "eval"
-    #   provider: "cloud"
-    #   model: "glm-5.2"
+    # (local LLM); only the judge uses this. Requires PROVIDER_CLOUD__* env vars
+    # (e.g. z.ai glm-5.2). When the cloud provider is not registered, the judge
+    # resolves to None and the eval falls back to deterministic-only scoring.
+    - task_kind: "eval"
+      provider: "cloud"
+      model: "glm-5.2"
 
     # Per-subagent routing (optional — falls back to default if no rule matches)
     # - subagent_id: "research-agent"

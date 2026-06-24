@@ -43,6 +43,7 @@ def _ctx(
     nudge_injected: bool = False,
     restricted: bool = False,
     prev_tool_calls: list[str] | None = None,
+    tools_used: list[str] | None = None,
     aggregation_markers: frozenset[str] = _AGGREGATION,
     gathering_tools: frozenset[str] = _GATHERING,
 ) -> PhaseContext:
@@ -54,6 +55,7 @@ def _ctx(
         nudge_injected=nudge_injected,
         restricted=restricted,
         prev_tool_calls=prev_tool_calls or [],
+        tools_used=tools_used or [],
         aggregation_markers=aggregation_markers,
         gathering_tools=gathering_tools,
     )
@@ -145,6 +147,75 @@ def test_research_first_turn_is_gathering_off() -> None:
     policy = _policy()
     opts = policy.options_for_phase(_ctx(is_workflow_subagent=True, prev_tool_calls=[]))
     assert _thinking_mode(opts) == "off"
+
+
+# ── Monotonic gathering→aggregation transition (D-056 timing fix) ────────────
+
+
+def test_research_aggregation_monotonic_after_list_facts() -> None:
+    """Once list_facts was invoked in ANY prior turn, aggregation is sticky.
+
+    The turn that calls research_finalize after list_facts must be in the
+    aggregation phase (thinking on), even though list_facts is not in the
+    immediately-previous turn — it's in the cumulative tools_used.
+    """
+    policy = _policy()
+    # Prev turn = read_source (gathering tool), but list_facts already happened
+    # earlier → cumulative has the marker → aggregation phase.
+    opts = policy.options_for_phase(
+        _ctx(
+            is_workflow_subagent=True,
+            prev_tool_calls=["research_read_source"],
+            tools_used=["research_search", "research_list_facts", "research_read_source"],
+        )
+    )
+    assert opts is None  # aggregation_thinking default → natural thinking on
+
+
+def test_research_gathering_before_any_list_facts() -> None:
+    """Pure gathering (no aggregation marker anywhere yet) → thinking off."""
+    policy = _policy()
+    opts = policy.options_for_phase(
+        _ctx(
+            is_workflow_subagent=True,
+            prev_tool_calls=["research_store_fact"],
+            tools_used=["research_search", "research_fetch_source", "research_store_fact"],
+        )
+    )
+    assert _thinking_mode(opts) == "off"
+
+
+def test_research_aggregation_sticky_after_finalize() -> None:
+    """After research_finalize in cumulative, subsequent turns stay aggregation."""
+    policy = _policy(aggregation_thinking="off")  # make override observable
+    opts = policy.options_for_phase(
+        _ctx(
+            is_workflow_subagent=True,
+            prev_tool_calls=["research_search"],  # gathering tool in prev
+            tools_used=["research_finalize", "research_search"],
+        )
+    )
+    # finalize in cumulative → aggregation phase (off, observable).
+    assert _thinking_mode(opts) == "off"
+
+
+def test_research_list_facts_turn_is_aggregation() -> None:
+    """The turn right after a gathering turn, when list_facts was called, → aggregation.
+
+    This covers the list_facts invocation turn's FOLLOW-UP: prev had list_facts,
+    cumulative has list_facts → aggregation. (The list_facts call itself happens
+    in a turn where prev was still gathering; that turn stays gathering by the
+    before-the-call signal, but every turn after is aggregation.)
+    """
+    policy = _policy(aggregation_thinking="off")
+    opts = policy.options_for_phase(
+        _ctx(
+            is_workflow_subagent=True,
+            prev_tool_calls=["research_list_facts"],
+            tools_used=["research_list_facts"],
+        )
+    )
+    assert _thinking_mode(opts) == "off"  # aggregation phase
 
 
 # ── Disabled policy ───────────────────────────────────────────────────────────
