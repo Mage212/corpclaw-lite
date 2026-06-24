@@ -154,7 +154,9 @@ data/
 |-------------|----------|
 | **ReAct-цикл агента** | Классический reasoning+acting с бюджетными ограничениями и обнаружением зацикливаний |
 | **LLM Router** | Маршрутизация задач к конкретным провайдерам (локальный Ollama, облачный Anthropic и др.) |
-| **Модельные пресеты** | Параметры инференса и конфигурация reasoning для каждой модели |
+| **Model + Sampling Profiles** | Ортогональные `ModelProfile` (свойства модели) + `SamplingProfile` (свойства задачи/фазы) с per-call `RequestOptions` override (D-056) |
+| **PhasePolicy** | Per-фазное управление thinking — research gathering off, aggregation on; closing mode off |
+| **Raw LLM Capture** | Опциональное логирование сырых request/response в `logs/llm_payloads.jsonl` с field-level allowlist + scrubbing секретов — для диагностики и будущего сбора датасета для дообучения |
 | **XML Tool Calling** | Fallback-парсер для локальных LLM без нативного function calling |
 | **Сжатие контекста** | 3-уровневое сжатие для ограниченных контекстных окон |
 | **Smart Approvals** | LLM-оценка риска опасных операций |
@@ -621,19 +623,19 @@ uv run pytest tests/ --cov=src/corpclaw_lite --cov-report=term-missing  # Пок
 
 | Компонент | LOC | Файлов |
 |-----------|-----|--------|
-| Agent Core | ~4 400 | 13 |
+| Agent Core | ~4 620 | 14 |
 | Extensions | ~9 100 | 51 |
-| Channels | ~6 500 | 22 |
+| Channels | ~6 540 | 22 |
 | Calibration | ~1 560 | 8 |
-| LLM Providers | ~4 000 | 9 |
-| Eval harness (B-060) | ~1 860 | 9 |
-| Container | ~830 | 6 |
+| LLM Providers | ~5 070 | 9 |
+| Eval harness (B-060) | ~2 350 | 10 |
+| Container | ~870 | 6 |
 | Security | ~800 | 6 |
 | Memory | ~840 | 4 |
 | Onboarding | ~630 | 5 |
-| Прочее | ~3 170 | ~27 |
-| **Исходный код** | **~34 500** | **~160** |
-| **Тесты** | **~30 300** | **~139** (1476 тестов собрано) |
+| Прочее | ~4 930 | ~33 |
+| **Исходный код** | **~36 750** | **163** |
+| **Тесты** | **~32 800** | **~138** (1585 тестов собрано) |
 
 ---
 

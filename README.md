@@ -136,7 +136,9 @@ React build is missing, the backend returns an explicit warning page instead of 
 |---------|-------------|
 | ReAct Agent Loop | Reasoning+acting with budget guards and loop detection |
 | LLM Router | Route tasks to specific providers (local/cloud) |
-| Model Presets | Per-model inference params and reasoning strategies |
+| Model + Sampling Profiles | Orthogonal `ModelProfile` (model properties) + `SamplingProfile` (task/phase properties) with per-call `RequestOptions` override (D-056) |
+| PhasePolicy | Per-phase thinking control — research gathering off, aggregation on; closing mode off |
+| Raw LLM Capture | Optional raw request/response logging to `logs/llm_payloads.jsonl` with field-level allowlist + credential scrubbing — for debugging and future fine-tune dataset collection |
 | XML Tool Calling | Fallback parser for local LLMs without function calling |
 | 29 Built-in Tools | File ops, SQL queries, charts, PDF, Excel workbook/inspection, web search/fetch, research workflows, and more |
 | Docker Sandbox | Per-user containers with resource limits and network deny-by-default |
