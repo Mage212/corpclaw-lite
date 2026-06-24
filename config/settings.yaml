@@ -44,30 +44,39 @@ llm:
       prune_interval_seconds: 600.0
       http_timeout_seconds: 30.0
   # Routing rules — checked top-to-bottom, first match wins
-  # provider: must match a name registered via PROVIDER_* env vars in .env
-  # model:    model identifier for that provider
-  # preset:   (optional) model preset from config/model_presets.yaml
+  # provider:       must match a name registered via PROVIDER_* env vars in .env
+  # model:          model identifier for that provider
+  # sampling:       (preferred) sampling profile from config/model_presets.yaml
+  #                 (the ``sampling:`` block). Controls thinking_mode + per-task
+  #                 inference overrides. See D-056.
+  # model_profile:  (optional) override the model profile; inferred from the
+  #                 sampling profile's ``model:`` or the rule's ``model:`` if absent.
+  # preset:         (deprecated) legacy combined preset — still works via the
+  #                 back-compat reader. Prefer ``sampling:``.
   routing:
     # Main chat (used by AgentLoop)
     - task_kind: "default"
       provider: "llamacpp"
       model: "qwen3.6-35b-a3b"
-      preset: "temperature-0.4"
+      sampling: "temperature-0.4"
 
-    # Vision analysis (separate LLM call for images)
+    # Vision analysis (separate LLM call for images) — thinking off (extraction)
     - task_kind: "vision"
       provider: "llamacpp"
       model: "qwen3.6-35b-a3b"
+      sampling: "aux-no-thinking"
 
-    # Memory consolidation (LLM-based history compression)
+    # Memory consolidation (LLM-based history compression) — thinking off
     - task_kind: "consolidate"
       provider: "llamacpp"
       model: "qwen3.6-35b-a3b"
+      sampling: "aux-no-thinking"
 
-    # Context compression (LLM-based summary of old turns)
+    # Context compression (LLM-based summary of old turns) — thinking off
     - task_kind: "compress"
       provider: "llamacpp"
       model: "qwen3.6-35b-a3b"
+      sampling: "aux-no-thinking"
 
     # Calibration analysis (cloud provider recommended)
     # Uncomment and configure PROVIDER_OPENROUTER__* in .env to enable
@@ -109,6 +118,28 @@ agent:
     protect_tail_tokens: 3000
     summary_ratio: 0.20
     prune_min_messages: 15
+  # D-056 PR2: per-call thinking overrides based on task phase. The policy is
+  # enabled by default but is a NO-OP for the main agent in its default phase
+  # (no override returned), so it only takes effect in closing mode (budget
+  # pressure) and for workflow subagents (research). Set enabled: false to
+  # disable entirely.
+  phase_policy:
+    enabled: true
+    # Semantic primary signal: tool names whose presence in the PREVIOUS turn
+    # marks the aggregation/finalization phase (about to write the final report).
+    aggregation_markers: ["research_list_facts"]
+    # Semantic signal: tool names whose presence in the previous turn marks the
+    # gathering phase (still collecting raw material).
+    gathering_tools:
+      - research_search
+      - research_fetch_source
+      - research_read_source
+      - research_list_sources
+      - research_store_fact
+    # Per-phase thinking overrides (default | off | budget).
+    closing_thinking: "off"          # main agent budget < soft_deadline_ratio
+    gathering_thinking: "off"        # research gathering (incl. first turn)
+    aggregation_thinking: "default"  # research aggregation (final analysis/report)
 
 web:
   search_backend: "auto"

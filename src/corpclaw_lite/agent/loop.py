@@ -37,6 +37,8 @@ from corpclaw_lite.llm.base import (
     Provider,
     StreamingProvider,
     ToolCall,
+    reset_request_options,
+    set_request_options,
 )
 from corpclaw_lite.llm.queue import LLMQueueStatus
 from corpclaw_lite.llm.router import LLMRouter, QueuedProvider
@@ -58,6 +60,7 @@ __all__ = [
 
 if TYPE_CHECKING:
     from corpclaw_lite.agent.compressor import ContextCompressor
+    from corpclaw_lite.agent.phase_policy import PhasePolicy
     from corpclaw_lite.calibration.trajectory import TrajectoryRecorder
     from corpclaw_lite.departments.permissions import PermissionChecker
     from corpclaw_lite.memory.consolidation import MemoryConsolidator
@@ -256,6 +259,9 @@ class AgentConfig:
     # B-040: file-change journal DAO. When set, the loop injects a
     # <recent_files> block into the system prompt at run start.
     file_change_dao: FileChangeDAO | None = None
+    # D-056 PR2: per-call thinking overrides based on task phase. When None,
+    # AgentLoop constructs a DefaultPhasePolicy from settings.agent.phase_policy.
+    phase_policy: PhasePolicy | None = None
 
 
 class AgentLoop:
@@ -277,6 +283,14 @@ class AgentLoop:
         self._terminal_tool = config.terminal_tool
         self._required_before_terminal = config.required_before_terminal
         self._file_change_dao = config.file_change_dao
+        # D-056 PR2: phase-based per-call thinking overrides. Default policy
+        # comes from settings; tests/callers may inject a custom PhasePolicy.
+        from corpclaw_lite.agent.phase_policy import DefaultPhasePolicy
+
+        self._phase_policy = config.phase_policy or DefaultPhasePolicy(self._settings.phase_policy)
+        # Cache marker sets as frozensets for the hot path.
+        self._phase_aggregation_markers = frozenset(self._settings.phase_policy.aggregation_markers)
+        self._phase_gathering_tools = frozenset(self._settings.phase_policy.gathering_tools)
         self._approval_lock = asyncio.Lock()
 
     @property
@@ -695,9 +709,21 @@ class AgentLoop:
         )
 
         try:
+            # D-056 PR2: prev_turn_tools feeds PhasePolicy's semantic phase
+            # signal. It holds the tool names invoked in the PREVIOUS turn
+            # (per-turn, not cumulative). current_turn_tools is populated during
+            # tool execution and promoted to prev_turn_tools at the top of the
+            # next iteration, then reset to accumulate the new turn's tools.
+            # On the first turn prev_turn_tools is [] (gathering, by convention).
+            prev_turn_tools: list[str] = []
+            current_turn_tools: list[str] = []
             while True:
                 budget.consume_iteration()
                 stats.iterations += 1
+                # Promote the previous turn's collected tools, then reset for
+                # this turn. PhasePolicy reads prev_turn_tools below.
+                prev_turn_tools = current_turn_tools
+                current_turn_tools = []
 
                 # Soft deadline (wall-clock) -> closing mode: reduce tool schema to
                 # finalize-only terminal tools so the model wraps up instead of being
@@ -747,88 +773,132 @@ class AgentLoop:
                     tools_schema = self._apply_closing_mode(
                         soft_deadline, tools_schema, task_run, user, stats
                     )
-                    # When the provider is a queued router, separate queue wait
-                    # from LLM inference so the budget only counts active time.
-                    if isinstance(self._provider, LLMRouter) and self._provider.has_queue:
-                        budget.pause()
+                    # D-056 PR2: phase-based per-call thinking override. The
+                    # policy returns RequestOptions (or None) based on the task
+                    # phase (closing mode / research gathering / aggregation),
+                    # which we set on the per-call contextvar for the duration
+                    # of this LLM call. The provider merges it with model/
+                    # sampling profiles. Independent of the queue/cache
+                    # extra_body contextvar.
+                    from corpclaw_lite.agent.phase_policy import PhaseContext
 
-                        def on_router_acquired() -> None:
-                            budget.resume()
-                            emit_llm_status("model_preparing")
-
-                        response = await self._provider.call_default_with_slot(
-                            user_id=str(user.id),
-                            run_id=stats.run_id,
-                            messages=context.messages,
-                            tools=tools_schema,
-                            system=context.system_prompt or None,
-                            on_acquired=on_router_acquired,
-                            call=lambda target_provider, _tools=tools_schema: asyncio.wait_for(
-                                self._call_llm_provider(
-                                    target_provider,
-                                    messages=context.messages,
-                                    tools=_tools,
-                                    system=context.system_prompt or None,
-                                    run_id=stats.run_id,
-                                    iteration=stats.iterations,
-                                    on_llm_stage=on_llm_stage,
-                                    stats=stats,
-                                ),
-                                timeout=self._settings.llm_timeout_seconds,
+                    phase_ctx = PhaseContext(
+                        is_workflow_subagent=mandate.enabled,
+                        iteration=stats.iterations,
+                        elapsed_ratio=mandate.elapsed_ratio() if mandate.enabled else None,
+                        closing_mode=soft_deadline.closing_mode,
+                        nudge_injected=mandate.nudge_injected,
+                        restricted=mandate.restricted,
+                        prev_tool_calls=prev_turn_tools,
+                        aggregation_markers=self._phase_aggregation_markers,
+                        gathering_tools=self._phase_gathering_tools,
+                    )
+                    req_opts = self._phase_policy.options_for_phase(phase_ctx)
+                    _phase_call_token = (
+                        set_request_options(req_opts) if req_opts is not None else None
+                    )
+                    if req_opts is not None:
+                        log_event(
+                            "phase_changed",
+                            stats.run_id,
+                            iteration=stats.iterations,
+                            prev_tools=prev_turn_tools,
+                            thinking=(
+                                req_opts.thinking.mode if req_opts.thinking is not None else None
                             ),
-                            on_queue_status=on_llm_queue_status,
-                            notify_position=_queue_notify_position(self._settings),
-                            notify_interval_seconds=_queue_notify_interval_seconds(self._settings),
+                            closing_mode=soft_deadline.closing_mode,
+                            is_workflow_subagent=mandate.enabled,
                         )
-                    elif isinstance(self._provider, QueuedProvider):
-                        budget.pause()
+                    try:
+                        # When the provider is a queued router, separate queue wait
+                        # from LLM inference so the budget only counts active time.
+                        if isinstance(self._provider, LLMRouter) and self._provider.has_queue:
+                            budget.pause()
 
-                        def on_queued_provider_acquired() -> None:
-                            budget.resume()
-                            emit_llm_status("model_preparing")
+                            def on_router_acquired() -> None:
+                                budget.resume()
+                                emit_llm_status("model_preparing")
 
-                        response = await self._provider.call_with_slot(
-                            messages=context.messages,
-                            tools=tools_schema,
-                            system=context.system_prompt or None,
-                            on_acquired=on_queued_provider_acquired,
-                            on_queue_status=on_llm_queue_status,
-                            notify_position=_queue_notify_position(self._settings),
-                            notify_interval_seconds=_queue_notify_interval_seconds(self._settings),
-                            call=lambda target_provider, _tools=tools_schema: asyncio.wait_for(
-                                self._call_llm_provider(
-                                    target_provider,
-                                    messages=context.messages,
-                                    tools=_tools,
-                                    system=context.system_prompt or None,
-                                    run_id=stats.run_id,
-                                    iteration=stats.iterations,
-                                    on_llm_stage=on_llm_stage,
-                                    stats=stats,
-                                ),
-                                timeout=self._settings.llm_timeout_seconds,
-                            ),
-                        )
-                    else:
-                        target_provider: Provider = (
-                            self._provider.default
-                            if isinstance(self._provider, LLMRouter)
-                            else self._provider
-                        )
-                        emit_llm_status("model_preparing")
-                        response = await asyncio.wait_for(
-                            self._call_llm_provider(
-                                target_provider,
+                            response = await self._provider.call_default_with_slot(
+                                user_id=str(user.id),
+                                run_id=stats.run_id,
                                 messages=context.messages,
                                 tools=tools_schema,
                                 system=context.system_prompt or None,
-                                run_id=stats.run_id,
-                                iteration=stats.iterations,
-                                on_llm_stage=on_llm_stage,
-                                stats=stats,
-                            ),
-                            timeout=self._settings.llm_timeout_seconds,
-                        )
+                                on_acquired=on_router_acquired,
+                                call=lambda target_provider, _tools=tools_schema: asyncio.wait_for(
+                                    self._call_llm_provider(
+                                        target_provider,
+                                        messages=context.messages,
+                                        tools=_tools,
+                                        system=context.system_prompt or None,
+                                        run_id=stats.run_id,
+                                        iteration=stats.iterations,
+                                        on_llm_stage=on_llm_stage,
+                                        stats=stats,
+                                    ),
+                                    timeout=self._settings.llm_timeout_seconds,
+                                ),
+                                on_queue_status=on_llm_queue_status,
+                                notify_position=_queue_notify_position(self._settings),
+                                notify_interval_seconds=_queue_notify_interval_seconds(
+                                    self._settings
+                                ),
+                            )
+                        elif isinstance(self._provider, QueuedProvider):
+                            budget.pause()
+
+                            def on_queued_provider_acquired() -> None:
+                                budget.resume()
+                                emit_llm_status("model_preparing")
+
+                            response = await self._provider.call_with_slot(
+                                messages=context.messages,
+                                tools=tools_schema,
+                                system=context.system_prompt or None,
+                                on_acquired=on_queued_provider_acquired,
+                                on_queue_status=on_llm_queue_status,
+                                notify_position=_queue_notify_position(self._settings),
+                                notify_interval_seconds=_queue_notify_interval_seconds(
+                                    self._settings
+                                ),
+                                call=lambda target_provider, _tools=tools_schema: asyncio.wait_for(
+                                    self._call_llm_provider(
+                                        target_provider,
+                                        messages=context.messages,
+                                        tools=_tools,
+                                        system=context.system_prompt or None,
+                                        run_id=stats.run_id,
+                                        iteration=stats.iterations,
+                                        on_llm_stage=on_llm_stage,
+                                        stats=stats,
+                                    ),
+                                    timeout=self._settings.llm_timeout_seconds,
+                                ),
+                            )
+                        else:
+                            target_provider: Provider = (
+                                self._provider.default
+                                if isinstance(self._provider, LLMRouter)
+                                else self._provider
+                            )
+                            emit_llm_status("model_preparing")
+                            response = await asyncio.wait_for(
+                                self._call_llm_provider(
+                                    target_provider,
+                                    messages=context.messages,
+                                    tools=tools_schema,
+                                    system=context.system_prompt or None,
+                                    run_id=stats.run_id,
+                                    iteration=stats.iterations,
+                                    on_llm_stage=on_llm_stage,
+                                    stats=stats,
+                                ),
+                                timeout=self._settings.llm_timeout_seconds,
+                            )
+                    finally:
+                        if _phase_call_token is not None:
+                            reset_request_options(_phase_call_token)
                 except TimeoutError:
                     msg = "I could not get a response from the language model (timed out)."
                     await self._save_memory(mem_key, "assistant", msg)
@@ -1020,6 +1090,7 @@ class AgentLoop:
                     for tc, result in zip(response.tool_calls, results, strict=True):
                         context.add_tool_result(tc.id, tc.name, result)
                         stats.tools_used.append(tc.name)
+                        current_turn_tools.append(tc.name)
                         action_results.append((tc.name, result))
                     # B-047 FIRST: the wall-clock deadline is time-critical and must
                     # always get a chance to nudge/restrict, even if the same tools
@@ -1070,6 +1141,7 @@ class AgentLoop:
                         )
                         context.add_tool_result(tc.id, tc.name, result)
                         stats.tools_used.append(tc.name)
+                        current_turn_tools.append(tc.name)
                         action_results.append((tc.name, result))
 
                         # Terminal tool: return result directly (no LLM re-paraphrase).
