@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings
 
 from corpclaw_lite.agent.guards import (
@@ -342,6 +342,26 @@ class LoggingSettings(BaseModel):
     trace_enabled: bool = True
     trace_level: Literal["metadata", "debug_preview", "full"] = "metadata"
     trace_preview_chars: int = 200
+    # D-056 post-0.2.0: raw LLM request/response capture (opt-in, disabled by
+    # default). Writes logs/llm_payloads.jsonl with allowlisted fields. Used for
+    # diagnostics (what the model actually receives/returns) and future
+    # fine-tuning dataset collection.
+    capture_enabled: bool = False
+    capture_fields: list[str] = Field(
+        default_factory=lambda: [
+            "request.model",
+            "request.messages",
+            "request.tools",
+            "request.params",
+            "request.extra_body",
+            "response.content",
+            "response.reasoning",
+            "response.tool_calls",
+            "response.usage",
+            "response.finish_reason",
+        ]
+    )
+    capture_dir: str = "logs"
 
 
 class Settings(BaseSettings):

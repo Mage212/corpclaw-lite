@@ -297,6 +297,130 @@ class OpenAIProvider(Provider):
         self._apply_sampling(kwargs)
         return system
 
+    # ── Raw request/response capture (D-056 post-0.2.0) ──────────────────────
+
+    def _capture_llm_io(
+        self,
+        phase: str,
+        kwargs: dict[str, Any],
+        raw_response: Any | None = None,
+        *,
+        finish_reason: str | None = None,
+        error: str | None = None,
+        diagnostic: dict[str, Any] | None = None,
+    ) -> None:
+        """Capture the raw request + response to logs/llm_payloads.jsonl.
+
+        No-op when payload capture is disabled (the common case). Extracts the
+        request/response summaries and hands them to the PayloadCaptureLogger
+        singleton, which applies the field allowlist + credential scrubbing.
+        """
+        from corpclaw_lite.logging.payload import get_payload_logger
+
+        pl = get_payload_logger()
+        if pl is None or not pl.enabled:
+            return
+
+        from corpclaw_lite.llm.base import get_run_id
+
+        response_summary = (
+            self._response_summary(raw_response, finish_reason) if raw_response else None
+        )
+        pl.capture(
+            run_id=get_run_id(),
+            phase=phase,
+            request=self._request_summary(kwargs),
+            response=response_summary,
+            finish_reason=finish_reason,
+            error=error,
+            diagnostic=diagnostic,
+        )
+
+    @staticmethod
+    def _request_summary(kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Build a request summary dict from the provider kwargs.
+
+        Keys match the ``request.*`` allowlist paths: ``model``, ``messages``,
+        ``tools``, ``params`` (standard OpenAI params), ``extra_body``.
+        """
+        # Standard OpenAI params that are NOT messages/tools/extra_body/model.
+        standard_param_keys = {
+            "temperature",
+            "max_tokens",
+            "max_completion_tokens",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty",
+            "stop",
+            "seed",
+            "tool_choice",
+            "parallel_tool_calls",
+            "response_format",
+            "user",
+            "n",
+            "logit_bias",
+            "logprobs",
+            "top_logprobs",
+            "stream",
+        }
+        params = {k: v for k, v in kwargs.items() if k in standard_param_keys}
+        return {
+            "model": kwargs.get("model"),
+            "messages": kwargs.get("messages"),
+            "tools": kwargs.get("tools"),
+            "params": params or None,
+            "extra_body": kwargs.get("extra_body"),
+        }
+
+    @staticmethod
+    def _response_summary(raw_response: Any, finish_reason: str | None) -> dict[str, Any]:
+        """Build a response summary dict from the raw SDK/streamed response.
+
+        Keys match the ``response.*`` allowlist paths: ``content``,
+        ``reasoning``, ``tool_calls``, ``usage``, ``finish_reason``. Handles
+        both SDK ChatCompletion objects (have ``.model_dump()``) and the
+        streamed SimpleNamespace assembled in ``chat_streamed``.
+        """
+        # SDK objects expose model_dump(); SimpleNamespace does not.
+        if hasattr(raw_response, "model_dump"):
+            try:
+                data = raw_response.model_dump()
+            except Exception:
+                data = {}
+            choices = data.get("choices") or []
+            choice = choices[0] if choices else {}
+            msg = choice.get("message") or {}
+            return {
+                "content": msg.get("content") or "",
+                "reasoning": msg.get("reasoning_content") or "",
+                "tool_calls": msg.get("tool_calls") or [],
+                "usage": data.get("usage"),
+                "finish_reason": choice.get("finish_reason") or finish_reason,
+            }
+        # Fallback: SimpleNamespace from chat_streamed — has choices/message-like
+        # attributes. Try attribute access.
+        try:
+            choices = getattr(raw_response, "choices", None) or []
+            choice = choices[0] if choices else None
+            msg = getattr(choice, "message", None) if choice else None
+            if msg is not None:
+                return {
+                    "content": getattr(msg, "content", "") or "",
+                    "reasoning": getattr(msg, "reasoning_content", "") or "",
+                    "tool_calls": getattr(msg, "tool_calls", []) or [],
+                    "usage": getattr(raw_response, "usage", None),
+                    "finish_reason": getattr(choice, "finish_reason", None) or finish_reason,
+                }
+        except Exception:
+            pass
+        return {
+            "content": None,
+            "reasoning": None,
+            "tool_calls": None,
+            "usage": None,
+            "finish_reason": finish_reason,
+        }
+
     def _parse_reasoning(self, message: Any) -> tuple[str, str]:
         """Extract (reasoning, content) based on the model's thinking parser.
 
@@ -479,6 +603,29 @@ class OpenAIProvider(Provider):
                 )
                 tool_calls.extend(parse_result.tool_calls)
                 content = ""
+            elif parse_result.error_code:
+                # XML markers present but parsing failed — capture the raw
+                # unparsed content for diagnosis (the "could not safely parse"
+                # path). Always captured regardless of allowlist so the model's
+                # raw output is visible when tool-call parsing breaks.
+                from corpclaw_lite.llm.base import get_run_id
+                from corpclaw_lite.logging.payload import get_payload_logger
+
+                pl = get_payload_logger()
+                if pl is not None and pl.enabled:
+                    pl.capture(
+                        run_id=get_run_id(),
+                        phase="xml_parse_failure",
+                        request=None,
+                        response=None,
+                        finish_reason=finish_reason,
+                        error=parse_result.error_code,
+                        diagnostic={
+                            "raw_unparsed_content": content,
+                            "raw_reasoning": reasoning,
+                            "parse_error_message": parse_result.error_message,
+                        },
+                    )
 
         return LLMResponse(
             content=content,
@@ -506,6 +653,7 @@ class OpenAIProvider(Provider):
 
         response = await self._client.chat.completions.create(**kwargs)
         if not response.choices:
+            self._capture_llm_io("chat", kwargs, response, finish_reason=None)
             return LLMResponse(content="", tool_calls=[], reasoning="")
         choice = response.choices[0]
 
@@ -514,6 +662,8 @@ class OpenAIProvider(Provider):
 
         usage = _usage_from_raw(response.usage)
         usage = _apply_timings(usage, getattr(response, "timings", None))
+
+        self._capture_llm_io("chat", kwargs, response, finish_reason=choice.finish_reason)
 
         return self._finalize_response(
             content=content,
@@ -657,6 +807,9 @@ class OpenAIProvider(Provider):
             tools=tools,
             usage=usage,
         )
+        # Capture raw I/O for streamed calls. raw_message is a SimpleNamespace
+        # (content/reasoning_content/tool_calls); usage + finish_reason are locals.
+        self._capture_llm_io("chat_streamed", kwargs, raw_message, finish_reason=finish_reason)
         emit(
             LLMStreamEvent(
                 stage="finished",
@@ -721,12 +874,16 @@ class OpenAIProvider(Provider):
 
         response = await self._client.chat.completions.create(**kwargs)
         if not response.choices:
+            self._capture_llm_io("chat_with_image", kwargs, response, finish_reason=None)
             return LLMResponse(content="")
         choice = response.choices[0]
         content = choice.message.content or ""
 
         usage = _usage_from_raw(response.usage)
         usage = _apply_timings(usage, getattr(response, "timings", None))
+        self._capture_llm_io(
+            "chat_with_image", kwargs, response, finish_reason=choice.finish_reason
+        )
         return LLMResponse(content=content, usage=usage)
 
     async def stream(
