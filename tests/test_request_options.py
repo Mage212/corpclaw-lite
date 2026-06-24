@@ -249,8 +249,10 @@ def test_build_chat_kwargs_full_merge_priority() -> None:
     assert kwargs["extra_body"]["top_k"] == 20
     # Sampling thinking off injected.
     assert kwargs["extra_body"]["chat_template_kwargs"]["enable_thinking"] is False
-    # system_prompt_prefix prepended (model-profile layer).
-    assert final_messages[0]["content"] == "<|think|>\nYou are helpful."
+    # system_prompt_prefix SUPPRESSED because thinking is off (the prefix is
+    # the thinking switch for prefix-based models like gemma4).
+    assert "<|think|>" not in final_messages[0]["content"]
+    assert final_messages[0]["content"] == "You are helpful."
 
 
 def test_build_chat_kwargs_no_profiles_no_options_minimal() -> None:
@@ -334,3 +336,51 @@ def test_build_provider_passes_profiles() -> None:
     assert provider is not None
     assert provider._model_profile is mp  # type: ignore[attr-defined]
     assert provider._sampling is sp  # type: ignore[attr-defined]
+
+
+# ── Thinking-off suppresses prefix-based thinking (gemma4 <|think|>) ─────────
+
+
+def test_thinking_off_suppresses_system_prompt_prefix() -> None:
+    """gemma4-style: thinking_mode=off suppresses <|think|> prefix.
+
+    For prefix-based models the system_prompt_prefix IS the thinking switch;
+    setting enable_thinking=False alone has no effect. _apply_model_profile
+    must drop the prefix when thinking is off.
+    """
+    from corpclaw_lite.llm.presets import ThinkingConfig
+
+    mp = ModelProfile(
+        system_prompt_prefix="<|think|>",
+        thinking_parser=ThinkingConfig(source="content"),
+    )
+    provider = _provider(
+        model_profile=mp, sampling=SamplingProfile(thinking_mode="off")
+    )
+    out = provider._apply_model_profile("You are helpful.", {})
+    assert "<|think|>" not in (out or "")
+    assert "You are helpful." in (out or "")
+
+
+def test_thinking_default_keeps_system_prompt_prefix() -> None:
+    """thinking_mode=default keeps the prefix (model's natural thinking)."""
+    mp = ModelProfile(system_prompt_prefix="<|think|>")
+    provider = _provider(
+        model_profile=mp, sampling=SamplingProfile(thinking_mode="default")
+    )
+    out = provider._apply_model_profile("You are helpful.", {})
+    assert out == "<|think|>\nYou are helpful."
+
+
+def test_per_call_thinking_off_suppresses_prefix() -> None:
+    """Per-call RequestOptions thinking=off overrides default sampling → prefix off."""
+    mp = ModelProfile(system_prompt_prefix="<|think|>")
+    provider = _provider(
+        model_profile=mp, sampling=SamplingProfile(thinking_mode="default")
+    )
+    tok = set_request_options(RequestOptions(thinking=ThinkingOverride(mode="off")))
+    try:
+        out = provider._apply_model_profile("You are helpful.", {})
+    finally:
+        reset_request_options(tok)
+    assert "<|think|>" not in (out or "")

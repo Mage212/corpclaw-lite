@@ -43,13 +43,14 @@ models:
       repeat_penalty: 1.1
 
   # ── Gemma 4 (26B QAT) ────────────────────────────────────────────────────
+  # This proxy's gemma4-26b-qat returns reasoning in the native
+  # ``reasoning_content`` field (Qwen-style), NOT via <|think|> prefix / content
+  # tags. Thinking is controlled by ``chat_template_kwargs.enable_thinking``
+  # (set to false by SamplingProfile thinking_mode=off / RequestOptions).
   gemma4-26b-qat:
-    description: "Gemma 4 with extended thinking via <|think|> tag injection"
-    system_prompt_prefix: "<|think|>"
+    description: "Gemma 4 with native reasoning_content field"
     thinking_parser:
-      open_tag: "<|channel>thought"
-      close_tag: "<channel|>"
-      source: "content"
+      source: "native"
     default_inference:
       temperature: 0.7
       top_p: 0.9

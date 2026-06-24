@@ -157,6 +157,23 @@ class OpenAIProvider(Provider):
         }
     )
 
+    def _thinking_disabled(self) -> bool:
+        """Return True if thinking is turned off by sampling or per-call override.
+
+        Some models (e.g. gemma4) enable thinking via a ``system_prompt_prefix``
+        token (``<|think|>``) rather than a ``chat_template_kwargs`` flag. For
+        those, "thinking off" must suppress the prefix — setting
+        ``enable_thinking=False`` alone has no effect. This helper checks both
+        the SamplingProfile and the per-call RequestOptions so the prefix is
+        suppressed whenever thinking is off by any layer.
+        """
+        if self._sampling is not None and self._sampling.thinking_mode == "off":
+            return True
+        opts = get_request_options()
+        if opts is not None and opts.thinking is not None and opts.thinking.mode == "off":
+            return True
+        return False
+
     def _apply_model_profile(self, system: str | None, kwargs: dict[str, Any]) -> str | None:
         """Apply the ModelProfile: default inference params + system_prompt_prefix.
 
@@ -164,6 +181,10 @@ class OpenAIProvider(Provider):
         these. ``setdefault`` is used so higher layers always win. Non-standard
         params (top_k, min_p, repeat_penalty, ...) are routed to ``extra_body``
         so the OpenAI SDK doesn't reject them.
+
+        The ``system_prompt_prefix`` (e.g. gemma4 ``<|think|>``) is suppressed
+        when thinking is disabled (SamplingProfile or RequestOptions) — for
+        prefix-based models the prefix IS the thinking switch.
         """
         if not self._model_profile:
             return system
@@ -177,7 +198,11 @@ class OpenAIProvider(Provider):
         if extra_body:
             kwargs["extra_body"] = extra_body
 
-        if self._model_profile.system_prompt_prefix:
+        # Suppress the thinking prefix when thinking is off. For gemma4-style
+        # models the prefix (<|think|>) is what enables reasoning; without this
+        # check, thinking_mode=off would set enable_thinking=False (a Qwen
+        # mechanism) but leave the prefix active, so gemma4 keeps reasoning.
+        if self._model_profile.system_prompt_prefix and not self._thinking_disabled():
             prefix = self._model_profile.system_prompt_prefix
             return f"{prefix}\n{system}" if system else prefix
         return system
@@ -189,9 +214,10 @@ class OpenAIProvider(Provider):
         overridden by RequestOptions (per-call). Thinking mode maps to backend
         controls:
           - ``off``    → ``extra_body.chat_template_kwargs.enable_thinking=false``
-            (Qwen/gemma complete-disable, fastest). Note: this does not suppress
-            the ModelProfile's ``system_prompt_prefix`` (e.g. gemma4 ``<|think|>``)
-            — that is model-bound and applied in ``_apply_model_profile``.
+            (Qwen-style disable) AND suppresses the ModelProfile's
+            ``system_prompt_prefix`` (gemma4 ``<|think|>``) — see
+            ``_apply_model_profile`` / ``_thinking_disabled``. Both mechanisms
+            are applied so thinking-off works across model families.
           - ``budget`` → cap ``max_tokens`` to ``budget + 1024`` (soft cap on
             reasoning output, model-dependent effectiveness).
           - ``default``→ the model's natural thinking.
