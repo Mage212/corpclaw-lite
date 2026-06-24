@@ -380,6 +380,9 @@ def cmd_chat(telegram_id: int, *, setup_mode: bool = False) -> None:
         trace_enabled=_log.trace_enabled,
         trace_level=_log.trace_level,
         trace_preview_chars=_log.trace_preview_chars,
+        capture_enabled=_log.capture_enabled,
+        capture_fields=_log.capture_fields,
+        capture_dir=PROJECT_ROOT / (_log.capture_dir or _log.log_dir),
     )
 
     shutdown: asyncio.Event = asyncio.Event()
@@ -643,6 +646,9 @@ def cmd_telegram() -> None:
         trace_enabled=_log.trace_enabled,
         trace_level=_log.trace_level,
         trace_preview_chars=_log.trace_preview_chars,
+        capture_enabled=_log.capture_enabled,
+        capture_fields=_log.capture_fields,
+        capture_dir=PROJECT_ROOT / (_log.capture_dir or _log.log_dir),
     )
 
     from corpclaw_lite.channels.telegram.runner import run_telegram_bot
@@ -981,6 +987,9 @@ def cmd_calibrate(
         trace_enabled=_log.trace_enabled,
         trace_level=_log.trace_level,
         trace_preview_chars=_log.trace_preview_chars,
+        capture_enabled=_log.capture_enabled,
+        capture_fields=_log.capture_fields,
+        capture_dir=PROJECT_ROOT / (_log.capture_dir or _log.log_dir),
     )
 
     if reset:
@@ -1036,6 +1045,9 @@ def cmd_eval(
         trace_enabled=_log.trace_enabled,
         trace_level=_log.trace_level,
         trace_preview_chars=_log.trace_preview_chars,
+        capture_enabled=_log.capture_enabled,
+        capture_fields=_log.capture_fields,
+        capture_dir=PROJECT_ROOT / (_log.capture_dir or _log.log_dir),
     )
 
     judge: LLMJudge | None = None

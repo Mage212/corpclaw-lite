@@ -126,6 +126,35 @@ class AnthropicProvider(Provider):
         self._apply_sampling(kwargs)
         return system
 
+    @staticmethod
+    def _anthropic_response_summary(
+        resp_dict: dict[str, Any] | None,
+        content: str,
+        tool_calls: list[ToolCall],
+        usage: TokenUsage,
+    ) -> dict[str, Any]:
+        """Build a response summary dict for payload capture.
+
+        Anthropic responses don't have ``reasoning_content``; reasoning is
+        conveyed via ``thinking`` content blocks (not separately captured here).
+        """
+        finish_reason = None
+        if resp_dict is not None:
+            finish_reason = resp_dict.get("stop_reason")
+        return {
+            "content": content,
+            "reasoning": None,
+            "tool_calls": [
+                {"id": tc.id, "name": tc.name, "arguments": tc.arguments} for tc in tool_calls
+            ],
+            "usage": {
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+                "total_tokens": usage.total_tokens,
+            },
+            "finish_reason": finish_reason,
+        }
+
     async def chat(
         self,
         messages: list[dict[str, Any]],
@@ -170,6 +199,35 @@ class AnthropicProvider(Provider):
             output_tokens=response.usage.output_tokens,
             total_tokens=response.usage.input_tokens + response.usage.output_tokens,
         )
+
+        # D-056 post-0.2.0: raw request/response capture (no-op when disabled).
+        from corpclaw_lite.llm.base import get_run_id
+        from corpclaw_lite.logging.payload import get_payload_logger
+
+        pl = get_payload_logger()
+        if pl is not None and pl.enabled:
+            try:
+                resp_dict = response.model_dump()
+            except Exception:
+                resp_dict = None
+            pl.capture(
+                run_id=get_run_id(),
+                phase="chat",
+                request={
+                    "model": kwargs.get("model"),
+                    "messages": kwargs.get("messages"),
+                    "tools": kwargs.get("tools"),
+                    "params": {
+                        k: v
+                        for k, v in kwargs.items()
+                        if k in {"max_tokens", "temperature", "top_p", "stop_sequences", "top_k"}
+                    }
+                    or None,
+                    "extra_body": None,
+                },
+                response=self._anthropic_response_summary(resp_dict, content, tool_calls, usage),
+                finish_reason=getattr(response, "stop_reason", None),
+            )
 
         return LLMResponse(content=content, tool_calls=tool_calls, usage=usage)
 
@@ -218,6 +276,36 @@ class AnthropicProvider(Provider):
             output_tokens=response.usage.output_tokens,
             total_tokens=response.usage.input_tokens + response.usage.output_tokens,
         )
+
+        # D-056 post-0.2.0: raw request/response capture (no-op when disabled).
+        from corpclaw_lite.llm.base import get_run_id
+        from corpclaw_lite.logging.payload import get_payload_logger
+
+        pl = get_payload_logger()
+        if pl is not None and pl.enabled:
+            try:
+                resp_dict = response.model_dump()
+            except Exception:
+                resp_dict = None
+            pl.capture(
+                run_id=get_run_id(),
+                phase="chat_with_image",
+                request={
+                    "model": kwargs.get("model"),
+                    "messages": kwargs.get("messages"),
+                    "tools": None,
+                    "params": {
+                        k: v
+                        for k, v in kwargs.items()
+                        if k in {"max_tokens", "temperature", "top_p", "stop_sequences", "top_k"}
+                    }
+                    or None,
+                    "extra_body": None,
+                },
+                response=self._anthropic_response_summary(resp_dict, content, [], usage),
+                finish_reason=getattr(response, "stop_reason", None),
+            )
+
         return LLMResponse(content=content, usage=usage)
 
     async def stream(

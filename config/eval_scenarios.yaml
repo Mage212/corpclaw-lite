@@ -579,3 +579,52 @@ scenarios:
         expected_tools: ["read_image"]
         success_criteria: "Agent must call read_image and report Sales = 1500."
 
+  # ═══════════════════ RESEARCH (2) ═══════════════════════════════════════════
+  # These exercise research-agent dispatch + its full gathering→aggregation
+  # lifecycle (search/fetch/store → list_facts → finalize). Used to validate
+  # PhasePolicy (D-056): thinking off during gathering, on during aggregation.
+  # Web content is non-deterministic, so these are judged on report structure
+  # and honest sourcing, not a single ground-truth answer.
+
+  - id: research_basic_fact_lookup
+    category: research
+    severity: normal
+    description: >
+      A factual research task delegated to research-agent. Validates the full
+      research lifecycle (gather → aggregate → finalize) and that the agent
+      returns a sourced report rather than a bare guess.
+    turns:
+      - user_message: >-
+          Найди в интернете год основания компании Wikipedia Foundation и
+          подготовь краткий исследовательский отчёт с источником.
+        expected_answer: "2003"
+        expected_tools: ["dispatch_subagent"]
+        expected_subagent: "research-agent"
+        success_criteria: >
+          Agent must delegate to research-agent and return a sourced report.
+          The report should state the Wikimedia Foundation was founded in 2003
+          and cite a source. Do NOT penalise for extra context; penalise a
+          hallucinated year with no source.
+
+  - id: research_comparison_synthesis
+    category: research
+    severity: deep
+    description: >
+      A synthesis-heavy research task (compare two things) that forces the
+      research-agent through multiple search/fetch cycles before aggregation.
+      Deep-research marker words ("сравни", "подробн") trigger deep_research
+      mode (more waves, rereads). Validates that aggregation-phase thinking is
+      enabled (research_list_facts → research_finalize).
+    turns:
+      - user_message: >-
+          Сравни DuckDuckGo и Google как поисковые системы по приватности и
+          источникам дохода, подробно, с источниками.
+        expected_answer: null
+        expected_tools: ["dispatch_subagent"]
+        expected_subagent: "research-agent"
+        success_criteria: >
+          Agent must delegate to research-agent and return a sourced comparative
+          report. Both companies must be addressed. PASS if the report cites at
+          least one source and covers both privacy and revenue for each; FAIL
+          correctness if it invents specifics with no source.
+

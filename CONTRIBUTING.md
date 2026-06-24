@@ -264,7 +264,7 @@ load) instead of silently breaking when the core moves on:
 
 ```yaml
 # plugins/crm-integration/manifest.yaml
-requires_core: "^0.1.13"   # compatible with 0.1.x; 0.2.0 will skip this plugin
+requires_core: "^0.2.0"   # compatible with 0.2.x; older cores will skip this plugin
 ```
 
 Supported syntax: `^` caret (pins minor for 0.x, major for 1.x+), bare version (exact

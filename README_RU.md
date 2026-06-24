@@ -468,45 +468,72 @@ CorpClaw Lite спроектирован для работы в **замкнут
 
 ### LLM Router
 
-Маршрутизация разных задач к конкретным провайдерам:
+Маршрутизация задач к провайдерам через routing rules в `config/settings.yaml`.
+Провайдеры регистрируются через env (`PROVIDER_*__*`), модели и sampling-профили —
+через routing rules:
 
 ```yaml
+# .env
+PROVIDER_LLAMACPP__TYPE=openai
+PROVIDER_LLAMACPP__BASE_URL=http://localhost:11434/v1
+PROVIDER_LLAMACPP__API_KEY=ollama
+```
+
+```yaml
+# config/settings.yaml
 llm:
-  default: "default"
-  named:
-    default:
-      type: "openai"
-      model: "qwen3.5-4b"
-      base_url: "http://localhost:11434/v1"
-      preset: "qwen3.5-thinking"
-    cloud:
-      type: "anthropic"
-      model: "claude-sonnet-4-20250514"
-      api_key: "${ANTHROPIC_API_KEY}"
   routing:
+    - task_kind: "default"
+      provider: "llamacpp"
+      model: "qwen3.6-35b-a3b"
+      sampling: "temperature-0.4"      # ссылка на sampling-профиль
     - task_kind: "vision"
-      provider: "default"
-    - subagent_id: "code_review"
-      provider: "cloud"
+      provider: "llamacpp"
+      model: "qwen3.6-35b-a3b"
+      sampling: "aux-no-thinking"      # thinking off для экстракции
+    - subagent_id: "research-agent"
+      provider: "llamacpp"
+      model: "qwen3.6-35b-a3b"
 ```
 
-### Модельные пресеты
+### Модельные профили и sampling (D-056)
 
-Разные модели требуют разные параметры инференса и стратегии reasoning:
+Пресет расщеплён на два ортогональных слоя: `ModelProfile` (свойства модели) +
+`SamplingProfile` (свойства задачи/фазы). Хранятся в `config/model_presets.yaml`:
 
 ```yaml
-presets:
-  qwen3.5-thinking:
-    thinking:
-      source: "native"          # Использует поле reasoning_content из API
-    thinking_budget_tokens: 1024
-    inference_params:
-      temperature: 0.7
-      top_p: 0.95
-      top_k: 20
+models:                          # ModelProfile — свойства модели
+  qwen3.6-35b-a3b:
+    thinking_parser: {source: native}    # reasoning в reasoning_content (Qwen-style)
+    default_inference: {temperature: 0.7, top_p: 0.95, top_k: 20}
+
+sampling:                        # SamplingProfile — свойства задачи/фазы
+  temperature-0.4:
+    model: qwen3.6-35b-a3b
+    thinking_mode: default
+    inference_overrides: {temperature: 0.4}
+  aux-no-thinking:               # thinking off для экстракции (vision/compress/consolidate)
+    model: qwen3.6-35b-a3b
+    thinking_mode: off
+    inference_overrides: {temperature: 0.2}
 ```
 
-**Приоритет:** `уровень запроса > пресет > дефолты провайдера`
+**Приоритет merge:** `model_profile defaults < sampling overrides < RequestOptions
+(per-call) < backend extra_body (transport)`.
+
+**PhasePolicy** (`agent/phase_policy.py`) — per-call переключение thinking по
+фазе задачи: closing-mode → off; research gathering → off, aggregation → on
+(monotonic переход: `research_list_facts` в cumulative tools → все последующие
+turns = aggregation, thinking force-on). Auxiliary calls (vision/compress/
+consolidate) → off через `aux-no-thinking` sampling (config-driven).
+
+**`LLMRouter.with_overrides()`** — программный atomic override всех agent-роутов
+in-memory (для testing/A/B). Перестраивает default/vision/compress/consolidate
+роуты сразу → устраняет route-contamination.
+
+Legacy формат (`presets:` комбинированный блок, `RoutingRule.preset`) всё ещё
+поддерживается back-compat reader'ом — overlay/unmigrated config работает без
+правок.
 
 ---
 

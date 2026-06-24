@@ -20,6 +20,9 @@ def setup_logging(
     trace_enabled: bool = True,
     trace_level: str = "metadata",
     trace_preview_chars: int = 200,
+    capture_enabled: bool = False,
+    capture_fields: list[str] | None = None,
+    capture_dir: Path | str | None = None,
 ) -> None:
     """Configure root logging with two handlers:
 
@@ -75,6 +78,15 @@ def setup_logging(
         enabled=trace_enabled,
         trace_level=trace_level,  # type: ignore[arg-type]
         preview_chars=trace_preview_chars,
+    )
+
+    # D-056 post-0.2.0: raw request/response payload capture (opt-in).
+    from corpclaw_lite.logging.payload import setup_payload_logging
+
+    setup_payload_logging(
+        log_dir=capture_dir or log_path,
+        enabled=capture_enabled,
+        fields=capture_fields,
     )
 
 

@@ -157,6 +157,21 @@ class OpenAIProvider(Provider):
         }
     )
 
+    def _thinking_disabled(self) -> bool:
+        """Return True if thinking is turned off by sampling or per-call override.
+
+        Some models (e.g. gemma4) enable thinking via a ``system_prompt_prefix``
+        token (``<|think|>``) rather than a ``chat_template_kwargs`` flag. For
+        those, "thinking off" must suppress the prefix — setting
+        ``enable_thinking=False`` alone has no effect. This helper checks both
+        the SamplingProfile and the per-call RequestOptions so the prefix is
+        suppressed whenever thinking is off by any layer.
+        """
+        if self._sampling is not None and self._sampling.thinking_mode == "off":
+            return True
+        opts = get_request_options()
+        return opts is not None and opts.thinking is not None and opts.thinking.mode == "off"
+
     def _apply_model_profile(self, system: str | None, kwargs: dict[str, Any]) -> str | None:
         """Apply the ModelProfile: default inference params + system_prompt_prefix.
 
@@ -164,6 +179,10 @@ class OpenAIProvider(Provider):
         these. ``setdefault`` is used so higher layers always win. Non-standard
         params (top_k, min_p, repeat_penalty, ...) are routed to ``extra_body``
         so the OpenAI SDK doesn't reject them.
+
+        The ``system_prompt_prefix`` (e.g. gemma4 ``<|think|>``) is suppressed
+        when thinking is disabled (SamplingProfile or RequestOptions) — for
+        prefix-based models the prefix IS the thinking switch.
         """
         if not self._model_profile:
             return system
@@ -177,7 +196,11 @@ class OpenAIProvider(Provider):
         if extra_body:
             kwargs["extra_body"] = extra_body
 
-        if self._model_profile.system_prompt_prefix:
+        # Suppress the thinking prefix when thinking is off. For gemma4-style
+        # models the prefix (<|think|>) is what enables reasoning; without this
+        # check, thinking_mode=off would set enable_thinking=False (a Qwen
+        # mechanism) but leave the prefix active, so gemma4 keeps reasoning.
+        if self._model_profile.system_prompt_prefix and not self._thinking_disabled():
             prefix = self._model_profile.system_prompt_prefix
             return f"{prefix}\n{system}" if system else prefix
         return system
@@ -189,9 +212,10 @@ class OpenAIProvider(Provider):
         overridden by RequestOptions (per-call). Thinking mode maps to backend
         controls:
           - ``off``    → ``extra_body.chat_template_kwargs.enable_thinking=false``
-            (Qwen/gemma complete-disable, fastest). Note: this does not suppress
-            the ModelProfile's ``system_prompt_prefix`` (e.g. gemma4 ``<|think|>``)
-            — that is model-bound and applied in ``_apply_model_profile``.
+            (Qwen-style disable) AND suppresses the ModelProfile's
+            ``system_prompt_prefix`` (gemma4 ``<|think|>``) — see
+            ``_apply_model_profile`` / ``_thinking_disabled``. Both mechanisms
+            are applied so thinking-off works across model families.
           - ``budget`` → cap ``max_tokens`` to ``budget + 1024`` (soft cap on
             reasoning output, model-dependent effectiveness).
           - ``default``→ the model's natural thinking.
@@ -243,7 +267,7 @@ class OpenAIProvider(Provider):
                 else:
                     extra_body[k] = v
 
-        if options.thinking and options.thinking.mode != "default":
+        if options.thinking:
             mode = options.thinking.mode
             if mode == "off":
                 ctk = dict(extra_body.get("chat_template_kwargs") or {})
@@ -251,6 +275,13 @@ class OpenAIProvider(Provider):
                 extra_body["chat_template_kwargs"] = ctk
             elif mode == "budget" and options.thinking.budget is not None:
                 kwargs["max_tokens"] = options.thinking.budget + 1024
+            elif mode == "default":
+                # Force the model's natural thinking ON — cancel any
+                # thinking_mode=off set by the sampling profile (e.g. aggregation
+                # phase must reason to synthesise, even on an off-configured run).
+                ctk = dict(extra_body.get("chat_template_kwargs") or {})
+                ctk["enable_thinking"] = True
+                extra_body["chat_template_kwargs"] = ctk
 
         if extra_body:
             kwargs["extra_body"] = extra_body
@@ -265,6 +296,130 @@ class OpenAIProvider(Provider):
         system = self._apply_model_profile(system, kwargs)
         self._apply_sampling(kwargs)
         return system
+
+    # ── Raw request/response capture (D-056 post-0.2.0) ──────────────────────
+
+    def _capture_llm_io(
+        self,
+        phase: str,
+        kwargs: dict[str, Any],
+        raw_response: Any | None = None,
+        *,
+        finish_reason: str | None = None,
+        error: str | None = None,
+        diagnostic: dict[str, Any] | None = None,
+    ) -> None:
+        """Capture the raw request + response to logs/llm_payloads.jsonl.
+
+        No-op when payload capture is disabled (the common case). Extracts the
+        request/response summaries and hands them to the PayloadCaptureLogger
+        singleton, which applies the field allowlist + credential scrubbing.
+        """
+        from corpclaw_lite.logging.payload import get_payload_logger
+
+        pl = get_payload_logger()
+        if pl is None or not pl.enabled:
+            return
+
+        from corpclaw_lite.llm.base import get_run_id
+
+        response_summary = (
+            self._response_summary(raw_response, finish_reason) if raw_response else None
+        )
+        pl.capture(
+            run_id=get_run_id(),
+            phase=phase,
+            request=self._request_summary(kwargs),
+            response=response_summary,
+            finish_reason=finish_reason,
+            error=error,
+            diagnostic=diagnostic,
+        )
+
+    @staticmethod
+    def _request_summary(kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Build a request summary dict from the provider kwargs.
+
+        Keys match the ``request.*`` allowlist paths: ``model``, ``messages``,
+        ``tools``, ``params`` (standard OpenAI params), ``extra_body``.
+        """
+        # Standard OpenAI params that are NOT messages/tools/extra_body/model.
+        standard_param_keys = {
+            "temperature",
+            "max_tokens",
+            "max_completion_tokens",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty",
+            "stop",
+            "seed",
+            "tool_choice",
+            "parallel_tool_calls",
+            "response_format",
+            "user",
+            "n",
+            "logit_bias",
+            "logprobs",
+            "top_logprobs",
+            "stream",
+        }
+        params = {k: v for k, v in kwargs.items() if k in standard_param_keys}
+        return {
+            "model": kwargs.get("model"),
+            "messages": kwargs.get("messages"),
+            "tools": kwargs.get("tools"),
+            "params": params or None,
+            "extra_body": kwargs.get("extra_body"),
+        }
+
+    @staticmethod
+    def _response_summary(raw_response: Any, finish_reason: str | None) -> dict[str, Any]:
+        """Build a response summary dict from the raw SDK/streamed response.
+
+        Keys match the ``response.*`` allowlist paths: ``content``,
+        ``reasoning``, ``tool_calls``, ``usage``, ``finish_reason``. Handles
+        both SDK ChatCompletion objects (have ``.model_dump()``) and the
+        streamed SimpleNamespace assembled in ``chat_streamed``.
+        """
+        # SDK objects expose model_dump(); SimpleNamespace does not.
+        if hasattr(raw_response, "model_dump"):
+            try:
+                data = raw_response.model_dump()
+            except Exception:
+                data = {}
+            choices = data.get("choices") or []
+            choice = choices[0] if choices else {}
+            msg = choice.get("message") or {}
+            return {
+                "content": msg.get("content") or "",
+                "reasoning": msg.get("reasoning_content") or "",
+                "tool_calls": msg.get("tool_calls") or [],
+                "usage": data.get("usage"),
+                "finish_reason": choice.get("finish_reason") or finish_reason,
+            }
+        # Fallback: SimpleNamespace from chat_streamed — has choices/message-like
+        # attributes. Try attribute access.
+        try:
+            choices = getattr(raw_response, "choices", None) or []
+            choice = choices[0] if choices else None
+            msg = getattr(choice, "message", None) if choice else None
+            if msg is not None:
+                return {
+                    "content": getattr(msg, "content", "") or "",
+                    "reasoning": getattr(msg, "reasoning_content", "") or "",
+                    "tool_calls": getattr(msg, "tool_calls", []) or [],
+                    "usage": getattr(raw_response, "usage", None),
+                    "finish_reason": getattr(choice, "finish_reason", None) or finish_reason,
+                }
+        except Exception:
+            pass
+        return {
+            "content": None,
+            "reasoning": None,
+            "tool_calls": None,
+            "usage": None,
+            "finish_reason": finish_reason,
+        }
 
     def _parse_reasoning(self, message: Any) -> tuple[str, str]:
         """Extract (reasoning, content) based on the model's thinking parser.
@@ -448,6 +603,29 @@ class OpenAIProvider(Provider):
                 )
                 tool_calls.extend(parse_result.tool_calls)
                 content = ""
+            elif parse_result.error_code:
+                # XML markers present but parsing failed — capture the raw
+                # unparsed content for diagnosis (the "could not safely parse"
+                # path). Always captured regardless of allowlist so the model's
+                # raw output is visible when tool-call parsing breaks.
+                from corpclaw_lite.llm.base import get_run_id
+                from corpclaw_lite.logging.payload import get_payload_logger
+
+                pl = get_payload_logger()
+                if pl is not None and pl.enabled:
+                    pl.capture(
+                        run_id=get_run_id(),
+                        phase="xml_parse_failure",
+                        request=None,
+                        response=None,
+                        finish_reason=finish_reason,
+                        error=parse_result.error_code,
+                        diagnostic={
+                            "raw_unparsed_content": content,
+                            "raw_reasoning": reasoning,
+                            "parse_error_message": parse_result.error_message,
+                        },
+                    )
 
         return LLMResponse(
             content=content,
@@ -475,6 +653,7 @@ class OpenAIProvider(Provider):
 
         response = await self._client.chat.completions.create(**kwargs)
         if not response.choices:
+            self._capture_llm_io("chat", kwargs, response, finish_reason=None)
             return LLMResponse(content="", tool_calls=[], reasoning="")
         choice = response.choices[0]
 
@@ -483,6 +662,8 @@ class OpenAIProvider(Provider):
 
         usage = _usage_from_raw(response.usage)
         usage = _apply_timings(usage, getattr(response, "timings", None))
+
+        self._capture_llm_io("chat", kwargs, response, finish_reason=choice.finish_reason)
 
         return self._finalize_response(
             content=content,
@@ -626,6 +807,9 @@ class OpenAIProvider(Provider):
             tools=tools,
             usage=usage,
         )
+        # Capture raw I/O for streamed calls. raw_message is a SimpleNamespace
+        # (content/reasoning_content/tool_calls); usage + finish_reason are locals.
+        self._capture_llm_io("chat_streamed", kwargs, raw_message, finish_reason=finish_reason)
         emit(
             LLMStreamEvent(
                 stage="finished",
@@ -690,12 +874,16 @@ class OpenAIProvider(Provider):
 
         response = await self._client.chat.completions.create(**kwargs)
         if not response.choices:
+            self._capture_llm_io("chat_with_image", kwargs, response, finish_reason=None)
             return LLMResponse(content="")
         choice = response.choices[0]
         content = choice.message.content or ""
 
         usage = _usage_from_raw(response.usage)
         usage = _apply_timings(usage, getattr(response, "timings", None))
+        self._capture_llm_io(
+            "chat_with_image", kwargs, response, finish_reason=choice.finish_reason
+        )
         return LLMResponse(content=content, usage=usage)
 
     async def stream(

@@ -22,10 +22,13 @@ __all__ = [
     "VisionProvider",
     "get_backend_request_options",
     "get_request_options",
+    "get_run_id",
     "reset_backend_request_options",
     "reset_request_options",
+    "reset_run_id",
     "set_backend_request_options",
     "set_request_options",
+    "set_run_id",
 ]
 
 LLMStreamStage = Literal[
@@ -174,6 +177,28 @@ def reset_request_options(token: contextvars.Token[RequestOptions | None]) -> No
 def get_request_options() -> RequestOptions | None:
     """Return per-call request overrides for the current async context."""
     return _call_options.get()
+
+
+# ── Run-id contextvar (D-056 post-0.2.0: payload capture) ──────────────────────
+# Set by AgentLoop.run() so providers can tag raw-payload captures with the
+# originating run_id without threading it through every call signature.
+# Defaults to None — capture still works without it (run_id field is null).
+_run_id_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar("llm_run_id", default=None)
+
+
+def set_run_id(run_id: str | None) -> contextvars.Token[str | None]:
+    """Set the current agent run id for payload-capture tagging."""
+    return _run_id_ctx.set(run_id)
+
+
+def reset_run_id(token: contextvars.Token[str | None]) -> None:
+    """Reset the run-id contextvar."""
+    _run_id_ctx.reset(token)
+
+
+def get_run_id() -> str | None:
+    """Return the current agent run id, or None if not in a run context."""
+    return _run_id_ctx.get()
 
 
 class LLMResponse(BaseModel):

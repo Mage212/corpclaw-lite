@@ -157,7 +157,7 @@ def test_shipped_corpus_loads() -> None:
     from corpclaw_lite.paths import PROJECT_ROOT
 
     scenarios = load_scenarios(PROJECT_ROOT / "config" / "eval_scenarios.yaml")
-    assert len(scenarios) == 26
+    assert len(scenarios) == 28  # 26 office/memory/vision + 2 research (D-056)
     ids = {s.id for s in scenarios}
     # A representative subset that pins the corpus shape.
     assert "csv_aggregate_total" in ids
