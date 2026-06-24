@@ -22,7 +22,7 @@ import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from corpclaw_lite.config.providers import ProviderConnection, ProviderRegistry, ProviderSettings
 from corpclaw_lite.config.settings import LLMSettings
@@ -33,6 +33,7 @@ from corpclaw_lite.llm.base import (
     Provider,
     StreamChunk,
     StreamingProvider,
+    ThinkingOverride,
     VisionProvider,
     reset_backend_request_options,
     set_backend_request_options,
@@ -131,6 +132,40 @@ def build_provider(
         preset=preset,
         model_profile=model_profile,
         sampling=sampling,
+    )
+
+
+def _derive_override_sampling(
+    *,
+    base: SamplingProfile | None,
+    model_name: str | None,
+    thinking: ThinkingOverride | None,
+    inference: dict[str, Any] | None,
+) -> SamplingProfile:
+    """Build an ad-hoc SamplingProfile for with_overrides.
+
+    Starts from the route's existing profile (``base``) if available, then
+    applies the per-call thinking/inference overrides. ``thinking.mode ==
+    "default"`` is treated as no thinking override.
+    """
+    # Carry over base fields, then override.
+    model_ref = model_name or (base.model if base else None)
+    thinking_mode = base.thinking_mode if base else "default"
+    thinking_budget = base.thinking_budget if base else None
+    inference_overrides = dict(base.inference_overrides) if base else {}
+
+    if thinking is not None and thinking.mode != "default":
+        thinking_mode = thinking.mode
+        thinking_budget = thinking.budget if thinking.mode == "budget" else None
+
+    if inference:
+        inference_overrides.update(inference)
+
+    return SamplingProfile(
+        model=model_ref,
+        thinking_mode=thinking_mode,
+        thinking_budget=thinking_budget,
+        inference_overrides=inference_overrides,
     )
 
 
@@ -517,6 +552,206 @@ class LLMRouter:
     def queue(self) -> LLMRequestQueue | None:
         """Return the request queue, or ``None`` if queuing is disabled."""
         return self._queue
+
+    # ── Programmatic override (D-056 PR3) ─────────────────────────────────────
+
+    # Task kinds that count as "agent-facing" for with_overrides: the main
+    # agent loop plus the auxiliary LLM calls it drives (vision, compress,
+    # consolidate) and all subagent routes. Non-matching routes (e.g. a
+    # cloud-only "eval" judge route) are left untouched.
+    _AGENT_TASK_KINDS = frozenset({"default", "vision", "compress", "consolidate"})
+
+    def with_overrides(
+        self,
+        *,
+        provider_registry: ProviderRegistry,
+        preset_registry: PresetRegistry | None = None,
+        model: str | None = None,
+        thinking: ThinkingOverride | None = None,
+        sampling_name: str | None = None,
+        inference: dict[str, Any] | None = None,
+        apply_to: Literal["all_agent_routes", "default_only"] = "all_agent_routes",
+    ) -> LLMRouter:
+        """Return a new router with overridden sampling/thinking/model on routes.
+
+        Rebuilds providers for the selected routes in-memory from
+        ``provider_registry`` + an override SamplingProfile — no YAML mutation,
+        no file rewrite. ``queue`` and ``cache_manager`` are shared with this
+        router (same semaphore, same cache leases).
+
+        Override resolution (first non-None wins for the SamplingProfile):
+          - ``sampling_name``: a named SamplingProfile from ``preset_registry``.
+          - ``thinking`` / ``inference``: an ad-hoc SamplingProfile derived from
+            each route's existing profile (or a fresh one) with these fields
+            overridden. ``thinking.mode == "default"`` is treated as no override.
+          - neither: the route keeps its existing profile (only ``model`` may change).
+
+        ``model`` (optional) swaps the model across overridden routes; the
+        ModelProfile is looked up by the new model name in ``preset_registry``
+        (when available), else carried over from the existing route.
+
+        ``apply_to``:
+          - ``"all_agent_routes"`` (default): override every route whose
+            ``task_kind`` is in {default, vision, compress, consolidate} OR has
+            a ``subagent_id``. Non-agent routes (e.g. an "eval" judge route) are
+            preserved unchanged.
+          - ``"default_only"``: override only the default route.
+
+        Routes whose provider connection cannot be rebuilt (provider not in the
+        registry, or build_provider returns None) fall back to the original
+        provider — override is skipped for that route, not an error.
+        """
+        override_label_parts: list[str] = []
+        if model:
+            override_label_parts.append(f"model={model}")
+        if sampling_name:
+            override_label_parts.append(f"sampling={sampling_name}")
+        if thinking and thinking.mode != "default":
+            override_label_parts.append(f"thinking={thinking.mode}")
+            if thinking.budget is not None:
+                override_label_parts[-1] += f":{thinking.budget}"
+        if inference:
+            override_label_parts.append("inference=custom")
+        override_tag = ",".join(override_label_parts) or "override"
+
+        new_routing: list[tuple[str | None, str | None, Provider, str]] = []
+        new_providers: dict[str, Provider] = {}
+        new_meta: dict[int, ProviderMeta] = {}
+        new_default: Provider | None = None
+        new_default_name: str | None = None
+
+        def _should_override(task_kind: str | None, subagent_id: str | None) -> bool:
+            if apply_to == "default_only":
+                return task_kind == "default"
+            # all_agent_routes: agent task_kinds + all subagent routes.
+            return task_kind in self._AGENT_TASK_KINDS or subagent_id is not None
+
+        for task_kind, subagent_id, provider, provider_name in self._routing:
+            if not _should_override(task_kind, subagent_id):
+                # Preserve the route as-is (copy its meta entry too).
+                new_routing.append((task_kind, subagent_id, provider, provider_name))
+                new_providers[f"{provider_name}:{getattr(provider, '_model', '?')}"] = provider
+                meta = self._provider_meta.get(id(provider))
+                if meta is not None:
+                    new_meta[id(provider)] = meta
+                if task_kind == "default" and new_default is None:
+                    new_default = provider
+                    new_default_name = provider_name
+                continue
+
+            # Look up the connection by name.
+            conn = provider_registry.get(provider_name)
+            if conn is None:
+                logger.warning(
+                    "with_overrides: provider '%s' not in registry; keeping original for route %s",
+                    provider_name,
+                    task_kind or f"subagent:{subagent_id}",
+                )
+                new_routing.append((task_kind, subagent_id, provider, provider_name))
+                meta = self._provider_meta.get(id(provider))
+                if meta is not None:
+                    new_meta[id(provider)] = meta
+                if task_kind == "default" and new_default is None:
+                    new_default = provider
+                    new_default_name = provider_name
+                continue
+
+            # Resolve the effective model + profiles.
+            parent_meta = self._provider_meta.get(id(provider))
+            parent_model = (
+                parent_meta[1] if parent_meta else str(getattr(provider, "_model", "unknown"))
+            )
+            effective_model = model or parent_model
+
+            # SamplingProfile: sampling_name > thinking/inference-on-existing > none.
+            override_sampling: SamplingProfile | None = None
+            if sampling_name and preset_registry is not None:
+                override_sampling = preset_registry.get_sampling_profile(sampling_name)
+                if override_sampling is None:
+                    logger.warning(
+                        "with_overrides: sampling profile '%s' not found; "
+                        "falling back to existing profile",
+                        sampling_name,
+                    )
+
+            if override_sampling is None and (thinking or inference):
+                # Derive from the route's existing sampling profile if available.
+                base_profile: SamplingProfile | None = None
+                if parent_meta and parent_meta[2] and preset_registry is not None:
+                    base_profile = preset_registry.get_sampling_profile(parent_meta[2])
+                override_sampling = _derive_override_sampling(
+                    base=base_profile,
+                    model_name=effective_model,
+                    thinking=thinking,
+                    inference=inference,
+                )
+
+            # ModelProfile: lookup by effective model, else carry over.
+            model_profile: ModelProfile | None = None
+            if preset_registry is not None:
+                model_profile = preset_registry.get_model_profile(effective_model)
+            if (
+                model_profile is None
+                and parent_meta
+                and parent_meta[2]
+                and preset_registry is not None
+            ):
+                # Carry over the parent's model profile by name.
+                parent_mp_name = parent_meta[2]
+                model_profile = preset_registry.get_model_profile(parent_mp_name)
+
+            built = build_provider(
+                conn,
+                model=effective_model,
+                model_profile=model_profile,
+                sampling=override_sampling,
+            )
+            if built is None:
+                logger.warning(
+                    "with_overrides: build_provider failed for provider '%s' model "
+                    "'%s'; keeping original for route %s",
+                    provider_name,
+                    effective_model,
+                    task_kind or f"subagent:{subagent_id}",
+                )
+                new_routing.append((task_kind, subagent_id, provider, provider_name))
+                meta = self._provider_meta.get(id(provider))
+                if meta is not None:
+                    new_meta[id(provider)] = meta
+                if task_kind == "default" and new_default is None:
+                    new_default = provider
+                    new_default_name = provider_name
+                continue
+
+            # Build a distinct profile label so cache scopes don't collide.
+            parent_profile = parent_meta[2] if parent_meta else None
+            profile_label = sampling_name or (
+                f"{parent_profile}+{override_tag}" if parent_profile else override_tag
+            )
+            new_routing.append((task_kind, subagent_id, built, provider_name))
+            new_providers[f"{provider_name}:{effective_model}"] = built
+            new_meta[id(built)] = (provider_name, effective_model, profile_label)
+            if task_kind == "default" and new_default is None:
+                new_default = built
+                new_default_name = provider_name
+
+        if new_default is None:
+            # No default route was overridden/seen — fall back to this router's default.
+            new_default = self._default_provider
+            new_default_name = self._default_provider_name
+            meta = self._provider_meta.get(id(self._default_provider))
+            if meta is not None:
+                new_meta[id(self._default_provider)] = meta
+
+        return LLMRouter(
+            providers=new_providers,
+            default_provider=new_default,
+            default_provider_name=new_default_name,
+            routing=new_routing,
+            queue=self._queue,
+            provider_meta=new_meta,
+            cache_manager=self._cache_manager,
+        )
 
     async def mark_user_cache_reset(self, user_id: str) -> None:
         """Invalidate persistent cache state for a user after conversation reset."""

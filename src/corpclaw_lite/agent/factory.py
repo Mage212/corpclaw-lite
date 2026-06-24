@@ -466,8 +466,20 @@ def _load_calibrated_tool_overrides(*registries: ToolRegistry) -> None:
 
 def build_agent_stack(
     settings: Settings | None = None,
+    *,
+    router_override: Provider | None = None,
 ) -> AgentStack:
-    """Build and return the complete agent stack from config + env."""
+    """Build and return the complete agent stack from config + env.
+
+    Args:
+        settings: Pre-loaded Settings. If None, loads from config/settings.yaml.
+        router_override: A pre-built Provider (usually an LLMRouter, e.g. one
+            produced by ``LLMRouter.with_overrides(...)``) to use instead of
+            building one from settings. When None (default), the router is built
+            from settings via ``_build_router``. Used by the eval harness and
+            other callers that need a programmatically overridden router
+            (D-056 PR3) without mutating YAML.
+    """
     from corpclaw_lite.config.loader import load_settings
     from corpclaw_lite.config.settings import AgentSettings
     from corpclaw_lite.container.ipc import ContainerIPC
@@ -482,7 +494,9 @@ def build_agent_stack(
     container_cfg = full_settings.container
     agent_settings = full_settings.agent if full_settings.agent else AgentSettings()
 
-    provider = _build_router(settings=full_settings)
+    provider = (
+        router_override if router_override is not None else _build_router(settings=full_settings)
+    )
     registry = ToolRegistry()
 
     container_manager: ContainerManager | None = None

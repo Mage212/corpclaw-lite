@@ -172,22 +172,18 @@ class CalibrationLoop:
                 improvements=["Cloud provider not available — dry-run only"],
             )
 
-        # Build a temporary router to resolve calibration-specific provider
+        # Resolve the calibration provider. Prefer an explicit calibration
+        # routing rule; otherwise build the cloud provider directly from its
+        # connection. (LLMRouter.with_overrides does not fit here — the
+        # fallback swaps the *provider* to the cloud connection, not the
+        # sampling on an existing route.)
         router = LLMRouter.from_settings(settings.llm, provider_registry)
-        calibration_provider = router.for_task("calibration")
-
-        # If no calibration rule, try building directly from cloud provider connection
-        if not router.has_task_route("calibration"):
+        if router.has_task_route("calibration"):
+            calibration_provider = router.for_task("calibration")
+        else:
             from corpclaw_lite.llm.router import build_provider
 
-            cloud_model: str = "calibration"
-            for rule in settings.llm.routing:
-                if rule.task_kind == "calibration" and rule.provider == self._cloud_name:
-                    if rule.model is not None:
-                        cloud_model = rule.model
-                    break
-
-            built = build_provider(cloud_conn, model=cloud_model)
+            built = build_provider(cloud_conn, model="calibration")
             if built is None:
                 print(
                     f"\n⚠️  Cloud provider '{self._cloud_name}' could not be built"

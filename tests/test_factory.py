@@ -358,3 +358,14 @@ def test_calibrated_tool_overrides_apply_to_both_registries(
 
     assert main_registry.to_schemas()[0]["function"]["description"] == "Calibrated read description"
     assert full_registry.to_schemas()[0]["function"]["description"] == "Calibrated read description"
+
+
+def test_build_agent_stack_uses_router_override() -> None:
+    """D-056 PR3: router_override is used instead of building one from settings."""
+    from corpclaw_lite.agent.factory import build_agent_stack
+
+    sentinel = MagicMock(name="override-provider")
+    with patch.dict(os.environ, _PROVIDER_ENV, clear=False):
+        stack = build_agent_stack(router_override=sentinel)
+    # The loop's provider is the injected override, not a freshly built router.
+    assert stack.loop.provider is sentinel
