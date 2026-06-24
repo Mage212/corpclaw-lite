@@ -4,6 +4,95 @@
 
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/).
 
+## [0.2.0] — 2026-06-24
+
+**Major bump** `0.1.13 → 0.2.0`. Фокус версии — **production-ready управление
+провайдерами, моделями и параметрами генерации** (D-056). Редизайн устраняет три
+workaround'а, выявленных в eval-сессиях: заморозка пресета в инстансе провайдера,
+route-contamination (gemma4 agent тихо маршрутизировал vision → qwen), и
+rename/restore `model_presets.yaml` с crash-window hazard.
+
+Пресет расщеплён на ортогональные слои: `ModelProfile` (свойства модели) +
+`SamplingProfile` (свойства задачи/фазы). Per-call override поднят через второй
+независимый contextvar (`RequestOptions`). `PhasePolicy` переключает thinking по
+фазе задачи (closing mode off; research gathering off / aggregation on;
+auxiliary off через config). `LLMRouter.with_overrides()` — программный atomic
+override всех agent-роутов, устраняет контаминацию как класс.
+
+### Breaking changes
+
+- **`config/model_presets.yaml`**: legacy комбинированный формат `presets:` →
+  split `models:` + `sampling:`. Back-compat reader в ядре парсит legacy
+  `presets:` и split'ит в виртуальные (ModelProfile, SamplingProfile) пары по
+  тому же имени — overlay-репо и unmigrated config продолжают работать без
+  правок. Миграция рекомендуемая, не обязательная.
+- **`RoutingRule.preset`** → deprecated alias. Рекомендуется `sampling:`
+  (split-формат). Legacy `preset:` работает через back-compat reader; при
+  заданных обоих `sampling` выигрывает.
+- **`ModelPreset`** тип deprecated (alias + bridge `profile_from_legacy_preset`).
+  Новый код должен использовать `ModelProfile` + `SamplingProfile`.
+- `requires_core` plugins: bump до `^0.2.0` (плагины с `^0.1.x` получат
+  warn-and-skip при загрузке, advisory — не fatal).
+
+### Added
+
+- **RequestOptions** (`llm/base.py`) — per-call contextvar (второй независимый
+  рельс рядом с `BackendRequestOptions`). Несёт per-call `inference` +
+  `thinking` override (`ThinkingOverride`: `default`/`off`/`budget`). Provider
+  мерджит оба с детерминированным приоритетом. Протокол `Provider` не меняется —
+  override через contextvar, не через параметры `chat()`.
+- **Расщепление `ModelPreset` → `ModelProfile` + `SamplingProfile`**
+  (`llm/presets.py`). `ModelProfile`: `thinking_parser`, `system_prompt_prefix`,
+  `default_inference` (свойства модели). `SamplingProfile`: `thinking_mode`,
+  `thinking_budget`, `inference_overrides`, ссылка на `ModelProfile` (свойства
+  задачи/фазы). Дубликаты пресетов схлопнуты (`gemma4-thinking`/`gemma4-fast` →
+  один `gemma4-26b-qat` profile + два sampling). YAML-bool coercion
+  (`thinking_mode: off` без кавычек → валидируется).
+- **`PhasePolicy`** (`agent/phase_policy.py`) — детектор фазы задачи, per-call
+  переключает thinking через `RequestOptions`. `DefaultPhasePolicy` enabled by
+  default, но **no-op для main agent в default phase** → меняет behavior только
+  в closing_mode (off) и для workflow subagent (gathering off / aggregation on,
+  semantic primary: prev turn = `research_list_facts` → on; wall-clock fallback:
+  `nudge`/`restrict` → on). `PhasePolicySettings` в `AgentSettings`
+  (`enabled`, `aggregation_markers`, `gathering_tools`, per-phase thinking).
+- **`LLMRouter.with_overrides()`** (`llm/router.py`) — программный atomic override
+  agent-facing роутов. Возвращает новый router с переопределёнными
+  sampling/thinking/model in-memory. `apply_to="all_agent_routes"` перестраивает
+  все 4 agent-роута сразу → контаминация устранена. `queue`/`cache_manager`
+  шарятся, `provider_meta` пересоздаётся с distinct profile_label.
+- **`build_agent_stack(settings, *, router_override=None)`** (`agent/factory.py`)
+  — инъекция готового router (eval/custom callers).
+- **`aux-no-thinking` sampling profile** + auxiliary routes (vision/compress/
+  consolidate) → thinking off через config, без PhasePolicy.
+
+### Changed
+
+- **`RoutingRule`** (`config/settings.py`): новые поля `model_profile`, `sampling`
+  (предпочтительно), legacy `preset` deprecated. `sampling` выигрывает над
+  `preset`.
+- **`OpenAIProvider`/`AnthropicProvider`**: `_apply_preset` → `_apply_model_profile`
+  + `_apply_sampling` + `_apply_request_options` с merge priority: model_profile
+  defaults < sampling overrides < RequestOptions (per-call) < backend extra_body.
+  `chat_with_image` почищен от inline preset copy.
+- **`config/model_presets.yaml`** мигрирован к `models:`/`sampling:` структуре.
+- **`config/settings.yaml`**: routing → `sampling:` на каждом rule;
+  `agent.phase_policy` блок (enabled default, markers, per-phase thinking).
+- **`calibration/loop.py`**: двух-путная resolution с dead inner loop
+  линеаризована (`has_task_route` gate; unreachable model-harvesting loop удалён).
+
+### Removed
+
+- `scripts/eval_live.py` (gitignored, локный): YAML-mutation + tempfile +
+  rename/restore `model_presets.yaml` workaround → заменён на `with_overrides()`
+  через wrapper `build_agent_stack` (266→174 строк, crash-window hazard устранён).
+- Дубликаты пресетов `gemma4-thinking`/`gemma4-fast` (схлопнуты).
+
+### Backward compatibility
+
+Legacy `presets:` YAML, `RoutingRule.preset`, и `ModelPreset` тип продолжают
+работать через back-compat reader/bridge. Overlay-репо с legacy config НЕ
+требует правок. Миграция к split-формату рекомендуемая.
+
 ## [0.1.13] — 2026-06-23
 
 Фокус версии — **три фазы инфраструктуры агента**. Phase 0 добавляет

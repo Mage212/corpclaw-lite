@@ -1,7 +1,7 @@
 # CorpClaw Lite — Архитектура проекта
 
-> Версия документа: 2026-06-23
-> Версия проекта: 0.1.13 — ~160 Python-модулей, ~34.5K LOC, 1476 pytest-кейсов
+> Версия документа: 2026-06-24
+> Версия проекта: 0.2.0 — ~162 Python-модулей, ~36.1K LOC, 1564 pytest-кейсов
 
 ---
 
@@ -127,7 +127,7 @@ corpclaw-lite/
 ├── skills/                 # 5 Markdown-скиллов с scope-фильтрацией
 ├── plugins/                # Директория плагинов
 ├── docker/                 # Dockerfile, Dockerfile.agent, seccomp_default.json
-└── tests/                  # Тесты (1056 pytest-кейсов, 106 Python test-файлов)
+└── tests/                  # Тесты (1564 pytest-кейсов, 144 Python test-файла)
 ```
 
 ---
@@ -324,21 +324,51 @@ llm:
       provider: cloud
 ```
 
-`LLMRouter` методы: `for_task(task_kind)`, `for_subagent(subagent_id)`.
+`LLMRouter` методы: `for_task(task_kind)`, `for_subagent(subagent_id)`,
+`with_overrides(...)` (программный atomic override agent-роутов, D-056).
 
-### Model Presets (`llm/presets.py`)
+### LLM Management — split profiles + per-call override (D-056, v0.2.0)
 
-**ThinkingConfig**: `open_tag`, `close_tag`, `budget_tokens`, `source` ("content" для парсинга тегов, "native" для `reasoning_content`).
+Пресет расщеплён на два ортогональных слоя (устраняет заморозку пресета в
+инстансе провайдера и схлопывает дубликаты):
 
-**Доступные пресеты:**
+- **`ModelProfile`** (`llm/presets.py`) — свойства *модели* (привязан к model id,
+  редко меняется): `thinking_parser` (`ThinkingConfig`: `open_tag`/`close_tag`/
+  `source` "content"|"native"), `system_prompt_prefix`, `default_inference`.
+- **`SamplingProfile`** — свойства *задачи/фазы* (меняется свободно, ссылается на
+  ModelProfile): `thinking_mode` (default|off|budget), `thinking_budget`,
+  `inference_overrides`.
 
-| Preset | Модель | Thinking | Params |
-|--------|--------|----------|--------|
-| `qwen3.5-thinking` | Qwen 3.5 | native reasoning_content | temp=0.7, top_p=0.95, top_k=20 |
-| `gemma4-thinking` | Gemma 4 | `<\|think\|>` tags | defaults |
-| `gemma4-fast` | Gemma 4 | none | defaults |
+`config/model_presets.yaml` хранит оба в блоках `models:` + `sampling:`.
+`PresetRegistry` также парсит legacy комбинированный `presets:` (back-compat
+reader, split в виртуальные пары) — overlay/unmigrated config работает без правок.
 
-**Приоритет:** `request-level > preset > provider defaults`
+**Per-call override** — второй независимый contextvar `RequestOptions` (рядом с
+`BackendRequestOptions`): несёт `inference` + `thinking` (`ThinkingOverride`:
+default|off|budget). Provider мерджит с детерминированным приоритетом:
+
+```
+model_profile.default_inference   (lowest)
+  < SamplingProfile.inference_overrides + thinking_mode
+    < RequestOptions.inference / RequestOptions.thinking  (per-call, highest)
+      < BackendRequestOptions.extra_body  (transport)
+```
+
+**PhasePolicy** (`agent/phase_policy.py`) — детектор фазы задачи, per-call
+переключает thinking через `RequestOptions`. `DefaultPhasePolicy` enabled by
+default, но **no-op для main agent в default phase** → меняет behavior только в:
+- **closing mode** (бюджет < soft_deadline_ratio) → thinking off;
+- **workflow subagent** (research): gathering off / aggregation on (semantic
+  primary: prev turn = `research_list_facts` → on; wall-clock fallback
+  `nudge`/`restrict` → on);
+- **auxiliary** (vision/compress/consolidate) → thinking off через `aux-no-thinking`
+  sampling (config-driven, без PhasePolicy).
+
+**`LLMRouter.with_overrides()`** — программный atomic override agent-facing
+роутов. Возвращает новый router с переопределёнными sampling/thinking/model
+in-memory (без YAML-мутации). `apply_to="all_agent_routes"` перестраивает все 4
+agent-роута сразу — устраняет route-contamination (напр. gemma4 agent тихо
+маршрутизирующий vision → qwen). Reusable API для testing/calibration/A/B.
 
 ---
 
@@ -491,7 +521,7 @@ version: "1.0.0"
 type: plugin
 description: "Does something"
 allowed_departments: ["*"]
-requires_core: "^0.1.13"   # caret-совместимый constraint; warn-and-skip при несовпадении
+requires_core: "^0.2.0"   # caret-совместимый constraint; warn-and-skip при несовпадении
 components:
   skill: skill.md
   tool: tool.py
