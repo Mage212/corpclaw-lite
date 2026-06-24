@@ -90,23 +90,27 @@ def test_request_options_nested_context() -> None:
 # ── ThinkingOverride ───────────────────────────────────────────────────────────
 
 
-def test_thinking_override_default_is_noop_in_build() -> None:
-    """mode='default' does not inject chat_template_kwargs or max_tokens."""
+def test_thinking_override_default_forces_thinking_on() -> None:
+    """mode='default' forces the model's native thinking ON, overriding sampling-off.
+
+    'default' means the model's natural thinking — when a per-call RequestOptions
+    carries it, the provider cancels any thinking_mode=off set by the sampling
+    profile (e.g. aggregation phase must reason to synthesise even on an
+    off-configured run).
+    """
     provider = _provider(sampling=SamplingProfile(thinking_mode="off"))
     kwargs: dict[str, Any] = {}
-    # Apply sampling first (sets off), then per-call default override.
+    # Apply sampling first (sets off).
     provider._apply_sampling(kwargs)
     assert kwargs["extra_body"]["chat_template_kwargs"]["enable_thinking"] is False
 
-    # Per-call default override should NOT flip it back on or remove it
-    # (default = "leave alone").
+    # Per-call default override forces thinking ON (cancels sampling-off).
     tok = set_request_options(RequestOptions(thinking=ThinkingOverride(mode="default")))
     try:
         provider._apply_request_options(kwargs)
     finally:
         reset_request_options(tok)
-    # Sampling's "off" stands because per-call is "default" (no-op).
-    assert kwargs["extra_body"]["chat_template_kwargs"]["enable_thinking"] is False
+    assert kwargs["extra_body"]["chat_template_kwargs"]["enable_thinking"] is True
 
 
 def test_thinking_override_off_injects_enable_thinking_false() -> None:

@@ -267,7 +267,7 @@ class OpenAIProvider(Provider):
                 else:
                     extra_body[k] = v
 
-        if options.thinking and options.thinking.mode != "default":
+        if options.thinking:
             mode = options.thinking.mode
             if mode == "off":
                 ctk = dict(extra_body.get("chat_template_kwargs") or {})
@@ -275,6 +275,13 @@ class OpenAIProvider(Provider):
                 extra_body["chat_template_kwargs"] = ctk
             elif mode == "budget" and options.thinking.budget is not None:
                 kwargs["max_tokens"] = options.thinking.budget + 1024
+            elif mode == "default":
+                # Force the model's natural thinking ON — cancel any
+                # thinking_mode=off set by the sampling profile (e.g. aggregation
+                # phase must reason to synthesise, even on an off-configured run).
+                ctk = dict(extra_body.get("chat_template_kwargs") or {})
+                ctk["enable_thinking"] = True
+                extra_body["chat_template_kwargs"] = ctk
 
         if extra_body:
             kwargs["extra_body"] = extra_body

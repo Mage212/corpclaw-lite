@@ -104,14 +104,17 @@ def test_research_gathering_thinking_off() -> None:
 def test_research_aggregation_thinking_default_on() -> None:
     """Research aggregation phase (prev turn called aggregation marker) → default.
 
-    'default' produces NO override (None) so the model's natural thinking applies.
+    'default' means force the model's natural thinking ON — it returns a
+    RequestOptions (not None) so the provider cancels any sampling-off, even on
+    a gemma4+off run (aggregation must reason to synthesise).
     """
     policy = _policy()
     opts = policy.options_for_phase(
         _ctx(is_workflow_subagent=True, prev_tool_calls=["research_list_facts"])
     )
-    # aggregation_thinking default = "default" → no override.
-    assert opts is None
+    # aggregation_thinking default = "default" → force-on RequestOptions.
+    assert opts is not None
+    assert _thinking_mode(opts) == "default"
 
 
 def test_research_aggregation_with_off_config_returns_off() -> None:
@@ -130,7 +133,7 @@ def test_research_wallclock_fallback_thinking_on() -> None:
         _ctx(is_workflow_subagent=True, prev_tool_calls=["research_search"], nudge_injected=True)
     )
     # Even though prev turn was gathering, the wall-clock nudge forces aggregation.
-    assert opts is None  # aggregation_thinking="default" → no override = natural thinking on
+    assert _thinking_mode(opts) == "default"  # force-on RequestOptions
 
 
 def test_research_wallclock_fallback_restricted() -> None:
@@ -139,7 +142,7 @@ def test_research_wallclock_fallback_restricted() -> None:
     opts = policy.options_for_phase(
         _ctx(is_workflow_subagent=True, prev_tool_calls=["research_search"], restricted=True)
     )
-    assert opts is None
+    assert _thinking_mode(opts) == "default"
 
 
 def test_research_first_turn_is_gathering_off() -> None:
@@ -169,7 +172,7 @@ def test_research_aggregation_monotonic_after_list_facts() -> None:
             tools_used=["research_search", "research_list_facts", "research_read_source"],
         )
     )
-    assert opts is None  # aggregation_thinking default → natural thinking on
+    assert _thinking_mode(opts) == "default"  # aggregation → force-on
 
 
 def test_research_gathering_before_any_list_facts() -> None:
@@ -270,7 +273,7 @@ def test_custom_markers_and_gathering_tools() -> None:
             gathering_tools=frozenset({"search", "fetch"}),
         )
     )
-    assert opts is None  # aggregation_thinking default → no override
+    assert _thinking_mode(opts) == "default"  # aggregation → force-on
 
     # Default marker (research_list_facts) is NOT recognized with custom config.
     opts2 = policy.options_for_phase(

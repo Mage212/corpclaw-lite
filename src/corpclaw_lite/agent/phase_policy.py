@@ -93,14 +93,15 @@ class PhasePolicy(Protocol):
 
 
 def _thinking_options(mode: str) -> RequestOptions | None:
-    """Build RequestOptions for a thinking mode, or None for 'default'.
+    """Build RequestOptions for a thinking mode.
 
-    'default' produces no override so the model's natural thinking applies —
-    returning None keeps the contextvar unset and the provider uses its
-    sampling profile unchanged.
+    'default' means the model's NATURAL thinking (native reasoning ON). It
+    returns a RequestOptions (not None) so the provider can FORCE thinking on
+    even when the routing sampling profile set thinking_mode=off — e.g.
+    aggregation phase on a gemma4+off run must still reason when synthesising.
+    A None return (no override) happens only when the policy caller has nothing
+    to say (main-agent default phase).
     """
-    if mode == "default":
-        return None
     return RequestOptions(thinking=ThinkingOverride(mode=mode))  # type: ignore[arg-type]
 
 
