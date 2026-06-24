@@ -158,6 +158,9 @@ class TelegramBotOrchestrator:
             trace_enabled=log_cfg.trace_enabled,
             trace_level=log_cfg.trace_level,
             trace_preview_chars=log_cfg.trace_preview_chars,
+            capture_enabled=log_cfg.capture_enabled,
+            capture_fields=log_cfg.capture_fields,
+            capture_dir=PROJECT_ROOT / (log_cfg.capture_dir or log_cfg.log_dir),
         )
         self._agent_activity_logger = AgentLogger(log_dir=PROJECT_ROOT / log_cfg.log_dir)
 

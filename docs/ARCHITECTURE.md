@@ -1,7 +1,7 @@
 # CorpClaw Lite — Архитектура проекта
 
 > Версия документа: 2026-06-24
-> Версия проекта: 0.2.0 — ~162 Python-модулей, ~36.1K LOC, 1564 pytest-кейсов
+> Версия проекта: 0.2.1 — 163 Python-модуля, ~36.7K LOC, 1585 pytest-кейсов
 
 ---
 
@@ -127,7 +127,7 @@ corpclaw-lite/
 ├── skills/                 # 5 Markdown-скиллов с scope-фильтрацией
 ├── plugins/                # Директория плагинов
 ├── docker/                 # Dockerfile, Dockerfile.agent, seccomp_default.json
-└── tests/                  # Тесты (1564 pytest-кейсов, 144 Python test-файла)
+└── tests/                  # Тесты (1585 pytest-кейсов, 138 Python test-файлов)
 ```
 
 ---
@@ -327,7 +327,7 @@ llm:
 `LLMRouter` методы: `for_task(task_kind)`, `for_subagent(subagent_id)`,
 `with_overrides(...)` (программный atomic override agent-роутов, D-056).
 
-### LLM Management — split profiles + per-call override (D-056, v0.2.0)
+### LLM Management — split profiles + per-call override (D-056, v0.2.1)
 
 Пресет расщеплён на два ортогональных слоя (устраняет заморозку пресета в
 инстансе провайдера и схлопывает дубликаты):
@@ -534,7 +534,7 @@ version: "1.0.0"
 type: plugin
 description: "Does something"
 allowed_departments: ["*"]
-requires_core: "^0.2.0"   # caret-совместимый constraint; warn-and-skip при несовпадении
+requires_core: "^0.2.1"   # caret-совместимый constraint; warn-and-skip при несовпадении
 components:
   skill: skill.md
   tool: tool.py
@@ -607,8 +607,8 @@ extensions:
 | mcp | merge по server `name` | более поздний файл выигрывает |
 | departments | **union-merge** | allowlists объединяются с wildcard-нормализацией, budget переопределяется где overlay указывает |
 
-**Version contract:** plugins декларируют `requires_core` в манифесте (`^0.1.13` =
-совместим с 0.1.x; bare = exact). Ядро проверяет в едином chokepoint
+**Version contract:** plugins декларируют `requires_core` в манифесте (`^0.2.1` =
+совместим с 0.2.x; bare = exact). Ядро проверяет в едином chokepoint
 (`PluginRegistry.register`) — при несовместимости warn-and-skip, никогда молча.
 Контракт применяется только к plugins.
 
@@ -920,6 +920,7 @@ skills:
 | `corpclaw.log` | Текст | DEBUG, человекочитаемый |
 | `agent_activity.jsonl` | JSONL | Per-request активность, аналитика |
 | `agent_trace.jsonl` | JSONL | Per-run trace-события агента: tool calls, LLM-вызовы, streaming-события (`llm_stream_*`), queue/wait. Уровень детализации через `logging.trace_level`: `metadata` (по умолчанию) / `debug_preview` / `full` |
+| `llm_payloads.jsonl` | JSONL | **Raw LLM request/response** (D-056, opt-in): по одной записи на LLM-вызов, с field-level allowlist (`logging.capture_fields`) и credential scrubbing. Основа диагностики и будущей системы сбора датасета для дообучения |
 
 ### AgentLogger
 
@@ -941,6 +942,98 @@ skills:
 
 `GET /health` на порту 8080 (aiohttp):
 - Uptime, requests, tool_calls, errors
+
+### Raw LLM Payload Capture (D-056)
+
+Опциональный слой поверх trace: пишет **сырые** request/response payload'ы в
+`logs/llm_payloads.jsonl` для диагностики «что именно получила/вернула модель»
+и как фундамент для будущей системы сбора датасета для дообучения. Off по
+умолчанию (`logging.capture_enabled: false`).
+
+**`PayloadCaptureLogger`** (`logging/payload.py`) — singleton, по одной записи
+на LLM-вызов (ротация 20MB×3):
+
+```json
+{
+  "ts": 1782326996.85,
+  "run_id": "fe4ffe64...",
+  "phase": "chat",
+  "request": {
+    "model": "qwen3.6-35b-a3b",
+    "messages": [{"role": "system", "content": "..."}, {"role": "user", "content": "..."}],
+    "extra_body": {"chat_template_kwargs": {"enable_thinking": false}, "id_slot": 0}
+  },
+  "response": {
+    "content": "2 + 2 = 4.",
+    "reasoning": "Here's a thinking process: ...",
+    "tool_calls": null,
+    "usage": {"input_tokens": 3373, "output_tokens": 184},
+    "finish_reason": "stop"
+  }
+}
+```
+
+Ключевые свойства:
+
+- **Field-level allowlist** (`logging.capture_fields`, dot-notation): оператор
+  выбирает, какие поля писать — `request.messages`, `response.reasoning`,
+  `response.tool_calls`, и т.д. По умолчанию полный набор для диагностики;
+  privacy-sensitive деплои подсекают список. Неизвестные поля в allowlist
+  логируются warning'ом и игнорируются.
+- **Credential scrubbing на каждом leaf-значении** (`sk-*`, `Bearer`, API-ключи)
+  — даже если полный `messages` в allowlist, секреты не попадут в файл.
+- **Без транкации** — весь payload целиком (в отличие от `trace._sanitize`).
+- **`diagnostic.*` всегда-on**: при XML-parse failure raw content/finish_reason
+  пишутся в capture независимо от allowlist (чтобы не потерять данные о
+  «поломанной» генерации — самые ценные для отладки).
+- **Streaming-провайдер** захватывает **собранный** полный `LLMResponse`, не
+  partial stream-deltas.
+- **`run_id` contextvar** (`llm/base.py`) тегирует каждую запись агентским
+  run_id → корреляция с `agent_trace.jsonl` (per-iteration метрики, phase,
+  tool calls).
+
+**Конфигурация** (`config/settings.yaml → logging`):
+
+```yaml
+logging:
+  capture_enabled: true
+  capture_fields:
+    - "request.model"
+    - "request.messages"
+    - "request.tools"
+    - "request.extra_body"
+    - "response.content"
+    - "response.reasoning"
+    - "response.tool_calls"
+    - "response.usage"
+    - "response.finish_reason"
+  capture_dir: "logs"
+```
+
+**Wiring**: `setup_logging()` (CLI/telegram/web) подключает singleton при
+старте; провайдеры читают его через `get_payload_logger()`. Capture hooks
+в `OpenAIProvider`/`AnthropicProvider` (`_capture_llm_io()`) вызываются из
+`chat()`/`chat_streamed()`/`chat_with_image()`.
+
+### Roadmap: fine-tune dataset collection
+
+Raw-capture — фундамент для будущей системы сбора датасета для дообучения
+локальных моделей (SFT/DPO). Планируемая логика (следующие версии):
+
+- **Позитивные примеры (успешные траектории)**: LLM-запрос → корректный
+  tool-call (подтверждён judge-оценкой или downstream-валидацией результата)
+  → экспортируется как few-shot/SFT-пример. Фильтр по `agent_trace.jsonl`:
+  `request_finished.status=ok` + целевой tool-call привёл к верному
+  downstream-результату.
+- **Негативные примеры (провальные/loop траектории)**: модель не зовёт нужный
+  tool, зацикливается (`loop detected`), XML-parse failure, tool-call с
+  неверными аргументами, fallback на `XML parsing`. Используются для
+  preference/DPO-пар (выбранная плохая генерация vs. исправленная) и для
+  отладки шаблонов/промптов/калибровки Edit Surfaces.
+- Capture уже несёт всё необходимое сырье (`request.messages`, `request.tools`,
+  `response.content`/`reasoning`/`tool_calls`, `run_id` для корреляции с
+  trace-метриками и outcome). Доработка будет в **слое разметки/экспорта**
+  (judge-скоринг, форматирование в SFT/DPO-формат, дедупликация), не в capture.
 
 ---
 
@@ -1039,30 +1132,30 @@ skills:
 ## Ключевые метрики
 
 > Per-component breakdown приблизительный (модули переезжали между пакетами с момента
-> последнего точного подсчёта); totals проверены на 0.1.13.
+> последнего точного подсчёта); totals проверены на 0.2.1.
 
 | Компонент | LOC | Файлов |
 |-----------|-----|--------|
-| Agent Core | ~4,400 | 13 |
+| Agent Core | ~4,620 | 14 |
 | Calibration | ~1,560 | 8 |
 | Onboarding | ~630 | 5 |
-| LLM Providers + Queue + Cache | ~4,000 | 9 |
+| LLM Providers + Queue + Cache | ~5,070 | 9 |
 | Extensions | ~9,100 | 51 |
 | Security | ~800 | 6 |
-| Channels | ~6,500 | 22 |
-| Container | ~830 | 6 |
+| Channels | ~6,540 | 22 |
+| Container | ~870 | 6 |
 | Memory | ~840 | 4 |
-| Config + RBAC | ~700 | 6 |
+| Config + RBAC | ~800 | 6 |
 | Departments | ~300 | 3 |
 | Users | ~955 | 3 |
-| Eval harness (B-060) | ~1,860 | 9 |
+| Eval harness (B-060) | ~2,350 | 10 |
 | Runtime | ~47 | 2 |
-| Logging | ~360 | 4 |
+| Logging | ~610 | 5 |
 | Utils | ~200 | 4 |
-| Root (cli, etc.) | ~1,410 | 5 |
-| **Исходники** | **~34,500** | **~160** |
-| **Тесты** | **~30,300** | **~139** |
-| **Тест-кейсов pytest** | **1476** | |
+| Root (cli, etc.) | ~1,480 | 5 |
+| **Исходники** | **~36,750** | **163** |
+| **Тесты** | **~32,800** | **~138** |
+| **Тест-кейсов pytest** | **1585** | |
 
 ---
 
