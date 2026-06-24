@@ -358,11 +358,24 @@ model_profile.default_inference   (lowest)
 переключает thinking через `RequestOptions`. `DefaultPhasePolicy` enabled by
 default, но **no-op для main agent в default phase** → меняет behavior только в:
 - **closing mode** (бюджет < soft_deadline_ratio) → thinking off;
-- **workflow subagent** (research): gathering off / aggregation on (semantic
-  primary: prev turn = `research_list_facts` → on; wall-clock fallback
-  `nudge`/`restrict` → on);
+- **workflow subagent** (research): gathering off / aggregation on. Переход
+  gathering→aggregation **monotonic** — как только aggregation marker
+  (`research_list_facts`) появляется в cumulative `tools_used`, все последующие
+  turns = aggregation. Wall-clock fallback: `nudge`/`restrict` → forced
+  aggregation.
 - **auxiliary** (vision/compress/consolidate) → thinking off через `aux-no-thinking`
   sampling (config-driven, без PhasePolicy).
+
+Thinking-mode semantics (важно для prefix-based моделей):
+- `thinking_mode=off` → `chat_template_kwargs.enable_thinking=False` (Qwen-
+  style) **И** подавление `system_prompt_prefix` (gemma4 `<|think|>` — prefix
+  это переключатель thinking). `_thinking_disabled()` проверяет sampling И
+  per-call RequestOptions.
+- `aggregation_thinking="default"` (force-on) → `enable_thinking=True`,
+  **отменяет** sampling-off даже на gemma4+off run. Aggregation должен
+  обдумывать собранные факты перед синтезом отчёта. Если бы "default" был
+  no-op, finalize шёл бы без reasoning (валидировано: reasoning=2269 в
+  aggregation-turn после фикса vs 0 до).
 
 **`LLMRouter.with_overrides()`** — программный atomic override agent-facing
 роутов. Возвращает новый router с переопределёнными sampling/thinking/model
