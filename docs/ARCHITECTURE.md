@@ -1,7 +1,7 @@
 # CorpClaw Lite — Архитектура проекта
 
-> Версия документа: 2026-06-24
-> Версия проекта: 0.2.1 — 163 Python-модуля, ~36.7K LOC, 1585 pytest-кейсов
+> Версия документа: 2026-06-25
+> Версия проекта: 0.2.1 — 163 Python-модуля, ~37K LOC, 1606 pytest-кейсов
 
 ---
 
@@ -127,7 +127,7 @@ corpclaw-lite/
 ├── skills/                 # 5 Markdown-скиллов с scope-фильтрацией
 ├── plugins/                # Директория плагинов
 ├── docker/                 # Dockerfile, Dockerfile.agent, seccomp_default.json
-└── tests/                  # Тесты (1585 pytest-кейсов, 138 Python test-файлов)
+└── tests/                  # Тесты (1606 pytest-кейсов, 139 Python test-файлов)
 ```
 
 ---
@@ -149,7 +149,7 @@ no tool_calls? → Response → Save to Memory
 **AgentConfig** (dataclass) — группирует все зависимости AgentLoop:
 - `provider: Provider` — LLM провайдер/router
 - `registry: ToolRegistry` — доступные инструменты
-- `settings: AgentSettings` — конфигурация (max_steps=15, max_tool_calls=30, max_wall_time_ms=300000)
+- `settings: AgentSettings` — конфигурация (max_steps=30, max_tool_calls=60, max_wall_time_ms=300000)
 - `permission_checker`, `tool_guard`, `memory`, `consolidator`, `compressor`, `approval_callback`
 
 **RunStats** (dataclass) — метрики выполнения:
@@ -866,8 +866,8 @@ llm:
   routing: [...]
 
 agent:
-  max_steps: 15
-  max_tool_calls: 30
+  max_steps: 30
+  max_tool_calls: 60
   max_wall_time_ms: 300000
   max_history: 20
   approval_mode: "manual"  # "manual" | "smart" | "off"
@@ -929,8 +929,12 @@ skills:
 - `can_use_plugin(user, plugin_name)`
 - `can_dispatch_subagent(user, subagent_id)`
 - `can_use_mcp(user, server_name)`
-- `get_budget(user)` → `SimpleBudgetGuardConfig`
 - Wildcard support: `*` = all
+
+> Ресурсные лимиты (`max_iterations`, `max_tool_calls`, `max_wall_time_ms`) —
+> глобальные (`settings.yaml → agent.*`), не per-department. Раньше
+> `get_budget(user)` перекрывал settings → баги «config change has no effect».
+> Метод остался в коде (back-compat), но не вызывается из production path.
 
 ---
 
@@ -1176,9 +1180,9 @@ Raw-capture — фундамент для будущей системы сбор
 | Logging | ~610 | 5 |
 | Utils | ~200 | 4 |
 | Root (cli, etc.) | ~1,480 | 5 |
-| **Исходники** | **~36,750** | **163** |
-| **Тесты** | **~32,800** | **~138** |
-| **Тест-кейсов pytest** | **1585** | |
+| **Исходники** | **~37,060** | **163** |
+| **Тесты** | **~33,400** | **~139** |
+| **Тест-кейсов pytest** | **1606** | |
 
 ---
 

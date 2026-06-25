@@ -487,37 +487,37 @@ llm:
   routing:
     - task_kind: "default"
       provider: "llamacpp"
-      model: "qwen3.6-35b-a3b"
-      sampling: "temperature-0.4"      # ссылка на sampling-профиль
+      model: "gemma4-26b-qat"
+      sampling: "gemma4-default"      # ссылка на sampling-профиль (model-scoped)
     - task_kind: "vision"
       provider: "llamacpp"
-      model: "qwen3.6-35b-a3b"
-      sampling: "aux-no-thinking"      # thinking off для экстракции
+      model: "gemma4-26b-qat"
+      sampling: "gemma4-fast"         # thinking off для экстракции
     - subagent_id: "research-agent"
       provider: "llamacpp"
-      model: "qwen3.6-35b-a3b"
+      model: "gemma4-26b-qat"
 ```
 
 ### Модельные профили и sampling (D-056)
 
 Пресет расщеплён на два ортогональных слоя: `ModelProfile` (свойства модели) +
-`SamplingProfile` (свойства задачи/фазы). Хранятся в `config/model_presets.yaml`:
+`SamplingProfile` (свойства задачи/фазы). Sampling-профили **model-scoped** —
+`inference_overrides` применяются только при совпадении модели. Хранятся в
+`config/model_presets.yaml`:
 
 ```yaml
 models:                          # ModelProfile — свойства модели
-  qwen3.6-35b-a3b:
-    thinking_parser: {source: native}    # reasoning в reasoning_content (Qwen-style)
-    default_inference: {temperature: 0.7, top_p: 0.95, top_k: 20}
+  gemma4-26b-qat:
+    thinking_parser: {source: native}
+    default_inference: {temperature: 1.0, top_p: 0.95, top_k: 64}  # офиц. рекомендация
 
 sampling:                        # SamplingProfile — свойства задачи/фазы
-  temperature-0.4:
-    model: qwen3.6-35b-a3b
+  gemma4-default:                # natural thinking
+    model: gemma4-26b-qat
     thinking_mode: default
-    inference_overrides: {temperature: 0.4}
-  aux-no-thinking:               # thinking off для экстракции (vision/compress/consolidate)
-    model: qwen3.6-35b-a3b
+  gemma4-fast:                   # thinking off — быстрый режим
+    model: gemma4-26b-qat
     thinking_mode: off
-    inference_overrides: {temperature: 0.2}
 ```
 
 **Приоритет merge:** `model_profile defaults < sampling overrides < RequestOptions
@@ -634,8 +634,8 @@ uv run pytest tests/ --cov=src/corpclaw_lite --cov-report=term-missing  # Пок
 | Memory | ~840 | 4 |
 | Onboarding | ~630 | 5 |
 | Прочее | ~4 930 | ~33 |
-| **Исходный код** | **~36 750** | **163** |
-| **Тесты** | **~32 800** | **~138** (1585 тестов собрано) |
+| **Исходный код** | **~37 060** | **163** |
+| **Тесты** | **~33 400** | **~139** (1606 тестов собрано) |
 
 ---
 
