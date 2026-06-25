@@ -54,29 +54,31 @@ llm:
   # preset:         (deprecated) legacy combined preset — still works via the
   #                 back-compat reader. Prefer ``sampling:``.
   routing:
-    # Main chat (used by AgentLoop)
+    # Main chat (used by AgentLoop) — gemma4 with its model-scoped sampling.
+    # NOTE: sampling profile MUST match the route's model. The router detects
+    # mismatches and warns + skips inference_overrides (thinking_mode preserved).
     - task_kind: "default"
       provider: "llamacpp"
-      model: "qwen3.6-35b-a3b"
-      sampling: "temperature-0.4"
+      model: "gemma4-26b-qat"
+      sampling: "gemma4-default"
 
     # Vision analysis (separate LLM call for images) — thinking off (extraction)
     - task_kind: "vision"
       provider: "llamacpp"
-      model: "qwen3.6-35b-a3b"
-      sampling: "aux-no-thinking"
+      model: "gemma4-26b-qat"
+      sampling: "gemma4-fast"
 
     # Memory consolidation (LLM-based history compression) — thinking off
     - task_kind: "consolidate"
       provider: "llamacpp"
-      model: "qwen3.6-35b-a3b"
-      sampling: "aux-no-thinking"
+      model: "gemma4-26b-qat"
+      sampling: "gemma4-fast"
 
     # Context compression (LLM-based summary of old turns) — thinking off
     - task_kind: "compress"
       provider: "llamacpp"
-      model: "qwen3.6-35b-a3b"
-      sampling: "aux-no-thinking"
+      model: "gemma4-26b-qat"
+      sampling: "gemma4-fast"
 
     # Calibration analysis (cloud provider recommended)
     # Uncomment and configure PROVIDER_OPENROUTER__* in .env to enable

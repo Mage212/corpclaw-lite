@@ -455,6 +455,15 @@ class OpenAIProvider(Provider):
 
         return "", raw
 
+    # Minimum reasoning length for the reasoning→content fallback (sub-case b).
+    # Qwen3's "everything in reasoning_content" edge case yields real answers
+    # (hundreds+ of chars). A short reasoning fragment (e.g. gemma4's 12-char
+    # degenerate output at thinking-OFF + low temp) is NOT a real answer —
+    # copying it to content would create a truncated XML marker and trigger a
+    # false "malformed_xml_tool_call" crash. Below this threshold we leave
+    # content empty so the agent retries instead of crashing on garbage.
+    _REASONING_FALLBACK_MIN_CHARS = 100
+
     def _resolve_reasoning_fallback(
         self,
         content: str,
@@ -471,6 +480,12 @@ class OpenAIProvider(Provider):
           a) reasoning_content has XML tool calls → parse them (NOT a final answer)
           b) reasoning_content is plain text → use as the final answer
 
+        Sub-case (b) only fires for substantial reasoning (≥
+        ``_REASONING_FALLBACK_MIN_CHARS``): a short reasoning fragment (e.g.
+        gemma4's degenerate 12-char output) is not a real answer and copying it
+        to content would cause a false malformed-XML crash. Below the threshold,
+        content stays empty so the agent can retry instead of crashing.
+
         Returns updated (content, tool_calls). Unchanged if no fallback needed.
         """
         # Only trigger when content is empty, no native tool calls, and stop
@@ -481,6 +496,9 @@ class OpenAIProvider(Provider):
         if not reasoning_text:
             return content, tool_calls
 
+        # Sub-case (a): reasoning contains XML tool-call markers — parse it.
+        # This can be a real tool-call embedded in reasoning, so it is checked
+        # regardless of length.
         if tools:
             _MARKERS = ("<tool_call>", "<function=")
             if any(m in reasoning_text for m in _MARKERS):
@@ -495,9 +513,16 @@ class OpenAIProvider(Provider):
                     )
                     return "", [*tool_calls, *parse_result.tool_calls]
                 logger.debug("XML fallback (reasoning_content): no tool_call parsed from reasoning")
+                # Markers present but unparseable — do NOT copy a short fragment
+                # to content (truncated marker → false malformed_xml crash).
+                if len(reasoning_text.strip()) < self._REASONING_FALLBACK_MIN_CHARS:
+                    return content, tool_calls
                 return reasoning_text.strip(), tool_calls
-            return reasoning_text.strip(), tool_calls
 
+        # Sub-case (b): plain-text reasoning as the answer. Only for substantial
+        # reasoning — a short fragment is degenerate output, not an answer.
+        if len(reasoning_text.strip()) < self._REASONING_FALLBACK_MIN_CHARS:
+            return content, tool_calls
         return reasoning_text.strip(), tool_calls
 
     # ── Main chat ─────────────────────────────────────────────────────────────

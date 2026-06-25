@@ -169,6 +169,35 @@ def _derive_override_sampling(
     )
 
 
+def _enforce_model_match(
+    sampling: SamplingProfile | None,
+    sampling_name: str | None,
+    route_model: str,
+) -> SamplingProfile | None:
+    """Enforce that a SamplingProfile's inference_overrides apply to the right model.
+
+    SamplingProfile.inference_overrides are authored for the model declared in
+    the profile's ``model:`` field. Applying them to a different route model
+    silently leaks cross-model parameters — e.g. qwen's ``temperature: 0.4``
+    on a gemma4 route caused non-deterministic crashes at thinking-OFF.
+
+    On mismatch: warn and return a copy with ``inference_overrides`` cleared.
+    ``thinking_mode`` / ``thinking_budget`` are model-agnostic and preserved.
+    A profile with no ``model:`` field (legacy-split, or model resolved from
+    the route) is left untouched.
+    """
+    if sampling is None or not sampling.model or sampling.model == route_model:
+        return sampling
+    logger.warning(
+        "Sampling profile '%s' declares model '%s' but route uses '%s'; "
+        "inference_overrides skipped (model mismatch). thinking_mode preserved.",
+        sampling_name or "(unnamed)",
+        sampling.model,
+        route_model,
+    )
+    return sampling.model_copy(update={"inference_overrides": {}})
+
+
 class LLMRouter:
     """Routes LLM calls to named providers based on task_kind or subagent_id.
 
@@ -249,6 +278,13 @@ class LLMRouter:
                 sampling_profile = preset_registry.get_sampling_profile(sampling_name)
                 if sampling_profile is None:
                     logger.warning("Unknown sampling profile '%s', ignoring", sampling_name)
+                # Model-match guard: a SamplingProfile's inference_overrides are
+                # authored for its declared ``model:``. Applying them to a
+                # different model silently leaks cross-model parameters (e.g.
+                # qwen's temperature=0.4 made gemma4 non-deterministically crash
+                # at thinking-OFF). On mismatch → warn + strip inference_overrides
+                # (thinking_mode/budget preserved — they are model-agnostic).
+                sampling_profile = _enforce_model_match(sampling_profile, sampling_name, model)
                 # Resolve the ModelProfile: explicit override > sampling's
                 # referenced model > same-name model profile (back-compat).
                 ref_model = model_profile_name or (
@@ -672,6 +708,13 @@ class LLMRouter:
                         "with_overrides: sampling profile '%s' not found; "
                         "falling back to existing profile",
                         sampling_name,
+                    )
+                else:
+                    # Same model-match guard as _get_or_create: don't let a
+                    # sampling profile authored for model A leak its
+                    # inference_overrides onto model B's route.
+                    override_sampling = _enforce_model_match(
+                        override_sampling, sampling_name, effective_model
                     )
 
             if override_sampling is None and (thinking or inference):

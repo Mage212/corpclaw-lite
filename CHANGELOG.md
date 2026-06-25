@@ -172,6 +172,37 @@ D-056 + raw-capture + контейнерный фикс объединены в 
   отменяя sampling-off. Валидировано: reasoning=2269 в aggregation-turn после
   `research_list_facts`.
 
+#### Model-scoped sampling + gemma4 research crash (найдено live-тестами 0.2.1)
+
+- **Cross-model parameter leakage → gemma4 crash.** Sampling-профиль
+  `temperature-0.4` (авторский для qwen, `model: qwen3.6-35b-a3b`) применялся к
+  роуту `default` с `model: gemma4-26b-qat`. Router резолвил ModelProfile по
+  `sampling.model`, но `inference_overrides: {temperature: 0.4}` применялся
+  безусловно к gemma4 — молчаливая утечка. При temp=0.4 gemma4
+  non-deterministically деградирует на thinking-OFF + multi-turn с `role=tool`:
+  генерирует 12-char garbage reasoning, finish=stop, без content/tool_calls.
+  Симптом: research-agent падал на iteration 2/4 с `malformed_xml_tool_call`.
+
+  **Фикс (config):** `ModelProfile.default_inference` обновлены до официальных
+  рекомендаций производителей — Gemma 4: `1.0/0.95/64`, Qwen 3: 4 канонических
+  режима (thinking-general/coding, instruct-general/reasoning) с
+  presence_penalty=1.5. Sampling-профили реструктурированы на model-scoped
+  (`gemma4-default`, `gemma4-fast`, `qwen-thinking-general`, и т.д.). Legacy
+  `temperature-0.4` удалён. Роуты обновлены: `default→gemma4-default`,
+  `vision/compress/consolidate→gemma4-fast`.
+
+  **Фикс (code):** `_enforce_model_match()` в `router.py` — sampling-профиль с
+  `model:` несовместимым с моделью роута → warn + skip `inference_overrides`
+  (thinking_mode preserved). Guard в `_get_or_create` и `with_overrides`.
+
+- **Reasoning-fallback копировал garbage в content (FIX 2).**
+  `_resolve_reasoning_fallback` (legacy Qwen3 heuristic) копировал любой
+  reasoning в content. Для gemma4's 12-char garbage это создавало обрезанный
+  XML-маркер → ложный `malformed_xml_tool_call` crash. Фикс: length-gate —
+  fallback (копирование reasoning→content) срабатывает только для reasoning
+  ≥ `_REASONING_FALLBACK_MIN_CHARS` (100). Короткий фрагмент → content остаётся
+  пустым, агент retry'ит вместо краша.
+
 ### Added (eval + overlay)
 
 - **+2 research eval-сценария** (`config/eval_scenarios.yaml`, 28 total):

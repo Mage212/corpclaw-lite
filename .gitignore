@@ -76,3 +76,6 @@ run_eval_*.py
 
 # Eval harness working directory (materialised scenarios per pass)
 .eval_workspace/
+
+# Visual companion brainstorming artifacts
+.superpowers/
