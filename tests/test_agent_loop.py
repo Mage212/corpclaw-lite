@@ -1447,15 +1447,20 @@ async def test_workflow_mandate_nudges_then_restricts(
     nudge_seen = any("research_finalize" in s and "time budget" in s for s in captured_system)
     assert nudge_seen, "expected the workflow nudge note in the system prompt"
 
-    # Restrict: at least one later LLM call saw a schema narrowed to the finalize tool
-    # set (research_list_facts + research_finalize), not the full tool set.
+    # Restrict: at least one later LLM call saw a schema narrowed to the finalize
+    # tool set (research_list_facts + research_finalize, or just research_finalize
+    # when closing-mode also engaged). The exact set depends on timing — iteration-
+    # aware mandate may restrict at a different iteration than wall-clock-only.
     names_per_call = [
         {str(t.get("function", {}).get("name", "")) for t in tools} for tools in captured_tools
     ]
-    restricted = [
-        names for names in names_per_call if names == {"research_list_facts", "research_finalize"}
-    ]
-    assert restricted, f"expected a restricted schema, got {names_per_call}"
+    full_set = {"research_search", "research_list_facts", "research_finalize"}
+    restricted = [names for names in names_per_call if names != full_set and names]
+    assert restricted, f"expected at least one restricted schema, got {names_per_call}"
+    # Every restricted schema must contain research_finalize (the terminal tool).
+    assert all("research_finalize" in names for names in restricted), (
+        f"restricted schemas must contain research_finalize, got {names_per_call}"
+    )
 
 
 @pytest.mark.asyncio
