@@ -2,10 +2,14 @@
 #
 # Each department defines:
 #   allowed_tools: tools this department can use (["*"] = all)
-#   budget: optional override for agent loop limits (iterations + tool_calls only)
+#   allowed_subagents: subagents this department can dispatch to
 #
-# Time budget (max_wall_time_ms) is controlled globally in config/settings.yaml
-# because it depends on hardware/model speed, not on department complexity.
+# Resource limits (max_steps, max_tool_calls, max_wall_time_ms) are controlled
+# globally in config/settings.yaml → agent.*. Department-specific iteration/
+# tool-call budgets were removed — they silently overrode settings, causing
+# "config change has no effect" bugs (the operator changes settings.yaml but
+# the department budget wins). The `budget:` block is still parsed for
+# back-compat but no longer applied in the agent loop.
 #
 # Main agent tools (inspection + routing):
 #   read_file, list_files, search_files, excel_inspect
@@ -33,9 +37,6 @@ departments:
       - send_file
     allowed_subagents:
       - research-agent
-    budget:
-      max_iterations: 10
-      max_tool_calls: 20
 
   engineering:
     description: "Software engineering and IT teams"
@@ -47,9 +48,6 @@ departments:
       - document-agent
       - data-agent
       - research-agent
-    budget:
-      max_iterations: 20
-      max_tool_calls: 50
 
   it:
     description: "IT support and infrastructure"
@@ -69,9 +67,6 @@ departments:
       - filesystem-agent
       - document-agent
       - research-agent
-    budget:
-      max_iterations: 15
-      max_tool_calls: 30
 
   marketing:
     description: "Marketing and communications"
@@ -90,9 +85,6 @@ departments:
     allowed_subagents:
       - document-agent
       - research-agent
-    budget:
-      max_iterations: 10
-      max_tool_calls: 20
 
   finance:
     description: "Finance and accounting"
@@ -112,9 +104,6 @@ departments:
       - data-agent
       - document-agent
       - research-agent
-    budget:
-      max_iterations: 10
-      max_tool_calls: 20
 
   hr:
     description: "Human resources"
@@ -133,9 +122,6 @@ departments:
     allowed_subagents:
       - document-agent
       - research-agent
-    budget:
-      max_iterations: 10
-      max_tool_calls: 20
 
   analytics:
     description: "Data analytics and BI"
@@ -155,9 +141,6 @@ departments:
       - data-agent
       - document-agent
       - research-agent
-    budget:
-      max_iterations: 15
-      max_tool_calls: 30
 
   product:
     description: "Product management"
@@ -176,9 +159,6 @@ departments:
     allowed_subagents:
       - document-agent
       - research-agent
-    budget:
-      max_iterations: 10
-      max_tool_calls: 20
 
   admin:
     description: "System administrators — full access"
@@ -190,9 +170,6 @@ departments:
       - document-agent
       - data-agent
       - research-agent
-    budget:
-      max_iterations: 25
-      max_tool_calls: 60
 
   development:
     description: "Software development team"
@@ -204,6 +181,3 @@ departments:
       - document-agent
       - data-agent
       - research-agent
-    budget:
-      max_iterations: 20
-      max_tool_calls: 50

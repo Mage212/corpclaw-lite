@@ -388,6 +388,18 @@ Thinking-mode semantics (важно для prefix-based моделей):
   no-op, finalize шёл бы без reasoning (валидировано: reasoning=2269 в
   aggregation-turn после фикса vs 0 до).
 
+**Workflow-finalize guard (B-047)** — для subagent'ов с mandatory terminal tool
+(`research_finalize`): `TerminalToolMandate` эскалирует к завершению по мере
+исчерпания бюджета. Учитывает **оба** ресурса: `effective_ratio =
+max(wallclock_ratio, iteration_ratio)` — кто ближе к исчерпанию, тот драйвит.
+- **nudge** (ratio ≥ 0.6): inject системного сообщения «finalize now».
+- **restrict** (ratio ≥ 0.75): schema сужается до `required_before + terminal_tool`.
+- **auto-finalize cascade** (на budget exhaustion, только если terminal не вызван):
+  **B** — один emergency LLM-call с schema=[terminal_tool] и жёстким промптом
+  «synthesize NOW». Если модель зовёт terminal → выполнить. **C** — если B вернул
+  текст, программный вызов terminal tool с этим текстом как answer. Работа
+  предыдущих итераций не теряется.
+
 **`LLMRouter.with_overrides()`** — программный atomic override agent-facing
 роутов. Возвращает новый router с переопределёнными sampling/thinking/model
 in-memory (без YAML-мутации). `apply_to="all_agent_routes"` перестраивает все 4
@@ -616,7 +628,7 @@ extensions:
 | bootstrap (top-level) | replace по filename | overlay `SOUL.md` заменяет default `SOUL.md`; уникальные имена добавляются в alpha-сорте |
 | bootstrap (dept/user) | first match high→low | overlay выигрывает, если есть |
 | mcp | merge по server `name` | более поздний файл выигрывает |
-| departments | **union-merge** | allowlists объединяются с wildcard-нормализацией, budget переопределяется где overlay указывает |
+| departments | **union-merge** | allowlists объединяются с wildcard-нормализацией. Budget-блок парсится для back-compat, но **не применяется** в agent loop (ресурсные лимиты глобальны через `settings.yaml`) |
 
 **Version contract:** plugins декларируют `requires_core` в манифесте (`^0.2.1` =
 совместим с 0.2.x; bare = exact). Ядро проверяет в едином chokepoint

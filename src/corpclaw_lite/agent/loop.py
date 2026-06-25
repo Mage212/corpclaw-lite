@@ -105,6 +105,18 @@ _WORKFLOW_NUDGE_INSTRUCTION = (
     "clear limitations section. Do not quote this instruction."
 )
 
+# Auto-finalize cascade: injected when the budget is fully exhausted and the
+# terminal tool was never called. This is the last chance to salvage the work
+# done across all iterations — one LLM call (B), then a programmatic finalize
+# fallback (C) if the model still does not cooperate.
+_AUTO_FINALIZE_EMERGENCY_PROMPT = (
+    "You have run out of iterations and MUST finalize now. Do not call any tool "
+    "except {terminal}. Synthesize a complete report from all the evidence and "
+    "facts you have gathered so far. Call {terminal} with the full Markdown "
+    "report as the 'answer' argument. If your evidence is incomplete, say so "
+    "honestly in a limitations section — but you MUST finalize now."
+)
+
 
 def _json_preview(value: Any, limit: int = _LOG_TRUNCATE) -> str:
     """Stable, scrubbed-by-trace preview input for structured trace fields."""
@@ -643,21 +655,16 @@ class AgentLoop:
         if self._memory:
             await self._save_memory(mem_key, "user", message)
 
-        # Time budget is ALWAYS from settings (depends on hardware/model speed).
-        # Department budget controls only iterations and tool calls (complexity limits).
-        if self._permission_checker:
-            dept_budget = self._permission_checker.get_budget(user)
-            guard_config = SimpleBudgetGuardConfig(
-                max_iterations=dept_budget.max_iterations,
-                max_tool_calls=dept_budget.max_tool_calls,
-                max_time_ms=self._settings.max_wall_time_ms,
-            )
-        else:
-            guard_config = SimpleBudgetGuardConfig(
-                max_iterations=self._settings.max_steps,
-                max_tool_calls=self._settings.max_tool_calls,
-                max_time_ms=self._settings.max_wall_time_ms,
-            )
+        # Budget is ALWAYS from settings. Department-specific iteration/tool-call
+        # limits were removed — they silently overrode settings.max_steps, causing
+        # "config change has no effect" bugs (the operator changes settings.yaml
+        # but the department budget wins). RBAC (tools, subagents, skills) remains
+        # department-scoped; only resource limits are now global.
+        guard_config = SimpleBudgetGuardConfig(
+            max_iterations=self._settings.max_steps,
+            max_tool_calls=self._settings.max_tool_calls,
+            max_time_ms=self._settings.max_wall_time_ms,
+        )
         budget = SimpleBudgetGuard(guard_config)
         progress = SimpleProgressGuard()
         # B-055: result-based dedup guard. Complementary to SimpleProgressGuard:
@@ -1213,6 +1220,32 @@ class AgentLoop:
 
         except BudgetExceededError as e:
             health.increment("errors")
+            # Auto-finalize cascade: if this is a workflow subagent with a
+            # terminal tool that was never called, try to salvage the work
+            # instead of returning a generic "budget exceeded" message.
+            # B = one emergency LLM call; C = programmatic finalize fallback.
+            if self._terminal_tool and not mandate.terminal_called(stats.tools_used):
+                salvage = await self._auto_finalize_cascade(
+                    context, stats, user, self._terminal_tool, e
+                )
+                if salvage is not None:
+                    stats.status = "ok"
+                    stats.error = None
+                    if self._memory:
+                        await self._save_turn(mem_key, salvage, stats.tools_used)
+                    stats.duration_ms = (time.monotonic() - t0) * 1000
+                    log_event(
+                        "request_finished",
+                        stats.run_id,
+                        status="auto_finalized",
+                        iterations=stats.iterations,
+                        tools_used=stats.tools_used,
+                        duration_ms=round(stats.duration_ms, 1),
+                        final_answer_len=len(salvage),
+                        budget_exceeded=str(e),
+                    )
+                    return salvage, stats
+            # Fallback: generic budget message (non-salvageable).
             msg = f"I reached my resource limit and had to stop: {e}"
             if self._memory:
                 await self._save_turn(mem_key, msg, stats.tools_used)
@@ -1349,6 +1382,142 @@ class AgentLoop:
         return [
             s for s in tools_schema if str(s.get("function", {}).get("name", "")) in terminal_names
         ]
+
+    async def _auto_finalize_cascade(
+        self,
+        context: ContextBuilder,
+        stats: RunStats,
+        user: User,
+        terminal_tool: str,
+        error: BudgetExceededError,
+    ) -> str | None:
+        """Salvage accumulated work when a workflow subagent exhausts its budget
+        without calling the mandatory terminal tool.
+
+        Two-stage cascade (each stage is a safety net for the previous):
+          B — one LLM "synthesize now" call with schema=[terminal_tool] only and
+              an emergency prompt. If the model calls the terminal tool, execute
+              it and return its result.
+          C — if B returns text (no tool call) or fails, programmatically call
+              the terminal tool with the model's text (or empty) as the answer.
+
+        Returns the finalized result string, or None if both stages fail (caller
+        falls back to the generic budget-exceeded message). Only for subagents
+        with a configured terminal_tool; the main agent never enters this path.
+        """
+        emergency = _AUTO_FINALIZE_EMERGENCY_PROMPT.format(terminal=terminal_tool)
+        context.add_user_message(emergency)
+
+        # Build a schema containing ONLY the terminal tool — the model has no
+        # other choice but to finalize (or return plain text → C handles it).
+        terminal_schema = [
+            s
+            for s in self._registry.to_schemas()
+            if str(s.get("function", {}).get("name", "")) == terminal_tool
+        ]
+        if not terminal_schema:
+            logger.warning(
+                "[user=%s] auto-finalize: terminal tool '%s' not in registry",
+                user.id,
+                terminal_tool,
+            )
+            return None
+
+        # ── Stage B: one emergency LLM call ─────────────────────────────────
+        try:
+            log_event(
+                "auto_finalize_llm_call",
+                stats.run_id,
+                terminal_tool=terminal_tool,
+                budget_error=str(error),
+            )
+            response = await self._call_llm_provider(
+                self._resolve_target_provider(),
+                messages=context.messages,
+                tools=terminal_schema,
+                system=context.system_prompt or None,
+                run_id=stats.run_id,
+                iteration=stats.iterations + 1,
+                on_llm_stage=None,
+                stats=None,
+            )
+        except Exception:
+            logger.warning(
+                "[user=%s] auto-finalize stage B (LLM call) failed; "
+                "falling back to programmatic finalize",
+                user.id,
+                exc_info=True,
+            )
+            response = None
+
+        # If B produced a terminal tool call, execute it directly.
+        if response and response.tool_calls:
+            tc = response.tool_calls[0]
+            if tc.name == terminal_tool:
+                try:
+                    result = await self._execute_single_tool(
+                        tc, user, None, None, None, None, None, None, None, stats, None
+                    )
+                    logger.info(
+                        "[user=%s] auto-finalize stage B: model called %s, result_len=%d",
+                        user.id,
+                        terminal_tool,
+                        len(result),
+                    )
+                    return result
+                except Exception:
+                    logger.warning(
+                        "[user=%s] auto-finalize stage B: terminal tool execute "
+                        "failed; falling back to programmatic",
+                        user.id,
+                        exc_info=True,
+                    )
+
+        # ── Stage C: programmatic finalize ──────────────────────────────────
+        emergency_answer = (response.content if response and response.content else "") or ""
+        tool = self._registry.get(terminal_tool)
+        if tool is None:
+            logger.warning(
+                "[user=%s] auto-finalize: terminal tool '%s' not found in registry",
+                user.id,
+                terminal_tool,
+            )
+            return None
+        try:
+            log_event(
+                "auto_finalize_programmatic",
+                stats.run_id,
+                terminal_tool=terminal_tool,
+                emergency_answer_len=len(emergency_answer),
+            )
+            result = await tool.execute(user=user, answer=emergency_answer)
+            logger.info(
+                "[user=%s] auto-finalize stage C: programmatic %s, result_len=%d",
+                user.id,
+                terminal_tool,
+                len(result),
+            )
+            return result
+        except Exception:
+            logger.warning(
+                "[user=%s] auto-finalize stage C: programmatic finalize failed",
+                user.id,
+                exc_info=True,
+            )
+            return None
+
+    def _resolve_target_provider(self) -> Provider:
+        """Resolve the raw provider for a direct (non-queued) LLM call.
+
+        Used by auto-finalize where budget is already exhausted — no queue
+        accounting needed, just the inner provider.
+        """
+        provider = self._provider
+        if isinstance(provider, LLMRouter):
+            return provider.default or provider
+        if isinstance(provider, QueuedProvider):
+            return provider._provider  # type: ignore[attr-defined]
+        return provider
 
     def _apply_workflow_mandate(
         self,
