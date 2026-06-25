@@ -101,8 +101,8 @@ llm:
     #   model: "deepseek/deepseek-chat-v3-0324"
 
 agent:
-  max_steps: 15
-  max_tool_calls: 30
+  max_steps: 30
+  max_tool_calls: 60
   max_wall_time_ms: 300000
   max_history: 20
   approval_mode: "manual"

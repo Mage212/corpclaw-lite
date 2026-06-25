@@ -682,6 +682,7 @@ class AgentLoop:
                 required_before=tuple(self._required_before_terminal),
             ),
             max_time_ms=self._settings.max_wall_time_ms,
+            max_iterations=guard_config.max_iterations,
         )
         task_run = TaskRun(self._workspace_base)
         task_run.initialize(user, stats.run_id)
@@ -785,7 +786,9 @@ class AgentLoop:
                     phase_ctx = PhaseContext(
                         is_workflow_subagent=mandate.enabled,
                         iteration=stats.iterations,
-                        elapsed_ratio=mandate.elapsed_ratio() if mandate.enabled else None,
+                        elapsed_ratio=mandate.elapsed_ratio(stats.iterations)
+                        if mandate.enabled
+                        else None,
                         closing_mode=soft_deadline.closing_mode,
                         nudge_injected=mandate.nudge_injected,
                         restricted=mandate.restricted,
@@ -1361,13 +1364,21 @@ class AgentLoop:
         ``tools_schema`` to ``required_before + terminal_tool`` so only finalization
         tools remain. Returns the (possibly restricted) schema.
 
+        Budget escalation accounts for BOTH wall-clock and iteration count
+        (``max(wallclock_ratio, iteration_ratio)``): local LLMs hit the iteration
+        limit before the wall-clock deadline, so iteration-awareness is essential.
+
         Neutral when the mandate is disabled (no terminal tool configured): returns the
         schema unchanged.
         """
         if not mandate.enabled:
             return tools_schema
 
-        if mandate.should_nudge(stats.tools_used):
+        # stats.iterations is the count of completed LLM turns; the mandate needs
+        # the current turn number to project how close we are to the limit.
+        iteration = stats.iterations
+
+        if mandate.should_nudge(stats.tools_used, iteration=iteration):
             required = ", ".join(mandate.config.required_before) or "(none)"
             instruction = _WORKFLOW_NUDGE_INSTRUCTION.format(
                 required=required, terminal=mandate.config.terminal_tool
@@ -1380,17 +1391,17 @@ class AgentLoop:
                 "workflow_nudge_injected",
                 stats.run_id,
                 terminal_tool=mandate.config.terminal_tool,
-                elapsed_ratio=round(mandate.elapsed_ratio(), 3),
+                elapsed_ratio=round(mandate.elapsed_ratio(iteration), 3),
             )
 
-        if mandate.should_restrict(stats.tools_used):
+        if mandate.should_restrict(stats.tools_used, iteration=iteration):
             allowed = set(mandate.config.required_before) | {mandate.config.terminal_tool}
             log_event(
                 "workflow_restrict_applied",
                 stats.run_id,
                 terminal_tool=mandate.config.terminal_tool,
                 allowed=sorted(allowed),
-                elapsed_ratio=round(mandate.elapsed_ratio(), 3),
+                elapsed_ratio=round(mandate.elapsed_ratio(iteration), 3),
             )
             if tools_schema:
                 return [

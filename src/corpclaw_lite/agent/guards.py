@@ -447,9 +447,16 @@ class TerminalToolMandateConfig:
 class TerminalToolMandate:
     """Workflow-finalize guard: push the run toward its mandatory terminal tool.
 
-    Tracks elapsed wall-clock time (via :func:`time.monotonic`, mirroring
-    :class:`SoftDeadline`) and, when the run is running low on budget AND has not yet
-    called ``terminal_tool``, signals the caller to escalate:
+    Tracks BOTH elapsed wall-clock time (via :func:`time.monotonic`, mirroring
+    :class:`SoftDeadline`) and iteration count (when ``max_iterations`` is
+    provided). Local LLMs are fast but iteration-inefficient — they hit the
+    iteration limit long before the wall-clock deadline, leaving the guard
+    dormant while the model loops on gather/store. The effective budget ratio
+    is ``max(wallclock_ratio, iteration_ratio)``: whichever resource is closer
+    to exhaustion drives the escalation.
+
+    When the run is running low on budget AND has not yet called
+    ``terminal_tool``, signals the caller to escalate:
 
     - :meth:`should_nudge`: inject a system note telling the model to stop gathering
       and call ``research_list_facts`` then ``research_finalize``.
@@ -465,9 +472,15 @@ class TerminalToolMandate:
         config: TerminalToolMandateConfig | None = None,
         *,
         max_time_ms: int = 300000,
+        max_iterations: int | None = None,
     ) -> None:
         self.config = config or TerminalToolMandateConfig()
         self._max_time_ms = max_time_ms
+        # B-047 extension: iteration-budget awareness. Local LLMs are fast but
+        # iteration-inefficient — they hit the iteration limit long before the
+        # wall-clock deadline. When set, the mandate escalates based on
+        # whichever resource (wall-clock OR iterations) is closer to exhaustion.
+        self._max_iterations = max_iterations
         self._start = time.monotonic()
         self._nudge_injected = False
         self._restricted = False
@@ -476,34 +489,55 @@ class TerminalToolMandate:
     def enabled(self) -> bool:
         return self.config.enabled and bool(self.config.terminal_tool)
 
-    def _elapsed_ratio(self) -> float:
+    def _wallclock_ratio(self) -> float:
         elapsed_ms = (time.monotonic() - self._start) * 1000
         return elapsed_ms / self._max_time_ms if self._max_time_ms > 0 else 1.0
 
-    def elapsed_ratio(self) -> float:
-        """Current fraction of max_wall_time_ms elapsed (for telemetry)."""
-        return self._elapsed_ratio()
+    def _iteration_ratio(self, iteration: int | None) -> float | None:
+        """Fraction of max_iterations consumed, or None if iteration tracking is off."""
+        if iteration is None or not self._max_iterations or self._max_iterations <= 0:
+            return None
+        return iteration / self._max_iterations
+
+    def _elapsed_ratio(self, iteration: int | None = None) -> float:
+        """Effective ratio: whichever resource is closer to exhaustion.
+
+        Wall-clock is always tracked. If iteration tracking is enabled
+        (``max_iterations`` was provided and ``iteration`` is given), the
+        *larger* of the two ratios wins — the resource closest to depletion
+        drives the escalation, so a fast-but-iteration-heavy local LLM is
+        nudged/restricted before it hits the iteration budget.
+        """
+        wallclock = self._wallclock_ratio()
+        iter_ratio = self._iteration_ratio(iteration)
+        if iter_ratio is None:
+            return wallclock
+        return max(wallclock, iter_ratio)
+
+    def elapsed_ratio(self, iteration: int | None = None) -> float:
+        """Current effective budget fraction (wall-clock OR iterations) for telemetry."""
+        return self._elapsed_ratio(iteration)
 
     def terminal_called(self, tools_used: list[str]) -> bool:
         """Whether the mandatory terminal tool has been called during this run."""
         return self.config.terminal_tool in tools_used
 
-    def should_nudge(self, tools_used: list[str]) -> bool:
+    def should_nudge(self, tools_used: list[str], iteration: int | None = None) -> bool:
         if not self.enabled or self._nudge_injected:
             return False
         if self.terminal_called(tools_used):
             return False
-        if self._elapsed_ratio() < self.config.nudge_ratio:
+        if self._elapsed_ratio(iteration) < self.config.nudge_ratio:
             return False
         self._nudge_injected = True
         return True
 
-    def should_restrict(self, tools_used: list[str]) -> bool:
+    def should_restrict(self, tools_used: list[str], iteration: int | None = None) -> bool:
         if not self.enabled or self._restricted:
             return False
         if self.terminal_called(tools_used):
             return False
-        if self._elapsed_ratio() < self.config.restrict_ratio:
+        if self._elapsed_ratio(iteration) < self.config.restrict_ratio:
             return False
         self._restricted = True
         return True
