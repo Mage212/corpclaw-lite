@@ -17,6 +17,9 @@ from corpclaw_lite.utils.async_helpers import run_in_thread
 __all__ = ["PdfReaderTool", "_sanitize_pdf_text"]
 
 _MAX_CHARS = 50_000
+# When saving to a file (output_path), extract the entire document without
+# truncation — the file is what the user wants, not a context-window-sized chunk.
+_MAX_INT = 2**31 - 1
 _ALLOWED_OUTPUT_SUFFIXES = {".md", ".markdown", ".txt"}
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]")
 _HYPHENATED_LINE_BREAK_RE = re.compile(r"(?<=\w)-\n(?=\w)")
@@ -168,7 +171,10 @@ class PdfReaderTool(Tool):
 
     name = "pdf_reader"
     description = (
-        "Extract text content from PDF files. Supports page ranges like 'all', '1-5', '1,3,5'."
+        "Extract text content from PDF files. Supports page ranges like 'all', '1-5', '1,3,5'. "
+        "When output_path is given, the ENTIRE document is saved to the file (no truncation) "
+        "— use this for PDF-to-Markdown conversion in one step. Without output_path, the "
+        "extracted text is returned (truncated to max_chars to protect context window)."
     )
     params = [
         ToolParam(
@@ -231,7 +237,15 @@ class PdfReaderTool(Tool):
                 allowed = ", ".join(sorted(_ALLOWED_OUTPUT_SUFFIXES))
                 return f"Error: output_path must end with one of: {allowed}"
 
-        result = await run_in_thread(_extract_text, resolved, pages, max_chars)
+        # When saving to a file, extract the ENTIRE document — truncation makes
+        # no sense for a file the model explicitly asked to create. The per-call
+        # max_chars limit applies only to the summary string returned into the
+        # agent context (to protect the context window). Without this, a
+        # "convert PDF to .md" task loops for 4-6 iterations re-extracting
+        # truncated chunks instead of completing in one step.
+        extract_max = max_chars if output_path is None else _MAX_INT
+
+        result = await run_in_thread(_extract_text, resolved, pages, extract_max)
         if isinstance(result, str):
             return result
         if output_path is not None:
