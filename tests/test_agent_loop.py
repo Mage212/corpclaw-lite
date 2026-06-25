@@ -1504,3 +1504,179 @@ async def test_workflow_mandate_neutral_without_terminal_tool(
 
     # No workflow nudge note should ever appear.
     assert not any("research_finalize" in s and "time budget" in s for s in captured_system)
+
+
+# ── Auto-finalize cascade (B + C) ────────────────────────────────────────────
+
+
+def _finalize_registry(registry: ToolRegistry) -> None:
+    """Register research_search + research_finalize stubs for auto-finalize tests."""
+
+    class SearchTool:
+        name = "research_search"
+        description = "search"
+        params = []
+        terminal = False
+        parallel_safe = True
+
+        async def execute(self, **kwargs: Any) -> str:
+            return "results"
+
+    class FinalizeTool:
+        name = "research_finalize"
+        description = "finalize"
+        params = []
+        terminal = True
+        parallel_safe = True
+
+        async def execute(self, **kwargs: Any) -> str:
+            answer = kwargs.get("answer", "")
+            return f"## Report\n{answer}" if answer else "## Report\nempty"
+
+    for t in (SearchTool(), FinalizeTool()):
+        registry._tools[t.name] = t  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_auto_finalize_stage_b_model_calls_terminal(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """Budget exhausted → stage B emergency LLM call → model calls terminal → result returned.
+
+    The model never finalized on its own (kept calling research_search), hit
+    the iteration limit, then the cascade's emergency prompt made it call
+    research_finalize.
+    """
+    _finalize_registry(empty_registry)
+    settings = AgentSettings(max_steps=3, max_tool_calls=100, max_wall_time_ms=60000)
+
+    provider = MockProvider(
+        responses=[
+            # 3 iterations: model loops on research_search, never finalizes.
+            LLMResponse(
+                content="", tool_calls=[ToolCall(id="1", name="research_search", arguments={})]
+            ),
+            LLMResponse(
+                content="", tool_calls=[ToolCall(id="2", name="research_search", arguments={})]
+            ),
+            LLMResponse(
+                content="", tool_calls=[ToolCall(id="3", name="research_search", arguments={})]
+            ),
+            # Stage B: emergency call → model cooperates, calls research_finalize.
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        id="4", name="research_finalize", arguments={"answer": "synthesized report"}
+                    )
+                ],
+            ),
+        ]
+    )
+    loop = AgentLoop(
+        AgentConfig(
+            provider,
+            empty_registry,
+            settings,
+            terminal_tool="research_finalize",
+        )
+    )
+    result, stats = await loop.run(test_user, "research task", channel="test")
+    assert "synthesized report" in result
+    assert stats.status == "ok"
+
+
+@pytest.mark.asyncio
+async def test_auto_finalize_stage_c_programmatic(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """Stage B returns plain text (no tool call) → stage C calls terminal
+    programmatically with the model's text as the answer."""
+    _finalize_registry(empty_registry)
+    settings = AgentSettings(max_steps=3, max_tool_calls=100, max_wall_time_ms=60000)
+
+    provider = MockProvider(
+        responses=[
+            LLMResponse(
+                content="", tool_calls=[ToolCall(id="1", name="research_search", arguments={})]
+            ),
+            LLMResponse(
+                content="", tool_calls=[ToolCall(id="2", name="research_search", arguments={})]
+            ),
+            LLMResponse(
+                content="", tool_calls=[ToolCall(id="3", name="research_search", arguments={})]
+            ),
+            # Stage B: model returns text instead of calling terminal.
+            LLMResponse(content="Here is what I found: the answer is 42."),
+        ]
+    )
+    loop = AgentLoop(
+        AgentConfig(
+            provider,
+            empty_registry,
+            settings,
+            terminal_tool="research_finalize",
+        )
+    )
+    result, stats = await loop.run(test_user, "research task", channel="test")
+    # Stage C: the text was passed as answer to research_finalize programmatically.
+    assert "the answer is 42" in result
+    assert stats.status == "ok"
+
+
+@pytest.mark.asyncio
+async def test_auto_finalize_skipped_for_main_agent(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """Main agent (no terminal_tool) → auto-finalize cascade does NOT trigger;
+    returns the generic budget-exceeded message instead."""
+    settings = AgentSettings(max_steps=2, max_tool_calls=100)
+
+    provider = MockProvider(
+        responses=[
+            LLMResponse(content="", tool_calls=[ToolCall(id="1", name="x", arguments={})]),
+            LLMResponse(content="", tool_calls=[ToolCall(id="2", name="x", arguments={})]),
+        ]
+    )
+    loop = AgentLoop(AgentConfig(provider, empty_registry, settings))
+    result, stats = await loop.run(test_user, "loop", channel="test")
+    assert "resource limit" in result.lower()
+    assert stats.status == "budget"
+
+
+@pytest.mark.asyncio
+async def test_auto_finalize_skipped_if_terminal_already_called(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """If terminal was already called (terminal_called=True), no cascade — the
+    run completed normally via the terminal tool before budget ran out."""
+    _finalize_registry(empty_registry)
+    settings = AgentSettings(max_steps=3, max_tool_calls=100, max_wall_time_ms=60000)
+
+    provider = MockProvider(
+        responses=[
+            LLMResponse(
+                content="", tool_calls=[ToolCall(id="1", name="research_search", arguments={})]
+            ),
+            # Model finalizes on iter 2 (before budget).
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCall(id="2", name="research_finalize", arguments={"answer": "done early"})
+                ],
+            ),
+        ]
+    )
+    loop = AgentLoop(
+        AgentConfig(
+            provider,
+            empty_registry,
+            settings,
+            terminal_tool="research_finalize",
+        )
+    )
+    result, stats = await loop.run(test_user, "research", channel="test")
+    assert "done early" in result
+    assert stats.status == "ok"
+    # Only 2 LLM calls (no cascade): no emergency call needed.
+    assert provider.call_count == 2

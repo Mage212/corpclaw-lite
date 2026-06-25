@@ -114,6 +114,25 @@ D-056 + raw-capture + контейнерный фикс объединены в 
 - **`calibration/loop.py`**: двух-путная resolution с dead inner loop
   линеаризована (`has_task_route` gate; unreachable model-harvesting loop удалён).
 
+#### Department budget упразднён + auto-finalize cascade
+
+- **Department-specific `max_iterations`/`max_tool_calls` удалены из production
+  path.** Раньше `permission_checker.get_budget(user)` silently перекрывал
+  `settings.yaml → agent.max_steps` — оператор менял config, перезапускал, лимит
+  тот же (мы сами попались: settings=30, но engineering dept=20 wins). Теперь
+  единый авторитетный лимит в `settings.yaml`. `budget:` блок в
+  `config/departments.yaml` остаётся валидным YAML (back-compat), но не
+  применяется. RBAC (tools, subagents, skills) остаётся department-scoped.
+- **`max_steps: 15→30`, `max_tool_calls: 30→60`** — больше места для research и
+  сложных задач.
+- **Auto-finalize cascade (B+C)** на budget exhaustion: если workflow subagent
+  (с `terminal_tool`) исчерпал бюджет, не вызвав terminal — cascade пытается
+  спасти работу: **B** — один emergency LLM-call «synthesize NOW» с
+  schema=[terminal_tool]. Если модель зовёт terminal → выполнить. **C** — если B
+  вернул текст, программный вызов terminal с этим текстом. Работа предыдущих
+  итераций не теряется. Main agent (без terminal_tool) → generic budget message
+  как раньше.
+
 ### Fixed
 
 #### Контейнерная изоляция (найдено живым прогоном web-канала)
