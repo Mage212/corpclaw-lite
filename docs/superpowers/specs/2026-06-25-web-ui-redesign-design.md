@@ -13,7 +13,7 @@
 - **Левый sidebar-навигация** с переключением разделов (Chat / Work + Extensions + Agent Context + профиль), списком чатов, кнопкой нового чата.
 - **File manager** уезжает из левой колонки в **bottom drawer** (раскрывается снизу, а не слева).
 - **Preview** остаётся справа, с явной кнопкой скрытия.
-- **Mode selector** (Fast / Think / Research) переносится из топбара в область input, заменяя текущие «Диалог/Выполнение».
+- **Mode selector** (Fast / Think / Research) переносится из топбара в область input. Это новая **ось глубины обработки**; прежняя ось tools on/off (бывшие «Диалог/Выполнение») привязывается к навигации Chat/Work (Work=tools on, Chat=tools off).
 - **Навигация Chat / Work** разделяет **историю чатов** на две независимые ленты (своя история на раздел).
 - **Раздел Extensions** (Skills / MCP / Plugins) и **Agent Context** (instructions) — новые разделы управления, поверх hot-reload.
 
@@ -94,7 +94,7 @@ WS: `/ws/chat` (inbound: `mode_change, load_history_before, reset_context, appro
 | Решение | Выбор | Обоснование |
 |---------|-------|-------------|
 | **Модель памяти** | **UI-мультисессия, single-thread агент-памяти** | 1 пользователь → 1 активный чат. Остальные чаты в истории — **read-only просмотр**. История = способ хранить частые/повторяющиеся задачи и восстанавливать контекст. Переключение между чатами/режимами возможно, но активный только один. **Точка расширения:** заложить на будущее возможность 2–3 одновременных чатов. Без правок ядра SQLiteMemory → нулевой риск. |
-| **Модель режимов** | **Заменить Mistral-стилем** | Полностью убрать текущие «Диалог/Выполнение». Новая модель: навигация **Chat / Work** (разделяет историю) + selector **Fast / Think / Research** в input. Work = инструменты включены; режим задаёт глубину/thinking/research. |
+| **Модель режимов (две ортогональные оси)** | **Chat/Work + Fast/Think/Research** | Две независимые оси, не одна. **Ось 1 — Chat/Work** (навигация/история): раздельные ленты чатов, **tools on/off привязан сюда** — Work = инструменты включены (наследник «Выполнение»), Chat = выключены (наследник «Диалог»). **Ось 2 — Fast/Think/Research** (глубина обработки в input): Fast = быстрый ответ без thinking; Think = с reasoning/thinking; Research = глубокое исследование через research-субагента. **Доступность режимов по разделам:** Chat → только Fast/Think (Research невозможен, т.к. требует tools); Work → Fast/Think/Research. Это устраняет двойственность осей и убирает ручной tools-toggle. |
 
 **Поведение при переключении чатов (detail):**
 - В истории — много чатов. Открываем любой → его транскрипт грузится в основную область (read-only просмотр прошлых сообщений).
@@ -167,17 +167,17 @@ WS: `/ws/chat` (inbound: `mode_change, load_history_before, reset_context, appro
 - BE: без изменений (preview/file-mode-change уже работают через существующие API).
 - **Зависимости:** нет.
 
-### Этап 2 — История чатов (мультисессия, своя на раздел Chat/Work)
-**Scope:** список чатов в sidebar, переключение (открытие = read-only просмотр; активация = отправкой сообщения, авто-подъём вверх), rename/delete, «new chat». Своя история на раздел Chat/Work. Auto-naming по первому сообщению (~25 символов). Фундамент папок (`folder_id`).
-- FE: `ChatList` компонент, состояние активного/просматриваемого чата, gating отправки при занятом активном.
-- BE: `chat_store.py` — expose архивных сессий + поле `section` (chat/work) + rename/delete + «switch active»; новые REST-эндпоинты (`GET /api/chats`, `POST /api/chats`, `PATCH /api/chats/{id}`, `DELETE /api/chats/{id}`, `POST /api/chats/{id}/activate`); WS-расширение (загрузка конкретного чата по id).
+### Этап 2 — История чатов (мультисессия, своя на раздел Chat/Work) + привязка tools к разделу
+**Scope:** список чатов в sidebar, переключение (открытие = read-only просмотр; активация = отправкой сообщения, авто-подъём вверх), rename/delete, «new chat». Своя история на раздел Chat/Work. Auto-naming по первому сообщению (~25 символов). Фундамент папок (`folder_id`). **Привязка tools on/off к разделу:** Work → `tools_enabled=True`, Chat → `tools_enabled=False` (наследники «Выполнение»/«Диалог» соответственно) — это убирает ручной tools-toggle.
+- FE: `ChatList` компонент, состояние активного/просматриваемого чата, gating отправки при занятом активном. SectionSwitcher (Chat/Work) теперь реально переключает раздел + определяет `tools_enabled`.
+- BE: `chat_store.py` — expose архивных сессий + поле `section` (chat/work) + rename/delete + «switch active»; новые REST-эндпоинты (`GET /api/chats`, `POST /api/chats`, `PATCH /api/chats/{id}`, `DELETE /api/chats/{id}`, `POST /api/chats/{id}/activate`); WS-расширение (загрузка конкретного чата по id). Маппинг section→`tools_enabled` в `service.py`.
 - **Зависимости:** Этап 1 (нужен sidebar для списка).
 
 ### Этап 3 — Mode selector (Fast / Think / Research) в input
-**Scope:** заменить «Диалог/Выполнение» на selector в composer. Research форсит `deep_research` явно (не keyword). Work-раздел = инструменты включены.
-- FE: dropdown в composer, замена `SegmentedMode`.
-- BE: thread явного `mode` в `AgentLoop.run()` + `service.py`; для Research — передача явного `research_mode` в `DispatchSubagentTool`/`SubagentDispatcher.dispatch` (переиспользовать `ResearchRuntime.resolve_mode`); Fast/Think → mapping на thinking-config через `SamplingProfile`.
-- **Зависимости:** Этап 1 (composer в main area).
+**Scope:** selector глубины обработки в composer. **Внимание:** это НЕ замена оси tools on/off — та привязана к Chat/Work (Этап 2). Fast/Think/Research — ортогональная ось глубины. Research форсит `deep_research` явно (не keyword-детекция).
+- FE: dropdown в composer (заменяет `SegmentedMode`); **доступные опции зависят от раздела** — в Chat только Fast/Think, в Work все три.
+- BE: thread явного `mode` (глубина) в `AgentLoop.run()` + `service.py`; для Research — передача явного `research_mode` в `DispatchSubagentTool`/`SubagentDispatcher.dispatch` (переиспользовать `ResearchRuntime.resolve_mode`); Fast/Think → mapping на thinking-config через `SamplingProfile`.
+- **Зависимости:** Этап 1 (composer в main area) + Этап 2 (раздел Chat/Work определяет tools + доступные modes).
 
 ### Этап 4 — Раздел Extensions (Skills / MCP / Plugins)
 **Scope:** grid-страница управления расширениями: список, toggle вкл/выкл, trigger reload, статус hot-reload. По образцу Mistral Connectors.
@@ -337,7 +337,7 @@ App.tsx
 Текущий topbar перегружен (files-toggle, title, context-meter, mode-toggle, new-session, user-menu). В новом layout topbar совсем минимальный — почти всё переехало в sidebar/composer:
 - Files-toggle → убирается (drawer управляется из main area снизу).
 - Title → название текущего чата (этап 2) или брэнд.
-- **Mode-toggle (Диалог/Выполнение) убирается** (этап 3 заменит на Fast/Think/Research в composer).
+- **Mode-toggle (Диалог/Выполнение) убирается из topbar'а.** Его смысл (tools on/off) привязывается к Chat/Work (Этап 2). Новый selector Fast/Think/Research (Этап 3) — отдельная ось глубины, живёт в composer.
 - New-session → переезжает в sidebar («+ Новый чат»).
 - **User-menu → убирается из topbar** (переехал в bottom-left sidebar'а, §6.5).
 - **Context-meter → убирается** из topbar (закреплён под composer'ом, §6.9).
