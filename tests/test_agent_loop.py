@@ -1680,3 +1680,54 @@ async def test_auto_finalize_skipped_if_terminal_already_called(
     assert stats.status == "ok"
     # Only 2 LLM calls (no cascade): no emergency call needed.
     assert provider.call_count == 2
+
+
+# ── Degenerate empty-response retry ──────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_empty_response_retry_then_recovers(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """Model returns empty content + no tool calls (degenerate stutter) →
+    loop retries with a correction prompt instead of exiting immediately.
+    On the second attempt the model produces a real answer."""
+    settings = AgentSettings(max_steps=10, max_tool_calls=50)
+    provider = MockProvider(
+        responses=[
+            # iter 1: normal tool call
+            LLMResponse(content="", tool_calls=[ToolCall(id="1", name="x", arguments={})]),
+            # iter 2: degenerate empty (no content, no tools) — triggers retry
+            LLMResponse(content="", tool_calls=[]),
+            # iter 3: model recovers with a real answer
+            LLMResponse(content="Here is the answer."),
+        ]
+    )
+    loop = AgentLoop(AgentConfig(provider, empty_registry, settings))
+    result, stats = await loop.run(test_user, "task", channel="test")
+    assert result == "Here is the answer."
+    assert stats.status == "ok"
+
+
+@pytest.mark.asyncio
+async def test_empty_response_retry_exhausted(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """If the model keeps returning empty after max retries, the loop exits
+    with 'Agent provided no response' (graceful degradation)."""
+    settings = AgentSettings(max_steps=10, max_tool_calls=50)
+    provider = MockProvider(
+        responses=[
+            # iter 1: tool call
+            LLMResponse(content="", tool_calls=[ToolCall(id="1", name="x", arguments={})]),
+            # All subsequent: empty degenerate (exceeds _EMPTY_RESPONSE_MAX_RETRIES=3)
+            LLMResponse(content="", tool_calls=[]),
+            LLMResponse(content="", tool_calls=[]),
+            LLMResponse(content="", tool_calls=[]),
+            LLMResponse(content="", tool_calls=[]),
+        ]
+    )
+    loop = AgentLoop(AgentConfig(provider, empty_registry, settings))
+    result, stats = await loop.run(test_user, "task", channel="test")
+    assert result == "Agent provided no response."
+    assert stats.status == "ok"

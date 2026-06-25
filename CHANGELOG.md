@@ -132,6 +132,12 @@ D-056 + raw-capture + контейнерный фикс объединены в 
   вернул текст, программный вызов terminal с этим текстом. Работа предыдущих
   итераций не теряется. Main agent (без terminal_tool) → generic budget message
   как раньше.
+- **Degenerate-empty-response retry.** Локальные LLMы (gemma4 thinking-OFF)
+  иногда после tool result отдают пустой контент + ноль tool_calls + finish=stop
+  (degenerate stutter). Раньше loop выходил с «Agent provided no response» на
+  iter 2-3, теряя весь ран. Теперь — bounded retry (3 попытки) с корректирующим
+  промптом «You returned an empty response. Continue your task», симметрично с
+  planning-text guard. После 3 пустых ответов → graceful exit.
 
 ### Fixed
 

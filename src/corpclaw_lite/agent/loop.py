@@ -565,6 +565,19 @@ class AgentLoop:
         stats = RunStats(run_id=run_id) if run_id is not None else RunStats()
         loop_warning_count = 0
         xml_repair_attempted = False
+        # B-047 ext: degenerate-empty-response retry. Local LLMs (gemma4) with
+        # thinking-OFF sometimes emit a tiny garbage reasoning fragment + empty
+        # content + no tool calls + finish=stop after a tool result. Without
+        # this guard the loop treats it as a final answer and exits with
+        # "Agent provided no response", losing the run. Instead, give the model
+        # a bounded number of correction turns (like planning-text guard).
+        empty_response_retries = 0
+        _EMPTY_RESPONSE_MAX_RETRIES = 3
+        _EMPTY_RESPONSE_PROMPT = (
+            "You returned an empty response with no tool call. This is not a valid "
+            "final answer. Continue your task: call a tool to gather more data, or "
+            "if you have enough information, provide a complete response now."
+        )
         last_actual_total_tokens: int | None = None
         t0 = time.monotonic()
 
@@ -1005,6 +1018,23 @@ class AgentLoop:
                     )
 
                 if not response.tool_calls:
+                    # Degenerate-empty-response guard: if the model returned empty
+                    # (or near-empty) content with no tool calls, it likely stuttered
+                    # (gemma4 thinking-OFF after a tool result). Give it a bounded
+                    # retry instead of exiting with "Agent provided no response".
+                    if (
+                        not response.content.strip()
+                        and empty_response_retries < _EMPTY_RESPONSE_MAX_RETRIES
+                    ):
+                        empty_response_retries += 1
+                        context.add_user_message(_EMPTY_RESPONSE_PROMPT)
+                        log_event(
+                            "empty_response_retry",
+                            stats.run_id,
+                            iteration=stats.iterations,
+                            retries=empty_response_retries,
+                        )
+                        continue
                     # Final answer — ALWAYS return, even if time budget exceeded.
                     # The model already completed its work; discarding it wastes the
                     # entire LLM call and frustrates users who waited for a response.
