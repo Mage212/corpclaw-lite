@@ -335,11 +335,22 @@ llm:
 - **`ModelProfile`** (`llm/presets.py`) — свойства *модели* (привязан к model id,
   редко меняется): `thinking_parser` (`ThinkingConfig`: `open_tag`/`close_tag`/
   `source` "content"|"native"), `system_prompt_prefix`, `default_inference`.
+  `default_inference` = **авторитетные параметры от производителя** (официальная
+  рекомендация). Гарантирует, что модель работает в оптимальных условиях.
 - **`SamplingProfile`** — свойства *задачи/фазы* (меняется свободно, ссылается на
   ModelProfile): `thinking_mode` (default|off|budget), `thinking_budget`,
-  `inference_overrides`.
+  `inference_overrides`. **Model-scoped:** каждый sampling-профиль декларирует
+  `model:` — его `inference_overrides` применяются **только** при совпадении с
+  моделью роута. При mismatch (e.g. qwen-sampling на gemma4-роуте) router
+  warn-and-skip'ает `inference_overrides` (`thinking_mode` сохраняется —
+  модель-агностичен). Это предотвращает молчаливую утечку cross-model параметров
+  (root cause gemma4 crash: qwen's `temperature=0.4` на gemma4 → degenerate output).
 
 `config/model_presets.yaml` хранит оба в блоках `models:` + `sampling:`.
+Канонические параметры (официальные рекомендации):
+- **Gemma 4:** `temperature=1.0, top_p=0.95, top_k=64` (один набор для всех режимов).
+- **Qwen 3:** 4 режима (thinking-general, thinking-coding, instruct-general,
+  instruct-reasoning) с своими temperature/top_p/presence_penalty.
 `PresetRegistry` также парсит legacy комбинированный `presets:` (back-compat
 reader, split в виртуальные пары) — overlay/unmigrated config работает без правок.
 

@@ -1,132 +1,117 @@
-# CorpClaw Lite — Model Profiles + Sampling Profiles
+# Model Presets — ModelProfile (model properties) + SamplingProfile (task properties)
 #
-# Split (D-056) of the legacy combined ``presets:`` into two orthogonal layers:
+# Split D-056: each model gets a canonical ModelProfile with OFFICIAL inference
+# parameters from the manufacturer. SamplingProfiles are **model-scoped** — each
+# sampling profile declares `model:` and its `inference_overrides` apply ONLY when
+# the route's model matches. A mismatch (e.g. a qwen sampling on a gemma4 route)
+# is detected by the router at load time → warn + skip inference_overrides
+# (thinking_mode preserved). This prevents silent cross-model parameter leakage
+# that breaks models (e.g. qwen's temperature=0.4 made gemma4 non-deterministically
+# crash at thinking-OFF).
 #
-#   models:     ModelProfile — properties of a *model* (thinking parser,
-#                system_prompt_prefix, default_inference). Bound to a model id,
-#                rarely changes. Corresponds to the model-bound half of the old
-#                combined preset.
+# Admins/testers can still override per-call via RequestOptions (model-agnostic
+# by design — explicit override, highest priority).
 #
-#   sampling:   SamplingProfile — properties of a *task / phase* (thinking_mode
-#                default|off|budget, thinking_budget, inference_overrides).
-#                Changes freely, references a ModelProfile by ``model:`` name.
-#                Corresponds to the task-bound half of the old preset.
-#
-# Reference a sampling profile by name in config/settings.yaml routing rules:
-#
-#   llm:
-#     routing:
-#       - task_kind: "default"
-#         provider: "llamacpp"
-#         model: "qwen3.6-35b-a3b"
-#         sampling: "temperature-0.4"   # ← uses this sampling profile
-#
-# Legacy combined format (``presets:``) is still parsed by the back-compat
-# reader in src/corpclaw_lite/llm/presets.py, so overlays and un-migrated
-# config keep working. New deployments should use the split format below.
+# Source of canonical parameters:
+#   Gemma 4 — official Google recommendation (single set for all modes).
+#   Qwen 3  — official recommendation, 4 task-specific modes.
 
 models:
-  # ── Qwen 3.6 (35B A3B MoE) ──────────────────────────────────────────────
+  # ── Qwen 3 (35B A3B) ──────────────────────────────────────────────────────
+  # Native reasoning_content (Qwen3-style). Default inference = "Thinking mode
+  # for general tasks" (official rec). Task-specific overrides live in the
+  # qwen-* sampling profiles below.
   qwen3.6-35b-a3b:
-    description: "Qwen3.6-35B-A3B with native reasoning_content field"
+    description: "Qwen 3 35B A3B with native reasoning_content"
     thinking_parser:
       source: "native"
     default_inference:
-      temperature: 0.7
+      temperature: 1.0
       top_p: 0.95
       top_k: 20
       min_p: 0.0
-      # SAFETY (from LM Studio docs): repeat_penalty penalizes OUTPUT-only
-      # repetitions — safe for tool calling. presence_penalty penalizes INPUT
-      # tokens (prompt + tool schemas) and KILLS tool name generation — never
-      # use it with tool calling.
-      repeat_penalty: 1.1
+      presence_penalty: 1.5
+      repetition_penalty: 1.0
 
-  # ── Gemma 4 (26B QAT) ────────────────────────────────────────────────────
-  # This proxy's gemma4-26b-qat returns reasoning in the native
-  # ``reasoning_content`` field (Qwen-style), NOT via <|think|> prefix / content
-  # tags. Thinking is controlled by ``chat_template_kwargs.enable_thinking``
-  # (set to false by SamplingProfile thinking_mode=off / RequestOptions).
+  # ── Gemma 4 (26B QAT) ─────────────────────────────────────────────────────
+  # Native reasoning_content. Official rec: temperature=1.0, top_p=0.95, top_k=64
+  # (single set for all modes). DO NOT lower temperature below ~0.7: gemma4
+  # becomes non-deterministically unstable at thinking-OFF (degenerate output).
   gemma4-26b-qat:
-    description: "Gemma 4 with native reasoning_content field"
+    description: "Gemma 4 26B QAT with native reasoning_content"
     thinking_parser:
       source: "native"
     default_inference:
-      temperature: 0.7
-      top_p: 0.9
+      temperature: 1.0
+      top_p: 0.95
       top_k: 64
 
 sampling:
-  # ── Default (natural thinking, model's inference defaults) ───────────────
-  qwen3.6-default:
-    model: qwen3.6-35b-a3b
-    thinking_mode: default
-
+  # ── Gemma 4 (single recommendation for all modes) ─────────────────────────
   gemma4-default:
-    description: "Gemma 4 natural thinking"
+    description: "Gemma 4 natural thinking (official rec)"
     model: gemma4-26b-qat
     thinking_mode: default
-    inference_overrides:
-      temperature: 1.0
 
   gemma4-fast:
     description: "Gemma 4 without thinking — fast mode"
     model: gemma4-26b-qat
     thinking_mode: off
+
+  # ── Qwen 3 (4 canonical modes per official recommendation) ────────────────
+  qwen-thinking-general:
+    description: "Qwen3 thinking mode, general tasks"
+    model: qwen3.6-35b-a3b
+    thinking_mode: default
+    inference_overrides:
+      temperature: 1.0
+      top_p: 0.95
+      top_k: 20
+      min_p: 0.0
+      presence_penalty: 1.5
+      repetition_penalty: 1.0
+
+  qwen-thinking-coding:
+    description: "Qwen3 thinking mode, precise coding tasks"
+    model: qwen3.6-35b-a3b
+    thinking_mode: default
+    inference_overrides:
+      temperature: 0.6
+      top_p: 0.95
+      top_k: 20
+      min_p: 0.0
+      presence_penalty: 0.0
+      repetition_penalty: 1.0
+
+  qwen-instruct-general:
+    description: "Qwen3 instruct (no-thinking) mode, general tasks"
+    model: qwen3.6-35b-a3b
+    thinking_mode: off
     inference_overrides:
       temperature: 0.7
-      top_p: 0.9
+      top_p: 0.8
+      top_k: 20
+      min_p: 0.0
+      presence_penalty: 1.5
+      repetition_penalty: 1.0
+
+  qwen-instruct-reasoning:
+    description: "Qwen3 instruct (no-thinking) mode, reasoning tasks"
+    model: qwen3.6-35b-a3b
+    thinking_mode: off
+    inference_overrides:
+      temperature: 1.0
+      top_p: 0.95
+      top_k: 20
+      min_p: 0.0
+      presence_penalty: 1.5
+      repetition_penalty: 1.0
 
   # ── Auxiliary: thinking off for extraction / summarization ──────────────
-  # Used by vision / compress / consolidate routes — these calls do not need
-  # reasoning, only extraction, so thinking is disabled for speed.
+  # Used by vision / compress / consolidate routes (when on qwen) — extraction
+  # does not need reasoning, only speed. Low temperature for deterministic output.
   aux-no-thinking:
     model: qwen3.6-35b-a3b
     thinking_mode: off
     inference_overrides:
       temperature: 0.2
-
-  # ── Temperature-only overrides (equivalents of the old single-param presets) ──
-  temperature-0.4:
-    model: qwen3.6-35b-a3b
-    thinking_mode: default
-    inference_overrides:
-      temperature: 0.4
-
-  # ── Thinking-budget capped (soft cap, model-dependent effectiveness) ─────
-  # Example: cap reasoning output at N tokens. Uncomment and reference via
-  # sampling: "qwen3.6-budget-128" to experiment with budgeted thinking.
-  # qwen3.6-budget-128:
-  #   model: qwen3.6-35b-a3b
-  #   thinking_mode: budget
-  #   thinking_budget: 128
-
-# ── Structured Output (example for models ≥7B) ─────────────────────────────
-#
-# LM Studio supports response_format with JSON Schema (same as OpenAI Structured
-# Output). The model will only generate valid JSON conforming to the provided
-# schema. NOT COMPATIBLE with tool calling in the same request.
-#
-# structured-extraction:
-#   model: qwen3.6-35b-a3b
-#   thinking_mode: off
-#   inference_overrides:
-#     temperature: 0.3                    # low temp for deterministic output
-#     top_p: 0.9
-#     response_format:                    # OpenAI-compatible standard param
-#       type: "json_schema"
-#       json_schema:
-#         name: "extraction_result"
-#         strict: true
-#         schema:
-#           type: "object"
-#           properties:
-#             entities:
-#               type: "array"
-#               items:
-#                 type: "object"
-#                 properties:
-#                   name: { type: "string" }
-#                   type: { type: "string", enum: ["person", "org", "location"] }
-#                 required: ["name", "type"]
-#           required: ["entities"]
