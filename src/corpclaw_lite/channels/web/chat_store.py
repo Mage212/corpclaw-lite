@@ -259,7 +259,7 @@ class WebChatStore:
             return 0
         placeholders = ",".join("?" for _ in session_ids)
         if user_id is None:
-            params: tuple[object, ...] | list[object] = session_ids
+            params: list[object] = list(session_ids)
             user_clause = ""
         else:
             params = [*session_ids, str(user_id)]
