@@ -6,6 +6,25 @@ from corpclaw_lite.config.settings import ContainerSettings
 from corpclaw_lite.container.manager import ContainerManager
 
 
+def test_container_settings_ignores_legacy_max_per_user() -> None:
+    """A private overlay yaml that still carries ``max_per_user`` must not break.
+
+    Regression guard for S2.3: the dead ``max_per_user`` field was removed from the
+    model. Pydantic v2 defaults to ``extra="ignore"`` (ContainerSettings has no
+    model_config override), so an overlay retaining the legacy key is silently
+    dropped instead of raising ValidationError.
+    """
+    settings = ContainerSettings.model_validate(
+        {
+            "enabled": True,
+            "max_per_user": 1,  # legacy overlay key — must be ignored, not rejected
+            "max_concurrent_containers": 15,
+        }
+    )
+    assert settings.max_concurrent_containers == 15
+    assert not hasattr(settings, "max_per_user")
+
+
 @pytest.fixture
 def mock_docker():
     with patch("corpclaw_lite.container.manager.docker") as m_docker:

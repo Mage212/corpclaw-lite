@@ -192,7 +192,7 @@ container:
   max_memory: "512m"
   cpus: 0.5
   idle_timeout_seconds: 600
-  max_per_user: 1
+  max_concurrent_containers: 20
   strict_capabilities: false
   ipc_timeout_seconds: 120.0
 
