@@ -1750,7 +1750,16 @@ class AgentLoop:
                 risk_level = tool.risk_level if tool else None
                 risk = risk_level.value if risk_level else None
                 guard_check = self._tool_guard.check
-                if "run_id" in inspect.signature(guard_check).parameters:
+                check_params = inspect.signature(guard_check).parameters
+                if "user_id" in check_params:
+                    await guard_check(
+                        tc.name,
+                        tc.arguments,
+                        risk_level=risk,
+                        run_id=run_id,
+                        user_id=str(user.id),
+                    )
+                elif "run_id" in check_params:
                     await guard_check(
                         tc.name,
                         tc.arguments,
