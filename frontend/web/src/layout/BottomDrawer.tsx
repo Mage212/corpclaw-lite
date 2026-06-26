@@ -26,7 +26,18 @@ export function BottomDrawer({ open, onToggle, onStartResize, children }: Bottom
           aria-orientation="horizontal"
         />
       )}
-      <div className="drawer-peek-bar" onClick={onToggle} role="button" tabIndex={0}>
+      <div
+        className="drawer-peek-bar"
+        onClick={onToggle}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            onToggle();
+          }
+        }}
+        role="button"
+        tabIndex={0}
+      >
         <span className="drawer-peek-label">
           <FolderClosed size={15} />
           <span>{FILES_LABEL}</span>

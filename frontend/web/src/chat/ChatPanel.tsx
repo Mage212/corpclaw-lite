@@ -26,10 +26,12 @@ export function ChatPanel({ session, user, onPreviewFile, contextUsage }: ChatPa
       preserveScrollRef.current = null;
       return;
     }
+    // Only auto-stick to bottom when the user is already near it; otherwise a
+    // streaming run would yank the view away while they're reading older history.
+    const distanceFromBottom = node.scrollHeight - node.scrollTop - node.clientHeight;
+    if (distanceFromBottom > 160) return;
     node.scrollTo({ top: node.scrollHeight });
-    // Re-scroll as the live ActivityCard grows: runEvents updates each step and
-    // the in-flight card's body expands, so we need to keep the bottom in view.
-  }, [session.messages, session.status, session.runEvents, session.approvals]);
+  }, [session.messages, session.status, session.runEventsByRequest, session.approvals]);
 
   function loadOlder() {
     const node = messagesRef.current;
@@ -56,7 +58,7 @@ export function ChatPanel({ session, user, onPreviewFile, contextUsage }: ChatPa
             <span>Задачи и ответы появятся здесь.</span>
           </div>
         )}
-        {session.messages.flatMap((message) => {
+        {session.messages.flatMap((message, index) => {
           const bubble = (
             <MessageBubble key={message.id} message={message} onPreviewFile={onPreviewFile} />
           );
@@ -65,20 +67,20 @@ export function ChatPanel({ session, user, onPreviewFile, contextUsage }: ChatPa
           // isn't active (e.g. history reloaded without persisted events).
           if (message.role === "user" && message.request_id) {
             const rid = message.request_id;
-            const events = session.runEvents.filter((event) => event.requestId === rid);
+            const events = session.runEventsByRequest.get(rid) ?? [];
             const approvals = session.approvals.filter((approval) => approval.request_id === rid);
             const isActive = session.status.requestId === rid && session.status.active;
             if (events.length > 0 || approvals.length > 0 || isActive) {
               return [
                 bubble,
                 <ActivityCard
-                  key={`activity_${rid}`}
+                  key={`activity_${index}_${rid}`}
                   requestId={rid}
                   events={events}
                   approvals={approvals}
                   isActive={isActive}
-                  statusLabel={session.status.label}
-                  statusTone={session.status.tone}
+                  statusLabel={isActive ? session.status.label : ""}
+                  statusTone={isActive ? session.status.tone : "idle"}
                   onAnswerApproval={session.answerApproval}
                 />
               ];

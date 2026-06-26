@@ -1,5 +1,5 @@
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { parsePanelLayoutState } from "../contracts";
 import type { PanelLayoutState } from "../types";
 
@@ -36,8 +36,41 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
-function drawerMax(): number {
-  return Math.max(DRAWER_MIN_PX, Math.floor((window.innerHeight || 720) * DRAWER_MAX_VH));
+function drawerMax(viewportHeight: number): number {
+  return Math.max(DRAWER_MIN_PX, Math.floor((viewportHeight || 720) * DRAWER_MAX_VH));
+}
+
+function sidebarMaxFor(viewportWidth: number, previewWidth: number): number {
+  const reserved = MAIN_MIN + (previewWidth > 0 ? HANDLE_WIDTH : 0);
+  return Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, viewportWidth - reserved));
+}
+
+function previewMaxFor(viewportWidth: number, sidebarWidth: number): number {
+  const reserved = sidebarWidth + MAIN_MIN + HANDLE_WIDTH;
+  return Math.max(PREVIEW_MIN, Math.min(PREVIEW_MAX, viewportWidth - reserved));
+}
+
+/**
+ * Re-clamp a layout against the current viewport so persisted px values that were
+ * saved on a large screen don't overflow a now-smaller window. Called on mount and
+ * on every viewport resize.
+ */
+function reclamp(layout: PanelLayoutState): PanelLayoutState {
+  const vw = window.innerWidth || 1280;
+  const vh = window.innerHeight || 720;
+  const sidebarWidth = clamp(
+    layout.sidebarWidth,
+    SIDEBAR_MIN,
+    sidebarMaxFor(vw, layout.previewWidth)
+  );
+  const previewWidth = clamp(
+    layout.previewWidth,
+    PREVIEW_MIN,
+    previewMaxFor(vw, sidebarWidth)
+  );
+  const drawerHeight =
+    layout.drawerHeight === null ? null : clamp(layout.drawerHeight, DRAWER_MIN_PX, drawerMax(vh));
+  return { sidebarWidth, previewWidth, drawerHeight };
 }
 
 function loadLayout(): PanelLayoutState {
@@ -47,20 +80,7 @@ function loadLayout(): PanelLayoutState {
     const parsed: unknown = JSON.parse(raw);
     const layout = parsePanelLayoutState(parsed);
     if (!layout) return DEFAULT_LAYOUT;
-    const sidebarWidth = clamp(layout.sidebarWidth, SIDEBAR_MIN, SIDEBAR_MAX);
-    const previewMax = Math.max(
-      PREVIEW_MIN,
-      Math.min(PREVIEW_MAX, window.innerWidth - sidebarWidth - MAIN_MIN - HANDLE_WIDTH)
-    );
-    const drawerHeight =
-      layout.drawerHeight === null
-        ? null
-        : clamp(layout.drawerHeight, DRAWER_MIN_PX, drawerMax());
-    return {
-      sidebarWidth,
-      previewWidth: clamp(layout.previewWidth, PREVIEW_MIN, previewMax),
-      drawerHeight
-    };
+    return reclamp(layout);
   } catch {
     return DEFAULT_LAYOUT;
   }
@@ -85,15 +105,34 @@ export function useResizablePanels() {
   );
 
   function sidebarMax(): number {
-    // Sidebar and preview-overlay don't share the grid row, but keep both within viewport.
-    const reserved = MAIN_MIN + (layout.previewWidth > 0 ? HANDLE_WIDTH : 0);
-    return Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, window.innerWidth - reserved));
+    return sidebarMaxFor(window.innerWidth || 1280, layout.previewWidth);
   }
 
   function previewMax(): number {
-    const reserved = layout.sidebarWidth + MAIN_MIN + HANDLE_WIDTH;
-    return Math.max(PREVIEW_MIN, Math.min(PREVIEW_MAX, window.innerWidth - reserved));
+    return previewMaxFor(window.innerWidth || 1280, layout.sidebarWidth);
   }
+
+  // Re-clamp persisted px values when the viewport shrinks so panels can't
+  // overflow (a width saved on a wide monitor would otherwise stick off-screen
+  // after narrowing the window until the user manually drags a handle).
+  useEffect(() => {
+    function onResize() {
+      setLayout((current) => {
+        const next = reclamp(current);
+        if (
+          next.sidebarWidth === current.sidebarWidth &&
+          next.previewWidth === current.previewWidth &&
+          next.drawerHeight === current.drawerHeight
+        ) {
+          return current;
+        }
+        saveLayout(next);
+        return next;
+      });
+    }
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
 
   /**
    * Begin a pointer-driven resize for the given panel.
@@ -132,7 +171,11 @@ export function useResizablePanels() {
           const currentHeight = start.drawerHeight ?? DRAWER_MIN_PX;
           next = {
             ...current,
-            drawerHeight: clamp(currentHeight - delta, DRAWER_MIN_PX, drawerMax())
+            drawerHeight: clamp(
+              currentHeight - delta,
+              DRAWER_MIN_PX,
+              drawerMax(window.innerHeight || 720)
+            )
           };
         }
         saveLayout(next);
@@ -156,7 +199,7 @@ export function useResizablePanels() {
       const drawerHeight =
         height === null
           ? null
-          : clamp(height, DRAWER_MIN_PX, drawerMax());
+          : clamp(height, DRAWER_MIN_PX, drawerMax(window.innerHeight || 720));
       const next = { ...current, drawerHeight };
       saveLayout(next);
       return next;
