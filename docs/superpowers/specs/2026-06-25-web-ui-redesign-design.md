@@ -433,6 +433,53 @@ App.tsx
 - [ ] Responsive-режимы сохранены (узкий экран → коллапс).
 - [ ] `uv run ruff/pyright/pytest` — зелёные; `npm run build` — зелёный, `dist/` сервируется.
 
+### 6.13 Декомпозиция Этапа 1 на спринты (1A + 1B)
+
+Этап 1 разбивается на два последовательных спринта. Причина: `ActivityCard` — реальная функциональность, требующая интеграции в `ChatPanel`/`useWebChatSession` (что нарушает принцип изоляции §6.2), а `FileExplorer` (1027 строк) захардкожен под side-режим — смесь с layout-перекройкой даёт кашу рисков. Разбивка даёт **shippable-каркас после 1A**, наполняемый в 1B.
+
+#### Спринт 1A — Layout Shell (чистый каркас, низкий риск)
+**Scope:** новый grid + sidebar + drawer + overlay + минимизированный topbar + resize. Без новой функциональности внутри чата.
+
+| Задача | Объём | Риск | Принцип |
+|--------|------|------|---------|
+| Grid CSS: 5 колонок → 2 (`[Sidebar][Main]`), feature-flag `corpclaw.web.layoutV2` (env/localStorage) | medium | medium | §6.4, §6.10 |
+| **Sidebar (NEW):** SectionSwitcher (Chat/Work плейсхолдер) + ManagementNav (Extensions/Context заглушки) + ChatListPlaceholder + UserProfile (из topbar → bottom-left) | medium | low | §6.5 |
+| **BottomDrawer (NEW):** peek-bar + wrapper для `FileExplorer` | medium | medium-high | §6.6 — проверить/добавить prop `variant: "drawer"` в `FileExplorer` |
+| **PreviewOverlay (NEW):** slide-in/fullscreen wrapper для `FilePreview` + Esc/backdrop | medium | low | §6.4 |
+| **Topbar минимизация:** убрать mode-toggle/user-menu/context-meter/new-session; оставить title + drawer-toggle + preview-toggle | small | low | §6.7 |
+| **useResizablePanels:** + измерение `drawer`, переименование `preview`→`preview-overlay` | medium | medium | §6.4 |
+| App.tsx: связать новый каркас | medium | medium | §6.3 |
+
+**Acceptance 1A:**
+- [ ] Левый sidebar рендерится (Chat/Work плейсхолдер + Extensions/Context заглушки + chats-placeholder + UserProfile bottom-left).
+- [ ] Main area — полная ширина (2 колонки).
+- [ ] Bottom drawer (peek-bar + разворот, resizable высота) с рабочим `FileExplorer` внутри.
+- [ ] Preview-overlay (slide-in + fullscreen, resizable, Esc/backdrop) с рабочим `FilePreview`.
+- [ ] Topbar минимален (title + drawer-toggle + preview-toggle).
+- [ ] Чат работает без регрессий (отправка, approval, preview файлов, upload) — через overlay/drawer.
+- [ ] Resize работает (sidebar, drawer, preview-overlay).
+- [ ] Responsive сохранён; `feature-flag` позволяет откат к старому layout.
+- [ ] Lint/type/build зелёные.
+- **Временно в 1A:** InspectorPanel может ещё рендериться (его расформирование — 1B), либо preview дублируется через overlay как primary — решение за impl-plan.
+
+#### Спринт 1B — Chat Enrichments (внутри чата, выше риск)
+**Scope:** ActivityCard inline + ContextSizeBar + расформирование Inspector. Зависит от 1A.
+
+| Задача | Объём | Риск | Принцип |
+|--------|------|------|---------|
+| **ActivityCard (NEW):** inline collapsible run-timeline в message-list; states `running`/`done`/`awaiting_approval`; переиспользует `runEvents`/`approvals` из `useWebChatSession` | **large** | **high** — реальная функция, интеграция в `ChatPanel`/`useWebChatSession` (контролируемое нарушение §6.2) | §6.8.1 |
+| **ContextSizeBar (NEW):** под composer, per-chat (на 1B — текущий `contextUsage`; per-chat хранилище — этап 2) | small | low | §6.9 |
+| **Расформирование InspectorPanel:** убрать Обзор; preview уже в overlay (1A), Выполнение уже в ActivityCard; verify ничего не сломалось | small | medium | §6.8 |
+
+**Acceptance 1B:**
+- [ ] ActivityCard рендерится inline (между user-сообщением и ответом): collapsible, live при `running`, collapsed-сводка «N шагов · Xs» при `done`, inline approval при `awaiting_approval`.
+- [ ] ContextSizeBar под composer (текущий `contextUsage`).
+- [ ] InspectorPanel полностью убран из UI; Обзор убран.
+- [ ] Чат работает без регрессий; WS-event-flow (`runEvents`/`approvals`/`status`) корректно питает ActivityCard.
+- [ ] Lint/type/build зелёные.
+
+**Порядок:** 1A → merge → 1B → merge. Каждый — отдельный feature-branch + PR в `pre-release`.
+
 ---
 
 ## 7. Открытые вопросы → Visual Companion
@@ -509,7 +556,9 @@ App.tsx
 ## 10. Порядок работы после approval
 
 1. **Этот spec** → user review → фиксируем.
-2. **writing-plans skill** → детальный implementation-plan на Этап 1 (layout).
-3. Этап 1 impl → verification → merge.
-4. Этап 2: новый spec (история чатов) → ... → повтор цикла.
-5. Этапы 3/4/5 — каждый со своим spec, с опорой на §9 (reference-паттерны).
+2. **writing-plans skill** → детальный implementation-plan на **Спринт 1A** (layout shell).
+3. Спринт 1A impl → verification → merge в `pre-release`.
+4. **writing-plans skill** → implementation-plan на **Спринт 1B** (chat enrichments).
+5. Спринт 1B impl → verification → merge. → Этап 1 завершён.
+6. Этап 2: новый spec (история чатов) → ... → повтор цикла.
+7. Этапы 3/4/5 — каждый со своим spec, с опорой на §9 (reference-паттерны).
