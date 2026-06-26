@@ -919,7 +919,7 @@ class WebChannelOrchestrator:
     @staticmethod
     def _session_summary_payload(summary: ChatSessionSummary) -> dict[str, object]:
         """Serialize a chat session for the sidebar list (REST + WS)."""
-        return {
+        payload: dict[str, object] = {
             "id": summary.id,
             "section": summary.section,
             "title": summary.title,
@@ -927,6 +927,11 @@ class WebChannelOrchestrator:
             "active": summary.is_active,
             "msg_count": summary.msg_count,
         }
+        # updated_at drives the sidebar's "recently active" ordering + time-range
+        # grouping. Omit it only when genuinely unknown (legacy rows).
+        if summary.updated_at is not None:
+            payload["updated_at"] = summary.updated_at
+        return payload
 
     def _llm_summary_payload(self) -> dict[str, object]:
         rule = next(
@@ -1103,20 +1108,29 @@ class WebChannelOrchestrator:
 
     async def _handle_delete_chat(self, request: web.Request) -> web.Response:
         user = self._require_user(request)
-        if self._chat_store is None:
+        if self._chat_store is None or self._service is None:
             raise web.HTTPServiceUnavailable()
         try:
             session_id = int(request.match_info["id"])
         except (KeyError, ValueError, TypeError) as e:
             raise web.HTTPBadRequest(text="Invalid chat id.") from e
-        summary = await self._chat_store.get_session(user.memory_key(), session_id)
-        if summary is None:
-            raise web.HTTPNotFound(text="Chat not found.")
-        if summary.is_active:
-            return web.json_response({"error": "Нельзя удалить активный чат."}, status=409)
-        ok = await self._chat_store.delete_session(user.memory_key(), session_id)
-        if not ok:
-            raise web.HTTPNotFound(text="Chat not found.")
+        # Take the single-in-flight lock for consistency with create/activate —
+        # all chat mutations that can interact with an active run serialize here.
+        if not await self._service.try_start_user_request(user.id):
+            return web.json_response(
+                {"error": "Дождитесь завершения активного чата перед удалением."}, status=409
+            )
+        try:
+            summary = await self._chat_store.get_session(user.memory_key(), session_id)
+            if summary is None:
+                raise web.HTTPNotFound(text="Chat not found.")
+            if summary.is_active:
+                return web.json_response({"error": "Нельзя удалить активный чат."}, status=409)
+            ok = await self._chat_store.delete_session(user.memory_key(), session_id)
+            if not ok:
+                raise web.HTTPNotFound(text="Chat not found.")
+        finally:
+            await self._service.finish_user_request(user.id)
         await self._broadcast_to_user(user.id, {"type": "chat_list_changed"})
         return web.json_response({"ok": True, "session_id": session_id})
 

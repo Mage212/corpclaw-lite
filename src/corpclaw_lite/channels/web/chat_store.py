@@ -243,17 +243,34 @@ class WebChatStore:
         return int(row[0])
 
     @staticmethod
-    def _sync_delete_sessions(conn: sqlite3.Connection, session_ids: list[int]) -> int:
+    def _sync_delete_sessions(
+        conn: sqlite3.Connection,
+        session_ids: list[int],
+        *,
+        user_id: str | None = None,
+    ) -> int:
+        """Delete sessions and their messages.
+
+        When ``user_id`` is given, the DELETE is scoped to that user (defense-
+        in-depth against a caller passing an unverified id). The background
+        retention prune passes ``user_id=None`` to delete globally by design.
+        """
         if not session_ids:
             return 0
         placeholders = ",".join("?" for _ in session_ids)
+        if user_id is None:
+            params: tuple[object, ...] | list[object] = session_ids
+            user_clause = ""
+        else:
+            params = [*session_ids, str(user_id)]
+            user_clause = " AND user_id = ?"
         conn.execute(
             f"DELETE FROM web_chat_messages WHERE session_id IN ({placeholders})",  # noqa: S608
             session_ids,
         )
         cursor = conn.execute(
-            f"DELETE FROM web_chat_sessions WHERE id IN ({placeholders})",  # noqa: S608
-            session_ids,
+            f"DELETE FROM web_chat_sessions WHERE id IN ({placeholders}){user_clause}",  # noqa: S608
+            params,
         )
         return int(cursor.rowcount or 0)
 
@@ -636,7 +653,10 @@ class WebChatStore:
                     # Never delete the active session — that would orphan the
                     # agent's single-thread memory. Caller surfaces a 409.
                     return False
-                deleted = self._sync_delete_sessions(conn, [int(session_id)])
+                # Scope the delete to this user (defense-in-depth): even though
+                # ownership was checked above, the DELETE itself must not touch
+                # another user's row if ids were ever reused or mis-passed.
+                deleted = self._sync_delete_sessions(conn, [int(session_id)], user_id=user_id)
                 return deleted > 0
         except Exception as e:
             logger.warning("Failed to delete web chat session %s: %s", session_id, e)
