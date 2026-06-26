@@ -4,15 +4,23 @@ A ``TaskRun`` is a stateless-on-disk reader/writer keyed by ``(user, run_id)``.
 It mirrors the on-disk layout of ``ResearchRuntime`` (``.task_runs/<run_id>/``)
 so that a timed-out or cancelled run leaves a recoverable journal + handoff
 instead of a bare error string.
+
+All public methods are async and delegate blocking filesystem I/O to a thread
+pool via ``anyio.to_thread.run_sync`` — mirroring ``SQLiteMemory`` — so the agent
+event loop is never stalled by journal writes (which fire on every tool call).
 """
 
+# pyright: reportUnknownMemberType=false, reportUnknownVariableType=false, reportAttributeAccessIssue=false
 from __future__ import annotations
 
 import json
 import re
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
+
+import anyio
 
 from corpclaw_lite.paths import PROJECT_ROOT
 
@@ -65,7 +73,76 @@ class TaskRun:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def initialize(
+    async def initialize(
+        self,
+        user: User,
+        run_id: str | None,
+        *,
+        subagent_id: str | None = None,
+        parent_run_id: str | None = None,
+    ) -> Path:
+        run_dir = await anyio.to_thread.run_sync(
+            partial(
+                self._sync_initialize,
+                user,
+                run_id,
+                subagent_id=subagent_id,
+                parent_run_id=parent_run_id,
+            )
+        )
+        return run_dir
+
+    async def set_phase(self, user: User, run_id: str | None, phase: str) -> None:
+        await anyio.to_thread.run_sync(partial(self._sync_set_phase, user, run_id, phase))
+
+    async def mark_soft_deadline(self, user: User, run_id: str | None) -> None:
+        await anyio.to_thread.run_sync(partial(self._sync_mark_soft_deadline, user, run_id))
+
+    async def record_tool_call(
+        self,
+        user: User,
+        run_id: str | None,
+        *,
+        name: str,
+        args_hash: str,
+        status: str,
+        duration_ms: float,
+        error: str | None = None,
+    ) -> None:
+        await anyio.to_thread.run_sync(
+            partial(
+                self._sync_record_tool_call,
+                user,
+                run_id,
+                name=name,
+                args_hash=args_hash,
+                status=status,
+                duration_ms=duration_ms,
+                error=error,
+            )
+        )
+
+    async def generate_handoff(
+        self,
+        user: User,
+        run_id: str | None,
+        *,
+        partial_result: str,
+        reason: str,
+    ) -> str:
+        return await anyio.to_thread.run_sync(
+            partial(
+                self._sync_generate_handoff,
+                user,
+                run_id,
+                partial_result=partial_result,
+                reason=reason,
+            )
+        )
+
+    # ── Sync implementations (run inside the thread pool) ───────────────────
+
+    def _sync_initialize(
         self,
         user: User,
         run_id: str | None,
@@ -88,19 +165,19 @@ class TaskRun:
         )
         return run_dir
 
-    def set_phase(self, user: User, run_id: str | None, phase: str) -> None:
+    def _sync_set_phase(self, user: User, run_id: str | None, phase: str) -> None:
         run_dir = self.run_dir(user, run_id)
         state = self._read_state(run_dir)
         state["phase"] = phase
         self._write_json(run_dir / "state.json", state)
 
-    def mark_soft_deadline(self, user: User, run_id: str | None) -> None:
+    def _sync_mark_soft_deadline(self, user: User, run_id: str | None) -> None:
         run_dir = self.run_dir(user, run_id)
         state = self._read_state(run_dir)
         state["soft_deadline_reached"] = True
         self._write_json(run_dir / "state.json", state)
 
-    def record_tool_call(
+    def _sync_record_tool_call(
         self,
         user: User,
         run_id: str | None,
@@ -124,7 +201,7 @@ class TaskRun:
         with (run_dir / "journal.jsonl").open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
-    def generate_handoff(
+    def _sync_generate_handoff(
         self,
         user: User,
         run_id: str | None,
@@ -145,7 +222,7 @@ class TaskRun:
             f"{partial_result}\n"
         )
         (run_dir / "handoff.md").write_text(handoff, encoding="utf-8")
-        self.set_phase(user, run_id, PHASE_PARTIAL)
+        self._sync_set_phase(user, run_id, PHASE_PARTIAL)
         return handoff
 
     def _journal_summary(self, run_dir: Path) -> dict[str, Any]:

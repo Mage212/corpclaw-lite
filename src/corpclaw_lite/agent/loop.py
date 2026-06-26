@@ -729,7 +729,7 @@ class AgentLoop:
             max_iterations=guard_config.max_iterations,
         )
         task_run = TaskRun(self._workspace_base)
-        task_run.initialize(user, stats.run_id)
+        await task_run.initialize(user, stats.run_id)
         tools_schema: list[dict[str, Any]] | None = None
         if tools_enabled:
             if self._permission_checker:
@@ -778,7 +778,7 @@ class AgentLoop:
                 # _apply_closing_mode) so a single long iteration that straddles the
                 # deadline still triggers it before the model is asked to produce more
                 # tool calls.
-                tools_schema = self._apply_closing_mode(
+                tools_schema = await self._apply_closing_mode(
                     soft_deadline, tools_schema, task_run, user, stats
                 )
 
@@ -815,7 +815,7 @@ class AgentLoop:
                     # mid-iteration; without this check the model is asked for another
                     # round of tool calls and closing mode only engages next iteration
                     # (by which point asyncio.wait_for may already cancel the run).
-                    tools_schema = self._apply_closing_mode(
+                    tools_schema = await self._apply_closing_mode(
                         soft_deadline, tools_schema, task_run, user, stats
                     )
                     # D-056 PR2: phase-based per-call thinking override. The
@@ -1397,7 +1397,7 @@ class AgentLoop:
                 return False
         return True
 
-    def _apply_closing_mode(
+    async def _apply_closing_mode(
         self,
         soft_deadline: SoftDeadline,
         tools_schema: list[dict[str, Any]] | None,
@@ -1415,11 +1415,13 @@ class AgentLoop:
         B-046: called both at the top of each iteration and immediately before each LLM
         provider call, so a single long iteration that straddles the deadline still
         triggers the reduction before the model is asked for more tool calls.
+
+        Async because ``task_run.mark_soft_deadline`` writes to disk off the event loop.
         """
         if not soft_deadline.is_reached() or soft_deadline.closing_mode:
             return tools_schema
         soft_deadline.enter_closing_mode()
-        task_run.mark_soft_deadline(user, stats.run_id)
+        await task_run.mark_soft_deadline(user, stats.run_id)
         log_event(
             "agent_soft_deadline_reached",
             stats.run_id,
@@ -1781,7 +1783,7 @@ class AgentLoop:
             if status == "error":
                 health.increment("tool_errors")
             if task_run is not None:
-                task_run.record_tool_call(
+                await task_run.record_tool_call(
                     user,
                     run_id,
                     name=tc.name,

@@ -405,7 +405,7 @@ class SubagentDispatcher:
                 except Exception as partial_err:  # pragma: no cover - defensive
                     logger.warning("Research partial-handoff failed: %s", partial_err)
                     return f"Subagent error: execution timed out after {int(timeout_seconds)}s"
-                TaskRun(self._workspace_base).generate_handoff(
+                await TaskRun(self._workspace_base).generate_handoff(
                     user,
                     subagent_run_id,
                     partial_result=partial,
