@@ -563,10 +563,18 @@ export function parseDraggedPaths(value: string): string[] {
 
 export function parsePanelLayoutState(value: unknown): PanelLayoutState | null {
   if (!isRecord(value)) return null;
-  const filesWidth = optionalNumber(value.filesWidth);
+
+  // Etap 1A back-compat: legacy layout stored `filesWidth`; migrate to `sidebarWidth`.
+  // New writes use `sidebarWidth`; both are accepted so existing users don't lose their width.
+  const sidebarWidth =
+    optionalNumber(value.sidebarWidth) ?? optionalNumber(value.filesWidth);
   const previewWidth = optionalNumber(value.previewWidth);
-  if (filesWidth === undefined || previewWidth === undefined) {
+  if (sidebarWidth === undefined || previewWidth === undefined) {
     return null;
   }
-  return { filesWidth, previewWidth };
+  // `drawerHeight` is optional: absent/null → drawer collapsed (peek-bar only).
+  const rawDrawerHeight = optionalNumber(value.drawerHeight);
+  const drawerHeight =
+    rawDrawerHeight === undefined || rawDrawerHeight <= 0 ? null : rawDrawerHeight;
+  return { sidebarWidth, previewWidth, drawerHeight };
 }

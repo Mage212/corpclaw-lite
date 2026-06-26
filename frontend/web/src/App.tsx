@@ -1,32 +1,21 @@
-import {
-  Activity,
-  Bot,
-  ChevronDown,
-  LogOut,
-  MessageSquare,
-  MessageSquarePlus,
-  PanelLeftClose,
-  PanelLeftOpen,
-  PanelRightOpen
-} from "lucide-react";
+import { ChevronDown, ChevronUp, Eye, MessageSquare, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import type { FormEvent } from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { getSession, getWorkspaceOverview, login, logout, previewFile } from "./api";
 import { ChatPanel } from "./chat/ChatPanel";
 import { useWebChatSession } from "./chat/useWebChatSession";
 import { FileExplorer } from "./files/FileExplorer";
-import { FilePreview } from "./files/FilePreview";
 import { useResizablePanels } from "./hooks/useResizablePanels";
-import { agentModeLabel } from "./i18n/ru";
-import { InspectorPanel } from "./inspector/InspectorPanel";
+import { BottomDrawer } from "./layout/BottomDrawer";
+import { PreviewOverlay } from "./layout/PreviewOverlay";
+import { Sidebar } from "./layout/Sidebar";
 import type {
   AgentMode,
   ContextUsage,
-  FileExplorerMode,
-  InspectorTab,
-  PreviewMode,
+  PreviewOverlayMode,
   PreviewPayload,
   SessionPayload,
+  SidebarSection,
   WorkspaceOverviewPayload
 } from "./types";
 
@@ -75,7 +64,7 @@ function LoginView({ onLogin }: { onLogin: (session: SessionPayload) => void }) 
     <main className="login-page">
       <form className="login-card" onSubmit={submit}>
         <div className="brand-mark">
-          <Bot size={24} />
+          <MessageSquare size={24} />
           <span>CorpClaw Lite</span>
         </div>
         <label>
@@ -115,20 +104,25 @@ function Workspace({
   session: SessionPayload;
   onSessionChange: (session: SessionPayload) => void;
 }) {
-  const [mode, setMode] = useState<AgentMode>("execute");
-  const [filesOpen, setFilesOpen] = useState(true);
-  const [filesMode, setFilesMode] = useState<FileExplorerMode>("side");
+  // --- Agent mode is fixed for Etap 1A. The UI toggle is gone, but the value is
+  // still required by useWebChatSession (it emits the WS `mode_change` event) and
+  // by the backend (`tools_enabled = mode === "execute"`). Etap 2 will wire this to
+  // the Chat/Work section selector. ---
+  const [mode] = useState<AgentMode>("execute");
+  const [section, setSection] = useState<SidebarSection>("chat");
+
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+
   const [preview, setPreview] = useState<PreviewPayload | null>(null);
-  const [previewMode, setPreviewMode] = useState<PreviewMode>("side");
-  const [inspectorTab, setInspectorTab] = useState<InspectorTab>("overview");
-  const [inspectorOpen, setInspectorOpen] = useState(true);
+  const [previewMode, setPreviewMode] = useState<PreviewOverlayMode>("side");
+
   const [contextUsage, setContextUsage] = useState<ContextUsage | null>(null);
   const [overview, setOverview] = useState<WorkspaceOverviewPayload | null>(null);
   const [overviewLoading, setOverviewLoading] = useState(false);
   const [resetSignal, setResetSignal] = useState(0);
-  const [userMenuOpen, setUserMenuOpen] = useState(false);
-  const userMenuRef = useRef<HTMLDivElement | null>(null);
-  const { cssVars, prepareSidePreview, startResize } = useResizablePanels();
+
+  const { cssVars, startResize, setDrawerHeight } = useResizablePanels();
   const user = session.user;
 
   const refreshOverview = useCallback(() => {
@@ -151,29 +145,12 @@ function Workspace({
     refreshOverview();
   }, [refreshOverview]);
 
-  useEffect(() => {
-    if (!userMenuOpen) return;
-
-    function onPointerDown(event: PointerEvent) {
-      const node = userMenuRef.current;
-      if (node && !node.contains(event.target as Node)) {
-        setUserMenuOpen(false);
-      }
-    }
-
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        setUserMenuOpen(false);
-      }
-    }
-
-    window.addEventListener("pointerdown", onPointerDown);
-    window.addEventListener("keydown", onKeyDown);
-    return () => {
-      window.removeEventListener("pointerdown", onPointerDown);
-      window.removeEventListener("keydown", onKeyDown);
-    };
-  }, [userMenuOpen]);
+  // Overview is unused in the Etap 1A UI (the Inspector "Обзор" tab was removed),
+  // but we keep refreshing it so the data is warm for Etap 1B (ContextSizeBar) and
+  // future overview surfaces. `overview`/`overviewLoading` are reserved for that.
+  void overview;
+  void overviewLoading;
+  void contextUsage;
 
   if (!user) {
     return <LoginView onLogin={onSessionChange} />;
@@ -184,21 +161,16 @@ function Workspace({
     onSessionChange({ authenticated: false, user: null, csrf_token: "" });
   }
 
-  function startNewSession() {
+  function startNewChat() {
     if (!window.confirm("Сбросить контекст и начать новую сессию?")) {
       return;
     }
     setResetSignal((value) => value + 1);
   }
 
-  function openPreview(next: PreviewPayload, nextMode: PreviewMode = "side") {
-    if (nextMode === "side") {
-      prepareSidePreview(filesOpen && filesMode === "side");
-    }
+  function openPreview(next: PreviewPayload, nextMode: PreviewOverlayMode = "side") {
     setPreview(next);
     setPreviewMode(nextMode);
-    setInspectorTab("preview");
-    setInspectorOpen(true);
   }
 
   async function openPreviewPath(path: string) {
@@ -206,205 +178,110 @@ function Workspace({
     openPreview(next, "side");
   }
 
-  function toggleFiles() {
-    setFilesOpen((value) => {
-      if (value) {
-        setFilesMode("side");
+  function toggleDrawer() {
+    setDrawerOpen((open) => {
+      if (open) {
+        // Collapsing: drop the persisted height so reopening uses the default.
+        setDrawerHeight(null);
+      } else {
+        // Opening: if no height is persisted, seed a sensible default (40vh).
+        setDrawerHeight(Math.round((window.innerHeight || 720) * 0.4));
       }
-      return !value;
+      return !open;
     });
   }
 
+  const workspaceClass = useMemo(() => {
+    return [
+      "workspace",
+      sidebarOpen ? "sidebar-open" : "",
+      drawerOpen ? "drawer-open-root" : ""
+    ]
+      .filter(Boolean)
+      .join(" ");
+  }, [sidebarOpen, drawerOpen]);
+
   return (
-    <div
-      className={`workspace ${filesOpen ? "files-open" : "files-closed"} ${
-        inspectorOpen ? "inspector-open" : "inspector-closed"
-      } ${filesMode === "expanded" ? "files-expanded" : ""}`}
-      style={cssVars}
-    >
-      <FileExplorer
-        csrf={session.csrf_token}
-        open={filesOpen}
-        mode={filesMode}
-        onModeChange={setFilesMode}
-        onPreview={openPreview}
-        onWorkspaceChanged={refreshOverview}
+    <div className={workspaceClass} style={cssVars} data-sidebar-open={sidebarOpen ? "1" : "0"}>
+      <Sidebar
+        user={user}
+        section={section}
+        onSectionChange={setSection}
+        onNewChat={startNewChat}
+        onLogout={doLogout}
       />
-      {filesOpen && filesMode === "side" && (
-        <div
-          className="resize-handle files-resize"
-          onPointerDown={(event) =>
-            startResize("files", event, {
-              filesOpen: true,
-              previewOpen: inspectorOpen
-            })
-          }
-          role="separator"
-          aria-orientation="vertical"
-        />
-      )}
-      <section className="main-pane">
+
+      <section className={`main-area ${drawerOpen ? "drawer-open" : ""}`}>
         <header className="topbar">
-          <button className="icon-button topbar-files-toggle" onClick={toggleFiles} title="Файлы">
-            {filesOpen ? <PanelLeftClose size={18} /> : <PanelLeftOpen size={18} />}
-          </button>
+          <div className="topbar-actions topbar-leading">
+            <button
+              className="icon-button"
+              onClick={() => setSidebarOpen((value) => !value)}
+              title={sidebarOpen ? "Скрыть боковую панель" : "Показать боковую панель"}
+            >
+              {sidebarOpen ? <PanelLeftClose size={18} /> : <PanelLeftOpen size={18} />}
+            </button>
+            <button
+              className="icon-button"
+              onClick={toggleDrawer}
+              title="Файлы"
+            >
+              {drawerOpen ? <ChevronDown size={18} /> : <ChevronUp size={18} />}
+            </button>
+          </div>
           <div className="topbar-center">
             <div className="topbar-title">
               <MessageSquare size={18} />
               <span>CorpClaw Lite</span>
             </div>
-            <ContextMeter usage={contextUsage} />
           </div>
-          <div className="topbar-mode">
-            <SegmentedMode mode={mode} onModeChange={setMode} />
-          </div>
-          <div className="topbar-actions">
+          <div className="topbar-actions topbar-trailing">
             <button
-              className="new-session-button"
-              onClick={startNewSession}
-              title="Сбросить контекст и начать новую сессию"
+              className="icon-button"
+              onClick={() =>
+                preview
+                  ? previewMode === "expanded"
+                    ? setPreviewMode("side")
+                    : setPreview(null)
+                  : undefined
+              }
+              title="Просмотр"
+              disabled={!preview}
             >
-              <MessageSquarePlus size={16} />
-              <span>Новая сессия</span>
+              <Eye size={18} />
             </button>
-            <div className="user-menu" ref={userMenuRef}>
-              <button
-                className="user-pill"
-                onClick={() => setUserMenuOpen((value) => !value)}
-                aria-expanded={userMenuOpen}
-                aria-haspopup="menu"
-              >
-                <span>{user.name}</span>
-                <ChevronDown size={14} />
-              </button>
-              {userMenuOpen && (
-                <div className="user-menu-popover" role="menu">
-                  <div className="user-menu-header">
-                    <strong>{user.name}</strong>
-                    <span>{user.department}</span>
-                  </div>
-                  <button
-                    className="user-menu-item danger"
-                    onClick={() => {
-                      setUserMenuOpen(false);
-                      void doLogout();
-                    }}
-                    role="menuitem"
-                  >
-                    <LogOut size={16} />
-                    <span>Выйти</span>
-                  </button>
-                </div>
-              )}
-            </div>
           </div>
         </header>
-        <ChatPanel
-          session={chatSession}
-          user={user}
-          onPreviewFile={openPreviewPath}
-        />
-      </section>
-      {!inspectorOpen && (
-        <button
-          className="operation-center-rail"
-          onClick={() => setInspectorOpen(true)}
-          title="Показать операционный центр"
+
+        <div className="main-pane">
+          <ChatPanel session={chatSession} user={user} onPreviewFile={openPreviewPath} />
+        </div>
+
+        <BottomDrawer
+          open={drawerOpen}
+          onToggle={toggleDrawer}
+          onStartResize={(event) => startResize("drawer", event)}
         >
-          <PanelRightOpen size={17} />
-          <span>Операционный центр</span>
-        </button>
-      )}
-      {inspectorOpen && (
-        <div
-          className="resize-handle preview-resize"
-          onPointerDown={(event) =>
-            startResize("preview", event, {
-              filesOpen: filesOpen && filesMode === "side",
-              previewOpen: true
-            })
-          }
-          role="separator"
-          aria-orientation="vertical"
-        />
-      )}
-      {inspectorOpen && (
-        <InspectorPanel
-          activeTab={inspectorTab}
-          onTabChange={setInspectorTab}
-          overview={overview}
-          overviewLoading={overviewLoading}
-          status={chatSession.status}
-          runEvents={chatSession.runEvents}
-          approvals={chatSession.approvals}
-          contextUsage={contextUsage}
-          preview={preview}
-          previewMode={previewMode}
-          onPreviewModeChange={setPreviewMode}
-          onClose={() => setInspectorOpen(false)}
-          onClosePreview={() => {
-            setPreview(null);
-            setInspectorTab("overview");
-          }}
-          onRefreshOverview={refreshOverview}
-          onPreviewPath={openPreviewPath}
-          onAnswerApproval={chatSession.answerApproval}
-        />
-      )}
-      {preview && previewMode === "expanded" && (
-        <FilePreview
+          <FileExplorer
+            csrf={session.csrf_token}
+            open={drawerOpen}
+            mode="side"
+            onModeChange={() => undefined}
+            onPreview={openPreview}
+            onWorkspaceChanged={refreshOverview}
+          />
+        </BottomDrawer>
+      </section>
+
+      {preview && (
+        <PreviewOverlay
           preview={preview}
           mode={previewMode}
           onModeChange={setPreviewMode}
           onClose={() => setPreview(null)}
+          onStartResize={(event) => startResize("preview", event)}
         />
       )}
-    </div>
-  );
-}
-
-function formatTokenCount(value: number): string {
-  if (value >= 1000) {
-    return `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)} тыс.`;
-  }
-  return String(value);
-}
-
-function ContextMeter({ usage }: { usage: ContextUsage | null }) {
-  const latest = usage?.latest_total_tokens ?? 0;
-  const limit = usage?.context_limit_tokens ?? 0;
-  const ratio = usage?.context_ratio ?? 0;
-  const tone = ratio >= 0.8 ? "danger" : ratio >= 0.6 ? "warning" : "normal";
-  const percent = Math.round(ratio * 100);
-  const label = limit ? `${formatTokenCount(latest)} / ${formatTokenCount(limit)}` : "—";
-
-  return (
-    <div className={`context-meter ${tone}`} title={`Контекст: ${percent}%`}>
-      <Activity size={15} />
-      <span>Контекст</span>
-      <strong>{label}</strong>
-      <i>
-        <b style={{ width: `${Math.min(100, Math.max(0, percent))}%` }} />
-      </i>
-    </div>
-  );
-}
-
-function SegmentedMode({
-  mode,
-  onModeChange
-}: {
-  mode: AgentMode;
-  onModeChange: (mode: AgentMode) => void;
-}) {
-  return (
-    <div className="segmented">
-      <button className={mode === "execute" ? "active" : ""} onClick={() => onModeChange("execute")}>
-        {agentModeLabel("execute")}
-      </button>
-      <button className={mode === "chat" ? "active" : ""} onClick={() => onModeChange("chat")}>
-        {agentModeLabel("chat")}
-      </button>
     </div>
   );
 }

@@ -126,7 +126,12 @@ export type ViewMode = "list" | "grid" | "details";
 export type AgentMode = "execute" | "chat";
 export type PreviewMode = "side" | "expanded";
 export type FileExplorerMode = "side" | "expanded";
-export type InspectorTab = "overview" | "run" | "preview";
+
+/** Sidebar navigation section. Chat = conversational (tools off in Etap 2), Work = task (tools on). */
+export type SidebarSection = "chat" | "work";
+
+/** Where the preview overlay renders: slide-in panel on the right, or fullscreen modal. */
+export type PreviewOverlayMode = "side" | "expanded";
 
 export type ContextUsage = {
   latest_total_tokens: number;
@@ -137,7 +142,17 @@ export type ContextUsage = {
   context_ratio: number;
 };
 
+/**
+ * Persisted workspace layout dimensions.
+ *
+ * - `sidebarWidth` — left navigation sidebar width (px). Was `filesWidth` pre-Etap 1A.
+ * - `previewWidth` — preview overlay width when in `side` mode (px).
+ * - `drawerHeight` — bottom file-drawer height (px). `null` = collapsed (peek-bar only).
+ *
+ * Stored under localStorage key `corpclaw.web.panelLayout`.
+ */
 export type PanelLayoutState = {
-  filesWidth: number;
+  sidebarWidth: number;
   previewWidth: number;
+  drawerHeight: number | null;
 };
