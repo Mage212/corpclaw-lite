@@ -39,8 +39,8 @@ export type ServerWsEvent =
   | { type: "warning"; message: string; request_id?: string }
   | { type: "error"; message: string; request_id?: string; usage?: ContextUsage }
   | { type: "file_ready"; name: string; url: string; caption: string; path?: string | null }
-  | { type: "approval_required"; approval_id: string; action: string; details: string }
-  | { type: "approval_resolved"; approval_id: string }
+  | { type: "approval_required"; approval_id: string; action: string; details: string; request_id?: string }
+  | { type: "approval_resolved"; approval_id: string; request_id?: string }
   | { type: "llm_status"; status: string }
   | { type: "mode"; mode: AgentMode };
 
@@ -531,18 +531,39 @@ export function parseServerWsEvent(value: unknown): ServerWsEvent | null {
       }
       return event;
     }
-    case "approval_required":
-      return {
+    case "approval_required": {
+      const approvalRequired: Extract<
+        ServerWsEvent,
+        { type: "approval_required" }
+      > = {
         type: "approval_required",
         approval_id: stringValue(value.approval_id, ""),
         action: stringValue(value.action, "Подтверждение"),
         details: stringValue(value.details, "")
       };
-    case "approval_resolved":
-      return {
+      // Defensive: the wire payload currently omits request_id (the orchestrator's
+      // approval_cb has no request in scope), but a future backend fix may add it.
+      // If present, prefer it over the client-side heuristic stamp.
+      const approvalRequestId = optionalString(value.request_id);
+      if (approvalRequestId !== undefined) {
+        approvalRequired.request_id = approvalRequestId;
+      }
+      return approvalRequired;
+    }
+    case "approval_resolved": {
+      const approvalResolved: Extract<
+        ServerWsEvent,
+        { type: "approval_resolved" }
+      > = {
         type: "approval_resolved",
         approval_id: stringValue(value.approval_id, "")
       };
+      const resolvedRequestId = optionalString(value.request_id);
+      if (resolvedRequestId !== undefined) {
+        approvalResolved.request_id = resolvedRequestId;
+      }
+      return approvalResolved;
+    }
     case "llm_status":
       return { type: "llm_status", status: stringValue(value.status, "unknown") };
     case "mode":

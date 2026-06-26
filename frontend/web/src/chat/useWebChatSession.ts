@@ -51,6 +51,7 @@ function timelineType(phase: string): RunTimelineEvent["type"] {
   if (phase === "queue") return "queue";
   if (phase === "llm") return "llm";
   if (phase === "tool") return "tool";
+  if (phase === "subagent") return "subagent";
   return "request";
 }
 
@@ -128,6 +129,15 @@ export function useWebChatSession({
   const wsRef = useRef<WebSocket | null>(null);
   const resetSignalRef = useRef(resetSignal);
   const modeRef = useRef(mode);
+  /**
+   * Tracks the most recently seen request_id (from request_started/state/finished/
+   * status_update). Used to stamp `request_id` onto approvals that arrive without
+   * one on the wire — the orchestrator's approval_cb has no request in scope, but
+   * approvals always fire mid-run while this ref holds the active id. Deliberately
+   * NOT cleared on request_finished so approvals arriving in the (up to 300s)
+   * approval window still get stamped, even after status auto-clears at 1.4s.
+   */
+  const lastActiveRequestIdRef = useRef<string | null>(null);
 
   const addMessage = useCallback((message: ChatMessage) => {
     setMessages((items) => appendUnique(items, message));
@@ -235,7 +245,11 @@ export function useWebChatSession({
             setHistoryHasMore,
             setLoadingHistory,
             setRunEvents,
-            onWorkspaceChanged
+            onWorkspaceChanged,
+            getActiveRequestId: () => lastActiveRequestIdRef.current,
+            setActiveRequestId: (requestId) => {
+              lastActiveRequestIdRef.current = requestId;
+            }
           });
         };
       })
@@ -307,6 +321,10 @@ type WsEventHandlers = {
   setLoadingHistory: Dispatch<SetStateAction<boolean>>;
   setRunEvents: Dispatch<SetStateAction<RunTimelineEvent[]>>;
   onWorkspaceChanged: (() => void) | undefined;
+  /** Read the last-known active request id (for stamping approvals). */
+  getActiveRequestId: () => string | null;
+  /** Record a request id as the active one (called on request_started/state/finished/status_update). */
+  setActiveRequestId: (requestId: string) => void;
 };
 
 function pushRunEvent(
@@ -349,6 +367,7 @@ function handleWsEvent(event: ServerWsEvent, handlers: WsEventHandlers) {
     }
   } else if (event.type === "request_started" || event.type === "request_state") {
     const phase = event.phase || "request";
+    handlers.setActiveRequestId(event.request_id);
     setStatus({
       active: true,
       requestId: event.request_id,
@@ -356,24 +375,16 @@ function handleWsEvent(event: ServerWsEvent, handlers: WsEventHandlers) {
       phase,
       tone: "running"
     });
-    if (event.type === "request_started") {
-      handlers.setRunEvents([
-        makeTimelineEvent({
-          requestId: event.request_id,
-          type: timelineType(phase),
-          label: event.label,
-          tone: "running"
-        })
-      ]);
-    } else {
-      pushRunEvent(handlers, {
-        requestId: event.request_id,
-        type: timelineType(phase),
-        label: event.label,
-        tone: "running"
-      });
-    }
+    // Accumulate (don't reset): a fresh request_started now just appends its first
+    // event so prior requests' timelines remain populated for their ActivityCards.
+    pushRunEvent(handlers, {
+      requestId: event.request_id,
+      type: timelineType(phase),
+      label: event.label,
+      tone: "running"
+    });
   } else if (event.type === "status_update") {
+    handlers.setActiveRequestId(event.request_id);
     setStatus({
       active: true,
       requestId: event.request_id,
@@ -403,6 +414,7 @@ function handleWsEvent(event: ServerWsEvent, handlers: WsEventHandlers) {
     });
   } else if (event.type === "request_finished") {
     const tone = event.status === "error" ? "error" : event.status === "warning" ? "warning" : "done";
+    handlers.setActiveRequestId(event.request_id);
     if (event.usage) {
       onContextUsage(event.usage);
     }
@@ -513,14 +525,18 @@ function handleWsEvent(event: ServerWsEvent, handlers: WsEventHandlers) {
     });
     onWorkspaceChanged?.();
   } else if (event.type === "approval_required") {
-    const approval = event;
+    // The wire payload omits request_id (orchestrator approval_cb has no request
+    // in scope). Prefer a backend-provided one if present; otherwise stamp the
+    // last-known active request so the approval groups inside its ActivityCard.
+    const requestId = event.request_id ?? handlers.getActiveRequestId();
+    const approval: ApprovalRequest = { ...event, request_id: requestId };
     setApprovals((items) =>
       items.some((item) => item.approval_id === approval.approval_id)
         ? items.map((item) => (item.approval_id === approval.approval_id ? approval : item))
         : [...items, approval]
     );
     pushRunEvent(handlers, {
-      requestId: null,
+      requestId,
       type: "approval",
       label: approval.action,
       detail: approval.details,
@@ -529,7 +545,7 @@ function handleWsEvent(event: ServerWsEvent, handlers: WsEventHandlers) {
   } else if (event.type === "approval_resolved") {
     setApprovals((items) => items.filter((item) => item.approval_id !== event.approval_id));
     pushRunEvent(handlers, {
-      requestId: null,
+      requestId: event.request_id ?? handlers.getActiveRequestId(),
       type: "done",
       label: "Подтверждение обработано",
       tone: "done"

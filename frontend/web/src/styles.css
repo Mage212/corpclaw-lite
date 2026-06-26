@@ -1744,6 +1744,258 @@ a {
   padding: 8px 12px;
 }
 
+/* --- Etap 1B: inline activity card (run timeline) ------------------------ */
+.activity-card {
+  align-self: center;
+  width: 100%;
+  max-width: 720px;
+  margin: 4px auto 12px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+.activity-card.running {
+  border-left-color: var(--accent);
+}
+
+.activity-card.warning {
+  border-left-color: var(--warning);
+}
+
+.activity-card.error {
+  border-left-color: var(--danger);
+}
+
+.activity-card.done {
+  border-left-color: var(--muted-2);
+}
+
+.activity-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  user-select: none;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.activity-header:hover {
+  background: var(--surface);
+}
+
+.activity-header .activity-state-icon {
+  flex-shrink: 0;
+  color: var(--muted-2);
+}
+
+.activity-card.running .activity-state-icon {
+  color: var(--accent);
+}
+
+.activity-card.warning .activity-state-icon {
+  color: var(--warning);
+}
+
+.activity-card.error .activity-state-icon {
+  color: var(--danger);
+}
+
+.activity-card.done .activity-state-icon {
+  color: var(--ok);
+}
+
+.activity-header .activity-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.activity-header .activity-meta {
+  flex-shrink: 0;
+  color: var(--muted-2);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.activity-header .activity-chevron {
+  flex-shrink: 0;
+  color: var(--muted-2);
+  transition: transform 0.15s ease;
+}
+
+.activity-card.expanded .activity-chevron {
+  transform: rotate(180deg);
+}
+
+.activity-body {
+  border-top: 1px solid var(--line);
+  padding: 6px 0;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.activity-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 4px 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.activity-step .activity-step-icon {
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: var(--muted-2);
+}
+
+.activity-step.running .activity-step-icon {
+  color: var(--accent);
+}
+
+.activity-step.warning .activity-step-icon,
+.activity-step.approval .activity-step-icon {
+  color: var(--warning);
+}
+
+.activity-step.error .activity-step-icon {
+  color: var(--danger);
+}
+
+.activity-step.done .activity-step-icon {
+  color: var(--ok);
+}
+
+.activity-step .activity-step-label {
+  flex: 1;
+  min-width: 0;
+  color: var(--text);
+}
+
+.activity-step .activity-step-detail {
+  display: block;
+  margin-top: 1px;
+  color: var(--muted-2);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity-step .activity-step-time {
+  flex-shrink: 0;
+  color: var(--muted-2);
+  font-size: 11px;
+}
+
+.activity-approval {
+  margin: 6px 12px 8px;
+  padding: 10px;
+  border: 1px solid #f0c36d;
+  border-radius: 7px;
+  background: var(--warning-soft);
+}
+
+.activity-approval .activity-approval-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.activity-approval p {
+  margin: 4px 0 8px;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+.activity-approval .activity-approval-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.activity-placeholder {
+  padding: 10px 12px;
+  color: var(--muted);
+  font-size: 12px;
+  font-style: italic;
+}
+
+/* --- Etap 1B: context size bar (under composer) -------------------------- */
+.context-size-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 18px 7px;
+  border-top: 1px solid var(--line);
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.context-size-bar .context-size-label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
+.context-size-bar .context-size-track {
+  flex: 1;
+  min-width: 0;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.context-size-bar .context-size-track > b {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 999px;
+  transition: width 0.2s ease, background 0.2s ease;
+}
+
+.context-size-bar.warning .context-size-track > b {
+  background: var(--warning);
+}
+
+.context-size-bar.danger .context-size-track > b {
+  background: var(--danger);
+}
+
+.context-size-bar .context-size-value {
+  flex-shrink: 0;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.context-size-bar .context-size-compact {
+  flex-shrink: 0;
+  margin-left: auto;
+  padding: 2px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--accent);
+  font-size: 11px;
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
 .status-line {
   min-height: 34px;
   padding: 8px 18px;

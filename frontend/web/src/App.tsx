@@ -145,12 +145,11 @@ function Workspace({
     refreshOverview();
   }, [refreshOverview]);
 
-  // Overview is unused in the Etap 1A UI (the Inspector "Обзор" tab was removed),
-  // but we keep refreshing it so the data is warm for Etap 1B (ContextSizeBar) and
-  // future overview surfaces. `overview`/`overviewLoading` are reserved for that.
+  // Overview is unused in the current UI (the Inspector "Обзор" tab was removed in 1A),
+  // but we keep refreshing it so the data is warm for future overview surfaces.
+  // `overview`/`overviewLoading` are reserved for that.
   void overview;
   void overviewLoading;
-  void contextUsage;
 
   if (!user) {
     return <LoginView onLogin={onSessionChange} />;
@@ -254,7 +253,12 @@ function Workspace({
         </header>
 
         <div className="main-pane">
-          <ChatPanel session={chatSession} user={user} onPreviewFile={openPreviewPath} />
+          <ChatPanel
+            session={chatSession}
+            user={user}
+            onPreviewFile={openPreviewPath}
+            contextUsage={contextUsage}
+          />
         </div>
 
         <BottomDrawer
