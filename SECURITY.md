@@ -26,4 +26,4 @@ CorpClaw Lite includes multiple security layers:
 - **Network Policy** — Deny-by-default network access for containers with explicit allowlist.
 - **IPC Authentication** — HMAC-SHA256 signed payloads with nonce-based replay protection (300s TTL).
 - **Credential Scrubber** — Automatic masking of API keys and tokens in logs and output.
-- **RBAC** — Department-based access control with per-department tool permissions and budgets.
+- **RBAC** — Department-based access control with per-department tool permissions. Resource limits (iterations, tool calls, wall-time) are global in settings.yaml.

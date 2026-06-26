@@ -138,6 +138,7 @@ React build is missing, the backend returns an explicit warning page instead of 
 | LLM Router | Route tasks to specific providers (local/cloud) |
 | Model + Sampling Profiles | Orthogonal `ModelProfile` (model properties) + `SamplingProfile` (task/phase properties) with per-call `RequestOptions` override (D-056) |
 | PhasePolicy | Per-phase thinking control — research gathering off, aggregation on; closing mode off |
+| Workflow-finalize Guard | Bounded nudge → restrict → auto-finalize cascade — research subagents always produce a report, never lose accumulated work on budget exhaustion |
 | Raw LLM Capture | Optional raw request/response logging to `logs/llm_payloads.jsonl` with field-level allowlist + credential scrubbing — for debugging and future fine-tune dataset collection |
 | XML Tool Calling | Fallback parser for local LLMs without function calling |
 | 29 Built-in Tools | File ops, SQL queries, charts, PDF, Excel workbook/inspection, web search/fetch, research workflows, and more |

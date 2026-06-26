@@ -1,7 +1,7 @@
 # CorpClaw Lite — Архитектура проекта
 
 > Версия документа: 2026-06-25
-> Версия проекта: 0.2.1 — 163 Python-модуля, ~37K LOC, 1606 pytest-кейсов
+> Версия проекта: 0.2.1 — 163 Python-модуля, ~37K LOC, 1607 pytest-кейсов
 
 ---
 
@@ -127,7 +127,7 @@ corpclaw-lite/
 ├── skills/                 # 5 Markdown-скиллов с scope-фильтрацией
 ├── plugins/                # Директория плагинов
 ├── docker/                 # Dockerfile, Dockerfile.agent, seccomp_default.json
-└── tests/                  # Тесты (1606 pytest-кейсов, 139 Python test-файлов)
+└── tests/                  # Тесты (1607 pytest-кейсов, 139 Python test-файлов)
 ```
 
 ---
@@ -399,6 +399,11 @@ max(wallclock_ratio, iteration_ratio)` — кто ближе к исчерпан
   «synthesize NOW». Если модель зовёт terminal → выполнить. **C** — если B вернул
   текст, программный вызов terminal tool с этим текстом как answer. Работа
   предыдущих итераций не теряется.
+- **degenerate-empty-response retry** — локальные LLMы (gemma4 thinking-OFF)
+  иногда возвращают пустой контент + 0 tool_calls после tool result (degenerate
+  stutter). Loop даёт bounded retry (3 попытки) с корректирующим промптом,
+  вместо немедленного выхода с «Agent provided no response». Симметрично с
+  planning-text guard.
 
 **`LLMRouter.with_overrides()`** — программный atomic override agent-facing
 роутов. Возвращает новый router с переопределёнными sampling/thinking/model
@@ -478,7 +483,7 @@ class Tool(ABC):
 | `table_query` | MEDIUM | SQL-запросы к CSV/XLSX/JSON через DuckDB |
 | `chart_generate` | MEDIUM | Графики (bar, line, pie, scatter, histogram) |
 | `convert_format` | MEDIUM | Конвертация CSV ↔ XLSX ↔ JSON ↔ Markdown |
-| `pdf_reader` | LOW | Извлечение текста из PDF (page ranges) |
+| `pdf_reader` | LOW | Извлечение текста из PDF (page ranges). При `output_path` — полный документ без truncation (одношаговая конвертация в .md) |
 | `research_search` | MEDIUM | Управляемый поиск источников для research-agent |
 | `research_fetch_source` | MEDIUM | Загрузка и кеширование источника исследования |
 | `research_read_source` | LOW | Чтение сохранённого источника с лимитами вывода |
@@ -1182,7 +1187,7 @@ Raw-capture — фундамент для будущей системы сбор
 | Root (cli, etc.) | ~1,480 | 5 |
 | **Исходники** | **~37,060** | **163** |
 | **Тесты** | **~33,400** | **~139** |
-| **Тест-кейсов pytest** | **1606** | |
+| **Тест-кейсов pytest** | **1607** | |
 
 ---
 
