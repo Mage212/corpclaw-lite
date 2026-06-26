@@ -72,6 +72,10 @@ logger = logging.getLogger(__name__)
 # Max chars to include from tool args / results in DEBUG logs
 # Large files / responses are truncated to avoid flooding the log file
 _LOG_TRUNCATE = 400
+
+# Per-user approval locks: one lock per user.id so different users never block
+# each other's approval prompts. Stale (unlocked) entries are pruned past this cap.
+_MAX_APPROVAL_LOCKS = 10_000
 _LOOP_GUARD_TEXT = (
     "System Guard: You seem to be stuck in a loop repeating the same error. "
     "Please change your strategy or stop using this tool."
@@ -303,7 +307,27 @@ class AgentLoop:
         # Cache marker sets as frozensets for the hot path.
         self._phase_aggregation_markers = frozenset(self._settings.phase_policy.aggregation_markers)
         self._phase_gathering_tools = frozenset(self._settings.phase_policy.gathering_tools)
-        self._approval_lock = asyncio.Lock()
+        # Per-user approval locks: serializes parallel approval prompts for ONE user
+        # (avoids confusing multiple Approve/Deny buttons), but different users are
+        # independent and never block each other. See _get_approval_lock.
+        self._approval_locks: dict[int, asyncio.Lock] = {}
+
+    def _get_approval_lock(self, user_id: int) -> asyncio.Lock:
+        """Return the per-user approval lock, pruning stale entries past the cap.
+
+        Mirrors ``ContainerManager._get_lock``: lazy creation plus cleanup of unlocked
+        entries when the pool exceeds ``_MAX_APPROVAL_LOCKS`` (keeps memory bounded for
+        long-running multi-user deployments).
+        """
+        lock = self._approval_locks.get(user_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._approval_locks[user_id] = lock
+        if len(self._approval_locks) > _MAX_APPROVAL_LOCKS:
+            stale = [k for k, v in self._approval_locks.items() if not v.locked()]
+            for k in stale[: len(stale) // 2]:
+                del self._approval_locks[k]
+        return lock
 
     @property
     def memory(self) -> SQLiteMemory | None:
@@ -1778,8 +1802,9 @@ class AgentLoop:
                 details=e.details,
             )
             if approval_callback:
-                # Lock prevents concurrent approval prompts when tools run in parallel
-                async with self._approval_lock:
+                # Per-user lock: serializes parallel approval prompts for ONE user (avoids
+                # confusing multiple Approve/Deny buttons), but different users are independent.
+                async with self._get_approval_lock(user.id):
                     approved = await approval_callback(e.action, e.details)
                 log_event(
                     "approval_finished",

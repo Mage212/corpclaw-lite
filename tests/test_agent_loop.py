@@ -953,6 +953,83 @@ async def test_parallel_tool_approval_serialized(
 
 
 @pytest.mark.asyncio
+async def test_approval_lock_is_per_user(
+    empty_registry: ToolRegistry,
+) -> None:
+    """Different users must reach their approval callback concurrently.
+
+    Regression guard for the per-user approval lock (previously a single instance-level
+    lock serialized ALL users' approvals — one user waiting on Approve/Deny blocked
+    every other user). With per-user locks, two distinct users hit approval at once.
+    """
+
+    from corpclaw_lite.security.tool_guard import ApprovalRequest, ToolGuard
+
+    class AlwaysApprovalGuard(ToolGuard):
+        async def check(  # type: ignore[override]
+            self, tool_name: str, arguments: Any, risk_level: str | None = None
+        ) -> None:
+            raise ApprovalRequest(action=tool_name, details="test")
+
+    class FakeTool:
+        name = "exec_tool"
+        description = ""
+        params = []
+        terminal = False
+        risk_level = None
+        parallel_safe = True
+
+        async def execute(self, **kwargs: Any) -> str:
+            return "executed"
+
+    tool = FakeTool()
+
+    def make_loop(user: User) -> AgentLoop:
+        # Each user gets its own registry + provider so the two runs are independent.
+        registry = ToolRegistry()
+        registry._tools["exec_tool"] = tool  # type: ignore
+        provider = MockProvider(
+            responses=[
+                LLMResponse(content="", tool_calls=[ToolCall(id="0", name="exec_tool", arguments={})]),
+                LLMResponse(content="Done."),
+            ]
+        )
+        return AgentLoop(
+            AgentConfig(
+                provider,
+                registry,
+                AgentSettings(),
+                tool_guard=AlwaysApprovalGuard(),
+                approval_callback=approval_cb,
+            )
+        )
+
+    concurrent_count = 0
+    max_concurrent = 0
+
+    async def approval_cb(action: str, details: str) -> bool:
+        nonlocal concurrent_count, max_concurrent
+        concurrent_count += 1
+        max_concurrent = max(max_concurrent, concurrent_count)
+        await asyncio.sleep(0.05)
+        concurrent_count -= 1
+        return True
+
+    user_a = User(id=1, name="A", department="QA")
+    user_b = User(id=2, name="B", department="QA")
+
+    # Run both users concurrently. With a per-user lock their approval callbacks
+    # overlap; with the old single instance lock they would serialize (max_concurrent=1).
+    results = await asyncio.gather(
+        make_loop(user_a).run(user_a, "run"),
+        make_loop(user_b).run(user_b, "run"),
+    )
+
+    assert all(result == "Done." for result, _ in results)
+    assert max_concurrent >= 2
+
+
+@pytest.mark.asyncio
 async def test_parallel_tool_one_approved_one_denied(
     test_user: User, empty_registry: ToolRegistry
 ) -> None:
