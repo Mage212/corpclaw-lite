@@ -17,10 +17,11 @@ export type PreviewOverlayProps = {
  * - `side` mode: absolute panel pinned to the right edge, resizable via its left edge.
  * - `expanded` mode: fullscreen modal with a backdrop.
  *
- * The inner <FilePreview> is always rendered with `mode="side"` so it does not
- * apply its own `position: fixed` styling; the overlay wrapper owns all positioning.
- * FilePreview's expand/collapse button calls back into `onModeChange`, which we
- * translate into overlay-mode (side ↔ expanded).
+ * The overlay wrapper owns positioning (`.preview-overlay` / `.preview-overlay.fullscreen`).
+ * The inner <FilePreview> receives the real overlay `mode` so its expand/collapse
+ * button shows the correct icon/title; in `expanded`, FilePreview's own
+ * `.preview-drawer.expanded` (inset:18px) just adds breathing room inside the
+ * fullscreen overlay (inset:0) — harmless, not a positioning conflict.
  */
 export function PreviewOverlay({
   preview,
@@ -31,6 +32,12 @@ export function PreviewOverlay({
 }: PreviewOverlayProps) {
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
+      // Ignore Esc while the user is typing in the composer textarea — closing
+      // the preview on Esc-to-clear-IME would be surprising.
+      const active = document.activeElement;
+      if (active instanceof HTMLTextAreaElement || active instanceof HTMLInputElement) {
+        return;
+      }
       if (event.key === "Escape") onClose();
     }
     window.addEventListener("keydown", onKeyDown);
@@ -57,7 +64,7 @@ export function PreviewOverlay({
         )}
         <FilePreview
           preview={preview}
-          mode="side"
+          mode={mode}
           onModeChange={() => onModeChange(mode === "expanded" ? "side" : "expanded")}
           onClose={onClose}
         />

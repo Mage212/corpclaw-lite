@@ -68,14 +68,22 @@ export function ActivityCard({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shouldAutoExpand]);
 
+  // Derive tone from the request's OWN events when not active, so a finished
+  // card isn't tinted by another request's global status tone (which can be
+  // "error" after status auto-clears and a different request fails).
+  const lastEventTone = events.length > 0 ? events[events.length - 1]?.tone : undefined;
   const tone = awaitingApproval
     ? "warning"
-    : statusTone === "error"
-      ? "error"
-      : statusTone === "warning"
-        ? "warning"
-        : isActive
-          ? "running"
+    : isActive
+      ? statusTone === "error"
+        ? "error"
+        : statusTone === "warning"
+          ? "warning"
+          : "running"
+      : lastEventTone === "error"
+        ? "error"
+        : lastEventTone === "warning"
+          ? "warning"
           : "done";
 
   const headerLabel = isActive

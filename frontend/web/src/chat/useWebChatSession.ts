@@ -20,7 +20,8 @@ const emptyStatus: StatusLine = {
   tone: "idle"
 };
 
-const MAX_TIMELINE_EVENTS = 80;
+/** Per-request cap so a chatty run can't evict other requests' timelines. */
+const MAX_EVENTS_PER_REQUEST = 60;
 
 function id(prefix: string): string {
   return `${prefix}_${Math.random().toString(36).slice(2)}_${Date.now()}`;
@@ -84,7 +85,28 @@ function appendTimeline(
   ) {
     return events;
   }
-  return [...events, makeTimelineEvent(event)].slice(-MAX_TIMELINE_EVENTS);
+  return [...events, makeTimelineEvent(event)].slice(-MAX_EVENTS_PER_REQUEST);
+}
+
+/**
+ * Timeline events scoped per-request. A flat capped array would evict older
+ * requests' events once the global cap filled, making their ActivityCards
+ * vanish. Scoping by requestId (capped per-request) keeps each card populated.
+ * Events with `requestId === null` (global: file_ready, ws-down) are bucketed
+ * under "" and shown in no ActivityCard (they render as system bubbles).
+ */
+type TimelineByRequest = Map<string, RunTimelineEvent[]>;
+
+const GLOBAL_BUCKET = "";
+
+function appendScoped(
+  byRequest: TimelineByRequest,
+  event: Omit<RunTimelineEvent, "id" | "createdAt">
+): TimelineByRequest {
+  const key = event.requestId ?? GLOBAL_BUCKET;
+  const next = new Map(byRequest);
+  next.set(key, appendTimeline(byRequest.get(key) ?? [], event));
+  return next;
 }
 
 type UseWebChatSessionOptions = {
@@ -103,7 +125,8 @@ export type WebChatSession = {
   connected: boolean;
   historyHasMore: boolean;
   loadingHistory: boolean;
-  runEvents: RunTimelineEvent[];
+  /** Timeline events grouped by request id. Use `.get(requestId)` for a card. */
+  runEventsByRequest: TimelineByRequest;
   setInput: (value: string) => void;
   send: () => void;
   loadOlder: () => void;
@@ -125,7 +148,9 @@ export function useWebChatSession({
   const [connected, setConnected] = useState(false);
   const [historyHasMore, setHistoryHasMore] = useState(false);
   const [loadingHistory, setLoadingHistory] = useState(false);
-  const [runEvents, setRunEvents] = useState<RunTimelineEvent[]>([]);
+  const [runEventsByRequest, setRunEventsByRequest] = useState<TimelineByRequest>(
+    () => new Map()
+  );
   const wsRef = useRef<WebSocket | null>(null);
   const resetSignalRef = useRef(resetSignal);
   const modeRef = useRef(mode);
@@ -144,7 +169,7 @@ export function useWebChatSession({
   }, []);
 
   const addRunEvent = useCallback((event: Omit<RunTimelineEvent, "id" | "createdAt">) => {
-    setRunEvents((items) => appendTimeline(items, event));
+    setRunEventsByRequest((items) => appendScoped(items, event));
   }, []);
 
   const resetContext = useCallback(() => {
@@ -244,7 +269,7 @@ export function useWebChatSession({
             onContextUsage,
             setHistoryHasMore,
             setLoadingHistory,
-            setRunEvents,
+            setRunEventsByRequest,
             onWorkspaceChanged,
             getActiveRequestId: () => lastActiveRequestIdRef.current,
             setActiveRequestId: (requestId) => {
@@ -302,7 +327,7 @@ export function useWebChatSession({
     connected,
     historyHasMore,
     loadingHistory,
-    runEvents,
+    runEventsByRequest,
     setInput,
     send,
     loadOlder,
@@ -319,7 +344,7 @@ type WsEventHandlers = {
   onContextUsage: (usage: ContextUsage) => void;
   setHistoryHasMore: Dispatch<SetStateAction<boolean>>;
   setLoadingHistory: Dispatch<SetStateAction<boolean>>;
-  setRunEvents: Dispatch<SetStateAction<RunTimelineEvent[]>>;
+  setRunEventsByRequest: Dispatch<SetStateAction<TimelineByRequest>>;
   onWorkspaceChanged: (() => void) | undefined;
   /** Read the last-known active request id (for stamping approvals). */
   getActiveRequestId: () => string | null;
@@ -328,10 +353,10 @@ type WsEventHandlers = {
 };
 
 function pushRunEvent(
-  handlers: Pick<WsEventHandlers, "setRunEvents">,
+  handlers: Pick<WsEventHandlers, "setRunEventsByRequest">,
   event: Omit<RunTimelineEvent, "id" | "createdAt">
 ) {
-  handlers.setRunEvents((items) => appendTimeline(items, event));
+  handlers.setRunEventsByRequest((items) => appendScoped(items, event));
 }
 
 function handleWsEvent(event: ServerWsEvent, handlers: WsEventHandlers) {
@@ -450,14 +475,19 @@ function handleWsEvent(event: ServerWsEvent, handlers: WsEventHandlers) {
       phase: "done",
       tone: "done"
     });
-    handlers.setRunEvents([
-      makeTimelineEvent({
-        requestId: null,
-        type: "reset",
-        label: event.message,
-        tone: "done"
-      })
-    ]);
+    handlers.setRunEventsByRequest(() => {
+      // Reset clears all per-request timelines and leaves only the reset marker.
+      const reset = new Map<string, RunTimelineEvent[]>();
+      reset.set(GLOBAL_BUCKET, [
+        makeTimelineEvent({
+          requestId: null,
+          type: "reset",
+          label: event.message,
+          tone: "done"
+        })
+      ]);
+      return reset;
+    });
     onWorkspaceChanged?.();
     window.setTimeout(() => setStatus(emptyStatus), 1600);
   } else if (event.type === "warning") {

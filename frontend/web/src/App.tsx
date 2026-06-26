@@ -122,7 +122,7 @@ function Workspace({
   const [overviewLoading, setOverviewLoading] = useState(false);
   const [resetSignal, setResetSignal] = useState(0);
 
-  const { cssVars, startResize, setDrawerHeight } = useResizablePanels();
+  const { cssVars, layout, startResize, setDrawerHeight } = useResizablePanels();
   const user = session.user;
 
   const refreshOverview = useCallback(() => {
@@ -178,17 +178,18 @@ function Workspace({
   }
 
   function toggleDrawer() {
-    setDrawerOpen((open) => {
-      if (open) {
-        // Collapsing: drop the persisted height so reopening uses the default.
-        setDrawerHeight(null);
-      } else {
-        // Opening: if no height is persisted, seed a sensible default (40vh).
-        setDrawerHeight(Math.round((window.innerHeight || 720) * 0.4));
-      }
-      return !open;
-    });
+    setDrawerOpen((open) => !open);
   }
+
+  // Seed a sensible default drawer height the first time the drawer is opened
+  // (when none is persisted). Subsequent open/close cycles reuse the persisted
+  // height. Lives in an effect (not inside the setDrawerOpen updater) so the
+  // state update stays pure and survives StrictMode double-invocation.
+  useEffect(() => {
+    if (drawerOpen && layout.drawerHeight === null) {
+      setDrawerHeight(Math.round((window.innerHeight || 720) * 0.4));
+    }
+  }, [drawerOpen, layout.drawerHeight, setDrawerHeight]);
 
   const workspaceClass = useMemo(() => {
     return [

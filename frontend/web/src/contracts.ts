@@ -70,6 +70,25 @@ function optionalString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
+/**
+ * Defense-in-depth: bound a backend/WS-provided URL to a safe scheme.
+ *
+ * Today the backend only ever produces same-origin relative URLs
+ * (`/api/download/{token}`, `/api/files/inline?...`), so this is a safety net
+ * against a future backend change or a compromised backend emitting
+ * `javascript:`/`data:text/html` (which would be XSS in an `<a href>`).
+ * Returns the URL unchanged when safe, `undefined` otherwise.
+ */
+function safeUrl(value: unknown): string | undefined {
+  if (typeof value !== "string" || value === "") return undefined;
+  // Relative (starts with `/`) or protocol-relative — same-origin, safe.
+  if (value.startsWith("/") || value.startsWith("./")) return value;
+  const lower = value.toLowerCase();
+  if (lower.startsWith("http://") || lower.startsWith("https://")) return value;
+  // Reject everything else (javascript:, data:, vbscript:, file:, …).
+  return undefined;
+}
+
 function stringValue(value: unknown, fallback: string): string {
   return typeof value === "string" ? value : fallback;
 }
@@ -253,7 +272,11 @@ export function parsePreviewPayload(value: unknown): PreviewPayload {
   const type = requiredString(source, "type", "preview");
   const entry = parseFileEntry(source.entry);
   if (type === "image") {
-    return { type, entry, url: requiredString(source, "url", "preview") };
+    const url = safeUrl(source.url);
+    if (url === undefined) {
+      throw invalid("preview.url");
+    }
+    return { type, entry, url };
   }
   if (type === "text") {
     const preview: PreviewPayload = {
@@ -355,7 +378,7 @@ export function parseChatMessage(value: unknown): ChatMessage | null {
     const file: NonNullable<ChatMessage["file"]> = {
       name: stringValue(value.file.name, "файл")
     };
-    const url = optionalString(value.file.url);
+    const url = safeUrl(value.file.url);
     const path = value.file.path === null ? null : optionalString(value.file.path);
     const caption = optionalString(value.file.caption);
     const available = typeof value.file.available === "boolean" ? value.file.available : undefined;
@@ -518,7 +541,7 @@ export function parseServerWsEvent(value: unknown): ServerWsEvent | null {
       const event: Extract<ServerWsEvent, { type: "file_ready" }> = {
         type: "file_ready",
         name: stringValue(value.name, "файл"),
-        url: stringValue(value.url, ""),
+        url: safeUrl(value.url) ?? "",
         caption: stringValue(value.caption, "")
       };
       if (value.path === null) {
