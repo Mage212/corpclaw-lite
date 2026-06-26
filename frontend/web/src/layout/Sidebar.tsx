@@ -18,6 +18,8 @@ export type SidebarProps = {
   chatsLoading: boolean;
   onSelectChat: (chat: ChatSummary) => void;
   onNewChat: () => void;
+  onRenameChat: (id: number, title: string) => void;
+  onDeleteChat: (id: number) => void;
   onLogout: () => void;
 };
 
@@ -30,6 +32,8 @@ export function Sidebar({
   chatsLoading,
   onSelectChat,
   onNewChat,
+  onRenameChat,
+  onDeleteChat,
   onLogout
 }: SidebarProps) {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
@@ -81,6 +85,8 @@ export function Sidebar({
         activeChatId={activeChatId}
         onSelectChat={onSelectChat}
         onNewChat={onNewChat}
+        onRenameChat={onRenameChat}
+        onDeleteChat={onDeleteChat}
         loading={chatsLoading}
       />
 

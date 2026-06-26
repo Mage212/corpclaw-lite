@@ -4,12 +4,14 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   activateChat,
   createChat,
+  deleteChat as apiDeleteChat,
   getChats,
   getSession,
   getWorkspaceOverview,
   login,
   logout,
-  previewFile
+  previewFile,
+  renameChat as apiRenameChat
 } from "./api";
 import { ChatPanel } from "./chat/ChatPanel";
 import { useWebChatSession } from "./chat/useWebChatSession";
@@ -218,6 +220,28 @@ function Workspace({
     }
   }
 
+  async function renameChat(id: number, title: string) {
+    try {
+      await apiRenameChat(session.csrf_token, id, title);
+      refreshChats();
+    } catch (error) {
+      console.warn("Failed to rename chat", error);
+    }
+  }
+
+  async function deleteChat(id: number) {
+    try {
+      await apiDeleteChat(session.csrf_token, id);
+      // If the deleted chat was being viewed, fall back to the active one.
+      if (chatId === id) {
+        setChatId(null);
+      }
+      refreshChats();
+    } catch (error) {
+      console.warn("Failed to delete chat", error);
+    }
+  }
+
   async function doLogout() {
     await logout(session.csrf_token);
     onSessionChange({ authenticated: false, user: null, csrf_token: "" });
@@ -268,6 +292,8 @@ function Workspace({
         chatsLoading={chatsLoading}
         onSelectChat={selectChat}
         onNewChat={startNewChat}
+        onRenameChat={renameChat}
+        onDeleteChat={deleteChat}
         onLogout={doLogout}
       />
 

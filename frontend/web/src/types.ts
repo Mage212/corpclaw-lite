@@ -146,6 +146,10 @@ export type ChatSummary = {
   created_at: string;
   active: boolean;
   msg_count: number;
+  /** Last-activity timestamp (drives time-range grouping). Null for legacy rows. */
+  updated_at?: string | null;
+  /** Folder grouping id (Etap 2B foundation — no UI grouping yet). */
+  folder_id?: number | null;
 };
 
 /** Where the preview overlay renders: slide-in panel on the right, or fullscreen modal. */

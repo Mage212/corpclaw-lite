@@ -117,6 +117,23 @@ export function activateChat(csrf: string, chatId: number): Promise<ChatSummary>
   });
 }
 
+// --- Etap 2B: chat management ---
+
+export function renameChat(csrf: string, chatId: number, title: string): Promise<{ ok: boolean }> {
+  return apiFetch(`/api/chats/${chatId}`, parseOkPayload, {
+    method: "PATCH",
+    csrf,
+    body: JSON.stringify({ title })
+  });
+}
+
+export function deleteChat(csrf: string, chatId: number): Promise<{ ok: boolean }> {
+  return apiFetch(`/api/chats/${chatId}`, parseOkPayload, {
+    method: "DELETE",
+    csrf
+  });
+}
+
 /** POST /api/chats and POST /api/chats/{id}/activate return `{chat: {...}}`. */
 function parseChatEnvelope(value: unknown): ChatSummary {
   const source = (value ?? {}) as { chat?: unknown };

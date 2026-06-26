@@ -256,6 +256,8 @@ class WebChannelOrchestrator:
         app.router.add_get("/api/chats", self._handle_list_chats)
         app.router.add_post("/api/chats", self._handle_create_chat)
         app.router.add_post("/api/chats/{id}/activate", self._handle_activate_chat)
+        app.router.add_patch("/api/chats/{id}", self._handle_update_chat)
+        app.router.add_delete("/api/chats/{id}", self._handle_delete_chat)
         app.router.add_post("/api/login", self._handle_api_login)
         app.router.add_post("/api/logout", self._handle_api_logout)
         app.router.add_post("/api/ws-ticket", self._handle_ws_ticket)
@@ -1067,6 +1069,56 @@ class WebChannelOrchestrator:
         return web.json_response(
             {"chat": self._session_summary_payload(activated), "activated": True, "mode": mode}
         )
+
+    # ------------------------------------------------------------------
+    # Etap 2B: chat management endpoints (rename / delete).
+    # ------------------------------------------------------------------
+
+    async def _handle_update_chat(self, request: web.Request) -> web.Response:
+        user = self._require_user(request)
+        if self._chat_store is None:
+            raise web.HTTPServiceUnavailable()
+        try:
+            session_id = int(request.match_info["id"])
+        except (KeyError, ValueError, TypeError) as e:
+            raise web.HTTPBadRequest(text="Invalid chat id.") from e
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        title = body.get("title") if isinstance(body, dict) else None
+        if not isinstance(title, str):
+            raise web.HTTPBadRequest(text="Поле title обязательно.")
+        title = title.strip()[:200]
+        if not title:
+            raise web.HTTPBadRequest(text="Поле title не может быть пустым.")
+        ok = await self._chat_store.rename_session(user.memory_key(), session_id, title)
+        if not ok:
+            raise web.HTTPNotFound(text="Chat not found.")
+        await self._broadcast_to_user(
+            user.id,
+            {"type": "chat_renamed", "session_id": session_id, "title": title},
+        )
+        return web.json_response({"ok": True, "session_id": session_id, "title": title})
+
+    async def _handle_delete_chat(self, request: web.Request) -> web.Response:
+        user = self._require_user(request)
+        if self._chat_store is None:
+            raise web.HTTPServiceUnavailable()
+        try:
+            session_id = int(request.match_info["id"])
+        except (KeyError, ValueError, TypeError) as e:
+            raise web.HTTPBadRequest(text="Invalid chat id.") from e
+        summary = await self._chat_store.get_session(user.memory_key(), session_id)
+        if summary is None:
+            raise web.HTTPNotFound(text="Chat not found.")
+        if summary.is_active:
+            return web.json_response({"error": "Нельзя удалить активный чат."}, status=409)
+        ok = await self._chat_store.delete_session(user.memory_key(), session_id)
+        if not ok:
+            raise web.HTTPNotFound(text="Chat not found.")
+        await self._broadcast_to_user(user.id, {"type": "chat_list_changed"})
+        return web.json_response({"ok": True, "session_id": session_id})
 
     async def _chat_messages_payload(
         self, messages: list[WebChatMessage], user: User

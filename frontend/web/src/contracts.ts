@@ -210,13 +210,17 @@ export function parseChatSummary(value: unknown): ChatSummary {
   const source = record(value, "chat summary");
   const rawSection = requiredString(source, "section", "chat summary");
   const titleValue = source.title;
+  const updatedAt = optionalString(source.updated_at);
+  const folderId = optionalNumber(source.folder_id);
   return {
     id: requiredNumber(source, "id", "chat summary"),
     section: rawSection === "work" ? "work" : "chat",
     title: typeof titleValue === "string" && titleValue.length > 0 ? titleValue : null,
     created_at: requiredString(source, "created_at", "chat summary"),
     active: requiredBoolean(source, "active", "chat summary"),
-    msg_count: requiredNumber(source, "msg_count", "chat summary")
+    msg_count: requiredNumber(source, "msg_count", "chat summary"),
+    updated_at: updatedAt ?? null,
+    folder_id: folderId ?? null
   };
 }
 
