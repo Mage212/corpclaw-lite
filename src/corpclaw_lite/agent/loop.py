@@ -72,6 +72,10 @@ logger = logging.getLogger(__name__)
 # Max chars to include from tool args / results in DEBUG logs
 # Large files / responses are truncated to avoid flooding the log file
 _LOG_TRUNCATE = 400
+
+# Per-user approval locks: one lock per user.id so different users never block
+# each other's approval prompts. Stale (unlocked) entries are pruned past this cap.
+_MAX_APPROVAL_LOCKS = 10_000
 _LOOP_GUARD_TEXT = (
     "System Guard: You seem to be stuck in a loop repeating the same error. "
     "Please change your strategy or stop using this tool."
@@ -303,7 +307,27 @@ class AgentLoop:
         # Cache marker sets as frozensets for the hot path.
         self._phase_aggregation_markers = frozenset(self._settings.phase_policy.aggregation_markers)
         self._phase_gathering_tools = frozenset(self._settings.phase_policy.gathering_tools)
-        self._approval_lock = asyncio.Lock()
+        # Per-user approval locks: serializes parallel approval prompts for ONE user
+        # (avoids confusing multiple Approve/Deny buttons), but different users are
+        # independent and never block each other. See _get_approval_lock.
+        self._approval_locks: dict[int, asyncio.Lock] = {}
+
+    def _get_approval_lock(self, user_id: int) -> asyncio.Lock:
+        """Return the per-user approval lock, pruning stale entries past the cap.
+
+        Mirrors ``ContainerManager._get_lock``: lazy creation plus cleanup of unlocked
+        entries when the pool exceeds ``_MAX_APPROVAL_LOCKS`` (keeps memory bounded for
+        long-running multi-user deployments).
+        """
+        lock = self._approval_locks.get(user_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._approval_locks[user_id] = lock
+        if len(self._approval_locks) > _MAX_APPROVAL_LOCKS:
+            stale = [k for k, v in self._approval_locks.items() if not v.locked()]
+            for k in stale[: len(stale) // 2]:
+                del self._approval_locks[k]
+        return lock
 
     @property
     def memory(self) -> SQLiteMemory | None:
@@ -705,7 +729,7 @@ class AgentLoop:
             max_iterations=guard_config.max_iterations,
         )
         task_run = TaskRun(self._workspace_base)
-        task_run.initialize(user, stats.run_id)
+        await task_run.initialize(user, stats.run_id)
         tools_schema: list[dict[str, Any]] | None = None
         if tools_enabled:
             if self._permission_checker:
@@ -754,7 +778,7 @@ class AgentLoop:
                 # _apply_closing_mode) so a single long iteration that straddles the
                 # deadline still triggers it before the model is asked to produce more
                 # tool calls.
-                tools_schema = self._apply_closing_mode(
+                tools_schema = await self._apply_closing_mode(
                     soft_deadline, tools_schema, task_run, user, stats
                 )
 
@@ -791,7 +815,7 @@ class AgentLoop:
                     # mid-iteration; without this check the model is asked for another
                     # round of tool calls and closing mode only engages next iteration
                     # (by which point asyncio.wait_for may already cancel the run).
-                    tools_schema = self._apply_closing_mode(
+                    tools_schema = await self._apply_closing_mode(
                         soft_deadline, tools_schema, task_run, user, stats
                     )
                     # D-056 PR2: phase-based per-call thinking override. The
@@ -1373,7 +1397,7 @@ class AgentLoop:
                 return False
         return True
 
-    def _apply_closing_mode(
+    async def _apply_closing_mode(
         self,
         soft_deadline: SoftDeadline,
         tools_schema: list[dict[str, Any]] | None,
@@ -1391,11 +1415,13 @@ class AgentLoop:
         B-046: called both at the top of each iteration and immediately before each LLM
         provider call, so a single long iteration that straddles the deadline still
         triggers the reduction before the model is asked for more tool calls.
+
+        Async because ``task_run.mark_soft_deadline`` writes to disk off the event loop.
         """
         if not soft_deadline.is_reached() or soft_deadline.closing_mode:
             return tools_schema
         soft_deadline.enter_closing_mode()
-        task_run.mark_soft_deadline(user, stats.run_id)
+        await task_run.mark_soft_deadline(user, stats.run_id)
         log_event(
             "agent_soft_deadline_reached",
             stats.run_id,
@@ -1757,7 +1783,7 @@ class AgentLoop:
             if status == "error":
                 health.increment("tool_errors")
             if task_run is not None:
-                task_run.record_tool_call(
+                await task_run.record_tool_call(
                     user,
                     run_id,
                     name=tc.name,
@@ -1778,8 +1804,9 @@ class AgentLoop:
                 details=e.details,
             )
             if approval_callback:
-                # Lock prevents concurrent approval prompts when tools run in parallel
-                async with self._approval_lock:
+                # Per-user lock: serializes parallel approval prompts for ONE user (avoids
+                # confusing multiple Approve/Deny buttons), but different users are independent.
+                async with self._get_approval_lock(user.id):
                     approved = await approval_callback(e.action, e.details)
                 log_event(
                     "approval_finished",
