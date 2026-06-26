@@ -179,7 +179,11 @@ class ContainerSettings(BaseModel):
     max_memory: str = "512m"
     cpus: float = 0.5
     idle_timeout_seconds: int = 600
-    max_per_user: int = 1
+    # Global cap on simultaneous container *creations* (Path B of ensure_running).
+    # Idempotent "already-running" checks (Path A) bypass this, so the per-message
+    # hot path is never serialized. Per-user 1-container invariant is guaranteed by
+    # ContainerManager._get_lock, not by this setting.
+    max_concurrent_containers: int = 20
     strict_capabilities: bool = False  # Set to True on Linux production for cap_drop ALL + seccomp
     # Timeout for the outer docker exec call (host-side IPC envelope)
     ipc_timeout_seconds: float = 120.0

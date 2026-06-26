@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -74,6 +75,11 @@ class ContainerManager:
         self._ipc = ipc
         self._user_locks: dict[int, asyncio.Lock] = {}
         self._managed_user_ids: set[int] = set()
+        # Global cap on simultaneous container CREATIONS (Path B of ensure_running).
+        # Path A (idempotent "already running" check) bypasses this, so the per-message
+        # hot path is never serialized. threading primitive because Path B runs inside
+        # anyio.to_thread.run_sync (a worker thread), unreachable by asyncio.Semaphore.
+        self._create_semaphore = threading.BoundedSemaphore(self.settings.max_concurrent_containers)
 
     @staticmethod
     def is_docker_available() -> bool:
@@ -170,7 +176,12 @@ class ContainerManager:
         )
 
         try:
-            self._client.containers.run(**args)
+            # Bounded by a global semaphore so a burst of new users cannot overwhelm
+            # the Docker host with concurrent container creations. build_docker_args
+            # (pure dict construction, no I/O) runs outside the semaphore; only the
+            # real containers.run call holds a slot.
+            with self._create_semaphore:
+                self._client.containers.run(**args)
             logger.info("Container %s started.", name)
             self._managed_user_ids.add(user_id)
             return name

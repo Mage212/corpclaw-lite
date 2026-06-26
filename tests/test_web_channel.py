@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import os
 import sqlite3
@@ -825,3 +827,53 @@ async def test_web_orchestrator_stop_cleans_managed_containers() -> None:
     await orchestrator.stop()
 
     assert container_manager.stopped is True
+
+
+@pytest.mark.asyncio
+async def test_web_container_prune_loop_calls_prune_and_survives_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The container pruner calls prune_idle each pass and keeps running on error."""
+
+    class FakeContainerManager:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def prune_idle(self) -> int:
+            self.calls += 1
+            # First pass raises a transient Docker error — the loop must survive.
+            if self.calls == 1:
+                raise RuntimeError("docker daemon hiccup")
+            return 0
+
+    class FakeStack:
+        def __init__(self, container_manager: FakeContainerManager) -> None:
+            self.container_manager = container_manager
+
+    cm = FakeContainerManager()
+    orchestrator = WebChannelOrchestrator(Settings())
+    orchestrator._stack = FakeStack(cm)
+
+    # Drive the loop with a near-zero interval instead of the real 300s.
+    monkeypatch.setattr(
+        "corpclaw_lite.channels.web.orchestrator._CONTAINER_PRUNE_INTERVAL_SECONDS", 0
+    )
+
+    # Cancel after enough iterations to exercise both the error and the success paths.
+    task = asyncio.create_task(orchestrator._container_prune_loop())
+    # Yield control so the loop runs a couple of passes.
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    assert cm.calls >= 2  # one erroring pass + one healthy pass
+
+
+@pytest.mark.asyncio
+async def test_web_container_prune_loop_noop_without_container_manager() -> None:
+    """The pruner returns immediately when there is no container_manager (dev mode)."""
+    orchestrator = WebChannelOrchestrator(Settings())
+    orchestrator._stack = None  # dev mode: no stack at all
+    # Should return without entering the loop (no await asyncio.sleep).
+    await asyncio.wait_for(orchestrator._container_prune_loop(), timeout=1.0)

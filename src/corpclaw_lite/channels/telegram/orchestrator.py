@@ -43,6 +43,10 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
+# Interval for the idle-container pruner background loop (seconds). Half the
+# default idle_timeout (600s) so a container is reaped within ~2 cycles.
+_CONTAINER_PRUNE_INTERVAL_SECONDS = 300
+
 
 class TelegramBotOrchestrator:
     """Orchestrates the full Telegram bot: startup, message handling, shutdown."""
@@ -67,6 +71,7 @@ class TelegramBotOrchestrator:
         self._subagent_reloader: Any = None
         self._cleanup_task: asyncio.Task[None] | None = None
         self._queue_notify_task: asyncio.Task[None] | None = None
+        self._container_prune_task: asyncio.Task[None] | None = None
         self._shutdown_event = asyncio.Event()
         self._agent_activity_logger: AgentLogger | None = None
         self._active_user_requests: set[int] = set()
@@ -327,6 +332,12 @@ class TelegramBotOrchestrator:
                 "Queue notification loop started (interval=%ds)",
                 self._settings.llm.queue.notify_interval_seconds,
             )
+        # Background idle-container pruner (prevents container accumulation in
+        # server mode — prune_idle was previously CLI-only). container_manager is
+        # None in dev mode (container.enabled=false), so guard on it directly.
+        if self._stack.container_manager is not None:
+            self._container_prune_task = asyncio.create_task(self._container_prune_loop())
+            logger.info("Container prune loop started (interval=300s)")
         self._started = True
 
     async def run_until_shutdown(self) -> None:
@@ -344,6 +355,8 @@ class TelegramBotOrchestrator:
             self._cleanup_task.cancel()
         if self._queue_notify_task is not None:
             self._queue_notify_task.cancel()
+        if self._container_prune_task is not None:
+            self._container_prune_task.cancel()
         for task in self._background_tasks:
             task.cancel()
         if self._reloader is not None:
@@ -839,6 +852,26 @@ class TelegramBotOrchestrator:
         while True:
             await asyncio.sleep(300)
             await self._rate_limiter.cleanup()
+
+    async def _container_prune_loop(self) -> None:
+        """Periodic idle-container pruning (server-mode reaper).
+
+        prune_idle was previously CLI-only, so containers accumulated for the
+        lifetime of a Telegram/web process. Each pass is wrapped in try/except so
+        a transient Docker hiccup never kills the reaper. Idempotent against
+        concurrent ensure_running/stop at the Docker level.
+        """
+        if self._stack is None or self._stack.container_manager is None:
+            return
+        cm = self._stack.container_manager
+        while True:
+            await asyncio.sleep(_CONTAINER_PRUNE_INTERVAL_SECONDS)
+            try:
+                removed = await cm.prune_idle()
+                if removed:
+                    logger.info("Pruned %d idle container(s)", removed)
+            except Exception as exc:
+                logger.warning("Container prune pass failed: %s", exc)
 
     async def _queue_notification_loop(
         self,
