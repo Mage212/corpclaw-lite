@@ -346,9 +346,15 @@ Response:"""
             # "_router_chat" that LLMRouter.chat() hardcodes), so per-user slot
             # affinity / accounting is correct. For an LLMRouter we use
             # acquire_slot + default.chat directly; for a raw provider we call
-            # chat() unchanged (no queue in that case). The 10s wait_for covers
-            # both queue wait and inference — under load a stuck queue makes us
-            # escalate to a human, which is the safe outcome.
+            # chat() unchanged (no queue in that case).
+            #
+            # Note: the 10s wait_for covers only the inference (default.chat),
+            # NOT the queue wait inside acquire_slot — that wait is unbounded, as
+            # it already was before this change (the old provider.chat() path went
+            # through call_default_with_slot with the same unbounded queue wait).
+            # If wait_for times out, the CancelledError is handled cleanly by
+            # acquire_slot's finally (router.py) and queue.acquire's CancelledError
+            # branch (queue.py); the tool is then escalated to a human.
             provider = self._provider
             messages = [{"role": "user", "content": prompt}]
             if isinstance(provider, LLMRouter):

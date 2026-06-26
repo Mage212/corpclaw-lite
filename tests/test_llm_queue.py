@@ -99,6 +99,35 @@ class TestQueueBasic:
         assert q.active_count == 1
         await q.release(entry, 0.1)
 
+    @pytest.mark.asyncio
+    async def test_double_release_is_noop_on_semaphore(self) -> None:
+        """Releasing the same entry twice must not over-grant semaphore slots.
+
+        Regression guard: release() unconditionally called semaphore.release(),
+        so a double-release would bump the counter above max_concurrent and allow
+        extra concurrent inferences. The fix gates the release on the entry being
+        active, so the second release is a no-op.
+        """
+        q = LLMRequestQueue(max_concurrent=1)
+        entry = await q.acquire("u1")
+        await q.release(entry, 1.0)
+        assert q.active_count == 0
+        # The double release must be a safe no-op (no exception, no extra slot).
+        await q.release(entry, 1.0)
+
+        # u2 takes the single real slot; it must succeed.
+        entry_u2 = await q.acquire("u2")
+        assert q.active_count == 1
+        # u3 must block — there is only one slot and the double-release above did
+        # NOT grant a phantom second one.
+        waiter = asyncio.create_task(q.acquire("u3"))
+        await asyncio.sleep(0.02)
+        assert not waiter.done(), (
+            "u3 must block: double-release must not over-grant a semaphore slot"
+        )
+        waiter.cancel()
+        await q.release(entry_u2, 1.0)
+
 
 class TestPositionTracking:
     """Queue position and estimated wait."""

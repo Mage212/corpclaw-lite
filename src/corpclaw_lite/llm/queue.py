@@ -466,10 +466,18 @@ class LLMRequestQueue:
         multiple concurrent entries cannot accidentally release the wrong one
         (the prior str-tolerant path silently dropped all-but-one entry and could
         leak the semaphore).
+
+        A double-release of the same entry is a no-op (matches the original's
+        defensive behavior): the semaphore is released only when the entry was
+        actually active. Without this guard, ``asyncio.Semaphore.release()``
+        would silently bump the counter above ``max_concurrent`` and over-grant
+        inference slots.
         """
         slot_to_release: _SlotState | None = None
+        was_active: bool
         async with self._lock:
-            if entry in self._active:
+            was_active = entry in self._active
+            if was_active:
                 self._active.remove(entry)
             if entry.slot_id is not None:
                 slot_to_release = self._slots.get(entry.slot_id)
@@ -486,6 +494,10 @@ class LLMRequestQueue:
                         slot_to_release.lock.release()
             waiting_count = len(self._waiting)
             active_count = len(self._active)
+        if not was_active:
+            # Double-release (or release of a cancelled/expired entry): no-op.
+            logger.warning("[queue] release of non-active entry user=%s; ignoring", entry.user_id)
+            return
         if elapsed_seconds > 0:
             self._avg_request_seconds = (
                 1 - _ROLLING_AVG_WEIGHT
