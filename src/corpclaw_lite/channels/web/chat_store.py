@@ -77,6 +77,8 @@ class ChatSessionSummary:
     created_at: str
     is_active: bool
     msg_count: int
+    updated_at: str | None = None
+    folder_id: int | None = None
 
 
 class WebChatStore:
@@ -157,13 +159,17 @@ class WebChatStore:
                     ON web_chat_messages(user_id, id)
                     """
                 )
-                # Etap 2: add section/title columns to sessions (idempotent).
-                # Mirrors the reasoning-column migration in memory/sqlite.py:
+                # Etap 2: add section/title/updated_at/folder_id columns to sessions
+                # (idempotent). Mirrors the reasoning-column migration in memory/sqlite.py:
                 # ALTER on every init; "duplicate column name" is swallowed.
                 # `section DEFAULT 'chat'` backfills legacy sessions into the Chat section.
+                # `updated_at` tracks last activity (drives sidebar time-range grouping).
+                # `folder_id` is a nullable grouping foundation (no UI in 2B).
                 for col, decl in [
                     ("section", "TEXT NOT NULL DEFAULT 'chat'"),
                     ("title", "TEXT"),
+                    ("updated_at", "DATETIME"),
+                    ("folder_id", "INTEGER"),
                 ]:
                     with contextlib.suppress(sqlite3.OperationalError):
                         # "duplicate column name" when already migrated — swallow.
@@ -357,6 +363,12 @@ class WebChatStore:
                 if cursor.lastrowid is None:
                     raise StorageError("Failed to get inserted web chat message id")
                 message_id = int(cursor.lastrowid)
+                # Etap 2B: bump the session's last-activity timestamp so it rises
+                # to the top of the sidebar list (sorted by updated_at DESC).
+                conn.execute(
+                    "UPDATE web_chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (session_id,),
+                )
                 self._sync_prune_active_messages(
                     conn,
                     session_id=session_id,
@@ -417,38 +429,34 @@ class WebChatStore:
             created_at=str(row["created_at"]),
             is_active=bool(row["is_active"]),
             msg_count=int(row["msg_count"]),
+            updated_at=row["updated_at"] if row["updated_at"] is not None else None,
+            folder_id=row["folder_id"] if row["folder_id"] is not None else None,
         )
 
     def _sync_list_sessions(self, user_id: str, section: str | None) -> list[ChatSessionSummary]:
+        # Sort: active first, then by last activity (updated_at, falling back to
+        # created_at for legacy rows) so recently-used chats rise to the top.
+        order_clause = (
+            "ORDER BY is_active DESC, COALESCE(s.updated_at, s.created_at) DESC, s.id DESC"
+        )
+        select_cols = """
+            s.id, s.user_id, s.section, s.title, s.created_at, s.updated_at, s.folder_id,
+            (s.ended_at IS NULL) AS is_active,
+            (SELECT COUNT(*) FROM web_chat_messages m WHERE m.session_id = s.id) AS msg_count
+        """
         try:
             with db_connect(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
                 if section is None:
                     rows = conn.execute(
-                        """
-                        SELECT
-                            s.id, s.user_id, s.section, s.title, s.created_at,
-                            (s.ended_at IS NULL) AS is_active,
-                            (SELECT COUNT(*) FROM web_chat_messages m
-                             WHERE m.session_id = s.id) AS msg_count
-                        FROM web_chat_sessions s
-                        WHERE s.user_id = ?
-                        ORDER BY is_active DESC, s.id DESC
-                        """,
+                        f"SELECT {select_cols} FROM web_chat_sessions s "
+                        f"WHERE s.user_id = ? {order_clause}",
                         (str(user_id),),
                     ).fetchall()
                 else:
                     rows = conn.execute(
-                        """
-                        SELECT
-                            s.id, s.user_id, s.section, s.title, s.created_at,
-                            (s.ended_at IS NULL) AS is_active,
-                            (SELECT COUNT(*) FROM web_chat_messages m
-                             WHERE m.session_id = s.id) AS msg_count
-                        FROM web_chat_sessions s
-                        WHERE s.user_id = ? AND s.section = ?
-                        ORDER BY is_active DESC, s.id DESC
-                        """,
+                        f"SELECT {select_cols} FROM web_chat_sessions s "
+                        f"WHERE s.user_id = ? AND s.section = ? {order_clause}",
                         (str(user_id), section),
                     ).fetchall()
                 return [self._session_from_row(row) for row in rows]
@@ -460,7 +468,7 @@ class WebChatStore:
     ) -> list[ChatSessionSummary]:
         """Return the user's chat sessions, optionally filtered by section.
 
-        Active session sorts first (so it stays on top of the sidebar list).
+        Active session sorts first; the rest by last activity (updated_at).
         """
         return await run_in_thread(self._sync_list_sessions, str(user_id), section)
 
@@ -472,6 +480,7 @@ class WebChatStore:
                     """
                     SELECT
                         s.id, s.user_id, s.section, s.title, s.created_at,
+                        s.updated_at, s.folder_id,
                         (s.ended_at IS NULL) AS is_active,
                         (SELECT COUNT(*) FROM web_chat_messages m
                          WHERE m.session_id = s.id) AS msg_count
@@ -582,6 +591,63 @@ class WebChatStore:
         return await run_in_thread(
             self._sync_set_session_title, str(user_id), int(session_id), title
         )
+
+    def _sync_rename_session(self, user_id: str, session_id: int, title: str) -> bool:
+        """Force-rename a session (overwrites any existing title). Etap 2B."""
+        try:
+            with db_connect(self.db_path) as conn:
+                cursor = conn.execute(
+                    """
+                    UPDATE web_chat_sessions
+                    SET title = ?
+                    WHERE id = ? AND user_id = ?
+                    """,
+                    (title, int(session_id), str(user_id)),
+                )
+                return cursor.rowcount > 0
+        except Exception as e:
+            logger.warning("Failed to rename web chat session %s: %s", session_id, e)
+            return False
+
+    async def rename_session(self, user_id: str, session_id: int, title: str) -> bool:
+        """Rename a chat (overwrites existing title). Returns whether a row was updated."""
+        return await run_in_thread(self._sync_rename_session, str(user_id), int(session_id), title)
+
+    def _sync_delete_session(self, user_id: str, session_id: int) -> bool:
+        """Physically delete a session and its messages. Refuses the active session.
+
+        Etap 2B. The caller should also clear the agent context if it deleted the
+        chat the agent was working on (handled at the orchestrator layer).
+        """
+        try:
+            with db_connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(
+                    """
+                    SELECT (ended_at IS NULL) AS is_active
+                    FROM web_chat_sessions
+                    WHERE id = ? AND user_id = ?
+                    """,
+                    (int(session_id), str(user_id)),
+                ).fetchone()
+                if row is None:
+                    return False
+                if bool(row["is_active"]):
+                    # Never delete the active session — that would orphan the
+                    # agent's single-thread memory. Caller surfaces a 409.
+                    return False
+                deleted = self._sync_delete_sessions(conn, [int(session_id)])
+                return deleted > 0
+        except Exception as e:
+            logger.warning("Failed to delete web chat session %s: %s", session_id, e)
+            return False
+
+    async def delete_session(self, user_id: str, session_id: int) -> bool:
+        """Delete a chat session owned by the user. Refuses the active session.
+
+        Returns True on success, False if not found or if it's the active session.
+        """
+        return await run_in_thread(self._sync_delete_session, str(user_id), int(session_id))
 
     def _sync_list_messages(self, user_id: str, session_id: int, limit: int) -> WebChatPage:
         """Read messages of a specific (not necessarily active) session. Read-only viewing."""
