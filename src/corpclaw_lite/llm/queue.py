@@ -456,23 +456,22 @@ class LLMRequestQueue:
                     slot_kind=slot.kind,
                 )
 
-    async def release(self, user_id: str | QueueEntry, elapsed_seconds: float) -> None:
+    async def release(self, entry: QueueEntry, elapsed_seconds: float) -> None:
         """Release an inference slot after the LLM call completes.
 
         Updates the rolling average request duration used for wait estimates.
+
+        ``entry`` must be the ``QueueEntry`` returned by ``acquire()`` — the
+        queue never resolves releases by bare user id anymore, so a caller with
+        multiple concurrent entries cannot accidentally release the wrong one
+        (the prior str-tolerant path silently dropped all-but-one entry and could
+        leak the semaphore).
         """
-        entry: QueueEntry | None = user_id if isinstance(user_id, QueueEntry) else None
-        target_user_id = user_id.user_id if isinstance(user_id, QueueEntry) else user_id
         slot_to_release: _SlotState | None = None
         async with self._lock:
-            if entry is None:
-                for active_entry in self._active:
-                    if active_entry.user_id == target_user_id:
-                        entry = active_entry
-                        break
-            if entry is not None and entry in self._active:
+            if entry in self._active:
                 self._active.remove(entry)
-            if entry is not None and entry.slot_id is not None:
+            if entry.slot_id is not None:
                 slot_to_release = self._slots.get(entry.slot_id)
                 if slot_to_release is not None:
                     slot_to_release.active = False
@@ -487,9 +486,6 @@ class LLMRequestQueue:
                         slot_to_release.lock.release()
             waiting_count = len(self._waiting)
             active_count = len(self._active)
-        if entry is None:
-            logger.warning("[queue] release requested for non-active user=%s", target_user_id)
-            return
         if elapsed_seconds > 0:
             self._avg_request_seconds = (
                 1 - _ROLLING_AVG_WEIGHT
