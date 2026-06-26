@@ -242,13 +242,14 @@ logging:
   trace_enabled: true
   trace_level: "metadata"
   trace_preview_chars: 200
-  # D-056 post-0.2.0: raw LLM request/response capture (opt-in, OFF by default).
+  # D-056 post-0.2.0: raw LLM request/response capture.
   # When enabled, writes logs/llm_payloads.jsonl with one record per LLM call,
   # filtered by capture_fields (allowlist). Used for diagnostics (what the model
   # actually receives/returns) and future fine-tuning dataset collection.
   # Credentials are scrubbed (sk-*, Bearer, etc.) — but review capture_fields
-  # before enabling in privacy-sensitive deployments.
-  capture_enabled: false
+  # before enabling in privacy-sensitive deployments. See AGENTS.md §"LLM payload
+  # capture" for the rationale.
+  capture_enabled: true
   capture_fields:
     - "request.model"           # model name
     - "request.messages"        # full messages array (system + user + history)
