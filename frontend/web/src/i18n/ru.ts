@@ -1,16 +1,25 @@
-import type { AgentMode, FileEntry } from "../types";
+import type { FileEntry, SidebarSection } from "../types";
 
 export const ROOT_LABEL = "Корень";
 export const NO_DATA_LABEL = "нет данных";
 export const REQUEST_FAILED_LABEL = "Не удалось выполнить запрос.";
 export const UPLOAD_FAILED_LABEL = "Не удалось загрузить файл.";
 
+// --- Etap 1A: sidebar navigation labels ---
+export const NEW_CHAT_LABEL = "Новый чат";
+export const EXTENSIONS_LABEL = "Расширения";
+export const AGENT_CONTEXT_LABEL = "Контекст агента";
+export const FILES_LABEL = "Файлы";
+export const PREVIEW_LABEL = "Просмотр";
+export const COMING_SOON_LABEL = "Скоро";
+export const CHAT_HISTORY_PLACEHOLDER = "История чатов — скоро";
+
 export function displayPath(path: string | null | undefined): string {
   return path?.trim() ? path : ROOT_LABEL;
 }
 
-export function agentModeLabel(mode: AgentMode): string {
-  return mode === "chat" ? "Диалог" : "Выполнение";
+export function sidebarSectionLabel(section: SidebarSection): string {
+  return section === "chat" ? "Чат" : "Работа";
 }
 
 export function statusPhaseLabel(phase: string): string {

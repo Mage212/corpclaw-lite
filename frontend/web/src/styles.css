@@ -158,61 +158,42 @@ a {
   font-size: 13px;
 }
 
+/* --- Workspace shell: 2-column grid (Sidebar | Main) ---------------------- */
+/* Etap 1A: replaced the legacy 5-track grid ([files][handle][main][handle][inspector])
+   with a persistent sidebar + full-width main area. The file explorer lives in a
+   bottom drawer (inside main), the preview is an absolute overlay (not in grid). */
 .workspace {
-  --files-track: 0px;
-  --files-handle: 0px;
-  --preview-track: 0px;
-  --preview-handle: 0px;
   position: relative;
   height: 100%;
   display: grid;
-  grid-template-columns:
-    var(--files-track) var(--files-handle) minmax(0, 1fr) var(--preview-handle)
-    var(--preview-track);
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+  grid-template-areas: "sidebar main";
   overflow: hidden;
 }
 
-.workspace.files-open {
-  --files-track: var(--files-width);
-  --files-handle: 6px;
-}
-
-.workspace.preview-open,
-.workspace.inspector-open {
-  --preview-track: var(--preview-width);
-  --preview-handle: 6px;
-}
-
-.workspace.files-expanded {
-  --files-track: 0px;
-  --files-handle: 0px;
-}
-
-.file-explorer,
-.main-pane,
-.preview-drawer {
+.sidebar {
+  grid-area: sidebar;
   min-height: 0;
 }
 
-.file-explorer {
-  grid-column: 1;
+.main-area {
+  grid-area: main;
+  min-height: 0;
+  position: relative; /* anchors the absolute preview overlay */
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto; /* chat grows; drawer peek-bar hugs bottom */
 }
 
-.files-resize {
-  grid-column: 2;
+/* When the bottom drawer is open, it gets a fixed track instead of auto. */
+.main-area.drawer-open {
+  grid-template-rows: minmax(0, 1fr) var(--drawer-height);
 }
 
-.main-pane {
-  grid-column: 3;
-}
-
-.preview-resize {
-  grid-column: 4;
-}
-
-.preview-drawer,
-.inspector-panel {
-  grid-column: 5;
+/* Legacy grid-column assignments removed; .file-explorer/.preview-drawer are now
+   placed by their new wrappers (.bottom-drawer / .preview-overlay). */
+.file-explorer,
+.preview-drawer {
+  min-height: 0;
 }
 
 .resize-handle {
@@ -908,6 +889,247 @@ a {
   grid-template-rows: auto minmax(0, 1fr);
   min-width: 0;
   container-type: inline-size;
+}
+
+/* --- Etap 1A: sidebar navigation ----------------------------------------- */
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-2);
+  border-right: 1px solid var(--line);
+  min-width: 0;
+  overflow: hidden;
+}
+
+.sidebar-section-switcher {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  padding: 10px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+
+.sidebar-section-switcher button {
+  padding: 7px 10px;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.sidebar-section-switcher button:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.sidebar-section-switcher button.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.sidebar-management {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sidebar-management button {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 9px;
+  border-radius: 7px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sidebar-management button:hover:not(:disabled) {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.sidebar-management button:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.sidebar-management .coming-soon-tag {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--muted-2);
+  background: var(--surface);
+  padding: 1px 6px;
+  border-radius: 999px;
+}
+
+.sidebar-chats {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.new-chat-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  width: 100%;
+  padding: 9px;
+  border-radius: 8px;
+  border: 1px dashed var(--line-strong);
+  background: var(--surface);
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.new-chat-btn:hover {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.sidebar-chats-placeholder {
+  padding: 16px 10px;
+  text-align: center;
+  color: var(--muted-2);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.sidebar-user-profile {
+  margin-top: auto;
+  padding: 10px;
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+}
+
+/* --- Etap 1A: bottom file drawer ----------------------------------------- */
+.bottom-drawer {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--surface);
+  border-top: 1px solid var(--line);
+  overflow: hidden;
+}
+
+.drawer-peek-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 14px;
+  background: var(--surface);
+  border-top: 1px solid var(--accent-soft);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+}
+
+.drawer-peek-bar:hover {
+  background: var(--accent-soft);
+}
+
+.drawer-peek-bar .drawer-peek-label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.drawer-peek-bar .drawer-peek-label span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.drawer-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* FileExplorer inside the drawer: drop the left-column assumptions. */
+.bottom-drawer .file-explorer {
+  border-right: none;
+  border-top: none;
+  flex: 1;
+  min-height: 0;
+}
+
+/* The drawer's own horizontal resize handle (drag up to grow). */
+.drawer-resize {
+  cursor: row-resize;
+}
+
+/* --- Etap 1A: preview overlay (absolute, not a grid column) -------------- */
+.preview-overlay {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: var(--preview-overlay-width);
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  box-shadow: -8px 0 24px rgba(21, 33, 45, 0.18);
+  overflow: hidden;
+}
+
+.preview-overlay.fullscreen {
+  inset: 0;
+  width: auto;
+  z-index: 60;
+}
+
+.preview-overlay-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 49;
+  background: rgba(23, 32, 42, 0.24);
+}
+
+/* Overlay's left-edge resize handle (drag left to widen). */
+.preview-overlay .preview-overlay-resize {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -3px;
+  width: 6px;
+  cursor: col-resize;
+  z-index: 1;
+}
+
+.preview-overlay.fullscreen .preview-overlay-resize {
+  display: none;
 }
 
 .topbar {
@@ -2411,108 +2633,44 @@ a {
   }
 }
 
+/* --- Etap 1A responsive cascade (2-column: sidebar | main) --------------- */
+/* Replaces the legacy 5-track → 3-track → vertical → mobile cascade.
+   Strategy: tablet collapses sidebar to an icon rail; phone hides the sidebar
+   entirely (toggled as an overlay) and forces preview to fullscreen. */
+
 @media (max-width: 1360px) {
-  .workspace,
-  .workspace.files-open,
-  .workspace.files-closed,
-  .workspace.preview-open,
-  .workspace.inspector-open,
-  .workspace.inspector-closed,
-  .workspace.files-expanded {
-    --files-track: 0px;
-    --files-handle: 0px;
-    --preview-track: 0px;
-    --preview-handle: 0px;
-    grid-template-columns: minmax(0, 1fr) var(--preview-handle) var(--preview-track);
-  }
-
-  .workspace.preview-open,
-  .workspace.inspector-open {
-    --preview-track: min(36vw, 380px);
-    --preview-handle: 6px;
-  }
-
-  .resize-handle,
-  .main-pane {
-    grid-column: 1;
-  }
-
-  .preview-resize {
-    grid-column: 2;
-  }
-
-  .inspector-panel {
-    grid-column: 3;
-  }
-
-  .file-explorer {
-    position: fixed;
-    inset: 0 auto 0 0;
-    width: min(94vw, 520px);
-    z-index: 12;
-    box-shadow: var(--shadow);
-  }
-
-  .file-explorer.expanded {
-    inset: 10px;
-    width: auto;
-    z-index: 30;
-  }
-
-  .preview-drawer:not(.embedded) {
-    position: fixed;
-    inset: 0 0 0 auto;
-    width: min(94vw, 620px);
-    z-index: 14;
-  }
-
-  .preview-drawer.expanded {
-    inset: 10px;
-    width: auto;
+  /* Narrower sidebar; preview overlay keeps its width but clamps via viewport. */
+  .workspace {
+    grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
   }
 }
 
 @media (max-width: 900px) {
-  .workspace,
-  .workspace.files-open,
-  .workspace.files-closed,
-  .workspace.preview-open,
-  .workspace.inspector-open,
-  .workspace.inspector-closed,
-  .workspace.files-expanded {
-    --preview-track: 0px;
-    --preview-handle: 0px;
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(0, 1fr) var(--preview-track);
+  /* Sidebar becomes a left overlay drawer (toggled by a topbar button). */
+  .workspace:not(.sidebar-open) {
+    grid-template-columns: 0 minmax(0, 1fr);
   }
 
-  .workspace.preview-open,
-  .workspace.inspector-open {
-    --preview-track: minmax(260px, 38vh);
-  }
-
-  .main-pane {
-    grid-column: 1;
-    grid-row: 1;
-  }
-
-  .preview-resize {
+  .workspace:not(.sidebar-open) .sidebar {
     display: none;
   }
 
-  .inspector-panel {
-    grid-column: 1;
-    grid-row: 2;
-    border-top: 1px solid var(--line);
-    border-left: 0;
+  .workspace.sidebar-open .sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    width: min(86vw, 320px);
+    z-index: 40;
+    box-shadow: var(--shadow);
   }
 
-  .inspector-header {
-    min-height: 48px;
+  /* Preview overlay is always fullscreen on narrow viewports. */
+  .preview-overlay {
+    inset: 0;
+    width: auto;
   }
 
-  .inspector-stack {
-    padding: 9px;
+  .preview-overlay .preview-overlay-resize {
+    display: none;
   }
 
   .summary-grid {
@@ -2521,23 +2679,12 @@ a {
 }
 
 @media (max-width: 620px) {
-  .workspace,
-  .workspace.files-open,
-  .workspace.files-closed,
-  .workspace.preview-open,
-  .workspace.inspector-open,
-  .workspace.inspector-closed,
-  .workspace.files-expanded {
-    --preview-track: 0px;
-  }
-
-  .workspace.preview-open,
-  .workspace.inspector-open {
-    --preview-track: 34vh;
+  /* Mobile: collapse the bottom drawer peek label, hide non-essential text. */
+  .drawer-peek-label span {
+    display: none;
   }
 
   .topbar-title span,
-  .context-meter span,
   .user-pill span {
     display: none;
   }
@@ -2548,33 +2695,11 @@ a {
     padding: 0;
   }
 
-  .operation-center-rail {
-    top: 118px;
-    right: 10px;
-  }
-
-  .operation-center-rail span {
-    display: none;
-  }
-
   .topbar-center {
     justify-content: start;
   }
 
-  .context-meter {
-    min-width: 96px;
-    grid-template-columns: auto auto minmax(42px, 1fr);
-  }
-
-  .segmented button {
-    min-width: 58px;
-  }
-
   .summary-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .inspector-tabs button {
-    min-height: 30px;
   }
 }
