@@ -162,33 +162,33 @@ WS: `/ws/chat` (inbound: `mode_change, load_history_before, reset_context, appro
 Каждый — отдельный spec → plan → impl. Порядок = зависимости.
 
 ### Этап 1 — Layout & Navigation (детальный дизайн в §6, ниже)
-**Scope:** перекрой layout под sidebar-навигацию, bottom-drawer file-manager, preview справа с hide. **Чистый frontend**, минимальный backend. Фундамент для остальных.
-- FE: реструктуризация `App.tsx` + `styles.css` grid, выделение `Sidebar`, `BottomDrawer`, переиспользование существующих `ChatPanel`/`FileExplorer`/`FilePreview`.
+**Scope:** перекрой layout под sidebar-навигацию, bottom-drawer file-manager, preview как overlay. **Чистый frontend**, минимальный backend. Фундамент для остальных.
+- FE: реструктуризация `App.tsx` + `styles.css` grid, выделение `Sidebar`, `BottomDrawer`, `PreviewOverlay`, переиспользование существующих `ChatPanel`/`FileExplorer`/`FilePreview`.
 - BE: без изменений (preview/file-mode-change уже работают через существующие API).
 - **Зависимости:** нет.
 
 ### Этап 2 — История чатов (мультисессия, своя на раздел Chat/Work) + привязка tools к разделу
 **Scope:** список чатов в sidebar, переключение (открытие = read-only просмотр; активация = отправкой сообщения, авто-подъём вверх), rename/delete, «new chat». Своя история на раздел Chat/Work. Auto-naming по первому сообщению (~25 символов). Фундамент папок (`folder_id`). **Привязка tools on/off к разделу:** Work → `tools_enabled=True`, Chat → `tools_enabled=False` (наследники «Выполнение»/«Диалог» соответственно) — это убирает ручной tools-toggle.
-- FE: `ChatList` компонент, состояние активного/просматриваемого чата, gating отправки при занятом активном. SectionSwitcher (Chat/Work) теперь реально переключает раздел + определяет `tools_enabled`.
-- BE: `chat_store.py` — expose архивных сессий + поле `section` (chat/work) + rename/delete + «switch active»; новые REST-эндпоинты (`GET /api/chats`, `POST /api/chats`, `PATCH /api/chats/{id}`, `DELETE /api/chats/{id}`, `POST /api/chats/{id}/activate`); WS-расширение (загрузка конкретного чата по id). Маппинг section→`tools_enabled` в `service.py`.
+- FE: `ChatList` компонент, состояние активного/просматриваемого чата, gating отправки при занятом активном. SectionSwitcher (Chat/Work) теперь реально переключает раздел + определяет `tools_enabled`. **[ref §9.1]** time-range grouping («Сегодня»/«Вчера»/«Ранее») + infinite scroll; **[ref §9.1]** lazy chat creation (чат на BE при первой отправке, не при клике New).
+- BE: `chat_store.py` — expose архивных сессий + поле `section` (chat/work) + `folder_id` (nullable) + rename/delete + «switch active»; новые REST-эндпоинты (`GET /api/chats`, `POST /api/chats`, `PATCH /api/chats/{id}`, `DELETE /api/chats/{id}`, `POST /api/chats/{id}/activate`); WS-расширение (загрузка конкретного чата по id). Маппинг section→`tools_enabled` в `service.py`. **[ref §9.2]** auto-naming = truncation первичного сообщения (~25 символов) синхронно при первой отправке (без LLM); опция async-LLM-улучшения — future.
 - **Зависимости:** Этап 1 (нужен sidebar для списка).
 
-### Этап 3 — Mode selector (Fast / Think / Research) в input
+### Этап 3 — Mode selector (Fast / Think / Research) в input — modes как presets
 **Scope:** selector глубины обработки в composer. **Внимание:** это НЕ замена оси tools on/off — та привязана к Chat/Work (Этап 2). Fast/Think/Research — ортогональная ось глубины. Research форсит `deep_research` явно (не keyword-детекция).
 - FE: dropdown в composer (заменяет `SegmentedMode`); **доступные опции зависят от раздела** — в Chat только Fast/Think, в Work все три.
-- BE: thread явного `mode` (глубина) в `AgentLoop.run()` + `service.py`; для Research — передача явного `research_mode` в `DispatchSubagentTool`/`SubagentDispatcher.dispatch` (переиспользовать `ResearchRuntime.resolve_mode`); Fast/Think → mapping на thinking-config через `SamplingProfile`.
+- BE: **[ref §9.2]** modes реализованы как **presets**, разворачивающиеся в params/thinking-config (по образцу Open WebUI `params`+`features`): Fast → thinking off + низкие токен-бюджеты; Think → thinking on + `SamplingProfile`; Research → явный `research_mode="deep_research"` в `DispatchSubagentTool`/`SubagentDispatcher.dispatch` (переиспользовать `ResearchRuntime.resolve_mode`). Thread явного mode в `AgentLoop.run()` + `service.py`. Fast/Think → mapping на thinking-config через `SamplingProfile`.
 - **Зависимости:** Этап 1 (composer в main area) + Этап 2 (раздел Chat/Work определяет tools + доступные modes).
 
-### Этап 4 — Раздел Extensions (Skills / MCP / Plugins)
+### Этап 4 — Раздел Extensions (Skills / MCP / Plugins) — workspace-каркас
 **Scope:** grid-страница управления расширениями: список, toggle вкл/выкл, trigger reload, статус hot-reload. По образцу Mistral Connectors.
-- FE: новая страница `Extensions`, grid-карточки.
-- BE: новые REST-эндпоинты (`GET /api/extensions/{skills,mcp,plugins}`, `POST /api/extensions/.../reload`, опц. `POST /api/extensions/.../toggle`). Переиспользовать `SkillRegistry.list_all`, `SubagentRegistry.list_all`, `MCPManager.get_server_names` + публичный `MCPManager.list_server_tools` (добавить). Toggle-state хранить в настройках пользователя (опц.).
+- FE: **[ref §9.1]** единый workspace-каркас (list/search/view-filter/grid/CRUD) с переиспользуемыми common-примитивами, как `workspace/Tools.svelte` — один компонент-каркас + разные data sources (Skills/MCP/Plugins) вместо 3 отдельных UI. Pill-style tab-nav (`workspace/+layout.svelte`).
+- BE: новые REST-эндпоинты (`GET /api/extensions/{skills,mcp,plugins}`, `POST /api/extensions/.../reload`, опц. `POST /api/extensions/.../toggle`). Переиспользовать `SkillRegistry.list_all`, `SubagentRegistry.list_all`, `MCPManager.get_server_names` + публичный `MCPManager.list_server_tools` (добавить). Toggle-state хранить в **[ref §9.1]** free-form user `settings` JSON (shallow-merge, без миграций).
 - **Зависимости:** Этап 1 (навигация).
 
 ### Этап 5 — Раздел Agent Context (instructions)
-**Scope:** модал/страница «Agent Context»: tone, personal instructions (additional system prompt), live-preview финального system prompt. Переиспользовать `memory_facts` + onboarding-логику.
+**Scope:** модал/страница «Agent Context»: tone, personal instructions (additional system prompt), live-preview финального system prompt. Переиспользовать `memory_facts` + onboarding-логику. **[ref §9.2]** опционально — инжект system_prompt из контекста/папки (идея из `Folder.data.system_prompt`).
 - FE: страница `AgentContext`, форма + live preview.
-- BE: REST (`GET/PUT /api/agent-context`); persist в `memory_facts` (или новую таблицу user-instructions); инжект в prompt-assembly (`service.py:178-205`).
+- BE: REST (`GET/PUT /api/agent-context`); persist в `memory_facts` (или **[ref §9.1]** free-form user `settings` JSON); инжект в prompt-assembly (`service.py:178-205`).
 - **Зависимости:** Этап 1.
 
 ### Этап 6 — Изоляция памяти по разговору (опционально, будущий)
@@ -464,10 +464,52 @@ App.tsx
 
 ---
 
-## 9. Порядок работы после approval
+## 9. Reference-паттерны из Open WebUI (заимствовать)
+
+Источник: `references/open-webui/` (tag `v0.9.6`, код новее тега). Анализ фронтенда (Svelte/SvelteKit) и бэкенда (FastAPI + async SQLAlchemy). Ниже — только то, что **релевантно нашей спеке** и **не противоречит нашим архитектурным решениям**.
+
+### 9.1 Заимствуем (зелёные)
+
+| Паттерн | Где у них | Применение у нас | Этап |
+|---------|----------|-----------------|------|
+| **Workspace-каркас с common-примитивами** | `src/lib/components/workspace/common/` (`AccessControl`, `ViewSelector`, `TagSelector`, `ValvesModal`, `ManifestModal`) + единый list/search/filter/grid/CRUD-паттерн (`workspace/Tools.svelte` ~655 строк как эталон) | Extensions (Skills/MCP/Plugins) — один компонент-каркас + разные data sources вместо 3 отдельных UI | 4 |
+| **Time-range grouping + infinite scroll** для списка чатов | `Sidebar.svelte:1513` (headers «Today»/«Yesterday»/«Previous 7 days») + `Loader`/`loadMoreChats:326` | ChatList в sidebar вместо плоского списка | 2 |
+| **Pinned/drag-reorderable items** в sidebar | `pinnedItems` из `settings.pinnedMenuItems`, Sortable.js, персист в user settings | Закрепление часто-используемых чатов/скиллов наверху sidebar'а | 2 (future) |
+| **Lazy chat creation** (чат создаётся на BE при первой отправке, не при клике New) | `Chat.svelte:initChatHandler:2799` → `createNewChat()` + `history.replaceState` URL rewriting | Избежание пустых чатов-мусора; «New chat» = просто открытый composer | 2 |
+| **Free-form `settings` JSON column** (`extra='allow'`, shallow-merge при update — новые prefs без миграций) | `models/users.py:40`, `update_user_settings_by_id:670` | Per-user layout/mode/section-настройки без миграций | cross |
+
+### 9.2 Заимствуем с адаптацией (жёлтые — осознанный выбор)
+
+| Паттерн Open WebUI | Наше решение | Обоснование расхождения |
+|--------------------|--------------|------------------------|
+| **Auto-naming = LLM task-endpoint** (`tasks/title/completions`, JSON-output промпт «3-5 слов+emoji», async) | **Truncation первого сообщения ~25 символов** как primary; опция async-LLM-улучшения позже | У нас **локальные LLM** → каждый авто-тайtl = отдельный inference (latency + GPU). Truncation мгновенен и бесплатен. Гибрид: truncation сразу, LLM-«улучшение» по кнопке/async позже. |
+| **Modes = compose из `params`+`features`+`capabilities`** (нет enum; `reasoning_effort`+`web_search`+per-model caps) | **Явный selector** (Fast/Think/Research) для UX, **но внутренне реализован как presets**, разворачивающиеся в params/features | Best of both: пользователь видит «Research», а не `reasoning_effort:high + web_search:true`. Реализация повторяет паттерн Open WebUI (`payload.py:104`, `middleware.py:2549`) — selector = preset-name → params/features. |
+| **`Folder.data.system_prompt`** (auto-inject per-folder custom instructions) | Переиспользуем `memory_facts` + onboarding (уже богаче) + **опционально** инжект system_prompt из чата/контекста | Наш механизм богаче; берём только идею «инжект инструкций из контекста» для Agent Context (Этап 5). |
+
+### 9.3 НЕ заимствуем (красные)
+
+| Паттерн Open WebUI | Причина отказа |
+|--------------------|----------------|
+| **Socket.IO + SSE** для realtime | У нас уже единый WebSocket-протокол (`/ws/chat`), переключение бессмысленно |
+| **JSON blob + normalized table dual-write** для чатов | Наша модель (SQLiteMemory normalized + WebChatStore UI-log) уже решает задачу; branching-редактирование сообщений не делаем в этой итерации |
+| **Channels/Notes/Playground/Automations** | Коллаборативные фичи — не наш use-case (закрытый контур, 1 пользователь) |
+| **Tools как Python source code** (`Tool.content` = raw Python, dynamic load) | У нас skills = markdown, plugins = manifest+tool.py; архитектура принципиально другая (AGENTS.md §4) |
+
+### 9.4 Конкретные файлы-эталоны для заимствования (для impl-plan)
+
+- **Workspace list-каркас:** `references/open-webui/src/lib/components/workspace/Tools.svelte` (~655 строк) — эталон list/search/view-filter/grid/CRUD для Extensions (Этап 4)
+- **Workspace common-примитивы:** `references/open-webui/src/lib/components/workspace/common/` — `ViewSelector`, `AccessControl` как шаблоны
+- **Sidebar с chat-list grouping:** `references/open-webui/src/lib/components/layout/Sidebar.svelte:1355-1593` — time-range grouping + infinite scroll + ChatItem с menu (Этап 2)
+- **Workspace tab-layout:** `references/open-webui/src/routes/(app)/workspace/+layout.svelte:59-152` — pill-style tab nav для Extensions (Этап 4)
+- **Models `params`+`meta.capabilities`:** `references/open-webui/backend/open_webui/models/models.py:39,75` — образец preset-модели для modes (Этап 3)
+- **Free-form user settings:** `references/open-webui/backend/open_webui/models/users.py:40-43,670` — shallow-merge JSON для cross-этапных prefs
+
+---
+
+## 10. Порядок работы после approval
 
 1. **Этот spec** → user review → фиксируем.
-2. **Visual companion** → собираем визуальное видение (закрываем §7).
-3. **writing-plans skill** → детальный implementation-plan на Этап 1 (layout).
-4. Этап 1 impl → verification → merge.
-5. Этап 2: новый spec (история чатов) → ... → повтор цикла.
+2. **writing-plans skill** → детальный implementation-plan на Этап 1 (layout).
+3. Этап 1 impl → verification → merge.
+4. Этап 2: новый spec (история чатов) → ... → повтор цикла.
+5. Этапы 3/4/5 — каждый со своим spec, с опорой на §9 (reference-паттерны).
