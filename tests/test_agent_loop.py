@@ -990,7 +990,10 @@ async def test_approval_lock_is_per_user(
         registry._tools["exec_tool"] = tool  # type: ignore
         provider = MockProvider(
             responses=[
-                LLMResponse(content="", tool_calls=[ToolCall(id="0", name="exec_tool", arguments={})]),
+                LLMResponse(
+                    content="",
+                    tool_calls=[ToolCall(id="0", name="exec_tool", arguments={})],
+                ),
                 LLMResponse(content="Done."),
             ]
         )
