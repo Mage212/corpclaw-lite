@@ -15,6 +15,7 @@ __all__ = [
     "AgentSettings",
     "CompressionSettings",
     "ContainerSettings",
+    "DepthModeSettings",
     "ExtensionsSettings",
     "LLMSettings",
     "LoggingSettings",
@@ -109,6 +110,27 @@ class PhasePolicySettings(BaseModel):
         if v is True or v in ("on", "yes") or v is None:
             return "default"
         return v
+
+
+class DepthModeSettings(BaseModel):
+    """Mapping from abstract depth modes (fast/think) to per-model sampling profiles.
+
+    Etap 3 (Sprint 3A). The UI exposes a depth selector (Fast/Think) orthogonal
+    to the Chat/Work section (tools on/off). Each depth resolves to a named
+    SamplingProfile in ``config/model_presets.yaml`` keyed by the route's model,
+    so every model can carry its own official inference/thinking parameters
+    (e.g. gemma4-fast vs qwen-instruct-general — different temp/top_k). The
+    resolution goes through ``LLMRouter.with_overrides(sampling_name=...)`` so
+    the full profile (thinking_mode + inference_overrides) is applied — no raw
+    thinking override that bypasses the preset system (spec §7).
+
+    - ``fast`` / ``think``: ``{model_name: sampling_profile_name}`` lookups.
+    - ``default``: which depth a new chat starts in.
+    """
+
+    fast: dict[str, str] = {}
+    think: dict[str, str] = {}
+    default: Literal["fast", "think"] = "think"
 
 
 class SlotAffinitySettings(BaseModel):
@@ -230,6 +252,9 @@ class AgentSettings(BaseModel):
     # a no-op for the main agent in its default phase, so enabling it by default
     # does not change main-agent behaviour unless the budget runs out.
     phase_policy: PhasePolicySettings = PhasePolicySettings()
+    # Etap 3: user-selectable depth modes (Fast/Think). Each resolves to a
+    # per-model SamplingProfile name applied via router.with_overrides.
+    depth_modes: DepthModeSettings = DepthModeSettings()
 
 
 class WebSettings(BaseModel):

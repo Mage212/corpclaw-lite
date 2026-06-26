@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from corpclaw_lite.agent.context import ContextBuilder
+from corpclaw_lite.agent.depth_mode import DepthMode, resolve_depth_sampling
 from corpclaw_lite.agent.guards import (
     BudgetExceededError,
     PlanningTextGuard,
@@ -62,7 +63,10 @@ if TYPE_CHECKING:
     from corpclaw_lite.agent.compressor import ContextCompressor
     from corpclaw_lite.agent.phase_policy import PhasePolicy
     from corpclaw_lite.calibration.trajectory import TrajectoryRecorder
+    from corpclaw_lite.config.providers import ProviderRegistry
+    from corpclaw_lite.config.settings import DepthModeSettings
     from corpclaw_lite.departments.permissions import PermissionChecker
+    from corpclaw_lite.llm.presets import PresetRegistry
     from corpclaw_lite.memory.consolidation import MemoryConsolidator
     from corpclaw_lite.memory.file_changes import FileChangeDAO
     from corpclaw_lite.security.tool_guard import ToolGuard
@@ -278,6 +282,13 @@ class AgentConfig:
     # D-056 PR2: per-call thinking overrides based on task phase. When None,
     # AgentLoop constructs a DefaultPhasePolicy from settings.agent.phase_policy.
     phase_policy: PhasePolicy | None = None
+    # Etap 3: depth-mode override (Fast/Think). When the loop is given a
+    # ``depth_mode`` in ``run()``, it resolves a per-model SamplingProfile and
+    # applies it via ``LLMRouter.with_overrides``. Requires these registries +
+    # mapping to be set; when None, depth override is a no-op.
+    preset_registry: PresetRegistry | None = None
+    provider_registry: ProviderRegistry | None = None
+    depth_modes: DepthModeSettings | None = None
 
 
 class AgentLoop:
@@ -304,6 +315,10 @@ class AgentLoop:
         from corpclaw_lite.agent.phase_policy import DefaultPhasePolicy
 
         self._phase_policy = config.phase_policy or DefaultPhasePolicy(self._settings.phase_policy)
+        # Etap 3: registries + depth mapping for Fast/Think override.
+        self._preset_registry = config.preset_registry
+        self._provider_registry = config.provider_registry
+        self._depth_modes = config.depth_modes
         # Cache marker sets as frozensets for the hot path.
         self._phase_aggregation_markers = frozenset(self._settings.phase_policy.aggregation_markers)
         self._phase_gathering_tools = frozenset(self._settings.phase_policy.gathering_tools)
@@ -575,6 +590,7 @@ class AgentLoop:
         few_shots: list[dict[str, Any]] | None = None,
         channel: str | None = None,
         run_id: str | None = None,
+        depth_mode: DepthMode | None = None,
     ) -> tuple[str, RunStats]:
         """Run the ReAct loop until a final answer is given or limits are reached.
 
@@ -604,6 +620,17 @@ class AgentLoop:
         )
         last_actual_total_tokens: int | None = None
         t0 = time.monotonic()
+
+        # Etap 3 (Sprint 3A): resolve a depth-mode override provider for this run.
+        # Fast/Think map to a per-model SamplingProfile name; with_overrides
+        # rebuilds the default-route provider with that profile (thinking_mode +
+        # inference_overrides). The override is a RUN-SCOPE local — it never
+        # mutates self._provider, so concurrent runs on this shared loop are
+        # isolated. When depth_mode is None or resolution fails, the route's
+        # default provider is used unchanged.
+        effective_provider: Provider = self._provider
+        if depth_mode is not None and isinstance(self._provider, LLMRouter):
+            effective_provider = self._apply_depth_override(self._provider, depth_mode)
 
         def emit_llm_status(stage: str) -> None:
             if self._settings.llm_stream_status_updates and on_llm_stage is not None:
@@ -860,14 +887,17 @@ class AgentLoop:
                     try:
                         # When the provider is a queued router, separate queue wait
                         # from LLM inference so the budget only counts active time.
-                        if isinstance(self._provider, LLMRouter) and self._provider.has_queue:
+                        # Etap 3: uses effective_provider (depth override) instead of
+                        # self._provider so Fast/Think applies to this run only.
+                        is_router_queue = isinstance(effective_provider, LLMRouter)
+                        if is_router_queue and effective_provider.has_queue:
                             budget.pause()
 
                             def on_router_acquired() -> None:
                                 budget.resume()
                                 emit_llm_status("model_preparing")
 
-                            response = await self._provider.call_default_with_slot(
+                            response = await effective_provider.call_default_with_slot(
                                 user_id=str(user.id),
                                 run_id=stats.run_id,
                                 messages=context.messages,
@@ -893,14 +923,14 @@ class AgentLoop:
                                     self._settings
                                 ),
                             )
-                        elif isinstance(self._provider, QueuedProvider):
+                        elif isinstance(effective_provider, QueuedProvider):
                             budget.pause()
 
                             def on_queued_provider_acquired() -> None:
                                 budget.resume()
                                 emit_llm_status("model_preparing")
 
-                            response = await self._provider.call_with_slot(
+                            response = await effective_provider.call_with_slot(
                                 messages=context.messages,
                                 tools=tools_schema,
                                 system=context.system_prompt or None,
@@ -926,9 +956,9 @@ class AgentLoop:
                             )
                         else:
                             target_provider: Provider = (
-                                self._provider.default
-                                if isinstance(self._provider, LLMRouter)
-                                else self._provider
+                                effective_provider.default
+                                if isinstance(effective_provider, LLMRouter)
+                                else effective_provider
                             )
                             emit_llm_status("model_preparing")
                             response = await asyncio.wait_for(
@@ -1605,6 +1635,50 @@ class AgentLoop:
         if isinstance(provider, QueuedProvider):
             return provider._provider  # type: ignore[attr-defined]
         return provider
+
+    def _apply_depth_override(self, router: LLMRouter, depth: DepthMode) -> Provider:
+        """Build a depth-mode override router (Etap 3).
+
+        Resolves the default route's model, looks up the depth→sampling-profile
+        mapping for that model, and rebuilds the default route with the profile
+        via ``router.with_overrides``. On any failure (missing mapping/profile/
+        registries) returns the original router unchanged so the run is never
+        broken by a depth override.
+        """
+        if (
+            self._depth_modes is None
+            or self._provider_registry is None
+            or self._preset_registry is None
+        ):
+            return router
+        # Recover the default route's model from the router's provider meta, or
+        # fall back to the provider's _model attribute.
+        default_provider = router.default
+        route_model = getattr(default_provider, "_model", None)
+        if not route_model:
+            return router
+        sampling_name = resolve_depth_sampling(
+            depth, str(route_model), self._depth_modes, self._preset_registry
+        )
+        if sampling_name is None:
+            return router
+        try:
+            overridden = router.with_overrides(
+                provider_registry=self._provider_registry,
+                preset_registry=self._preset_registry,
+                sampling_name=sampling_name,
+                apply_to="default_only",
+            )
+        except Exception:
+            logger.exception("Failed to apply depth override '%s'; using default route", depth)
+            return router
+        logger.info(
+            "[depth=%s] override sampling='%s' for model='%s'",
+            depth,
+            sampling_name,
+            route_model,
+        )
+        return overridden
 
     def _apply_workflow_mandate(
         self,

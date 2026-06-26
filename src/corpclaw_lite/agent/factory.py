@@ -481,10 +481,12 @@ def build_agent_stack(
             (D-056 PR3) without mutating YAML.
     """
     from corpclaw_lite.config.loader import load_settings
+    from corpclaw_lite.config.providers import ProviderRegistry
     from corpclaw_lite.config.settings import AgentSettings
     from corpclaw_lite.container.ipc import ContainerIPC
     from corpclaw_lite.container.manager import ContainerManager
     from corpclaw_lite.extensions.tools.registry import ToolRegistry
+    from corpclaw_lite.llm.presets import PresetRegistry
 
     full_settings: Settings = (
         settings
@@ -496,6 +498,13 @@ def build_agent_stack(
 
     provider = (
         router_override if router_override is not None else _build_router(settings=full_settings)
+    )
+    # Etap 3: resolve registries for depth-mode override (Fast/Think). These are
+    # independent of router_override — env providers + model_presets.yaml.
+    depth_provider_registry = ProviderRegistry.from_env()
+    depth_presets_path = PROJECT_ROOT / "config" / "model_presets.yaml"
+    depth_preset_registry = (
+        PresetRegistry.from_yaml(depth_presets_path) if depth_presets_path.exists() else None
     )
     registry = ToolRegistry()
 
@@ -645,6 +654,10 @@ def build_agent_stack(
             default_system_prompt=system_prompt,
             workspace_base=workspace_base,
             file_change_dao=file_change_dao,
+            # Etap 3: registries + depth mapping for Fast/Think override.
+            preset_registry=depth_preset_registry,
+            provider_registry=depth_provider_registry,
+            depth_modes=agent_settings.depth_modes,
         )
     )
     user_manager = UserManager()

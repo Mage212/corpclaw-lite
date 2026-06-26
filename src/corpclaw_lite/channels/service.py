@@ -160,6 +160,7 @@ class AgentRequestService:
         mode: str = "execute",
         channel: str,
         callbacks: AgentRequestCallbacks | None = None,
+        depth_mode: str | None = None,
     ) -> AgentRequestResult:
         """Run an agent request with shared prompt, skill, container and logging setup."""
         callbacks = callbacks or AgentRequestCallbacks()
@@ -221,6 +222,7 @@ class AgentRequestService:
                 tools_enabled=(mode == "execute"),
                 few_shots=stack.few_shots,
                 channel=channel,
+                depth_mode=depth_mode,  # type: ignore[arg-type]
             )
         except Exception as e:
             if is_llm_transport_error(e):

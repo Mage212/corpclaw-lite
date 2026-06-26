@@ -8,6 +8,7 @@ import type {
   ApprovalRequest,
   ChatMessage,
   ContextUsage,
+  DepthMode,
   RunTimelineEvent,
   StatusLine
 } from "../types";
@@ -112,6 +113,8 @@ function appendScoped(
 type UseWebChatSessionOptions = {
   csrf: string;
   mode: AgentMode;
+  /** Processing depth (Etap 3): Fast = no thinking, Think = reasoning on. */
+  depthMode: DepthMode;
   resetSignal: number;
   onContextUsage: (usage: ContextUsage) => void;
   onWorkspaceChanged?: (() => void) | undefined;
@@ -149,6 +152,7 @@ export type WebChatSession = {
 export function useWebChatSession({
   csrf,
   mode,
+  depthMode,
   resetSignal,
   onContextUsage,
   onWorkspaceChanged,
@@ -170,6 +174,7 @@ export function useWebChatSession({
   const wsRef = useRef<WebSocket | null>(null);
   const resetSignalRef = useRef(resetSignal);
   const modeRef = useRef(mode);
+  const depthModeRef = useRef(depthMode);
   /**
    * Tracks the most recently seen request_id (from request_started/state/finished/
    * status_update). Used to stamp `request_id` onto approvals that arrive without
@@ -237,6 +242,10 @@ export function useWebChatSession({
   }, [mode]);
 
   useEffect(() => {
+    depthModeRef.current = depthMode;
+  }, [depthMode]);
+
+  useEffect(() => {
     let ws: WebSocket | null = null;
     let cancelled = false;
 
@@ -251,6 +260,9 @@ export function useWebChatSession({
         ws.onopen = () => {
           setConnected(true);
           ws?.send(JSON.stringify({ type: "mode_change", mode: modeRef.current }));
+          ws?.send(
+            JSON.stringify({ type: "depth_mode_change", depth_mode: depthModeRef.current })
+          );
         };
         ws.onclose = () => {
           setConnected(false);
@@ -331,6 +343,12 @@ export function useWebChatSession({
       wsRef.current.send(JSON.stringify({ type: "mode_change", mode }));
     }
   }, [mode]);
+
+  useEffect(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "depth_mode_change", depth_mode: depthMode }));
+    }
+  }, [depthMode]);
 
   useEffect(() => {
     if (resetSignal === resetSignalRef.current) return;

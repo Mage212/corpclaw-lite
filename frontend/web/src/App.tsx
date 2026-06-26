@@ -24,6 +24,7 @@ import type {
   AgentMode,
   ChatSummary,
   ContextUsage,
+  DepthMode,
   PreviewOverlayMode,
   PreviewPayload,
   SessionPayload,
@@ -122,6 +123,8 @@ function Workspace({
   // effective mode from the chat's section at run time. ---
   const [mode] = useState<AgentMode>("execute");
   const [section, setSection] = useState<SidebarSection>("chat");
+  // Etap 3: depth mode (Fast/Think) — orthogonal to section (tools on/off).
+  const [depthMode, setDepthMode] = useState<DepthMode>("think");
 
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -161,6 +164,7 @@ function Workspace({
   const chatSession = useWebChatSession({
     csrf: session.csrf_token,
     mode,
+    depthMode,
     resetSignal,
     onContextUsage: setContextUsage,
     onWorkspaceChanged: refreshOverview,
@@ -345,6 +349,8 @@ function Workspace({
             user={user}
             onPreviewFile={openPreviewPath}
             contextUsage={contextUsage}
+            depthMode={depthMode}
+            onDepthModeChange={setDepthMode}
           />
         </div>
 

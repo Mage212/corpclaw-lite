@@ -144,6 +144,22 @@ agent:
     gathering_thinking: "off"        # research gathering (incl. first turn)
     aggregation_thinking: "default"  # research aggregation (final analysis/report)
 
+  # Etap 3 (Sprint 3A): user-selectable depth modes (Fast/Think). Each maps to
+  # a named SamplingProfile in config/model_presets.yaml, keyed by the route's
+  # model, so every model carries its own official inference/thinking params.
+  # Resolution goes through router.with_overrides(sampling_name=...) — the full
+  # profile applies, no raw thinking override bypassing the preset system.
+  depth_modes:
+    default: "think"
+    # Fast = thinking OFF (instruct mode). Official rec per model.
+    fast:
+      gemma4-26b-qat: gemma4-fast            # single official set, thinking off
+      qwen3.6-35b-a3b: qwen-instruct-general # temp=0.7, top_p=0.8, thinking off
+    # Think = thinking ON (default reasoning). Official rec per model.
+    think:
+      gemma4-26b-qat: gemma4-default          # temp=1.0, top_p=0.95, top_k=64
+      qwen3.6-35b-a3b: qwen-thinking-general  # temp=1.0, top_p=0.95, pp=1.5
+
 web:
   search_backend: "auto"
   search_retry_attempts: 3

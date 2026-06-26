@@ -1165,6 +1165,9 @@ class WebChannelOrchestrator:
         await ws.prepare(request)
         self._clients.setdefault(user.id, set()).add(ws)
         mode = "execute"
+        # Etap 3: depth mode (Fast/Think) is a per-connection UI state, separate
+        # from `mode` (tools on/off, derived from chat section). Default = think.
+        depth_mode: str = "think"
 
         async def send(payload: dict[str, object]) -> None:
             await self._send_ws(ws, payload)
@@ -1402,6 +1405,7 @@ class WebChannelOrchestrator:
                     user=user,
                     message=text,
                     mode=effective_mode,
+                    depth_mode=depth_mode,
                     channel="web",
                     callbacks=AgentRequestCallbacks(
                         request_approval=approval_cb,
@@ -1558,6 +1562,13 @@ class WebChannelOrchestrator:
                     if requested in {"chat", "execute"}:
                         mode = str(requested)
                         await send({"type": "mode", "mode": mode})
+                elif event_type == "depth_mode_change":
+                    # Etap 3: Fast/Think depth selector. Validated against the
+                    # known set; unknown values are ignored (research arrives in 3B).
+                    requested_depth = payload.get("depth_mode")
+                    if requested_depth in {"fast", "think"}:
+                        depth_mode = str(requested_depth)
+                        await send({"type": "depth_mode", "depth_mode": depth_mode})
                 elif event_type == "load_chat":
                     # Read-only load of a specific chat's transcript. Does NOT
                     # activate the chat or touch agent context — the client uses

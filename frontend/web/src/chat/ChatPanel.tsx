@@ -1,6 +1,6 @@
 import { Bot, CheckCircle2, CircleAlert, Download, Eye, Send, Sparkles } from "lucide-react";
 import { useLayoutEffect, useRef } from "react";
-import type { ChatMessage, ContextUsage, StatusLine, User } from "../types";
+import type { ChatMessage, ContextUsage, DepthMode, StatusLine, User } from "../types";
 import { ActivityCard } from "./ActivityCard";
 import { ContextSizeBar } from "./ContextSizeBar";
 import { MarkdownMessage } from "./MarkdownMessage";
@@ -11,9 +11,18 @@ type ChatPanelProps = {
   user: User;
   onPreviewFile: (path: string) => void;
   contextUsage: ContextUsage | null;
+  depthMode: DepthMode;
+  onDepthModeChange: (mode: DepthMode) => void;
 };
 
-export function ChatPanel({ session, user, onPreviewFile, contextUsage }: ChatPanelProps) {
+export function ChatPanel({
+  session,
+  user,
+  onPreviewFile,
+  contextUsage,
+  depthMode,
+  onDepthModeChange
+}: ChatPanelProps) {
   const messagesRef = useRef<HTMLDivElement | null>(null);
   const preserveScrollRef = useRef<{ height: number; top: number } | null>(null);
 
@@ -110,8 +119,36 @@ export function ChatPanel({ session, user, onPreviewFile, contextUsage }: ChatPa
           <Send size={18} />
         </button>
       </footer>
-      <ContextSizeBar usage={contextUsage} />
+      <div className="composer-extras">
+        <ModeSelector value={depthMode} onChange={onDepthModeChange} />
+        <ContextSizeBar usage={contextUsage} />
+      </div>
     </main>
+  );
+}
+
+/** Fast/Think depth selector (Etap 3). Compact segmented control. */
+function ModeSelector({
+  value,
+  onChange
+}: {
+  value: DepthMode;
+  onChange: (mode: DepthMode) => void;
+}) {
+  return (
+    <div className="depth-selector" role="group" aria-label="Режим обработки">
+      {(["fast", "think"] as const).map((mode) => (
+        <button
+          key={mode}
+          className={`depth-option ${value === mode ? "active" : ""}`}
+          onClick={() => onChange(mode)}
+          title={mode === "fast" ? "Быстрый ответ (без размышлений)" : "С размышлениями"}
+          aria-pressed={value === mode}
+        >
+          {mode === "fast" ? "Fast" : "Think"}
+        </button>
+      ))}
+    </div>
   );
 }
 
