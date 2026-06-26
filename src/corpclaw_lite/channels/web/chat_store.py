@@ -419,9 +419,7 @@ class WebChatStore:
             msg_count=int(row["msg_count"]),
         )
 
-    def _sync_list_sessions(
-        self, user_id: str, section: str | None
-    ) -> list[ChatSessionSummary]:
+    def _sync_list_sessions(self, user_id: str, section: str | None) -> list[ChatSessionSummary]:
         try:
             with db_connect(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
@@ -466,9 +464,7 @@ class WebChatStore:
         """
         return await run_in_thread(self._sync_list_sessions, str(user_id), section)
 
-    def _sync_get_session(
-        self, user_id: str, session_id: int
-    ) -> ChatSessionSummary | None:
+    def _sync_get_session(self, user_id: str, session_id: int) -> ChatSessionSummary | None:
         try:
             with db_connect(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
@@ -488,9 +484,7 @@ class WebChatStore:
         except Exception as e:
             raise StorageError(f"Failed to get web chat session {session_id}: {e}") from e
 
-    async def get_session(
-        self, user_id: str, session_id: int
-    ) -> ChatSessionSummary | None:
+    async def get_session(self, user_id: str, session_id: int) -> ChatSessionSummary | None:
         """Return a single chat session if owned by the user, else None."""
         return await run_in_thread(self._sync_get_session, str(user_id), int(session_id))
 
@@ -567,9 +561,7 @@ class WebChatStore:
         """Activate a chat session owned by the user. Returns its id, or None if not found."""
         return await run_in_thread(self._sync_activate_session, str(user_id), int(session_id))
 
-    def _sync_set_session_title(
-        self, user_id: str, session_id: int, title: str | None
-    ) -> bool:
+    def _sync_set_session_title(self, user_id: str, session_id: int, title: str | None) -> bool:
         try:
             with db_connect(self.db_path) as conn:
                 cursor = conn.execute(
@@ -585,17 +577,13 @@ class WebChatStore:
             logger.warning("Failed to set web chat title for session %s: %s", session_id, e)
             return False
 
-    async def set_session_title(
-        self, user_id: str, session_id: int, title: str | None
-    ) -> bool:
+    async def set_session_title(self, user_id: str, session_id: int, title: str | None) -> bool:
         """Set title only if currently NULL (auto-naming guard). Returns whether updated."""
         return await run_in_thread(
             self._sync_set_session_title, str(user_id), int(session_id), title
         )
 
-    def _sync_list_messages(
-        self, user_id: str, session_id: int, limit: int
-    ) -> WebChatPage:
+    def _sync_list_messages(self, user_id: str, session_id: int, limit: int) -> WebChatPage:
         """Read messages of a specific (not necessarily active) session. Read-only viewing."""
         limit = max(1, min(limit, 200))
         try:
@@ -633,9 +621,7 @@ class WebChatStore:
         limit: int = _DEFAULT_HISTORY_LIMIT,
     ) -> WebChatPage:
         """Return messages of a specific chat session (read-only viewing of any owned chat)."""
-        return await run_in_thread(
-            self._sync_list_messages, str(user_id), int(session_id), limit
-        )
+        return await run_in_thread(self._sync_list_messages, str(user_id), int(session_id), limit)
 
     def _sync_list_recent(self, user_id: str, limit: int) -> WebChatPage:
         limit = max(1, min(limit, 200))

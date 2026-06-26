@@ -985,12 +985,8 @@ class WebChannelOrchestrator:
         section = request.query.get("section")
         if section not in {"chat", "work", None}:
             section = None
-        summaries = await self._chat_store.list_sessions(
-            user.memory_key(), section=section
-        )
-        return web.json_response(
-            {"chats": [self._session_summary_payload(s) for s in summaries]}
-        )
+        summaries = await self._chat_store.list_sessions(user.memory_key(), section=section)
+        return web.json_response({"chats": [self._session_summary_payload(s) for s in summaries]})
 
     async def _handle_create_chat(self, request: web.Request) -> web.Response:
         user = self._require_user(request)
@@ -1011,9 +1007,7 @@ class WebChannelOrchestrator:
             )
         try:
             await self._service.reset_user_context(user)
-            session_id = await self._chat_store.create_session(
-                user.memory_key(), section=section
-            )
+            session_id = await self._chat_store.create_session(user.memory_key(), section=section)
             summary = await self._chat_store.get_session(user.memory_key(), session_id)
         finally:
             await self._service.finish_user_request(user.id)
@@ -1048,9 +1042,7 @@ class WebChannelOrchestrator:
             )
         try:
             await self._service.reset_user_context(user)
-            new_id = await self._chat_store.activate_session(
-                user.memory_key(), session_id
-            )
+            new_id = await self._chat_store.activate_session(user.memory_key(), session_id)
         finally:
             await self._service.finish_user_request(user.id)
         if new_id is None:
