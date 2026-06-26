@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-import time
 from functools import partial
 from typing import Any
 
@@ -21,7 +20,6 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 _DATA_DIR = DATA_DIR
-_VACUUM_INTERVAL = 3600
 
 
 class SQLiteMemory:
@@ -33,7 +31,6 @@ class SQLiteMemory:
 
     def __init__(self, db_path: str = "memory.db"):
         self.db_path = _DATA_DIR / db_path
-        self._last_vacuum: dict[str, float] = {}
         self._init_db()
 
     def _init_db(self) -> None:
@@ -232,13 +229,12 @@ class SQLiteMemory:
         """Delete the N oldest messages and insert a consolidation summary.
 
         Runs in a single transaction to avoid data loss.
+
+        Note: VACUUM is no longer triggered automatically here — it takes an exclusive
+        database lock that stalls all readers/writers. Call ``vacuum()`` explicitly
+        (e.g. from a maintenance/CLI path) when reclaiming disk space is required.
         """
         await anyio.to_thread.run_sync(partial(self._sync_replace_oldest, user_id, count, summary))
-        now = time.monotonic()
-        last = self._last_vacuum.get(user_id, 0.0)
-        if now - last >= _VACUUM_INTERVAL:
-            await anyio.to_thread.run_sync(partial(self._sync_vacuum))
-            self._last_vacuum[user_id] = now
 
     # ── Vacuum ──────────────────────────────────────────────────────────────
 
