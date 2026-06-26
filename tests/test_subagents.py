@@ -654,6 +654,7 @@ async def test_dispatch_subagent_tool_dispatches() -> None:
         on_subagent_tool_batch_start=None,
         on_subagent_llm_stage=None,
         on_subagent_llm_queue_status=None,
+        forced_research_mode=None,
     )
 
 
@@ -709,6 +710,7 @@ async def test_dispatch_subagent_tool_passes_status_callbacks() -> None:
         on_subagent_tool_batch_start=on_tool_batch_start,
         on_subagent_llm_stage=on_llm_stage,
         on_subagent_llm_queue_status=on_llm_queue_status,
+        forced_research_mode=None,
     )
 
 

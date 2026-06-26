@@ -628,7 +628,7 @@ export function parseServerWsEvent(value: unknown): ServerWsEvent | null {
       const raw = value.depth_mode;
       return {
         type: "depth_mode",
-        depth_mode: raw === "fast" ? "fast" : "think"
+        depth_mode: raw === "fast" ? "fast" : raw === "research" ? "research" : "think"
       };
     }
     case "chat_renamed": {

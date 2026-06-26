@@ -1,6 +1,13 @@
 import { Bot, CheckCircle2, CircleAlert, Download, Eye, Send, Sparkles } from "lucide-react";
 import { useLayoutEffect, useRef } from "react";
-import type { ChatMessage, ContextUsage, DepthMode, StatusLine, User } from "../types";
+import type {
+  ChatMessage,
+  ContextUsage,
+  DepthMode,
+  SidebarSection,
+  StatusLine,
+  User
+} from "../types";
 import { ActivityCard } from "./ActivityCard";
 import { ContextSizeBar } from "./ContextSizeBar";
 import { MarkdownMessage } from "./MarkdownMessage";
@@ -13,6 +20,7 @@ type ChatPanelProps = {
   contextUsage: ContextUsage | null;
   depthMode: DepthMode;
   onDepthModeChange: (mode: DepthMode) => void;
+  section: SidebarSection;
 };
 
 export function ChatPanel({
@@ -21,7 +29,8 @@ export function ChatPanel({
   onPreviewFile,
   contextUsage,
   depthMode,
-  onDepthModeChange
+  onDepthModeChange,
+  section
 }: ChatPanelProps) {
   const messagesRef = useRef<HTMLDivElement | null>(null);
   const preserveScrollRef = useRef<{ height: number; top: number } | null>(null);
@@ -120,32 +129,46 @@ export function ChatPanel({
         </button>
       </footer>
       <div className="composer-extras">
-        <ModeSelector value={depthMode} onChange={onDepthModeChange} />
+        <ModeSelector value={depthMode} onChange={onDepthModeChange} section={section} />
         <ContextSizeBar usage={contextUsage} />
       </div>
     </main>
   );
 }
 
-/** Fast/Think depth selector (Etap 3). Compact segmented control. */
+/**
+ * Fast/Think/Research depth selector (Etap 3). Compact segmented control.
+ * Research is Work-only (requires tools to dispatch the research subagent).
+ */
 function ModeSelector({
   value,
-  onChange
+  onChange,
+  section
 }: {
   value: DepthMode;
   onChange: (mode: DepthMode) => void;
+  section: SidebarSection;
 }) {
+  const modes: DepthMode[] = section === "work" ? ["fast", "think", "research"] : ["fast", "think"];
+  const label = (mode: DepthMode): string =>
+    mode === "fast" ? "Fast" : mode === "think" ? "Think" : "Research";
+  const hint = (mode: DepthMode): string =>
+    mode === "fast"
+      ? "Быстрый ответ (без размышлений)"
+      : mode === "think"
+        ? "С размышлениями"
+        : "Глубокое исследование через research-агента";
   return (
     <div className="depth-selector" role="group" aria-label="Режим обработки">
-      {(["fast", "think"] as const).map((mode) => (
+      {modes.map((mode) => (
         <button
           key={mode}
           className={`depth-option ${value === mode ? "active" : ""}`}
           onClick={() => onChange(mode)}
-          title={mode === "fast" ? "Быстрый ответ (без размышлений)" : "С размышлениями"}
+          title={hint(mode)}
           aria-pressed={value === mode}
         >
-          {mode === "fast" ? "Fast" : "Think"}
+          {label(mode)}
         </button>
       ))}
     </div>

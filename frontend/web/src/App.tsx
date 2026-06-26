@@ -187,6 +187,15 @@ function Workspace({
   void overview;
   void overviewLoading;
 
+  // Etap 3B: Research mode requires tools (dispatch_subagent), which are off in
+  // the Chat section. If the user switches to Chat while Research is selected,
+  // fall back to Think so the depth stays meaningful.
+  useEffect(() => {
+    if (section === "chat" && depthMode === "research") {
+      setDepthMode("think");
+    }
+  }, [section, depthMode]);
+
   if (!user) {
     return <LoginView onLogin={onSessionChange} />;
   }
@@ -351,6 +360,7 @@ function Workspace({
             contextUsage={contextUsage}
             depthMode={depthMode}
             onDepthModeChange={setDepthMode}
+            section={section}
           />
         </div>
 

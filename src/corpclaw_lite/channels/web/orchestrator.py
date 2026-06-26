@@ -1563,10 +1563,10 @@ class WebChannelOrchestrator:
                         mode = str(requested)
                         await send({"type": "mode", "mode": mode})
                 elif event_type == "depth_mode_change":
-                    # Etap 3: Fast/Think depth selector. Validated against the
-                    # known set; unknown values are ignored (research arrives in 3B).
+                    # Etap 3: Fast/Think/Research depth selector. Validated
+                    # against the known set; unknown values are ignored.
                     requested_depth = payload.get("depth_mode")
-                    if requested_depth in {"fast", "think"}:
+                    if requested_depth in {"fast", "think", "research"}:
                         depth_mode = str(requested_depth)
                         await send({"type": "depth_mode", "depth_mode": depth_mode})
                 elif event_type == "load_chat":

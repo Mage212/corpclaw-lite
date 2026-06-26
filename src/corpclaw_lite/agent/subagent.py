@@ -70,8 +70,12 @@ def _research_mode_for_task(spec: SubagentSpec, task_context: str) -> str | None
     return "research"
 
 
-def _prepare_research_task_context(spec: SubagentSpec, task_context: str) -> str:
-    mode = _research_mode_for_task(spec, task_context)
+def _prepare_research_task_context(
+    spec: SubagentSpec, task_context: str, *, research_mode: str | None = None
+) -> str:
+    mode = (
+        research_mode if research_mode is not None else _research_mode_for_task(spec, task_context)
+    )
     if mode is None:
         return task_context
     language = detect_language(task_context)
@@ -134,6 +138,7 @@ class SubagentDispatcher:
         on_subagent_tool_batch_start: Callable[[str, list[str]], None] | None = None,
         on_subagent_llm_stage: Callable[[str, str], None] | None = None,
         on_subagent_llm_queue_status: Callable[[str, LLMQueueStatus], None] | None = None,
+        forced_research_mode: str | None = None,
     ) -> str:
         """Run the subagent on a specific task.
 
@@ -286,10 +291,20 @@ class SubagentDispatcher:
 
         try:
             t0 = time.monotonic()
-            effective_task_context = _prepare_research_task_context(spec, task_context)
-            research_mode = _research_mode_for_task(spec, task_context)
-            if self._research_runtime is not None and research_mode is not None:
-                mode = "deep_research" if research_mode == "deep_research" else "research"
+            # Etap 3B: explicit depth-mode override ("research" from the UI)
+            # forces deep_research for the research-agent, bypassing keyword
+            # detection. When None, keyword detection is the fallback (3A behavior).
+            if forced_research_mode == "research" and spec.id == "research-agent":
+                resolved_research_mode: str | None = "deep_research"
+            else:
+                resolved_research_mode = forced_research_mode or _research_mode_for_task(
+                    spec, task_context
+                )
+            effective_task_context = _prepare_research_task_context(
+                spec, task_context, research_mode=resolved_research_mode
+            )
+            if self._research_runtime is not None and resolved_research_mode is not None:
+                mode = "deep_research" if resolved_research_mode == "deep_research" else "research"
                 language = detect_language(task_context)
                 self._research_runtime.initialize_run_mode(
                     user, subagent_run_id, mode, language=language
@@ -301,6 +316,7 @@ class SubagentDispatcher:
                     subagent_id=spec.id,
                     mode=mode,
                     language=language,
+                    forced=bool(forced_research_mode),
                 )
 
             def forward_tool_start(tool_name: str) -> None:
@@ -396,8 +412,14 @@ class SubagentDispatcher:
             # — banner + gathered facts + sources + a limitation noting synthesis did not
             # happen — instead of pretending the facts dump is a finished deep report.
             if spec.id == "research-agent" and self._research_runtime is not None:
-                research_mode = _research_mode_for_task(spec, task_context)
-                mode = "deep_research" if research_mode == "deep_research" else "research"
+                # Etap 3B: honour the explicit override on timeout recovery too.
+                if forced_research_mode == "research":
+                    recovery_research_mode: str | None = "deep_research"
+                else:
+                    recovery_research_mode = forced_research_mode or _research_mode_for_task(
+                        spec, task_context
+                    )
+                mode = "deep_research" if recovery_research_mode == "deep_research" else "research"
                 try:
                     partial = self._research_runtime.finalize_report(
                         user, subagent_run_id, mode, answer="", interrupted=True

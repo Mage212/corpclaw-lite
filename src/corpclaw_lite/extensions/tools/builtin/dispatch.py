@@ -156,6 +156,14 @@ class DispatchSubagentTool(Tool):
                 f"cannot use subagent '{subagent_id}'."
             )
 
+        # Etap 3B: if the main run was started in "research" depth mode, force
+        # deep_research when dispatching the research-agent (bypass keyword
+        # detection). Read from the per-run contextvar set by AgentLoop.run().
+        from corpclaw_lite.agent.depth_mode import get_call_depth_mode
+
+        depth = get_call_depth_mode()
+        forced_research = "research" if depth == "research" else None
+
         return await self._dispatcher.dispatch(
             spec,
             user,
@@ -166,6 +174,7 @@ class DispatchSubagentTool(Tool):
             on_subagent_tool_batch_start=on_subagent_tool_batch_start,
             on_subagent_llm_stage=on_subagent_llm_stage,
             on_subagent_llm_queue_status=on_subagent_llm_queue_status,
+            forced_research_mode=forced_research,
         )
 
     def should_return_direct(self, arguments: dict[str, Any], result: str) -> bool:
