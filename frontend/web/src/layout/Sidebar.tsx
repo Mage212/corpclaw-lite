@@ -1,24 +1,37 @@
 import { useEffect, useRef, useState } from "react";
-import { ChevronDown, LogOut, MessageSquarePlus, Settings2, Sparkles } from "lucide-react";
+import { ChevronDown, LogOut, Settings2, Sparkles } from "lucide-react";
 import {
   AGENT_CONTEXT_LABEL,
-  CHAT_HISTORY_PLACEHOLDER,
   COMING_SOON_LABEL,
   EXTENSIONS_LABEL,
-  NEW_CHAT_LABEL,
   sidebarSectionLabel
 } from "../i18n/ru";
-import type { SidebarSection, User } from "../types";
+import type { ChatSummary, SidebarSection, User } from "../types";
+import { ChatList } from "./ChatList";
 
 export type SidebarProps = {
   user: User;
   section: SidebarSection;
   onSectionChange: (section: SidebarSection) => void;
+  chats: ChatSummary[];
+  activeChatId: number | null;
+  chatsLoading: boolean;
+  onSelectChat: (chat: ChatSummary) => void;
   onNewChat: () => void;
   onLogout: () => void;
 };
 
-export function Sidebar({ user, section, onSectionChange, onNewChat, onLogout }: SidebarProps) {
+export function Sidebar({
+  user,
+  section,
+  onSectionChange,
+  chats,
+  activeChatId,
+  chatsLoading,
+  onSelectChat,
+  onNewChat,
+  onLogout
+}: SidebarProps) {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const userMenuRef = useRef<HTMLDivElement | null>(null);
 
@@ -63,13 +76,13 @@ export function Sidebar({ user, section, onSectionChange, onNewChat, onLogout }:
         </button>
       </nav>
 
-      <div className="sidebar-chats">
-        <button className="new-chat-btn" onClick={onNewChat} title={NEW_CHAT_LABEL}>
-          <MessageSquarePlus size={16} />
-          <span>{NEW_CHAT_LABEL}</span>
-        </button>
-        <div className="sidebar-chats-placeholder">{CHAT_HISTORY_PLACEHOLDER}</div>
-      </div>
+      <ChatList
+        chats={chats}
+        activeChatId={activeChatId}
+        onSelectChat={onSelectChat}
+        onNewChat={onNewChat}
+        loading={chatsLoading}
+      />
 
       <div className="sidebar-user-profile" ref={userMenuRef}>
         <div className="user-menu">

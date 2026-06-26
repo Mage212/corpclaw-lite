@@ -1,13 +1,17 @@
 import type {
+  ChatSummary,
   DirectoryPayload,
   FileEntry,
   PreviewPayload,
   SessionPayload,
+  SidebarSection,
   TreeNode,
   WorkspaceOverviewPayload
 } from "./types";
 import {
   errorMessageFromPayload,
+  parseChatSummaries,
+  parseChatSummary,
   parseDirectoryPayload,
   parseOkPayload,
   parsePathPayload,
@@ -86,6 +90,37 @@ export function createWebSocketTicket(
 
 export function getWorkspaceOverview(): Promise<WorkspaceOverviewPayload> {
   return apiFetch("/api/workspace/overview", parseWorkspaceOverviewPayload);
+}
+
+// --- Etap 2: chat history endpoints ---
+
+export function getChats(csrf: string, section?: SidebarSection): Promise<ChatSummary[]> {
+  const params = section ? new URLSearchParams({ section }) : new URLSearchParams();
+  const qs = params.toString();
+  return apiFetch(`/api/chats${qs ? `?${qs}` : ""}`, (value) =>
+    parseChatSummaries((value as { chats?: unknown }).chats)
+  );
+}
+
+export function createChat(csrf: string, section: SidebarSection): Promise<ChatSummary> {
+  return apiFetch("/api/chats", parseChatEnvelope, {
+    method: "POST",
+    csrf,
+    body: JSON.stringify({ section })
+  });
+}
+
+export function activateChat(csrf: string, chatId: number): Promise<ChatSummary> {
+  return apiFetch(`/api/chats/${chatId}/activate`, parseChatEnvelope, {
+    method: "POST",
+    csrf
+  });
+}
+
+/** POST /api/chats and POST /api/chats/{id}/activate return `{chat: {...}}`. */
+function parseChatEnvelope(value: unknown): ChatSummary {
+  const source = (value ?? {}) as { chat?: unknown };
+  return parseChatSummary(source.chat);
 }
 
 export function listFiles(

@@ -1,6 +1,7 @@
 import type {
   AgentMode,
   ChatMessage,
+  ChatSummary,
   ContextUsage,
   DirectoryPayload,
   FileEntry,
@@ -19,7 +20,7 @@ export type UploadPayload = {
 };
 
 export type ServerWsEvent =
-  | { type: "chat_history"; messages: ChatMessage[]; has_more: boolean; session_id?: number }
+  | { type: "chat_history"; messages: ChatMessage[]; has_more: boolean; session_id?: number; read_only?: boolean }
   | { type: "history_page"; messages: ChatMessage[]; has_more: boolean; session_id?: number }
   | { type: "chat_message"; message: ChatMessage }
   | { type: "request_started"; request_id: string; label: string; phase?: string; key?: string }
@@ -42,7 +43,10 @@ export type ServerWsEvent =
   | { type: "approval_required"; approval_id: string; action: string; details: string; request_id?: string }
   | { type: "approval_resolved"; approval_id: string; request_id?: string }
   | { type: "llm_status"; status: string }
-  | { type: "mode"; mode: AgentMode };
+  | { type: "mode"; mode: AgentMode }
+  | { type: "chat_renamed"; session_id: number; title: string }
+  | { type: "chat_activated"; session_id: number; section: string; mode: AgentMode }
+  | { type: "chat_list_changed" };
 
 type JsonRecord = Record<string, unknown>;
 
@@ -199,6 +203,26 @@ export function parseFileEntry(value: unknown): FileEntry {
     mime_type: nullableString(source, "mime_type", "file entry"),
     protected: requiredBoolean(source, "protected", "file entry")
   };
+}
+
+/** Parse a chat summary object from GET /api/chats (or embedded in WS events). */
+export function parseChatSummary(value: unknown): ChatSummary {
+  const source = record(value, "chat summary");
+  const rawSection = requiredString(source, "section", "chat summary");
+  const titleValue = source.title;
+  return {
+    id: requiredNumber(source, "id", "chat summary"),
+    section: rawSection === "work" ? "work" : "chat",
+    title: typeof titleValue === "string" && titleValue.length > 0 ? titleValue : null,
+    created_at: requiredString(source, "created_at", "chat summary"),
+    active: requiredBoolean(source, "active", "chat summary"),
+    msg_count: requiredNumber(source, "msg_count", "chat summary")
+  };
+}
+
+export function parseChatSummaries(value: unknown): ChatSummary[] {
+  if (!Array.isArray(value)) return [];
+  return value.map(parseChatSummary);
 }
 
 function parseWorkspaceOutput(value: unknown): WorkspaceOutputSummary {
@@ -426,6 +450,9 @@ export function parseServerWsEvent(value: unknown): ServerWsEvent | null {
       if (sessionId !== undefined) {
         event.session_id = sessionId;
       }
+      if (value.read_only === true) {
+        event.read_only = true;
+      }
       return event;
     }
     case "history_page": {
@@ -591,6 +618,28 @@ export function parseServerWsEvent(value: unknown): ServerWsEvent | null {
       return { type: "llm_status", status: stringValue(value.status, "unknown") };
     case "mode":
       return { type: "mode", mode: modeValue(value.mode) };
+    case "chat_renamed": {
+      const renamedId = optionalNumber(value.session_id);
+      if (renamedId === undefined) return null;
+      return {
+        type: "chat_renamed",
+        session_id: renamedId,
+        title: stringValue(value.title, "")
+      };
+    }
+    case "chat_activated": {
+      const activatedId = optionalNumber(value.session_id);
+      if (activatedId === undefined) return null;
+      const sectionValue = stringValue(value.section, "chat");
+      return {
+        type: "chat_activated",
+        session_id: activatedId,
+        section: sectionValue === "work" ? "work" : "chat",
+        mode: modeValue(value.mode)
+      };
+    }
+    case "chat_list_changed":
+      return { type: "chat_list_changed" };
     default:
       return null;
   }

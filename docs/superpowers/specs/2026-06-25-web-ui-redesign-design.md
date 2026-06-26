@@ -93,7 +93,7 @@ WS: `/ws/chat` (inbound: `mode_change, load_history_before, reset_context, appro
 
 | Решение | Выбор | Обоснование |
 |---------|-------|-------------|
-| **Модель памяти** | **UI-мультисессия, single-thread агент-памяти** | 1 пользователь → 1 активный чат. Остальные чаты в истории — **read-only просмотр**. История = способ хранить частые/повторяющиеся задачи и восстанавливать контекст. Переключение между чатами/режимами возможно, но активный только один. **Точка расширения:** заложить на будущее возможность 2–3 одновременных чатов. Без правок ядра SQLiteMemory → нулевой риск. |
+| **Модель памяти** | **UI-мультисессия, single-thread агент-памяти** | 1 пользователь → 1 активный чат **total** (не на раздел). Остальные чаты в истории — **read-only просмотр**. Section (Chat/Work) — тег на чате + фильтр списка в sidebar, не отдельная активная-сессия (существующий unique index на user_id не трогаем). История = способ хранить частые/повторяющиеся задачи и восстанавливать контекст. Переключение между чатами/режимами возможно, но активный только один. **Точка расширения:** заложить на будущее возможность 2–3 одновременных чатов. Без правок ядра SQLiteMemory → нулевой риск. |
 | **Модель режимов (две ортогональные оси)** | **Chat/Work + Fast/Think/Research** | Две независимые оси, не одна. **Ось 1 — Chat/Work** (навигация/история): раздельные ленты чатов, **tools on/off привязан сюда** — Work = инструменты включены (наследник «Выполнение»), Chat = выключены (наследник «Диалог»). **Ось 2 — Fast/Think/Research** (глубина обработки в input): Fast = быстрый ответ без thinking; Think = с reasoning/thinking; Research = глубокое исследование через research-субагента. **Доступность режимов по разделам:** Chat → только Fast/Think (Research невозможен, т.к. требует tools); Work → Fast/Think/Research. Это устраняет двойственность осей и убирает ручной tools-toggle. |
 
 **Поведение при переключении чатов (detail):**
@@ -167,11 +167,24 @@ WS: `/ws/chat` (inbound: `mode_change, load_history_before, reset_context, appro
 - BE: без изменений (preview/file-mode-change уже работают через существующие API).
 - **Зависимости:** нет.
 
-### Этап 2 — История чатов (мультисессия, своя на раздел Chat/Work) + привязка tools к разделу
-**Scope:** список чатов в sidebar, переключение (открытие = read-only просмотр; активация = отправкой сообщения, авто-подъём вверх), rename/delete, «new chat». Своя история на раздел Chat/Work. Auto-naming по первому сообщению (~25 символов). Фундамент папок (`folder_id`). **Привязка tools on/off к разделу:** Work → `tools_enabled=True`, Chat → `tools_enabled=False` (наследники «Выполнение»/«Диалог» соответственно) — это убирает ручной tools-toggle.
-- FE: `ChatList` компонент, состояние активного/просматриваемого чата, gating отправки при занятом активном. SectionSwitcher (Chat/Work) теперь реально переключает раздел + определяет `tools_enabled`. **[ref §9.1]** time-range grouping («Сегодня»/«Вчера»/«Ранее») + infinite scroll; **[ref §9.1]** lazy chat creation (чат на BE при первой отправке, не при клике New).
-- BE: `chat_store.py` — expose архивных сессий + поле `section` (chat/work) + `folder_id` (nullable) + rename/delete + «switch active»; новые REST-эндпоинты (`GET /api/chats`, `POST /api/chats`, `PATCH /api/chats/{id}`, `DELETE /api/chats/{id}`, `POST /api/chats/{id}/activate`); WS-расширение (загрузка конкретного чата по id). Маппинг section→`tools_enabled` в `service.py`. **[ref §9.2]** auto-naming = truncation первичного сообщения (~25 символов) синхронно при первой отправке (без LLM); опция async-LLM-улучшения — future.
-- **Зависимости:** Этап 1 (нужен sidebar для списка).
+### Этап 2 — История чатов (мультисессия) + привязка tools к разделу
+**Scope:** список чатов в sidebar, переключение (открытие = read-only просмотр; активация = отправкой сообщения, авто-подъём вверх), rename/delete, «new chat». Auto-naming по первому сообщению (~25 символов). Фундамент папок (`folder_id`). **Привязка tools on/off к разделу:** Work → `tools_enabled=True`, Chat → `tools_enabled=False` (наследники «Выполнение»/«Диалог» соответственно) — это убирает ручной tools-toggle.
+
+**Уточнение модели сессий (пересмотрено при планировании):** активный чат всегда **ровно один на пользователя total** (не на раздел). Section (`chat`/`work`) — это **тег на чате + фильтр списка** в sidebar, а не отдельная активная-сессия. Это упрощает backend (существующий unique index `idx_web_chat_sessions_active ON (user_id) WHERE ended_at IS NULL` **не трогаем**). Переключение Chat↔Work в sidebar просто фильтрует видимый список; активный чат остаётся тот же, но виден только в своём разделе.
+
+**Декомпозиция на спринты (вертикальные срезы, shippable):**
+
+#### Спринт 2A — Core multi-chat (end-to-end вертикаль)
+Создание чата, список в sidebar, переключение, auto-naming, tools привязаны к section. Полный вертикальный срез (BE+FE вместе), shippable.
+- BE: миграция `section`+`title` колонок (ALTER-on-init, прецедент `reasoning` в sqlite.py:77-82); `list_sessions`/`activate_session`; REST `GET /api/chats`, `POST /api/chats`, `POST /api/chats/{id}/activate`; WS `load_chat` (загрузить транскрипт конкретного чата); auto-naming при первой отправке (truncation ~25 символов, без LLM); `mode` выводится из `section` активного чата в orchestrator (service.py БЕЗ изменений — mode→tools_enabled уже работает :221).
+- FE: `ChatSummary` тип + парсеры; 5 api.ts-функций; `ChatList` (базовый — список+выбор, БЕЗ rename/delete); `useWebChatSession chatId` param + reload по переключению; App.tsx — `mode = section === "work" ? "execute" : "chat"` (1 строка, переиспользует существующий WS mode_change), chatId state, composer-gating при занятом активном; Sidebar — placeholder → `<ChatList>`.
+
+#### Спринт 2B — Chat management
+Rename, delete, time-range grouping polish, фундамент папок. Зависит от 2A.
+- BE: `rename_session`/`delete_session`; `folder_id` миграция (nullable, grouping future).
+- FE: rename inline-edit; delete UI (⋮-меню + confirm); **[ref §9.1]** time-range grouping («Сегодня»/«Вчера»/«Ранее») + infinite scroll; foundation папок (folder_id в данных, grouping UI — future).
+
+- **Зависимости:** Этап 1 (нужен sidebar).
 
 ### Этап 3 — Mode selector (Fast / Think / Research) в input — modes как presets
 **Scope:** selector глубины обработки в composer. **Внимание:** это НЕ замена оси tools on/off — та привязана к Chat/Work (Этап 2). Fast/Think/Research — ортогональная ось глубины. Research форсит `deep_research` явно (не keyword-детекция).

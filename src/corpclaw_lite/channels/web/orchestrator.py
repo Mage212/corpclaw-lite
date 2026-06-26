@@ -33,6 +33,7 @@ from corpclaw_lite.channels.status import (
 )
 from corpclaw_lite.channels.telegram.rate_limit import RateLimiter
 from corpclaw_lite.channels.web.chat_store import (
+    ChatSessionSummary,
     WebChatFile,
     WebChatMessage,
     WebChatStore,
@@ -75,6 +76,22 @@ _DOWNLOAD_GRANT_TTL_SECONDS = 24 * 60 * 60
 _CONTAINER_PRUNE_INTERVAL_SECONDS = 300
 _INLINE_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 _FRONTEND_DIST = PROJECT_ROOT / "frontend" / "web" / "dist"
+# Auto-naming: first user message truncated to this many chars (no LLM call).
+_CHAT_TITLE_MAX_CHARS = 25
+
+
+def _derive_chat_title(text: str) -> str | None:
+    """Derive a chat title from the first user message via truncation.
+
+    Collapses whitespace, caps at _CHAT_TITLE_MAX_CHARS, appends an ellipsis when
+    truncated. Returns None for blank/whitespace-only input (no title to set).
+    """
+    cleaned = " ".join(text.split())
+    if not cleaned:
+        return None
+    if len(cleaned) <= _CHAT_TITLE_MAX_CHARS:
+        return cleaned
+    return cleaned[:_CHAT_TITLE_MAX_CHARS].rstrip() + "…"
 
 
 @dataclass(slots=True)
@@ -236,6 +253,9 @@ class WebChannelOrchestrator:
         app.router.add_post("/logout", self._handle_logout)
         app.router.add_get("/api/session", self._handle_session)
         app.router.add_get("/api/workspace/overview", self._handle_workspace_overview)
+        app.router.add_get("/api/chats", self._handle_list_chats)
+        app.router.add_post("/api/chats", self._handle_create_chat)
+        app.router.add_post("/api/chats/{id}/activate", self._handle_activate_chat)
         app.router.add_post("/api/login", self._handle_api_login)
         app.router.add_post("/api/logout", self._handle_api_logout)
         app.router.add_post("/api/ws-ticket", self._handle_ws_ticket)
@@ -894,6 +914,18 @@ class WebChannelOrchestrator:
             payload["file"] = file_payload
         return payload
 
+    @staticmethod
+    def _session_summary_payload(summary: ChatSessionSummary) -> dict[str, object]:
+        """Serialize a chat session for the sidebar list (REST + WS)."""
+        return {
+            "id": summary.id,
+            "section": summary.section,
+            "title": summary.title,
+            "created_at": summary.created_at,
+            "active": summary.is_active,
+            "msg_count": summary.msg_count,
+        }
+
     def _llm_summary_payload(self) -> dict[str, object]:
         rule = next(
             (item for item in self._settings.llm.routing if item.task_kind == "default"),
@@ -940,6 +972,101 @@ class WebChannelOrchestrator:
             "recent_outputs": await self._recent_outputs_payload(user, limit=8),
         }
         return web.json_response(payload)
+
+    # ------------------------------------------------------------------
+    # Etap 2: chat history REST endpoints (list / create / activate).
+    # rename/delete are Etap 2B. All require auth + CSRF (enforced by middleware).
+    # ------------------------------------------------------------------
+
+    async def _handle_list_chats(self, request: web.Request) -> web.Response:
+        user = self._require_user(request)
+        if self._chat_store is None:
+            return web.json_response({"chats": []})
+        section = request.query.get("section")
+        if section not in {"chat", "work", None}:
+            section = None
+        summaries = await self._chat_store.list_sessions(user.memory_key(), section=section)
+        return web.json_response({"chats": [self._session_summary_payload(s) for s in summaries]})
+
+    async def _handle_create_chat(self, request: web.Request) -> web.Response:
+        user = self._require_user(request)
+        if self._chat_store is None or self._service is None:
+            raise web.HTTPServiceUnavailable()
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        section = body.get("section", "chat") if isinstance(body, dict) else "chat"
+        if section not in {"chat", "work"}:
+            section = "chat"
+        # A new chat implies a clean agent context. Block while a run is in-flight.
+        if not await self._service.try_start_user_request(user.id):
+            return web.json_response(
+                {"error": "Дождитесь завершения активного чата перед созданием нового."},
+                status=409,
+            )
+        try:
+            await self._service.reset_user_context(user)
+            session_id = await self._chat_store.create_session(user.memory_key(), section=section)
+            summary = await self._chat_store.get_session(user.memory_key(), session_id)
+        finally:
+            await self._service.finish_user_request(user.id)
+        if summary is None:
+            raise web.HTTPInternalServerError(text="Failed to create chat session")
+        self._context_usage.pop(user.id, None)
+        await self._broadcast_to_user(user.id, {"type": "chat_list_changed"})
+        return web.json_response({"chat": self._session_summary_payload(summary)})
+
+    async def _handle_activate_chat(self, request: web.Request) -> web.Response:
+        user = self._require_user(request)
+        if self._chat_store is None or self._service is None:
+            raise web.HTTPServiceUnavailable()
+        try:
+            session_id = int(request.match_info["id"])
+        except (KeyError, ValueError, TypeError) as e:
+            raise web.HTTPBadRequest(text="Invalid chat id.") from e
+        summary = await self._chat_store.get_session(user.memory_key(), session_id)
+        if summary is None:
+            raise web.HTTPNotFound(text="Chat not found.")
+        if summary.is_active:
+            # Already active — nothing to switch, just confirm current state.
+            return web.json_response(
+                {"chat": self._session_summary_payload(summary), "activated": False}
+            )
+        # Switching the active chat resets agent context (memory is single-thread
+        # per user). Block while a run is in-flight.
+        if not await self._service.try_start_user_request(user.id):
+            return web.json_response(
+                {"error": "Дождитесь завершения активного чата перед переключением."},
+                status=409,
+            )
+        try:
+            await self._service.reset_user_context(user)
+            new_id = await self._chat_store.activate_session(user.memory_key(), session_id)
+        finally:
+            await self._service.finish_user_request(user.id)
+        if new_id is None:
+            raise web.HTTPNotFound(text="Chat not found.")
+        activated = await self._chat_store.get_session(user.memory_key(), new_id)
+        if activated is None:
+            raise web.HTTPInternalServerError(text="Failed to reload chat session")
+        self._context_usage.pop(user.id, None)
+        # mode is now derived from the activated chat's section (Etap 2):
+        # Work → execute (tools on), Chat → chat (tools off).
+        mode = "execute" if activated.section == "work" else "chat"
+        await self._broadcast_to_user(
+            user.id,
+            {
+                "type": "chat_activated",
+                "session_id": new_id,
+                "section": activated.section,
+                "mode": mode,
+            },
+        )
+        await self._broadcast_to_user(user.id, {"type": "chat_list_changed"})
+        return web.json_response(
+            {"chat": self._session_summary_payload(activated), "activated": True, "mode": mode}
+        )
 
     async def _chat_messages_payload(
         self, messages: list[WebChatMessage], user: User
@@ -1159,7 +1286,27 @@ class WebChannelOrchestrator:
                 return
             request_acquired = True
             try:
-                await persist_and_broadcast(role="user", content=text, request_id=request_id)
+                user_message = await persist_and_broadcast(
+                    role="user", content=text, request_id=request_id
+                )
+                # Etap 2: auto-name the chat from the first user message if untitled.
+                # Truncation only (no LLM) — cheap and deterministic for local models.
+                if user_message is not None and self._chat_store is not None:
+                    title = _derive_chat_title(text)
+                    if title is not None:
+                        updated = await self._chat_store.set_session_title(
+                            user.memory_key(), user_message.session_id, title
+                        )
+                        if updated:
+                            await self._broadcast_to_user(
+                                user.id,
+                                {
+                                    "type": "chat_renamed",
+                                    "session_id": user_message.session_id,
+                                    "title": title,
+                                },
+                            )
+                            broadcast_task({"type": "chat_list_changed"})
                 request_started = True
                 self._active_request_state[user.id] = {
                     "request_id": request_id,
@@ -1174,10 +1321,21 @@ class WebChannelOrchestrator:
                         "label": INITIAL_STATUS_TEXT,
                     },
                 )
+                # Etap 2: mode is now derived from the active chat's section,
+                # not the legacy WS mode_change toggle. Work → execute (tools on),
+                # Chat → chat (tools off). Falls back to the WS-local mode if the
+                # session lookup fails (defensive — shouldn't happen).
+                effective_mode = mode
+                if user_message is not None and self._chat_store is not None:
+                    active_session = await self._chat_store.get_session(
+                        user.memory_key(), user_message.session_id
+                    )
+                    if active_session is not None:
+                        effective_mode = "execute" if active_session.section == "work" else "chat"
                 result = await self._service.run(
                     user=user,
                     message=text,
-                    mode=mode,
+                    mode=effective_mode,
                     channel="web",
                     callbacks=AgentRequestCallbacks(
                         request_approval=approval_cb,
@@ -1334,6 +1492,33 @@ class WebChannelOrchestrator:
                     if requested in {"chat", "execute"}:
                         mode = str(requested)
                         await send({"type": "mode", "mode": mode})
+                elif event_type == "load_chat":
+                    # Read-only load of a specific chat's transcript. Does NOT
+                    # activate the chat or touch agent context — the client uses
+                    # POST /api/chats/{id}/activate to switch the active chat.
+                    if self._chat_store is None:
+                        await send({"type": "error", "message": "История чата недоступна."})
+                        continue
+                    try:
+                        target_session = int(payload.get("session_id") or 0)
+                    except (TypeError, ValueError):
+                        await send({"type": "error", "message": "Некорректный чат."})
+                        continue
+                    if target_session <= 0:
+                        await send({"type": "error", "message": "Некорректный чат."})
+                        continue
+                    page = await self._chat_store.list_messages(
+                        user.memory_key(), session_id=target_session, limit=100
+                    )
+                    await send(
+                        {
+                            "type": "chat_history",
+                            "session_id": target_session,
+                            "messages": await self._chat_messages_payload(page.messages, user),
+                            "has_more": page.has_more,
+                            "read_only": True,
+                        }
+                    )
                 elif event_type == "load_history_before":
                     if self._chat_store is None:
                         await send({"type": "error", "message": "История чата недоступна."})
