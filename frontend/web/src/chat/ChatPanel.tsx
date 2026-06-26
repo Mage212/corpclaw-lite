@@ -1,6 +1,8 @@
 import { Bot, CheckCircle2, CircleAlert, Download, Eye, Send, Sparkles } from "lucide-react";
 import { useLayoutEffect, useRef } from "react";
-import type { ChatMessage, StatusLine, User } from "../types";
+import type { ChatMessage, ContextUsage, StatusLine, User } from "../types";
+import { ActivityCard } from "./ActivityCard";
+import { ContextSizeBar } from "./ContextSizeBar";
 import { MarkdownMessage } from "./MarkdownMessage";
 import type { WebChatSession } from "./useWebChatSession";
 
@@ -8,9 +10,10 @@ type ChatPanelProps = {
   session: WebChatSession;
   user: User;
   onPreviewFile: (path: string) => void;
+  contextUsage: ContextUsage | null;
 };
 
-export function ChatPanel({ session, user, onPreviewFile }: ChatPanelProps) {
+export function ChatPanel({ session, user, onPreviewFile, contextUsage }: ChatPanelProps) {
   const messagesRef = useRef<HTMLDivElement | null>(null);
   const preserveScrollRef = useRef<{ height: number; top: number } | null>(null);
 
@@ -24,7 +27,9 @@ export function ChatPanel({ session, user, onPreviewFile }: ChatPanelProps) {
       return;
     }
     node.scrollTo({ top: node.scrollHeight });
-  }, [session.messages, session.status]);
+    // Re-scroll as the live ActivityCard grows: runEvents updates each step and
+    // the in-flight card's body expands, so we need to keep the bottom in view.
+  }, [session.messages, session.status, session.runEvents, session.approvals]);
 
   function loadOlder() {
     const node = messagesRef.current;
@@ -51,29 +56,36 @@ export function ChatPanel({ session, user, onPreviewFile }: ChatPanelProps) {
             <span>Задачи и ответы появятся здесь.</span>
           </div>
         )}
-        {session.messages.map((message) => (
-          <MessageBubble key={message.id} message={message} onPreviewFile={onPreviewFile} />
-        ))}
-        {session.approvals.map((approval) => (
-          <div className="approval-card" key={approval.approval_id}>
-            <div className="approval-title">
-              <CircleAlert size={18} />
-              <strong>{approval.action}</strong>
-            </div>
-            <p>{approval.details}</p>
-            <div>
-              <button
-                className="primary"
-                onClick={() => session.answerApproval(approval.approval_id, true)}
-              >
-                Разрешить
-              </button>
-              <button onClick={() => session.answerApproval(approval.approval_id, false)}>
-                Отклонить
-              </button>
-            </div>
-          </div>
-        ))}
+        {session.messages.flatMap((message) => {
+          const bubble = (
+            <MessageBubble key={message.id} message={message} onPreviewFile={onPreviewFile} />
+          );
+          // After a user message that opened a request, render its ActivityCard.
+          // The card is omitted when there's no timeline data and the request
+          // isn't active (e.g. history reloaded without persisted events).
+          if (message.role === "user" && message.request_id) {
+            const rid = message.request_id;
+            const events = session.runEvents.filter((event) => event.requestId === rid);
+            const approvals = session.approvals.filter((approval) => approval.request_id === rid);
+            const isActive = session.status.requestId === rid && session.status.active;
+            if (events.length > 0 || approvals.length > 0 || isActive) {
+              return [
+                bubble,
+                <ActivityCard
+                  key={`activity_${rid}`}
+                  requestId={rid}
+                  events={events}
+                  approvals={approvals}
+                  isActive={isActive}
+                  statusLabel={session.status.label}
+                  statusTone={session.status.tone}
+                  onAnswerApproval={session.answerApproval}
+                />
+              ];
+            }
+          }
+          return [bubble];
+        })}
       </div>
       <StatusLineView status={session.status} connected={session.connected} />
       <footer className="composer">
@@ -96,6 +108,7 @@ export function ChatPanel({ session, user, onPreviewFile }: ChatPanelProps) {
           <Send size={18} />
         </button>
       </footer>
+      <ContextSizeBar usage={contextUsage} />
     </main>
   );
 }

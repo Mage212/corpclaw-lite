@@ -73,6 +73,13 @@ export type ApprovalRequest = {
   approval_id: string;
   action: string;
   details: string;
+  /**
+   * Request this approval belongs to. Not carried on the wire (the WS
+   * `approval_required` event has no request_id) — stamped client-side in
+   * `useWebChatSession` via `lastActiveRequestIdRef` so approvals can group
+   * inside their request's ActivityCard. `null` when no request is active.
+   */
+  request_id?: string | null;
 };
 
 export type WorkspaceOutputSummary = {
@@ -102,6 +109,7 @@ export type RunTimelineEvent = {
     | "queue"
     | "llm"
     | "tool"
+    | "subagent"
     | "approval"
     | "file"
     | "warning"
