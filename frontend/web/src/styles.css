@@ -1017,6 +1017,69 @@ a {
   line-height: 1.5;
 }
 
+/* --- Etap 2: chat list in sidebar --- */
+.chat-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.chat-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 9px;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chat-item:hover {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.chat-item.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* The chat that is the user's active session (even if not currently viewed). */
+.chat-item.is-active-session::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  flex-shrink: 0;
+}
+
+.chat-item-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-item-meta {
+  flex-shrink: 0;
+  color: var(--muted-2);
+  font-size: 11px;
+  background: var(--surface);
+  padding: 1px 6px;
+  border-radius: 999px;
+}
+
 .sidebar-user-profile {
   margin-top: auto;
   padding: 10px;

@@ -1,7 +1,16 @@
 import { ChevronDown, ChevronUp, Eye, MessageSquare, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import type { FormEvent } from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { getSession, getWorkspaceOverview, login, logout, previewFile } from "./api";
+import {
+  activateChat,
+  createChat,
+  getChats,
+  getSession,
+  getWorkspaceOverview,
+  login,
+  logout,
+  previewFile
+} from "./api";
 import { ChatPanel } from "./chat/ChatPanel";
 import { useWebChatSession } from "./chat/useWebChatSession";
 import { FileExplorer } from "./files/FileExplorer";
@@ -11,6 +20,7 @@ import { PreviewOverlay } from "./layout/PreviewOverlay";
 import { Sidebar } from "./layout/Sidebar";
 import type {
   AgentMode,
+  ChatSummary,
   ContextUsage,
   PreviewOverlayMode,
   PreviewPayload,
@@ -104,10 +114,10 @@ function Workspace({
   session: SessionPayload;
   onSessionChange: (session: SessionPayload) => void;
 }) {
-  // --- Agent mode is fixed for Etap 1A. The UI toggle is gone, but the value is
-  // still required by useWebChatSession (it emits the WS `mode_change` event) and
-  // by the backend (`tools_enabled = mode === "execute"`). Etap 2 will wire this to
-  // the Chat/Work section selector. ---
+  // --- Etap 2: mode is derived from the active chat's section, not a free toggle.
+  // Work → execute (tools on), Chat → chat (tools off). The hook still emits
+  // mode_change on connect for back-compat, but the backend now derives the
+  // effective mode from the chat's section at run time. ---
   const [mode] = useState<AgentMode>("execute");
   const [section, setSection] = useState<SidebarSection>("chat");
 
@@ -122,6 +132,11 @@ function Workspace({
   const [overviewLoading, setOverviewLoading] = useState(false);
   const [resetSignal, setResetSignal] = useState(0);
 
+  // Etap 2: multi-chat. chatId=null = follow the active chat (loaded on connect).
+  const [chatId, setChatId] = useState<number | null>(null);
+  const [chats, setChats] = useState<ChatSummary[]>([]);
+  const [chatsLoading, setChatsLoading] = useState(false);
+
   const { cssVars, layout, startResize, setDrawerHeight } = useResizablePanels();
   const user = session.user;
 
@@ -133,17 +148,32 @@ function Workspace({
       .finally(() => setOverviewLoading(false));
   }, []);
 
+  const refreshChats = useCallback(() => {
+    setChatsLoading(true);
+    getChats(session.csrf_token, section)
+      .then(setChats)
+      .catch((error) => console.warn("Failed to load chats", error))
+      .finally(() => setChatsLoading(false));
+  }, [session.csrf_token, section]);
+
   const chatSession = useWebChatSession({
     csrf: session.csrf_token,
     mode,
     resetSignal,
     onContextUsage: setContextUsage,
-    onWorkspaceChanged: refreshOverview
+    onWorkspaceChanged: refreshOverview,
+    chatId,
+    onChatRenamed: refreshChats,
+    onChatListChanged: refreshChats
   });
 
   useEffect(() => {
     refreshOverview();
   }, [refreshOverview]);
+
+  useEffect(() => {
+    refreshChats();
+  }, [refreshChats]);
 
   // Overview is unused in the current UI (the Inspector "Обзор" tab was removed in 1A),
   // but we keep refreshing it so the data is warm for future overview surfaces.
@@ -155,16 +185,42 @@ function Workspace({
     return <LoginView onLogin={onSessionChange} />;
   }
 
+  async function selectChat(chat: ChatSummary) {
+    if (chat.active) {
+      // Already the active chat — follow it (drop read-only view).
+      setChatId(null);
+      return;
+    }
+    // Activate via REST (switches the active chat + resets agent context), then
+    // follow the newly-active chat. The WS chat_activated event refreshes the list.
+    setChatsLoading(true);
+    try {
+      await activateChat(session.csrf_token, chat.id);
+      setChatId(null);
+    } catch (error) {
+      console.warn("Failed to activate chat", error);
+    } finally {
+      setChatsLoading(false);
+    }
+  }
+
+  async function startNewChat() {
+    setChatsLoading(true);
+    try {
+      const created = await createChat(session.csrf_token, section);
+      // New chat is active server-side; follow it (chatId=null loads the active one).
+      setChatId(null);
+      setChats((current) => [created, ...current.filter((chat) => chat.id !== created.id)]);
+    } catch (error) {
+      console.warn("Failed to create chat", error);
+    } finally {
+      setChatsLoading(false);
+    }
+  }
+
   async function doLogout() {
     await logout(session.csrf_token);
     onSessionChange({ authenticated: false, user: null, csrf_token: "" });
-  }
-
-  function startNewChat() {
-    if (!window.confirm("Сбросить контекст и начать новую сессию?")) {
-      return;
-    }
-    setResetSignal((value) => value + 1);
   }
 
   function openPreview(next: PreviewPayload, nextMode: PreviewOverlayMode = "side") {
@@ -207,6 +263,10 @@ function Workspace({
         user={user}
         section={section}
         onSectionChange={setSection}
+        chats={chats}
+        activeChatId={chatId}
+        chatsLoading={chatsLoading}
+        onSelectChat={selectChat}
         onNewChat={startNewChat}
         onLogout={doLogout}
       />

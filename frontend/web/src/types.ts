@@ -138,6 +138,16 @@ export type FileExplorerMode = "side" | "expanded";
 /** Sidebar navigation section. Chat = conversational (tools off in Etap 2), Work = task (tools on). */
 export type SidebarSection = "chat" | "work";
 
+/** A chat session as shown in the sidebar chat list (from GET /api/chats). */
+export type ChatSummary = {
+  id: number;
+  section: SidebarSection;
+  title: string | null;
+  created_at: string;
+  active: boolean;
+  msg_count: number;
+};
+
 /** Where the preview overlay renders: slide-in panel on the right, or fullscreen modal. */
 export type PreviewOverlayMode = "side" | "expanded";
 

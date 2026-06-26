@@ -115,6 +115,16 @@ type UseWebChatSessionOptions = {
   resetSignal: number;
   onContextUsage: (usage: ContextUsage) => void;
   onWorkspaceChanged?: (() => void) | undefined;
+  /**
+   * The chat to view. `null` = follow the active chat (load the active session
+   * on connect). A specific id = load that chat's transcript read-only (the
+   * client activates it separately via POST /api/chats/{id}/activate).
+   */
+  chatId?: number | null;
+  /** Fired when the server signals a chat was renamed (to refresh the list). */
+  onChatRenamed?: (() => void) | undefined;
+  /** Fired when the server signals the chat list changed (create/activate/rename). */
+  onChatListChanged?: (() => void) | undefined;
 };
 
 export type WebChatSession = {
@@ -127,6 +137,8 @@ export type WebChatSession = {
   loadingHistory: boolean;
   /** Timeline events grouped by request id. Use `.get(requestId)` for a card. */
   runEventsByRequest: TimelineByRequest;
+  /** True when viewing a non-active chat (composer should be disabled). */
+  readOnly: boolean;
   setInput: (value: string) => void;
   send: () => void;
   loadOlder: () => void;
@@ -139,7 +151,10 @@ export function useWebChatSession({
   mode,
   resetSignal,
   onContextUsage,
-  onWorkspaceChanged
+  onWorkspaceChanged,
+  chatId = null,
+  onChatRenamed,
+  onChatListChanged
 }: UseWebChatSessionOptions): WebChatSession {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [status, setStatus] = useState<StatusLine>(emptyStatus);
@@ -148,6 +163,7 @@ export function useWebChatSession({
   const [connected, setConnected] = useState(false);
   const [historyHasMore, setHistoryHasMore] = useState(false);
   const [loadingHistory, setLoadingHistory] = useState(false);
+  const [readOnly, setReadOnly] = useState(false);
   const [runEventsByRequest, setRunEventsByRequest] = useState<TimelineByRequest>(
     () => new Map()
   );
@@ -274,7 +290,10 @@ export function useWebChatSession({
             getActiveRequestId: () => lastActiveRequestIdRef.current,
             setActiveRequestId: (requestId) => {
               lastActiveRequestIdRef.current = requestId;
-            }
+            },
+            setReadOnly,
+            onChatRenamed,
+            onChatListChanged
           });
         };
       })
@@ -319,6 +338,18 @@ export function useWebChatSession({
     resetContext();
   }, [resetContext, resetSignal]);
 
+  // Etap 2: when the viewed chat changes, request its transcript read-only.
+  // chatId === null means "follow the active chat" (loaded on connect); a
+  // specific id triggers a WS load_chat. Activation (making it the active chat
+  // the agent writes to) is a separate REST call done by the caller.
+  useEffect(() => {
+    if (chatId == null) return;
+    const ws = wsRef.current;
+    if (ws?.readyState !== WebSocket.OPEN) return;
+    setLoadingHistory(true);
+    ws.send(JSON.stringify({ type: "load_chat", session_id: chatId }));
+  }, [chatId]);
+
   return {
     messages,
     status,
@@ -328,6 +359,7 @@ export function useWebChatSession({
     historyHasMore,
     loadingHistory,
     runEventsByRequest,
+    readOnly,
     setInput,
     send,
     loadOlder,
@@ -350,6 +382,11 @@ type WsEventHandlers = {
   getActiveRequestId: () => string | null;
   /** Record a request id as the active one (called on request_started/state/finished/status_update). */
   setActiveRequestId: (requestId: string) => void;
+  /** Set the read-only flag (true when viewing a non-active chat transcript). */
+  setReadOnly: Dispatch<SetStateAction<boolean>>;
+  /** Fired when a chat was renamed or the chat list changed (refresh sidebar). */
+  onChatRenamed: (() => void) | undefined;
+  onChatListChanged: (() => void) | undefined;
 };
 
 function pushRunEvent(
@@ -368,12 +405,16 @@ function handleWsEvent(event: ServerWsEvent, handlers: WsEventHandlers) {
     onContextUsage,
     setHistoryHasMore,
     setLoadingHistory,
-    onWorkspaceChanged
+    onWorkspaceChanged,
+    setReadOnly,
+    onChatRenamed,
+    onChatListChanged
   } = handlers;
   if (event.type === "chat_history") {
     setMessages(event.messages);
     setHistoryHasMore(event.has_more);
     setLoadingHistory(false);
+    setReadOnly(event.read_only === true);
   } else if (event.type === "history_page") {
     setMessages((items) => prependUnique(items, event.messages));
     setHistoryHasMore(event.has_more);
@@ -580,5 +621,15 @@ function handleWsEvent(event: ServerWsEvent, handlers: WsEventHandlers) {
       label: "Подтверждение обработано",
       tone: "done"
     });
+  } else if (event.type === "chat_renamed") {
+    // A chat got an auto-generated title (or was renamed). Refresh the sidebar list.
+    onChatRenamed?.();
+  } else if (event.type === "chat_activated") {
+    // The active chat changed (via POST .../activate). We're now following it:
+    // drop read-only and let the next chat_history load repopulate messages.
+    setReadOnly(false);
+    onChatListChanged?.();
+  } else if (event.type === "chat_list_changed") {
+    onChatListChanged?.();
   }
 }

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import sqlite3
@@ -13,6 +14,7 @@ from corpclaw_lite.utils.async_helpers import run_in_thread
 from corpclaw_lite.utils.db import db_connect
 
 __all__ = [
+    "ChatSessionSummary",
     "WebChatFile",
     "WebChatMessage",
     "WebChatPage",
@@ -62,6 +64,19 @@ class WebChatPage:
     session_id: int
     messages: list[WebChatMessage]
     has_more: bool
+
+
+@dataclass(slots=True)
+class ChatSessionSummary:
+    """A chat session as shown in the sidebar chat list."""
+
+    id: int
+    user_id: str
+    section: str
+    title: str | None
+    created_at: str
+    is_active: bool
+    msg_count: int
 
 
 class WebChatStore:
@@ -142,6 +157,17 @@ class WebChatStore:
                     ON web_chat_messages(user_id, id)
                     """
                 )
+                # Etap 2: add section/title columns to sessions (idempotent).
+                # Mirrors the reasoning-column migration in memory/sqlite.py:
+                # ALTER on every init; "duplicate column name" is swallowed.
+                # `section DEFAULT 'chat'` backfills legacy sessions into the Chat section.
+                for col, decl in [
+                    ("section", "TEXT NOT NULL DEFAULT 'chat'"),
+                    ("title", "TEXT"),
+                ]:
+                    with contextlib.suppress(sqlite3.OperationalError):
+                        # "duplicate column name" when already migrated — swallow.
+                        conn.execute(f"ALTER TABLE web_chat_sessions ADD COLUMN {col} {decl}")
         except Exception as e:
             logger.critical("Failed to initialize web chat store: %s", e)
             raise StorageError(f"Web chat store initialization failed: {e}") from e
@@ -369,6 +395,246 @@ class WebChatStore:
             request_id=request_id,
             metadata=metadata,
             file=file,
+        )
+
+    # ------------------------------------------------------------------
+    # Etap 2: multi-chat session management.
+    #
+    # The active-session invariant stays "one active session per user total"
+    # (the partial unique index idx_web_chat_sessions_active is unchanged).
+    # `section` (chat|work) is a tag on a session used to filter the sidebar
+    # list, NOT a separate active-session slot. Activating a chat archives the
+    # currently-active one and reopens the selected one.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _session_from_row(row: sqlite3.Row) -> ChatSessionSummary:
+        return ChatSessionSummary(
+            id=int(row["id"]),
+            user_id=str(row["user_id"]),
+            section=str(row["section"]),
+            title=row["title"] if row["title"] is not None else None,
+            created_at=str(row["created_at"]),
+            is_active=bool(row["is_active"]),
+            msg_count=int(row["msg_count"]),
+        )
+
+    def _sync_list_sessions(
+        self, user_id: str, section: str | None
+    ) -> list[ChatSessionSummary]:
+        try:
+            with db_connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                if section is None:
+                    rows = conn.execute(
+                        """
+                        SELECT
+                            s.id, s.user_id, s.section, s.title, s.created_at,
+                            (s.ended_at IS NULL) AS is_active,
+                            (SELECT COUNT(*) FROM web_chat_messages m
+                             WHERE m.session_id = s.id) AS msg_count
+                        FROM web_chat_sessions s
+                        WHERE s.user_id = ?
+                        ORDER BY is_active DESC, s.id DESC
+                        """,
+                        (str(user_id),),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """
+                        SELECT
+                            s.id, s.user_id, s.section, s.title, s.created_at,
+                            (s.ended_at IS NULL) AS is_active,
+                            (SELECT COUNT(*) FROM web_chat_messages m
+                             WHERE m.session_id = s.id) AS msg_count
+                        FROM web_chat_sessions s
+                        WHERE s.user_id = ? AND s.section = ?
+                        ORDER BY is_active DESC, s.id DESC
+                        """,
+                        (str(user_id), section),
+                    ).fetchall()
+                return [self._session_from_row(row) for row in rows]
+        except Exception as e:
+            raise StorageError(f"Failed to list web chat sessions for {user_id}: {e}") from e
+
+    async def list_sessions(
+        self, user_id: str, *, section: str | None = None
+    ) -> list[ChatSessionSummary]:
+        """Return the user's chat sessions, optionally filtered by section.
+
+        Active session sorts first (so it stays on top of the sidebar list).
+        """
+        return await run_in_thread(self._sync_list_sessions, str(user_id), section)
+
+    def _sync_get_session(
+        self, user_id: str, session_id: int
+    ) -> ChatSessionSummary | None:
+        try:
+            with db_connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(
+                    """
+                    SELECT
+                        s.id, s.user_id, s.section, s.title, s.created_at,
+                        (s.ended_at IS NULL) AS is_active,
+                        (SELECT COUNT(*) FROM web_chat_messages m
+                         WHERE m.session_id = s.id) AS msg_count
+                    FROM web_chat_sessions s
+                    WHERE s.id = ? AND s.user_id = ?
+                    """,
+                    (int(session_id), str(user_id)),
+                ).fetchone()
+                return self._session_from_row(row) if row is not None else None
+        except Exception as e:
+            raise StorageError(f"Failed to get web chat session {session_id}: {e}") from e
+
+    async def get_session(
+        self, user_id: str, session_id: int
+    ) -> ChatSessionSummary | None:
+        """Return a single chat session if owned by the user, else None."""
+        return await run_in_thread(self._sync_get_session, str(user_id), int(session_id))
+
+    def _sync_create_session(self, user_id: str, section: str) -> int:
+        if section not in {"chat", "work"}:
+            section = "chat"
+        try:
+            with db_connect(self.db_path) as conn:
+                # Close the currently-active session (if any) so the new one is
+                # the single active session per the unique-index invariant.
+                conn.execute(
+                    """
+                    UPDATE web_chat_sessions
+                    SET ended_at = CURRENT_TIMESTAMP, reset_reason = 'new_chat'
+                    WHERE user_id = ? AND ended_at IS NULL
+                    """,
+                    (str(user_id),),
+                )
+                conn.execute(
+                    "INSERT INTO web_chat_sessions (user_id, section) VALUES (?, ?)",
+                    (str(user_id), section),
+                )
+                row = conn.execute("SELECT last_insert_rowid()").fetchone()
+                if row is None:
+                    raise StorageError("Failed to get inserted web chat session id")
+                return int(row[0])
+        except Exception as e:
+            raise StorageError(f"Failed to create web chat session for {user_id}: {e}") from e
+
+    async def create_session(self, user_id: str, *, section: str = "chat") -> int:
+        """Create a fresh active chat in the given section, archiving the prior active one."""
+        return await run_in_thread(self._sync_create_session, str(user_id), section)
+
+    def _sync_activate_session(self, user_id: str, session_id: int) -> int | None:
+        """Make `session_id` the active chat. Returns its id, or None if not owned/found.
+
+        Archives the currently-active session first (preserving the one-active-per-user
+        invariant), then reopens the requested one by clearing its ended_at.
+        """
+        try:
+            with db_connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                owned = conn.execute(
+                    "SELECT 1 FROM web_chat_sessions WHERE id = ? AND user_id = ?",
+                    (int(session_id), str(user_id)),
+                ).fetchone()
+                if owned is None:
+                    return None
+                # Close the current active session (could be the same row; harmless).
+                conn.execute(
+                    """
+                    UPDATE web_chat_sessions
+                    SET ended_at = CURRENT_TIMESTAMP, reset_reason = 'switched'
+                    WHERE user_id = ? AND ended_at IS NULL AND id != ?
+                    """,
+                    (str(user_id), int(session_id)),
+                )
+                # Reopen the requested session as active.
+                conn.execute(
+                    """
+                    UPDATE web_chat_sessions
+                    SET ended_at = NULL, reset_reason = NULL
+                    WHERE id = ? AND user_id = ?
+                    """,
+                    (int(session_id), str(user_id)),
+                )
+                return int(session_id)
+        except Exception as e:
+            raise StorageError(
+                f"Failed to activate web chat session {session_id} for {user_id}: {e}"
+            ) from e
+
+    async def activate_session(self, user_id: str, session_id: int) -> int | None:
+        """Activate a chat session owned by the user. Returns its id, or None if not found."""
+        return await run_in_thread(self._sync_activate_session, str(user_id), int(session_id))
+
+    def _sync_set_session_title(
+        self, user_id: str, session_id: int, title: str | None
+    ) -> bool:
+        try:
+            with db_connect(self.db_path) as conn:
+                cursor = conn.execute(
+                    """
+                    UPDATE web_chat_sessions
+                    SET title = ?
+                    WHERE id = ? AND user_id = ? AND title IS NULL
+                    """,
+                    (title, int(session_id), str(user_id)),
+                )
+                return cursor.rowcount > 0
+        except Exception as e:
+            logger.warning("Failed to set web chat title for session %s: %s", session_id, e)
+            return False
+
+    async def set_session_title(
+        self, user_id: str, session_id: int, title: str | None
+    ) -> bool:
+        """Set title only if currently NULL (auto-naming guard). Returns whether updated."""
+        return await run_in_thread(
+            self._sync_set_session_title, str(user_id), int(session_id), title
+        )
+
+    def _sync_list_messages(
+        self, user_id: str, session_id: int, limit: int
+    ) -> WebChatPage:
+        """Read messages of a specific (not necessarily active) session. Read-only viewing."""
+        limit = max(1, min(limit, 200))
+        try:
+            with db_connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                owned = conn.execute(
+                    "SELECT 1 FROM web_chat_sessions WHERE id = ? AND user_id = ?",
+                    (int(session_id), str(user_id)),
+                ).fetchone()
+                if owned is None:
+                    return WebChatPage(session_id=int(session_id), messages=[], has_more=False)
+                rows = conn.execute(
+                    """
+                    SELECT * FROM web_chat_messages
+                    WHERE session_id = ?
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (int(session_id), limit + 1),
+                ).fetchall()
+                has_more = len(rows) > limit
+                selected = rows[:limit]
+                messages = [self._message_from_row(row) for row in reversed(selected)]
+                return WebChatPage(session_id=int(session_id), messages=messages, has_more=has_more)
+        except Exception as e:
+            raise StorageError(
+                f"Failed to list messages for session {session_id} ({user_id}): {e}"
+            ) from e
+
+    async def list_messages(
+        self,
+        user_id: str,
+        *,
+        session_id: int,
+        limit: int = _DEFAULT_HISTORY_LIMIT,
+    ) -> WebChatPage:
+        """Return messages of a specific chat session (read-only viewing of any owned chat)."""
+        return await run_in_thread(
+            self._sync_list_messages, str(user_id), int(session_id), limit
         )
 
     def _sync_list_recent(self, user_id: str, limit: int) -> WebChatPage:
