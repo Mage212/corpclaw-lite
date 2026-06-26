@@ -3,6 +3,7 @@ import type {
   ChatMessage,
   ChatSummary,
   ContextUsage,
+  DepthMode,
   DirectoryPayload,
   FileEntry,
   PanelLayoutState,
@@ -44,6 +45,7 @@ export type ServerWsEvent =
   | { type: "approval_resolved"; approval_id: string; request_id?: string }
   | { type: "llm_status"; status: string }
   | { type: "mode"; mode: AgentMode }
+  | { type: "depth_mode"; depth_mode: DepthMode }
   | { type: "chat_renamed"; session_id: number; title: string }
   | { type: "chat_activated"; session_id: number; section: string; mode: AgentMode }
   | { type: "chat_list_changed" };
@@ -622,6 +624,13 @@ export function parseServerWsEvent(value: unknown): ServerWsEvent | null {
       return { type: "llm_status", status: stringValue(value.status, "unknown") };
     case "mode":
       return { type: "mode", mode: modeValue(value.mode) };
+    case "depth_mode": {
+      const raw = value.depth_mode;
+      return {
+        type: "depth_mode",
+        depth_mode: raw === "fast" ? "fast" : "think"
+      };
+    }
     case "chat_renamed": {
       const renamedId = optionalNumber(value.session_id);
       if (renamedId === undefined) return null;

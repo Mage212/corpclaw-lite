@@ -2121,6 +2121,43 @@ a {
 }
 
 /* --- Etap 1B: context size bar (under composer) -------------------------- */
+/* --- Etap 3: depth selector (Fast/Think) in composer extras --- */
+.composer-extras {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.depth-selector {
+  display: inline-flex;
+  gap: 2px;
+  padding: 5px 14px 4px;
+  background: var(--surface-2);
+  border-top: 1px solid var(--line);
+}
+
+.depth-option {
+  padding: 3px 11px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.depth-option:hover {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.depth-option.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
 .context-size-bar {
   display: flex;
   align-items: center;
