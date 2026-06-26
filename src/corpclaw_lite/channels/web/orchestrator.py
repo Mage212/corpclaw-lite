@@ -70,6 +70,9 @@ logger = logging.getLogger(__name__)
 _MAX_WS_MESSAGE_CHARS = 20_000
 _MAX_BATCH_PATHS = 100
 _DOWNLOAD_GRANT_TTL_SECONDS = 24 * 60 * 60
+# Interval for the idle-container pruner background loop (seconds). Half the
+# default idle_timeout (600s) so a container is reaped within ~2 cycles.
+_CONTAINER_PRUNE_INTERVAL_SECONDS = 300
 _INLINE_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 _FRONTEND_DIST = PROJECT_ROOT / "frontend" / "web" / "dist"
 
@@ -125,6 +128,7 @@ class WebChannelOrchestrator:
         self._pending_approvals: dict[str, _PendingApproval] = {}
         self._chat_store: WebChatStore | None = None
         self._cleanup_task: asyncio.Task[None] | None = None
+        self._container_prune_task: asyncio.Task[None] | None = None
         self._request_tasks: set[asyncio.Task[None]] = set()
         self._started = False
 
@@ -180,6 +184,11 @@ class WebChannelOrchestrator:
         await site.start()
         install_signal_handlers(self._shutdown_event)
         self._cleanup_task = asyncio.create_task(self._session_cleanup_loop())
+        # Background idle-container pruner (prevents container accumulation in
+        # server mode — prune_idle was previously CLI-only).
+        if self._stack is not None and self._stack.container_manager is not None:
+            self._container_prune_task = asyncio.create_task(self._container_prune_loop())
+            logger.info("Container prune loop started (interval=300s)")
         self._started = True
         logger.info(
             "Web channel started at http://%s:%d",
@@ -193,6 +202,8 @@ class WebChannelOrchestrator:
     async def stop(self) -> None:
         if self._cleanup_task is not None:
             self._cleanup_task.cancel()
+        if self._container_prune_task is not None:
+            self._container_prune_task.cancel()
         for sockets in list(self._clients.values()):
             for ws in list(sockets):
                 await ws.close()
@@ -1450,6 +1461,25 @@ class WebChannelOrchestrator:
         for token in expired:
             self._download_grants.pop(token, None)
         return len(expired)
+
+    async def _container_prune_loop(self) -> None:
+        """Periodic idle-container pruning (server-mode reaper).
+
+        prune_idle was previously CLI-only, so containers accumulated for the
+        lifetime of a web process. Each pass is wrapped in try/except so a
+        transient Docker hiccup never kills the reaper.
+        """
+        if self._stack is None or self._stack.container_manager is None:
+            return
+        cm = self._stack.container_manager
+        while True:
+            await asyncio.sleep(_CONTAINER_PRUNE_INTERVAL_SECONDS)
+            try:
+                removed = await cm.prune_idle()
+                if removed:
+                    logger.info("Pruned %d idle container(s)", removed)
+            except Exception as exc:
+                logger.warning("Container prune pass failed: %s", exc)
 
     async def _session_cleanup_loop(self) -> None:
         if self._stack is None:
