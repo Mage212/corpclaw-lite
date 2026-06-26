@@ -1461,16 +1461,47 @@ class AgentLoop:
                 terminal_tool=terminal_tool,
                 budget_error=str(error),
             )
-            response = await self._call_llm_provider(
-                self._resolve_target_provider(),
-                messages=context.messages,
-                tools=terminal_schema,
-                system=context.system_prompt or None,
-                run_id=stats.run_id,
-                iteration=stats.iterations + 1,
-                on_llm_stage=None,
-                stats=None,
-            )
+            if isinstance(self._provider, LLMRouter) and self._provider.has_queue:
+                # Route through the queue so this LLM call is slot-bounded and
+                # accounted for (previously it bypassed the queue via
+                # _resolve_target_provider, adding un-bounded load when many
+                # subagents exhaust their budget at once). The budget is already
+                # exhausted here, so there is no pause/resume; on_acquired=None.
+                # task_kind="default"/load_class="interactive" are hardcoded in
+                # call_default_with_slot → sticky-eligible (user slot).
+                response = await self._provider.call_default_with_slot(
+                    user_id=str(user.id),
+                    run_id=stats.run_id,
+                    messages=context.messages,
+                    tools=terminal_schema,
+                    system=context.system_prompt or None,
+                    on_acquired=None,
+                    call=lambda target_provider: self._call_llm_provider(
+                        target_provider,
+                        messages=context.messages,
+                        tools=terminal_schema,
+                        system=context.system_prompt or None,
+                        run_id=stats.run_id,
+                        iteration=stats.iterations + 1,
+                        on_llm_stage=None,
+                        stats=None,
+                    ),
+                    on_queue_status=None,
+                    notify_position=_queue_notify_position(self._settings),
+                    notify_interval_seconds=_queue_notify_interval_seconds(self._settings),
+                )
+            else:
+                # Fallback: no queue (bare QueuedProvider or non-router) — raw call.
+                response = await self._call_llm_provider(
+                    self._resolve_target_provider(),
+                    messages=context.messages,
+                    tools=terminal_schema,
+                    system=context.system_prompt or None,
+                    run_id=stats.run_id,
+                    iteration=stats.iterations + 1,
+                    on_llm_stage=None,
+                    stats=None,
+                )
         except Exception:
             logger.warning(
                 "[user=%s] auto-finalize stage B (LLM call) failed; "
