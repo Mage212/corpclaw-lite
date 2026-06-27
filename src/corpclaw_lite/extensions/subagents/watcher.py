@@ -58,6 +58,10 @@ class SubagentHotReloader:
             self._task.cancel()
             logger.info("SubagentHotReloader stopped.")
 
+    async def reload_now(self) -> None:
+        """Trigger an immediate rescan (Etap 4: manual reload button)."""
+        await self._scan()
+
     async def _poll_loop(self) -> None:
         """Poll the directories for mtime changes on .yaml files."""
         await self._scan()

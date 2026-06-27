@@ -1,6 +1,7 @@
 import type {
   ChatSummary,
   DirectoryPayload,
+  ExtensionsPayload,
   FileEntry,
   PreviewPayload,
   SessionPayload,
@@ -13,6 +14,7 @@ import {
   parseChatSummaries,
   parseChatSummary,
   parseDirectoryPayload,
+  parseExtensionsPayload,
   parseOkPayload,
   parsePathPayload,
   parsePathsPayload,
@@ -130,6 +132,19 @@ export function renameChat(csrf: string, chatId: number, title: string): Promise
 export function deleteChat(csrf: string, chatId: number): Promise<{ ok: boolean }> {
   return apiFetch(`/api/chats/${chatId}`, parseOkPayload, {
     method: "DELETE",
+    csrf
+  });
+}
+
+// --- Etap 4: Extensions management ---
+
+export function getExtensions(): Promise<ExtensionsPayload> {
+  return apiFetch("/api/extensions", parseExtensionsPayload);
+}
+
+export function reloadExtensions(csrf: string): Promise<{ ok: boolean; errors?: string[] }> {
+  return apiFetch("/api/extensions/reload", parseOkPayload, {
+    method: "POST",
     csrf
   });
 }

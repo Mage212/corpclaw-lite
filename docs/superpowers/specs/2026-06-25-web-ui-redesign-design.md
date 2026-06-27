@@ -207,11 +207,19 @@ Research mode форсит `deep_research` явно, минуя keyword-дете
 - FE (общее): dropdown в composer (зависит от раздела — в Chat только Fast/Think, в Work все три после 3B).
 - **Зависимости:** Этап 1 (composer в main area) + Этап 2 (раздел Chat/Work определяет tools + доступные modes).
 
-### Этап 4 — Раздел Extensions (Skills / MCP / Plugins) — workspace-каркас
-**Scope:** grid-страница управления расширениями: список, toggle вкл/выкл, trigger reload, статус hot-reload. По образцу Mistral Connectors.
-- FE: **[ref §9.1]** единый workspace-каркас (list/search/view-filter/grid/CRUD) с переиспользуемыми common-примитивами, как `workspace/Tools.svelte` — один компонент-каркас + разные data sources (Skills/MCP/Plugins) вместо 3 отдельных UI. Pill-style tab-nav (`workspace/+layout.svelte`).
-- BE: новые REST-эндпоинты (`GET /api/extensions/{skills,mcp,plugins}`, `POST /api/extensions/.../reload`, опц. `POST /api/extensions/.../toggle`). Переиспользовать `SkillRegistry.list_all`, `SubagentRegistry.list_all`, `MCPManager.get_server_names` + публичный `MCPManager.list_server_tools` (добавить). Toggle-state хранить в **[ref §9.1]** free-form user `settings` JSON (shallow-merge, без миграций).
+### Этап 4 — Раздел Extensions (Skills / MCP / Plugins / Subagents) — workspace-каркас
+**Scope:** grid-страница управления расширениями: список, статус, trigger reload. По образцу Mistral Connectors.
+
+**Решение (после разведки): read-only + UI-session toggle.** Toggle = show/hide в UI-сессии (React state), ноль BE-persistence. Показывает загруженные расширения, статус (loaded/connected/disconnected), reload. Реальное per-user disable-extension — будущий подэтап (требует persistence + registry filtering на run path).
+
+**Разведка выявила:** List-APIs для Skills/Subagents/Plugins **уже готовы** (`registry.list_all()`). Единственный BE-пробел — MCP tools-per-server + status (2 trivial метода). Watchers подключены **только в Telegram orchestrator** — web-канал не hot-reloads; "Reload" button = единственный путь для web-пользователей. Routing — нет react-router, conditional rendering в App.tsx.
+
+**1 спринт (4A):**
+- BE: `MCPManager.get_server_tools()` + `get_server_status()`; `GET /api/extensions` (4 секции в одном payload); watchers public `reload_now()` + wire в `WebChannelOrchestrator.start()/stop()`; `POST /api/extensions/reload` (CSRF).
+- FE: `ExtensionSummary` types + parser + `getExtensions()`; `ExtensionsView` (tab-nav 4 таба + grid-list + status badges + reload button); `view` state в App.tsx + clickable Extensions в Sidebar.
 - **Зависимости:** Этап 1 (навигация).
+
+**Что НЕ входит (future):** per-user enable/disable (persistence + registry filtering); extension creation/editing (manifest editor); import/export.
 
 ### Этап 5 — Раздел Agent Context (instructions)
 **Scope:** модал/страница «Agent Context»: tone, personal instructions (additional system prompt), live-preview финального system prompt. Переиспользовать `memory_facts` + onboarding-логику. **[ref §9.2]** опционально — инжект system_prompt из контекста/папки (идея из `Folder.data.system_prompt`).
