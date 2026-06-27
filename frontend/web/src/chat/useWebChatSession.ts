@@ -654,9 +654,13 @@ function handleWsEvent(event: ServerWsEvent, handlers: WsEventHandlers) {
     // A chat got an auto-generated title (or was renamed). Refresh the sidebar list.
     onChatRenamed?.();
   } else if (event.type === "chat_activated") {
-    // The active chat changed (via POST .../activate). We're now following it:
-    // drop read-only and let the next chat_history load repopulate messages.
+    // The active chat changed (via POST .../activate, or as a replacement after
+    // deleting the active chat). Drop read-only, and clear messages: if this
+    // was a delete-replacement, the old transcript is gone; for a normal
+    // activation the transcript was already loaded by load_chat, but clearing
+    // is harmless and avoids showing a stale transcript from a viewed chat.
     setReadOnly(false);
+    setMessages([]);
     onChatListChanged?.();
   } else if (event.type === "chat_list_changed") {
     onChatListChanged?.();

@@ -116,7 +116,6 @@ function ChatRow({
 
   function requestDelete() {
     setMenuOpen(false);
-    if (chat.active) return; // cannot delete active session
     const label = chat.title ?? `Чат #${chat.id}`;
     if (window.confirm(`Удалить чат «${label}»?`)) {
       onDelete();
@@ -176,8 +175,7 @@ function ChatRow({
                 className="chat-item-menu-item danger"
                 onClick={requestDelete}
                 role="menuitem"
-                disabled={chat.active}
-                title={chat.active ? "Нельзя удалить активный чат" : "Удалить"}
+                title="Удалить"
               >
                 <Trash2 size={14} />
                 <span>Удалить</span>

@@ -1305,19 +1305,42 @@ class WebChannelOrchestrator:
             return web.json_response(
                 {"error": "Дождитесь завершения активного чата перед удалением."}, status=409
             )
+        replacement_session_id: int | None = None
         try:
             summary = await self._chat_store.get_session(user.memory_key(), session_id)
             if summary is None:
                 raise web.HTTPNotFound(text="Chat not found.")
-            if summary.is_active:
-                return web.json_response({"error": "Нельзя удалить активный чат."}, status=409)
             ok = await self._chat_store.delete_session(user.memory_key(), session_id)
             if not ok:
                 raise web.HTTPNotFound(text="Chat not found.")
+            # The active chat was deleted → the invariant "one active chat per
+            # user" (partial-unique-index idx_web_chat_sessions_active) would
+            # otherwise be left unsatisfied, and the agent would have nowhere to
+            # write. Create a fresh active chat and broadcast a switch so the
+            # client drops the deleted transcript and follows the new one.
+            if summary.is_active:
+                replacement_session_id = await self._chat_store.ensure_active_session(
+                    user.memory_key()
+                )
+                activated = await self._chat_store.get_session(
+                    user.memory_key(), replacement_session_id
+                )
+                mode = "execute" if (activated and activated.section == "work") else "chat"
+                await self._broadcast_to_user(
+                    user.id,
+                    {
+                        "type": "chat_activated",
+                        "session_id": replacement_session_id,
+                        "section": activated.section if activated else "chat",
+                        "mode": mode,
+                    },
+                )
         finally:
             await self._service.finish_user_request(user.id)
         await self._broadcast_to_user(user.id, {"type": "chat_list_changed"})
-        return web.json_response({"ok": True, "session_id": session_id})
+        return web.json_response(
+            {"ok": True, "session_id": session_id, "replacement_session_id": replacement_session_id}
+        )
 
     async def _chat_messages_payload(
         self, messages: list[WebChatMessage], user: User
@@ -1362,18 +1385,14 @@ class WebChannelOrchestrator:
 
         if self._chat_store is not None:
             try:
+                # Keep the server-side memory backfill (cheap, no WS payload); but
+                # do NOT auto-push the active chat's transcript. The client starts
+                # with an empty panel and the user chooses a chat (or sends a
+                # message, which continues the active chat). The active chat is
+                # loaded on demand via the load_chat WS event.
                 await self._chat_store.backfill_from_memory(user.memory_key(), limit=100)
-                page = await self._chat_store.list_recent(user.memory_key(), limit=100)
-                await send(
-                    {
-                        "type": "chat_history",
-                        "session_id": page.session_id,
-                        "messages": await self._chat_messages_payload(page.messages, user),
-                        "has_more": page.has_more,
-                    }
-                )
             except Exception as e:
-                logger.warning("Failed to load web chat history for user %s: %s", user.id, e)
+                logger.warning("Failed to backfill web chat history for user %s: %s", user.id, e)
 
         await send({"type": "llm_status", "status": "unknown"})
         await send(
@@ -1755,9 +1774,12 @@ class WebChannelOrchestrator:
                         depth_mode = str(requested_depth)
                         await send({"type": "depth_mode", "depth_mode": depth_mode})
                 elif event_type == "load_chat":
-                    # Read-only load of a specific chat's transcript. Does NOT
-                    # activate the chat or touch agent context — the client uses
-                    # POST /api/chats/{id}/activate to switch the active chat.
+                    # Load a specific chat's transcript. Does NOT activate the
+                    # chat or touch agent context — the client uses POST
+                    # /api/chats/{id}/activate to switch the active chat.
+                    # The active chat loads as editable (read_only=False) so the
+                    # user can return to it from a read-only view and keep typing;
+                    # any other chat loads read-only until activated-on-send.
                     if self._chat_store is None:
                         await send({"type": "error", "message": "История чата недоступна."})
                         continue
@@ -1769,6 +1791,8 @@ class WebChannelOrchestrator:
                     if target_session <= 0:
                         await send({"type": "error", "message": "Некорректный чат."})
                         continue
+                    summary = await self._chat_store.get_session(user.memory_key(), target_session)
+                    read_only = not (summary is not None and summary.is_active)
                     page = await self._chat_store.list_messages(
                         user.memory_key(), session_id=target_session, limit=100
                     )
@@ -1778,7 +1802,7 @@ class WebChannelOrchestrator:
                             "session_id": target_session,
                             "messages": await self._chat_messages_payload(page.messages, user),
                             "has_more": page.has_more,
-                            "read_only": True,
+                            "read_only": read_only,
                         }
                     )
                 elif event_type == "load_history_before":

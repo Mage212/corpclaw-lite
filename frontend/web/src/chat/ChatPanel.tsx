@@ -72,8 +72,11 @@ export function ChatPanel({
         {session.messages.length === 0 && (
           <div className="empty-chat">
             <Bot size={32} />
-            <strong>{user.name}, рабочая сессия готова</strong>
-            <span>Задачи и ответы появятся здесь.</span>
+            <strong>{user.name}, выберите чат или начните новый</strong>
+            <span>
+              Сообщение продолжит активный чат. Чтобы вернуться к истории —
+              выберите чат слева.
+            </span>
           </div>
         )}
         {session.messages.flatMap((message, index) => {
