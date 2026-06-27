@@ -64,6 +64,11 @@ class SubagentHotReloader:
 
     async def _poll_loop(self) -> None:
         """Poll the directories for mtime changes on .yaml files."""
+        # Prime the mtime cache from the on-disk state WITHOUT re-registering.
+        # The bootstrap loader already registered subagents from these files;
+        # an unprimed first scan would re-register each and warn (falsely) about
+        # an overlay override against the bootstrap-loaded copy.
+        await self._prime()
         await self._scan()
         while True:
             await asyncio.sleep(self._poll_interval)
@@ -72,8 +77,8 @@ class SubagentHotReloader:
             except Exception as e:
                 logger.error("SubagentHotReloader error during scan: %s", e)
 
-    async def _scan(self) -> None:
-        """Check all .yaml files across directories, reload any that changed."""
+    async def _discover_files(self) -> dict[Path, float]:
+        """Return {path: mtime} for every .yaml file across the watched dirs."""
         current_files: dict[Path, float] = {}
         for directory in self._dirs:
             aio_dir = anyio.Path(directory)
@@ -83,6 +88,29 @@ class SubagentHotReloader:
                 sync_p = Path(p)
                 stat = await p.stat()
                 current_files[sync_p] = stat.st_mtime
+        return current_files
+
+    async def _prime(self) -> None:
+        """Seed the mtime cache for subagent files already in the registry.
+
+        Called once before the first scan so subagents the bootstrap loader
+        already registered are not re-registered (which would log a misleading
+        "overridden by overlay" WARNING). Files NOT yet in the registry are left
+        uncached, so the first scan still picks them up (covers the case where
+        the watcher is the sole loader). A file is matched to its registry entry
+        by the parsed spec id.
+        """
+        registered_ids = {spec.id for spec in self._registry.list_all()}
+        current_files = await self._discover_files()
+        for path, mtime in current_files.items():
+            spec = self._load_spec(path)
+            if spec is not None and spec.id in registered_ids:
+                self._mtimes[path] = mtime
+        self._known_files = set(current_files.keys())
+
+    async def _scan(self) -> None:
+        """Check all .yaml files across directories, reload any that changed."""
+        current_files = await self._discover_files()
 
         current_paths = set(current_files.keys())
 
