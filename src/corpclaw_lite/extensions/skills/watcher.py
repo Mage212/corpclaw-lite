@@ -59,7 +59,12 @@ class SkillHotReloader:
 
     async def _poll_loop(self) -> None:
         """Poll the directories for mtime changes on .md files."""
-        # Do an initial scan on startup
+        # Prime the mtime cache with the on-disk state WITHOUT re-registering.
+        # The bootstrap loader already registered skills from these same files;
+        # an unprimed first scan would treat every file as "new" and re-register
+        # it, spurious-warning "overridden by overlay" against the bootstrap copy.
+        await self._prime()
+        # Now scan for genuine deltas (new/changed/deleted) since the prime.
         await self._scan()
         while True:
             await asyncio.sleep(self._poll_interval)
@@ -68,8 +73,8 @@ class SkillHotReloader:
             except Exception as e:
                 logger.error("SkillHotReloader error during scan: %s", e)
 
-    async def _scan(self) -> None:
-        """Check all .md files across the directories, reload any that changed."""
+    async def _discover_files(self) -> dict[Path, float]:
+        """Return {path: mtime} for every .md file across the watched dirs."""
         current_files: dict[Path, float] = {}
         for directory in self._dirs:
             aio_dir = anyio.Path(directory)
@@ -79,6 +84,30 @@ class SkillHotReloader:
                 sync_p = Path(p)
                 stat = await p.stat()
                 current_files[sync_p] = stat.st_mtime
+        return current_files
+
+    async def _prime(self) -> None:
+        """Seed the mtime/known-file caches for files already in the registry.
+
+        Called once before the first scan so skills the bootstrap loader already
+        registered are not re-registered (which would log a misleading
+        "overridden by overlay" WARNING). Files NOT yet in the registry are left
+        uncached, so the first scan still picks them up (covers the case where
+        the watcher is the sole loader). Matches a file to its registry entry by
+        the skill's ``.path`` to avoid re-parsing frontmatter for the id.
+        """
+        registered_paths = {
+            (skill.path.resolve() if skill.path else None) for skill in self._registry.list_all()
+        }
+        current_files = await self._discover_files()
+        for path, mtime in current_files.items():
+            if path.resolve() in registered_paths:
+                self._mtimes[path] = mtime
+        self._known_files = set(current_files.keys())
+
+    async def _scan(self) -> None:
+        """Check all .md files across the directories, reload any that changed."""
+        current_files = await self._discover_files()
 
         current_paths = set(current_files.keys())
 
