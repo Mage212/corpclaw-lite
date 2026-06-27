@@ -1500,6 +1500,12 @@ a {
   display: grid;
   grid-template-rows: minmax(0, 1fr) auto auto;
   min-height: 0;
+  /* .chat-shell lives inside the flex column .view-pane; without flex:1 it
+     defaults to content height, so on a SHORT chat the messages + composer
+     collapse to content height and the composer ends up mid-panel instead of
+     pinned to the bottom. flex:1 makes it fill .view-pane so the 1fr messages
+     row absorbs the slack and the composer hugs the bottom. */
+  flex: 1;
 }
 
 .messages {
