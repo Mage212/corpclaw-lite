@@ -141,6 +141,28 @@ export type FileExplorerMode = "side" | "expanded";
  */
 export type DepthMode = "fast" | "think" | "research";
 
+/** A loaded extension as shown in the Extensions management view (Etap 4). */
+export type ExtensionSummary = {
+  id: string;
+  name: string;
+  description: string | null;
+  version: string | null;
+  status: string;
+  type?: string;
+  always?: boolean;
+  keywords?: string[];
+  capabilities?: string[];
+  tools?: string[];
+};
+
+/** The full extensions payload from GET /api/extensions. */
+export type ExtensionsPayload = {
+  skills: ExtensionSummary[];
+  subagents: ExtensionSummary[];
+  mcp: ExtensionSummary[];
+  plugins: ExtensionSummary[];
+};
+
 /** Sidebar navigation section. Chat = conversational (tools off in Etap 2), Work = task (tools on). */
 export type SidebarSection = "chat" | "work";
 

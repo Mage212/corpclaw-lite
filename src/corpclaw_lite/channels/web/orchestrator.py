@@ -56,6 +56,12 @@ from corpclaw_lite.channels.web.files import (
 from corpclaw_lite.config.bootstrap import BootstrapLoader
 from corpclaw_lite.config.settings import Settings, WebChannelSettings
 from corpclaw_lite.exceptions import LLMBackendUnavailableError
+from corpclaw_lite.extensions.mcp.watcher import MCPHotReloader
+from corpclaw_lite.extensions.plugins.watcher import PluginHotReloader
+
+# Etap 4: hot-reload watchers (lazy imports to avoid circular deps at module load).
+from corpclaw_lite.extensions.skills.watcher import SkillHotReloader
+from corpclaw_lite.extensions.subagents.watcher import SubagentHotReloader
 from corpclaw_lite.extensions.tools.builtin.send_file import SendFileTool
 from corpclaw_lite.logging.agent_logger import AgentLogger, setup_logging
 from corpclaw_lite.paths import PROJECT_ROOT
@@ -146,6 +152,11 @@ class WebChannelOrchestrator:
         self._chat_store: WebChatStore | None = None
         self._cleanup_task: asyncio.Task[None] | None = None
         self._container_prune_task: asyncio.Task[None] | None = None
+        # Etap 4: hot-reload watchers (started in start(), stopped in stop()).
+        self._skill_reloader: SkillHotReloader | None = None
+        self._subagent_reloader: SubagentHotReloader | None = None
+        self._plugin_reloader: PluginHotReloader | None = None
+        self._mcp_reloader: MCPHotReloader | None = None
         self._request_tasks: set[asyncio.Task[None]] = set()
         self._started = False
 
@@ -194,6 +205,39 @@ class WebChannelOrchestrator:
             except Exception as e:
                 logger.error("MCP: failed to connect — %s (continuing without MCP tools)", e)
 
+        # Etap 4: start hot-reload watchers (same pattern as Telegram orchestrator).
+        from corpclaw_lite.extensions.paths import resolve_dirs as _resolve_dirs
+
+        skills_dirs = list(_resolve_dirs("skills", self._settings, PROJECT_ROOT))
+        plugins_dirs = list(_resolve_dirs("plugins", self._settings, PROJECT_ROOT))
+        if stack.skill_registry is not None:
+            self._skill_reloader = SkillHotReloader(skills_dirs, stack.skill_registry)
+            self._skill_reloader.start()
+            logger.info("Skill hot-reloader started watching %s", skills_dirs)
+        if stack.plugin_registry is not None and stack.skill_registry is not None:
+            self._plugin_reloader = PluginHotReloader(
+                plugins_dirs, stack.plugin_registry, stack.tool_registry, stack.skill_registry
+            )
+            self._plugin_reloader.start()
+            logger.info("Plugin hot-reloader started watching %s", plugins_dirs)
+        if stack.mcp_manager is not None:
+            mcp_cfg_paths = list(_resolve_dirs("mcp", self._settings, PROJECT_ROOT))
+            self._mcp_reloader = MCPHotReloader(
+                mcp_cfg_paths, stack.mcp_manager, stack.tool_registry
+            )
+            self._mcp_reloader.start()
+            logger.info("MCP hot-reloader started watching %s", mcp_cfg_paths)
+        if stack.subagent_registry is not None:
+            subagents_dirs = [
+                d for d in _resolve_dirs("subagents", self._settings, PROJECT_ROOT) if d.exists()
+            ]
+            if subagents_dirs:
+                self._subagent_reloader = SubagentHotReloader(
+                    subagents_dirs, stack.subagent_registry
+                )
+                self._subagent_reloader.start()
+                logger.info("Subagent hot-reloader started watching %s", subagents_dirs)
+
         app = self._build_app()
         self._runner = web.AppRunner(app)
         await self._runner.setup()
@@ -221,6 +265,15 @@ class WebChannelOrchestrator:
             self._cleanup_task.cancel()
         if self._container_prune_task is not None:
             self._container_prune_task.cancel()
+        # Etap 4: stop hot-reload watchers.
+        for reloader in (
+            self._skill_reloader,
+            self._subagent_reloader,
+            self._plugin_reloader,
+            self._mcp_reloader,
+        ):
+            if reloader is not None:
+                reloader.stop()
         for sockets in list(self._clients.values()):
             for ws in list(sockets):
                 await ws.close()
@@ -255,6 +308,8 @@ class WebChannelOrchestrator:
         app.router.add_get("/api/workspace/overview", self._handle_workspace_overview)
         app.router.add_get("/api/chats", self._handle_list_chats)
         app.router.add_post("/api/chats", self._handle_create_chat)
+        app.router.add_get("/api/extensions", self._handle_list_extensions)
+        app.router.add_post("/api/extensions/reload", self._handle_reload_extensions)
         app.router.add_post("/api/chats/{id}/activate", self._handle_activate_chat)
         app.router.add_patch("/api/chats/{id}", self._handle_update_chat)
         app.router.add_delete("/api/chats/{id}", self._handle_delete_chat)
@@ -979,6 +1034,86 @@ class WebChannelOrchestrator:
             "recent_outputs": await self._recent_outputs_payload(user, limit=8),
         }
         return web.json_response(payload)
+
+    # ------------------------------------------------------------------
+    # Etap 4: Extensions management endpoints (list / reload). Read-only.
+    # ------------------------------------------------------------------
+
+    async def _handle_list_extensions(self, request: web.Request) -> web.Response:
+        self._require_user(request)
+        stack = self._stack
+        if stack is None:
+            return web.json_response({"skills": [], "subagents": [], "mcp": [], "plugins": []})
+        skills = [
+            {
+                "id": s.id,
+                "name": s.id,
+                "description": s.description,
+                "version": s.version,
+                "status": "loaded",
+                "always": s.always,
+                "keywords": s.keywords,
+            }
+            for s in (stack.skill_registry.list_all() if stack.skill_registry else [])
+        ]
+        subagents = [
+            {
+                "id": spec.id,
+                "name": spec.name,
+                "description": spec.description,
+                "version": None,
+                "status": "loaded",
+                "capabilities": spec.capabilities,
+            }
+            for spec in (stack.subagent_registry.list_all() if stack.subagent_registry else [])
+        ]
+        mcp: list[dict[str, object]] = []
+        if stack.mcp_manager is not None:
+            tools_map = stack.mcp_manager.get_server_tools()
+            status_map = stack.mcp_manager.get_server_status()
+            mcp = [
+                {
+                    "id": name,
+                    "name": name,
+                    "description": None,
+                    "version": None,
+                    "status": status_map[name],
+                    "tools": tools_map.get(name, []),
+                }
+                for name in sorted(status_map.keys())
+            ]
+        plugins = [
+            {
+                "id": p.manifest.name,
+                "name": p.manifest.name,
+                "description": p.manifest.description,
+                "version": p.manifest.version,
+                "status": "loaded",
+                "type": p.manifest.type,
+            }
+            for p in (stack.plugin_registry.list_all() if stack.plugin_registry else [])
+        ]
+        return web.json_response(
+            {"skills": skills, "subagents": subagents, "mcp": mcp, "plugins": plugins}
+        )
+
+    async def _handle_reload_extensions(self, request: web.Request) -> web.Response:
+        self._require_user(request)
+        errors: list[str] = []
+        for label, reloader in (
+            ("skills", self._skill_reloader),
+            ("subagents", self._subagent_reloader),
+            ("plugins", self._plugin_reloader),
+            ("mcp", self._mcp_reloader),
+        ):
+            if reloader is None:
+                continue
+            try:
+                await reloader.reload_now()
+            except Exception as e:
+                logger.error("Extensions reload failed for %s: %s", label, e)
+                errors.append(f"{label}: {e}")
+        return web.json_response({"ok": len(errors) == 0, "errors": errors})
 
     # ------------------------------------------------------------------
     # Etap 2: chat history REST endpoints (list / create / activate).

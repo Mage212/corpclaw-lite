@@ -6,11 +6,13 @@ import {
   createChat,
   deleteChat as apiDeleteChat,
   getChats,
+  getExtensions,
   getSession,
   getWorkspaceOverview,
   login,
   logout,
   previewFile,
+  reloadExtensions,
   renameChat as apiRenameChat
 } from "./api";
 import { ChatPanel } from "./chat/ChatPanel";
@@ -18,6 +20,7 @@ import { useWebChatSession } from "./chat/useWebChatSession";
 import { FileExplorer } from "./files/FileExplorer";
 import { useResizablePanels } from "./hooks/useResizablePanels";
 import { BottomDrawer } from "./layout/BottomDrawer";
+import { ExtensionsView } from "./layout/ExtensionsView";
 import { PreviewOverlay } from "./layout/PreviewOverlay";
 import { Sidebar } from "./layout/Sidebar";
 import type {
@@ -25,6 +28,7 @@ import type {
   ChatSummary,
   ContextUsage,
   DepthMode,
+  ExtensionsPayload,
   PreviewOverlayMode,
   PreviewPayload,
   SessionPayload,
@@ -142,6 +146,11 @@ function Workspace({
   const [chats, setChats] = useState<ChatSummary[]>([]);
   const [chatsLoading, setChatsLoading] = useState(false);
 
+  // Etap 4: extensions view ("chat" | "extensions").
+  const [view, setView] = useState<"chat" | "extensions">("chat");
+  const [extensions, setExtensions] = useState<ExtensionsPayload | null>(null);
+  const [extensionsLoading, setExtensionsLoading] = useState(false);
+
   const { cssVars, layout, startResize, setDrawerHeight } = useResizablePanels();
   const user = session.user;
 
@@ -160,6 +169,26 @@ function Workspace({
       .catch((error) => console.warn("Failed to load chats", error))
       .finally(() => setChatsLoading(false));
   }, [session.csrf_token, section]);
+
+  // Etap 4: extensions list (loaded on demand when view opens or reload clicked).
+  const refreshExtensions = useCallback(() => {
+    setExtensionsLoading(true);
+    getExtensions()
+      .then(setExtensions)
+      .catch((error) => console.warn("Failed to load extensions", error))
+      .finally(() => setExtensionsLoading(false));
+  }, []);
+
+  const handleOpenExtensions = useCallback(() => {
+    setView("extensions");
+    refreshExtensions();
+  }, [refreshExtensions]);
+
+  const handleReloadExtensions = useCallback(() => {
+    reloadExtensions(session.csrf_token)
+      .then(() => refreshExtensions())
+      .catch((error) => console.warn("Failed to reload extensions", error));
+  }, [session.csrf_token, refreshExtensions]);
 
   const chatSession = useWebChatSession({
     csrf: session.csrf_token,
@@ -308,6 +337,7 @@ function Workspace({
         onRenameChat={renameChat}
         onDeleteChat={deleteChat}
         onLogout={doLogout}
+        onOpenExtensions={handleOpenExtensions}
       />
 
       <section className={`main-area ${drawerOpen ? "drawer-open" : ""}`}>
@@ -353,15 +383,24 @@ function Workspace({
         </header>
 
         <div className="main-pane">
-          <ChatPanel
-            session={chatSession}
-            user={user}
-            onPreviewFile={openPreviewPath}
-            contextUsage={contextUsage}
-            depthMode={depthMode}
-            onDepthModeChange={setDepthMode}
-            section={section}
-          />
+          {view === "extensions" ? (
+            <ExtensionsView
+              extensions={extensions}
+              loading={extensionsLoading}
+              onReload={handleReloadExtensions}
+              onBack={() => setView("chat")}
+            />
+          ) : (
+            <ChatPanel
+              session={chatSession}
+              user={user}
+              onPreviewFile={openPreviewPath}
+              contextUsage={contextUsage}
+              depthMode={depthMode}
+              onDepthModeChange={setDepthMode}
+              section={section}
+            />
+          )}
         </div>
 
         <BottomDrawer

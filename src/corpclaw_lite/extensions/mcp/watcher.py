@@ -71,6 +71,10 @@ class MCPHotReloader:
             self._task.cancel()
             logger.info("MCPHotReloader stopped.")
 
+    async def reload_now(self) -> None:
+        """Trigger an immediate config recheck (Etap 4: manual reload button)."""
+        await self._check()
+
     # ── Internal ──────────────────────────────────────────────────────────────
 
     async def _poll_loop(self) -> None:

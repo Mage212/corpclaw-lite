@@ -5,6 +5,8 @@ import type {
   ContextUsage,
   DepthMode,
   DirectoryPayload,
+  ExtensionSummary,
+  ExtensionsPayload,
   FileEntry,
   PanelLayoutState,
   PreviewPayload,
@@ -229,6 +231,40 @@ export function parseChatSummary(value: unknown): ChatSummary {
 export function parseChatSummaries(value: unknown): ChatSummary[] {
   if (!Array.isArray(value)) return [];
   return value.map(parseChatSummary);
+}
+
+// --- Etap 4: Extensions payload parsing ---
+
+export function parseExtensionSummary(value: unknown): ExtensionSummary {
+  const source = record(value, "extension summary");
+  return {
+    id: requiredString(source, "id", "extension summary"),
+    name: requiredString(source, "name", "extension summary"),
+    description: nullableString(source, "description", "extension summary"),
+    version: nullableString(source, "version", "extension summary"),
+    status: requiredString(source, "status", "extension summary"),
+    ...(typeof source.type === "string" ? { type: source.type } : {}),
+    ...(typeof source.always === "boolean" ? { always: source.always } : {}),
+    ...(Array.isArray(source.keywords) ? { keywords: source.keywords as string[] } : {}),
+    ...(Array.isArray(source.capabilities)
+      ? { capabilities: source.capabilities as string[] }
+      : {}),
+    ...(Array.isArray(source.tools) ? { tools: source.tools as string[] } : {})
+  };
+}
+
+export function parseExtensionsPayload(value: unknown): ExtensionsPayload {
+  const source = record(value, "extensions payload");
+  const parseList = (key: string): ExtensionSummary[] => {
+    const arr = (source as Record<string, unknown>)[key];
+    return Array.isArray(arr) ? arr.map(parseExtensionSummary) : [];
+  };
+  return {
+    skills: parseList("skills"),
+    subagents: parseList("subagents"),
+    mcp: parseList("mcp"),
+    plugins: parseList("plugins")
+  };
 }
 
 function parseWorkspaceOutput(value: unknown): WorkspaceOutputSummary {

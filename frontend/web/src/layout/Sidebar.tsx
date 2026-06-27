@@ -20,6 +20,7 @@ export type SidebarProps = {
   onNewChat: () => void;
   onRenameChat: (id: number, title: string) => void;
   onDeleteChat: (id: number) => void;
+  onOpenExtensions: () => void;
   onLogout: () => void;
 };
 
@@ -34,6 +35,7 @@ export function Sidebar({
   onNewChat,
   onRenameChat,
   onDeleteChat,
+  onOpenExtensions,
   onLogout
 }: SidebarProps) {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
@@ -68,10 +70,9 @@ export function Sidebar({
       <SectionSwitcher value={section} onChange={onSectionChange} />
 
       <nav className="sidebar-management" aria-label="Управление агентом">
-        <button disabled title={`${EXTENSIONS_LABEL} — ${COMING_SOON_LABEL}`}>
+        <button onClick={onOpenExtensions} title={EXTENSIONS_LABEL}>
           <Settings2 size={16} />
           <span>{EXTENSIONS_LABEL}</span>
-          <span className="coming-soon-tag">{COMING_SOON_LABEL}</span>
         </button>
         <button disabled title={`${AGENT_CONTEXT_LABEL} — ${COMING_SOON_LABEL}`}>
           <Sparkles size={16} />
