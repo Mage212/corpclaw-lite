@@ -135,8 +135,11 @@ export type AgentMode = "execute" | "chat";
 export type PreviewMode = "side" | "expanded";
 export type FileExplorerMode = "side" | "expanded";
 
-/** Processing depth (Etap 3). Fast = no thinking, Think = reasoning on. */
-export type DepthMode = "fast" | "think";
+/**
+ * Processing depth (Etap 3). Fast = no thinking, Think = reasoning on,
+ * Research = force deep_research via the research subagent (Work-only).
+ */
+export type DepthMode = "fast" | "think" | "research";
 
 /** Sidebar navigation section. Chat = conversational (tools off in Etap 2), Work = task (tools on). */
 export type SidebarSection = "chat" | "work";
