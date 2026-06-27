@@ -8,7 +8,6 @@ import {
   getChats,
   getExtensions,
   getSession,
-  getWorkspaceOverview,
   login,
   logout,
   previewFile,
@@ -24,7 +23,6 @@ import { ExtensionsView } from "./layout/ExtensionsView";
 import { PreviewOverlay } from "./layout/PreviewOverlay";
 import { Sidebar } from "./layout/Sidebar";
 import type {
-  AgentMode,
   ChatSummary,
   ContextUsage,
   DepthMode,
@@ -32,8 +30,7 @@ import type {
   PreviewOverlayMode,
   PreviewPayload,
   SessionPayload,
-  SidebarSection,
-  WorkspaceOverviewPayload
+  SidebarSection
 } from "./types";
 
 export function App() {
@@ -121,11 +118,9 @@ function Workspace({
   session: SessionPayload;
   onSessionChange: (session: SessionPayload) => void;
 }) {
-  // --- Etap 2: mode is derived from the active chat's section, not a free toggle.
-  // Work → execute (tools on), Chat → chat (tools off). The hook still emits
-  // mode_change on connect for back-compat, but the backend now derives the
-  // effective mode from the chat's section at run time. ---
-  const [mode] = useState<AgentMode>("execute");
+  // --- Mode is derived server-side from the active chat's section. The FE no
+  // longer sends mode_change (vestigial after Etap 2 — the hook still accepts
+  // it for back-compat with older builds, but we pass a constant default). ---
   const [section, setSection] = useState<SidebarSection>("chat");
   // Etap 3: depth mode (Fast/Think) — orthogonal to section (tools on/off).
   const [depthMode, setDepthMode] = useState<DepthMode>("think");
@@ -137,8 +132,6 @@ function Workspace({
   const [previewMode, setPreviewMode] = useState<PreviewOverlayMode>("side");
 
   const [contextUsage, setContextUsage] = useState<ContextUsage | null>(null);
-  const [overview, setOverview] = useState<WorkspaceOverviewPayload | null>(null);
-  const [overviewLoading, setOverviewLoading] = useState(false);
   const [resetSignal, setResetSignal] = useState(0);
 
   // Etap 2: multi-chat. chatId=null = follow the active chat (loaded on connect).
@@ -153,14 +146,6 @@ function Workspace({
 
   const { cssVars, layout, startResize, setDrawerHeight } = useResizablePanels();
   const user = session.user;
-
-  const refreshOverview = useCallback(() => {
-    setOverviewLoading(true);
-    getWorkspaceOverview()
-      .then(setOverview)
-      .catch((error) => console.warn("Failed to load workspace overview", error))
-      .finally(() => setOverviewLoading(false));
-  }, []);
 
   const refreshChats = useCallback(() => {
     setChatsLoading(true);
@@ -190,31 +175,34 @@ function Workspace({
       .catch((error) => console.warn("Failed to reload extensions", error));
   }, [session.csrf_token, refreshExtensions]);
 
+  const handleActivateViewedChat = useCallback(
+    async (targetChatId: number): Promise<boolean> => {
+      try {
+        await activateChat(session.csrf_token, targetChatId);
+        return true;
+      } catch (error) {
+        console.warn("Failed to activate viewed chat", error);
+        return false;
+      }
+    },
+    [session.csrf_token]
+  );
+
   const chatSession = useWebChatSession({
     csrf: session.csrf_token,
-    mode,
     depthMode,
     resetSignal,
     onContextUsage: setContextUsage,
-    onWorkspaceChanged: refreshOverview,
     chatId,
+    onActivateViewedChat: handleActivateViewedChat,
+    onChatActivated: () => setChatId(null),
     onChatRenamed: refreshChats,
     onChatListChanged: refreshChats
   });
 
   useEffect(() => {
-    refreshOverview();
-  }, [refreshOverview]);
-
-  useEffect(() => {
     refreshChats();
   }, [refreshChats]);
-
-  // Overview is unused in the current UI (the Inspector "Обзор" tab was removed in 1A),
-  // but we keep refreshing it so the data is warm for future overview surfaces.
-  // `overview`/`overviewLoading` are reserved for that.
-  void overview;
-  void overviewLoading;
 
   // Etap 3B: Research mode requires tools (dispatch_subagent), which are off in
   // the Chat section. If the user switches to Chat while Research is selected,
@@ -229,23 +217,15 @@ function Workspace({
     return <LoginView onLogin={onSessionChange} />;
   }
 
-  async function selectChat(chat: ChatSummary) {
+  function selectChat(chat: ChatSummary) {
     if (chat.active) {
       // Already the active chat — follow it (drop read-only view).
       setChatId(null);
       return;
     }
-    // Activate via REST (switches the active chat + resets agent context), then
-    // follow the newly-active chat. The WS chat_activated event refreshes the list.
-    setChatsLoading(true);
-    try {
-      await activateChat(session.csrf_token, chat.id);
-      setChatId(null);
-    } catch (error) {
-      console.warn("Failed to activate chat", error);
-    } finally {
-      setChatsLoading(false);
-    }
+    // View-only: load the chat's transcript read-only WITHOUT activating.
+    // Activation happens on send (activate-on-send flow in chatSession.send).
+    setChatId(chat.id);
   }
 
   async function startNewChat() {
@@ -383,14 +363,7 @@ function Workspace({
         </header>
 
         <div className="main-pane">
-          {view === "extensions" ? (
-            <ExtensionsView
-              extensions={extensions}
-              loading={extensionsLoading}
-              onReload={handleReloadExtensions}
-              onBack={() => setView("chat")}
-            />
-          ) : (
+          <div className={view === "extensions" ? "view-hidden" : ""}>
             <ChatPanel
               session={chatSession}
               user={user}
@@ -399,6 +372,14 @@ function Workspace({
               depthMode={depthMode}
               onDepthModeChange={setDepthMode}
               section={section}
+            />
+          </div>
+          {view === "extensions" && (
+            <ExtensionsView
+              extensions={extensions}
+              loading={extensionsLoading}
+              onReload={handleReloadExtensions}
+              onBack={() => setView("chat")}
             />
           )}
         </div>
@@ -414,7 +395,6 @@ function Workspace({
             mode="side"
             onModeChange={() => undefined}
             onPreview={openPreview}
-            onWorkspaceChanged={refreshOverview}
           />
         </BottomDrawer>
       </section>

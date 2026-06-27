@@ -7,9 +7,7 @@ import {
   FolderPlus,
   Grid3X3,
   List,
-  Maximize2,
   MoreVertical,
-  Minimize2,
   MoveRight,
   PanelLeftOpen,
   RefreshCw,
@@ -289,15 +287,7 @@ export function FileExplorer({
           <strong>Рабочая область</strong>
           <span title={displayPath(cwd)}>{displayPath(cwd)}</span>
         </div>
-        <div className="files-header-actions">
-          <button
-            className="icon-button"
-            onClick={() => onModeChange(mode === "side" ? "expanded" : "side")}
-            title={mode === "side" ? "Открыть на весь экран" : "Вернуть сбоку"}
-          >
-            {mode === "side" ? <Maximize2 size={18} /> : <Minimize2 size={18} />}
-          </button>
-        </div>
+        <div className="files-header-actions" />
       </header>
 
       <div className="file-toolbar">

@@ -111,7 +111,11 @@ export function ChatPanel({
       <footer className="composer">
         <textarea
           value={session.input}
-          placeholder="Введите сообщение или задачу"
+          placeholder={
+            session.readOnly
+              ? "Просмотр чата. Отправьте сообщение, чтобы активировать."
+              : "Введите сообщение или задачу"
+          }
           onChange={(event) => session.setInput(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === "Enter" && !event.shiftKey) {
