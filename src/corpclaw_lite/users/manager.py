@@ -95,6 +95,17 @@ class UserManager:
                 )
                 """
             )
+            # Etap 5: per-user agent context (personal instructions + tone).
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_agent_context (
+                    user_id INTEGER PRIMARY KEY,
+                    instructions TEXT NOT NULL DEFAULT '',
+                    tone TEXT NOT NULL DEFAULT 'default',
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
 
     def create_user(
         self,
@@ -919,3 +930,54 @@ class UserManager:
     async def async_update_name(self, user_id: int, name: str) -> None:
         """Async wrapper around update_name."""
         await anyio.to_thread.run_sync(partial(self.update_name, user_id, name))
+
+    def get_agent_context(self, user_id: int) -> dict[str, str] | None:
+        """Return the user's agent context (instructions + tone), or None if unset."""
+        try:
+            with self._connect() as conn:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(
+                    "SELECT instructions, tone FROM user_agent_context WHERE user_id = ?",
+                    (int(user_id),),
+                ).fetchone()
+                if row is None:
+                    return None
+                return {
+                    "instructions": str(row["instructions"]),  # type: ignore[index]
+                    "tone": str(row["tone"]),  # type: ignore[index]
+                }
+        except Exception as e:
+            logger.warning("Failed to get agent context for user %s: %s", user_id, e)
+            return None
+
+    async def async_get_agent_context(self, user_id: int) -> dict[str, str] | None:
+        """Async wrapper around get_agent_context."""
+        return await anyio.to_thread.run_sync(partial(self.get_agent_context, user_id))
+
+    def set_agent_context(self, user_id: int, *, instructions: str, tone: str) -> None:
+        """Upsert the user's agent context (personal instructions + tone)."""
+        if tone not in ("default", "concise", "detailed"):
+            tone = "default"
+        instructions = instructions.strip()[:10000]  # cap at 10k chars
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO user_agent_context (user_id, instructions, tone, updated_at)
+                    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        instructions = excluded.instructions,
+                        tone = excluded.tone,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (int(user_id), instructions, tone),
+                )
+                conn.commit()
+        except Exception as e:
+            logger.warning("Failed to set agent context for user %s: %s", user_id, e)
+
+    async def async_set_agent_context(self, user_id: int, *, instructions: str, tone: str) -> None:
+        """Async wrapper around set_agent_context."""
+        await anyio.to_thread.run_sync(
+            partial(self.set_agent_context, user_id, instructions=instructions, tone=tone)
+        )

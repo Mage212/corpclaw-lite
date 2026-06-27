@@ -1,4 +1,5 @@
 import type {
+  AgentContextPayload,
   ChatSummary,
   DirectoryPayload,
   ExtensionsPayload,
@@ -147,6 +148,40 @@ export function reloadExtensions(csrf: string): Promise<{ ok: boolean; errors?: 
     method: "POST",
     csrf
   });
+}
+
+// --- Etap 5: Agent Context ---
+
+export function getAgentContext(): Promise<AgentContextPayload> {
+  return apiFetch("/api/agent-context", (value) => ({
+    instructions: typeof (value as { instructions?: unknown }).instructions === "string"
+      ? (value as { instructions: string }).instructions
+      : "",
+    tone: ["default", "concise", "detailed"].includes(
+      (value as { tone?: string }).tone ?? ""
+    )
+      ? ((value as { tone: AgentContextPayload["tone"] }).tone)
+      : "default"
+  }));
+}
+
+export function saveAgentContext(
+  csrf: string,
+  payload: AgentContextPayload
+): Promise<{ ok: boolean }> {
+  return apiFetch("/api/agent-context", parseOkPayload, {
+    method: "PUT",
+    csrf,
+    body: JSON.stringify(payload)
+  });
+}
+
+export function getAgentContextPreview(): Promise<{ prompt: string }> {
+  return apiFetch("/api/agent-context/preview", (value) => ({
+    prompt: typeof (value as { prompt?: unknown }).prompt === "string"
+      ? (value as { prompt: string }).prompt
+      : ""
+  }));
 }
 
 /** POST /api/chats and POST /api/chats/{id}/activate return `{chat: {...}}`. */

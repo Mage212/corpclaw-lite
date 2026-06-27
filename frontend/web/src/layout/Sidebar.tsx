@@ -21,6 +21,7 @@ export type SidebarProps = {
   onRenameChat: (id: number, title: string) => void;
   onDeleteChat: (id: number) => void;
   onOpenExtensions: () => void;
+  onOpenAgentContext: () => void;
   onLogout: () => void;
 };
 
@@ -36,6 +37,7 @@ export function Sidebar({
   onRenameChat,
   onDeleteChat,
   onOpenExtensions,
+  onOpenAgentContext,
   onLogout
 }: SidebarProps) {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
@@ -74,10 +76,9 @@ export function Sidebar({
           <Settings2 size={16} />
           <span>{EXTENSIONS_LABEL}</span>
         </button>
-        <button disabled title={`${AGENT_CONTEXT_LABEL} — ${COMING_SOON_LABEL}`}>
+        <button onClick={onOpenAgentContext} title={AGENT_CONTEXT_LABEL}>
           <Sparkles size={16} />
           <span>{AGENT_CONTEXT_LABEL}</span>
-          <span className="coming-soon-tag">{COMING_SOON_LABEL}</span>
         </button>
       </nav>
 

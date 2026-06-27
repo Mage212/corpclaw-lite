@@ -19,6 +19,7 @@ import { useWebChatSession } from "./chat/useWebChatSession";
 import { FileExplorer } from "./files/FileExplorer";
 import { useResizablePanels } from "./hooks/useResizablePanels";
 import { BottomDrawer } from "./layout/BottomDrawer";
+import { AgentContextView } from "./layout/AgentContextView";
 import { ExtensionsView } from "./layout/ExtensionsView";
 import { PreviewOverlay } from "./layout/PreviewOverlay";
 import { Sidebar } from "./layout/Sidebar";
@@ -139,8 +140,8 @@ function Workspace({
   const [chats, setChats] = useState<ChatSummary[]>([]);
   const [chatsLoading, setChatsLoading] = useState(false);
 
-  // Etap 4: extensions view ("chat" | "extensions").
-  const [view, setView] = useState<"chat" | "extensions">("chat");
+  // Etap 4/5: view state ("chat" | "extensions" | "agent-context").
+  const [view, setView] = useState<"chat" | "extensions" | "agent-context">("chat");
   const [extensions, setExtensions] = useState<ExtensionsPayload | null>(null);
   const [extensionsLoading, setExtensionsLoading] = useState(false);
 
@@ -318,6 +319,7 @@ function Workspace({
         onDeleteChat={deleteChat}
         onLogout={doLogout}
         onOpenExtensions={handleOpenExtensions}
+        onOpenAgentContext={() => setView("agent-context")}
       />
 
       <section className={`main-area ${drawerOpen ? "drawer-open" : ""}`}>
@@ -379,6 +381,12 @@ function Workspace({
               extensions={extensions}
               loading={extensionsLoading}
               onReload={handleReloadExtensions}
+              onBack={() => setView("chat")}
+            />
+          )}
+          {view === "agent-context" && (
+            <AgentContextView
+              csrf={session.csrf_token}
               onBack={() => setView("chat")}
             />
           )}
