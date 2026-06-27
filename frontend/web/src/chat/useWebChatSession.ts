@@ -112,7 +112,9 @@ function appendScoped(
 
 type UseWebChatSessionOptions = {
   csrf: string;
-  mode: AgentMode;
+  /** @deprecated Mode is now derived server-side from the chat's section. Kept
+   * for back-compat; when omitted, no mode_change WS events are sent. */
+  mode?: AgentMode;
   /** Processing depth (Etap 3): Fast = no thinking, Think = reasoning on. */
   depthMode: DepthMode;
   resetSignal: number;
@@ -124,6 +126,14 @@ type UseWebChatSessionOptions = {
    * client activates it separately via POST /api/chats/{id}/activate).
    */
   chatId?: number | null;
+  /**
+   * Activate-on-send: when the user sends a message while viewing a read-only
+   * chat (chatId !== null), this callback activates it (REST) before the WS
+   * message is sent. Returns true on success, false on conflict (409).
+   */
+  onActivateViewedChat?: (chatId: number) => Promise<boolean>;
+  /** Called when activation succeeds (to reset chatId to null = follow active). */
+  onChatActivated?: () => void;
   /** Fired when the server signals a chat was renamed (to refresh the list). */
   onChatRenamed?: (() => void) | undefined;
   /** Fired when the server signals the chat list changed (create/activate/rename). */
@@ -157,6 +167,8 @@ export function useWebChatSession({
   onContextUsage,
   onWorkspaceChanged,
   chatId = null,
+  onActivateViewedChat,
+  onChatActivated,
   onChatRenamed,
   onChatListChanged
 }: UseWebChatSessionOptions): WebChatSession {
@@ -173,7 +185,6 @@ export function useWebChatSession({
   );
   const wsRef = useRef<WebSocket | null>(null);
   const resetSignalRef = useRef(resetSignal);
-  const modeRef = useRef(mode);
   const depthModeRef = useRef(depthMode);
   /**
    * Tracks the most recently seen request_id (from request_started/state/finished/
@@ -213,12 +224,20 @@ export function useWebChatSession({
     });
   }, [addMessage, addRunEvent]);
 
-  const send = useCallback(() => {
+  const send = useCallback(async () => {
     const text = input.trim();
     if (!text || wsRef.current?.readyState !== WebSocket.OPEN) return;
+    // Activate-on-send: if viewing a read-only chat (chatId !== null), activate
+    // it first via REST. On success, the active chat changes server-side and we
+    // follow it (chatId=null). On 409 (agent busy in another chat), abort.
+    if (chatId !== null && onActivateViewedChat) {
+      const ok = await onActivateViewedChat(chatId);
+      if (!ok) return; // 409 — agent busy, activation refused
+      onChatActivated?.();
+    }
     wsRef.current.send(JSON.stringify({ type: "message", message: text }));
     setInput("");
-  }, [input]);
+  }, [input, chatId, onActivateViewedChat, onChatActivated]);
 
   const loadOlder = useCallback(() => {
     if (!historyHasMore || loadingHistory || wsRef.current?.readyState !== WebSocket.OPEN) return;
@@ -238,10 +257,6 @@ export function useWebChatSession({
   }, []);
 
   useEffect(() => {
-    modeRef.current = mode;
-  }, [mode]);
-
-  useEffect(() => {
     depthModeRef.current = depthMode;
   }, [depthMode]);
 
@@ -259,7 +274,9 @@ export function useWebChatSession({
         wsRef.current = ws;
         ws.onopen = () => {
           setConnected(true);
-          ws?.send(JSON.stringify({ type: "mode_change", mode: modeRef.current }));
+          if (mode !== undefined) {
+            ws?.send(JSON.stringify({ type: "mode_change", mode }));
+          }
           ws?.send(
             JSON.stringify({ type: "depth_mode_change", depth_mode: depthModeRef.current })
           );
@@ -337,12 +354,6 @@ export function useWebChatSession({
       }
     };
   }, [addMessage, addRunEvent, csrf, onContextUsage, onWorkspaceChanged]);
-
-  useEffect(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: "mode_change", mode }));
-    }
-  }, [mode]);
 
   useEffect(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {

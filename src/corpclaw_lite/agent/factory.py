@@ -660,6 +660,23 @@ def build_agent_stack(
             depth_modes=agent_settings.depth_modes,
         )
     )
+
+    # Etap 4 audit: warn at startup if depth_modes references models not in routing.
+    if agent_settings.depth_modes.fast or agent_settings.depth_modes.think:
+        route_models = {r.model for r in full_settings.llm.routing}
+        for depth_name, mapping in [
+            ("fast", agent_settings.depth_modes.fast),
+            ("think", agent_settings.depth_modes.think),
+        ]:
+            for model_key in mapping:
+                if model_key not in route_models:
+                    logger.warning(
+                        "depth_modes.%s references model '%s' not found in routing rules; "
+                        "depth override for this model will be a no-op.",
+                        depth_name,
+                        model_key,
+                    )
+
     user_manager = UserManager()
 
     return AgentStack(

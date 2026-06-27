@@ -891,6 +891,11 @@ a {
   container-type: inline-size;
 }
 
+/* Hide a view without unmounting it (preserves scroll/state). */
+.view-hidden {
+  display: none;
+}
+
 /* --- Etap 1A: sidebar navigation ----------------------------------------- */
 .sidebar {
   display: flex;
