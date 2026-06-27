@@ -14,6 +14,7 @@ from corpclaw_lite.extensions.tools.builtin._path_utils import user_workspace_pa
 from corpclaw_lite.llm.queue import LLMQueueStatus
 from corpclaw_lite.logging.agent_logger import AgentLogger
 from corpclaw_lite.paths import PROJECT_ROOT
+from corpclaw_lite.users.manager import tone_directive
 from corpclaw_lite.users.models import User
 
 logger = logging.getLogger(__name__)
@@ -152,6 +153,42 @@ class AgentRequestService:
         if isinstance(provider, LLMRouter):
             await provider.mark_user_cache_reset(user.memory_key())
 
+    async def build_system_prompt(self, user: User) -> str | None:
+        """Assemble the base system prompt exactly as ``run()`` does.
+
+        Mirrors the 5-part prompt assembly (base + department + onboarding user +
+        personal instructions + response tone + user context) that ``run()``
+        feeds to the agent loop, minus the dynamic per-message additions done
+        later inside ``run()`` (skill matching) and ``AgentLoop.run()``
+        (current-user context wrapper). Used by the web preview handler so the
+        preview reflects the real prompt instead of a hand-copied approximation.
+
+        Returns ``None`` when every part is empty (same sentinel ``run()`` uses
+        before appending the skill block).
+        """
+        stack = self._stack
+        base_prompt = self._bootstrap.get_system_prompt()
+        dept_prompt = self._bootstrap.get_department_prompt(user.department)
+        user_prompt = self._bootstrap.get_user_prompt(user.id, user.telegram_id)
+        agent_ctx = await stack.user_manager.async_get_agent_context(user.id)
+        personal_instructions = agent_ctx.get("instructions", "") if agent_ctx else ""
+        tone = agent_ctx.get("tone", "default") if agent_ctx else "default"
+        tone_text = tone_directive(tone)
+        user_ctx = f"You are talking to {user.name} from the {user.department} department."
+        parts = [
+            p
+            for p in [
+                base_prompt,
+                dept_prompt,
+                user_prompt,
+                personal_instructions,
+                tone_text,
+                user_ctx,
+            ]
+            if p
+        ]
+        return "\n\n".join(parts) if parts else None
+
     async def run(
         self,
         *,
@@ -176,17 +213,10 @@ class AgentRequestService:
                 logger.exception("Container failed for user %s", user.memory_key())
                 raise
 
-        base_prompt = self._bootstrap.get_system_prompt()
-        dept_prompt = self._bootstrap.get_department_prompt(user.department)
-        user_prompt = self._bootstrap.get_user_prompt(user.id, user.telegram_id)
-        # Etap 5: inject personal instructions from user_agent_context.
-        agent_ctx = await stack.user_manager.async_get_agent_context(user.id)
-        personal_instructions = agent_ctx.get("instructions", "") if agent_ctx else ""
-        user_ctx = f"You are talking to {user.name} from the {user.department} department."
-        parts = [
-            p for p in [base_prompt, dept_prompt, user_prompt, personal_instructions, user_ctx] if p
-        ]
-        system_prompt: str | None = "\n\n".join(parts) if parts else None
+        # Etap 5 (+ L2): the base system prompt (base + department + onboarding +
+        # personal instructions + response tone + user context) is assembled in one
+        # shared method so the web preview handler reflects the exact same prompt.
+        system_prompt = await self.build_system_prompt(user)
 
         skill_registry = stack.skill_registry
         plugin_registry = stack.plugin_registry
