@@ -1362,6 +1362,8 @@ class AgentLoop:
             return msg, stats
         finally:
             health.increment("active_requests", -1)
+            if _depth_token is not None:
+                reset_call_depth_mode(_depth_token)
 
         fallback = _LOOP_FALLBACK
         if self._memory:
@@ -1378,8 +1380,6 @@ class AgentLoop:
             duration_ms=round(stats.duration_ms, 1),
             final_answer_len=len(fallback),
         )
-        if _depth_token is not None:
-            reset_call_depth_mode(_depth_token)
         return fallback, stats
 
     async def _save_memory(self, mem_key: str, role: str, content: str, **kwargs: Any) -> None:

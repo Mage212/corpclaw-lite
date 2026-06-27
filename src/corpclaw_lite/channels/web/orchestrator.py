@@ -1118,7 +1118,7 @@ class WebChannelOrchestrator:
                 await reloader.reload_now()
             except Exception as e:
                 logger.error("Extensions reload failed for %s: %s", label, e)
-                errors.append(f"{label}: {e}")
+                errors.append(f"{label}: reload failed (see server logs)")
         return web.json_response({"ok": len(errors) == 0, "errors": errors})
 
     # ------------------------------------------------------------------
