@@ -78,10 +78,22 @@ def resolve_depth_sampling(
 
     The caller falls back to the route's default sampling profile when ``None``
     is returned, so a missing depth mapping never breaks agent execution.
+
+    Note: "research" intentionally returns None here — it affects only the
+    subagent dispatcher (forced deep_research via contextvar), NOT the main
+    agent's sampling profile. The main agent keeps its route default in research
+    depth; only the research subagent's behaviour changes.
     """
+    if depth == "research":
+        return None
     mapping = settings.fast if depth == "fast" else settings.think
     name = mapping.get(route_model)
     if not name:
+        logger.warning(
+            "Depth mode '%s' has no sampling mapping for model '%s'; using route default.",
+            depth,
+            route_model,
+        )
         return None
     if preset_registry is not None and preset_registry.get_sampling_profile(name) is None:
         logger.warning(

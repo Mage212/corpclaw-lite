@@ -159,10 +159,13 @@ class DispatchSubagentTool(Tool):
         # Etap 3B: if the main run was started in "research" depth mode, force
         # deep_research when dispatching the research-agent (bypass keyword
         # detection). Read from the per-run contextvar set by AgentLoop.run().
+        # Gated on the research-agent spec so non-research subagents (document,
+        # data, execution) are NOT corrupted with a research task preamble.
         from corpclaw_lite.agent.depth_mode import get_call_depth_mode
 
         depth = get_call_depth_mode()
-        forced_research = "research" if depth == "research" else None
+        is_research_dispatch = depth == "research" and spec.id == "research-agent"
+        forced_research = "research" if is_research_dispatch else None
 
         return await self._dispatcher.dispatch(
             spec,
