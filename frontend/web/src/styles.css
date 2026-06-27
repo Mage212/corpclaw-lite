@@ -181,12 +181,15 @@ a {
   min-height: 0;
   position: relative; /* anchors the absolute preview overlay */
   display: grid;
-  grid-template-rows: minmax(0, 1fr) auto; /* chat grows; drawer peek-bar hugs bottom */
+  /* Three children in order: topbar (auto), main-pane (grows, shrinks to fit),
+     bottom-drawer peek-bar (auto). The minmax(0,1fr) on row 2 is what lets the
+     chat panel fill the viewport instead of the page growing to content height. */
+  grid-template-rows: auto minmax(0, 1fr) auto;
 }
 
-/* When the bottom drawer is open, it gets a fixed track instead of auto. */
+/* When the bottom drawer is open, its track gets a fixed height. */
 .main-area.drawer-open {
-  grid-template-rows: minmax(0, 1fr) var(--drawer-height);
+  grid-template-rows: auto minmax(0, 1fr) var(--drawer-height);
 }
 
 /* Legacy grid-column assignments removed; .file-explorer/.preview-drawer are now
@@ -886,14 +889,38 @@ a {
 
 .main-pane {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  /* Single grow+shrink track. The active view (chat wrapper, ExtensionsView, or
+     AgentContextView) fills the pane; hidden siblings (display:none) take no
+     cell. Each view manages its own internal row layout (e.g. .chat-shell's
+     grid-template-rows). Previously this was "auto minmax(0,1fr)", which stuck
+     a single visible view into the "auto" row and made it collapse to content
+     height (ExtensionsView showed ~250px instead of filling the pane). */
+  grid-template-rows: minmax(0, 1fr);
   min-width: 0;
+  /* min-height:0 lets this grid item shrink inside its parent's minmax(0,1fr)
+     track. Without it, the default min-height:auto makes the track grow to the
+     child's content height, blowing the page past the viewport and breaking
+     in-panel scrolling of .messages. */
+  min-height: 0;
   container-type: inline-size;
 }
 
-/* Hide a view without unmounting it (preserves scroll/state). */
-.view-hidden {
+/* Hide a view without unmounting it (preserves scroll/state).
+   Qualified with .view-pane to beat the .view-pane { display:flex } rule that
+   would otherwise keep the wrapper laid out (same specificity, later wins). */
+.view-hidden,
+.view-pane.view-hidden {
   display: none;
+}
+
+/* The view-switch wrapper around <ChatPanel>. It must be a shrinking flex
+   container so the height constraint from .main-pane's grid track propagates
+   down to .chat-shell (which is a grid itself). A plain block div has
+   min-height:auto and breaks the chain — the page then grows to content height. */
+.view-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 /* --- Etap 1A: sidebar navigation ----------------------------------------- */

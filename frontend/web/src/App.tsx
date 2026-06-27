@@ -365,7 +365,7 @@ function Workspace({
         </header>
 
         <div className="main-pane">
-          <div className={view === "extensions" ? "view-hidden" : ""}>
+          <div className={`view-pane ${view === "chat" ? "" : "view-hidden"}`}>
             <ChatPanel
               session={chatSession}
               user={user}
