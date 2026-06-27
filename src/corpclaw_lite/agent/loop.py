@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import hashlib
 import inspect
 import json
@@ -639,10 +640,14 @@ class AgentLoop:
 
         # Etap 3B: publish the depth mode to a per-run contextvar so tools
         # (notably DispatchSubagentTool) can read it without a schema/kwargs
-        # change. The token is captured and reset before run() returns so the
-        # value does not leak into a subsequent run() in the same task
-        # (e.g. eval/calibration loops, or a subagent's nested run).
-        _depth_token = set_call_depth_mode(depth_mode) if depth_mode is not None else None
+        # change. The token is set as the FIRST statement inside the try/finally
+        # below so every code path — including context-build failures between
+        # here and the try — is covered by the reset in finally. Previously the
+        # set lived here (before the try), which leaked the value when
+        # log_event/build_initial/task_run.initialize raised in the gap.
+        # Pre-initialised to None so the finally can reference it unconditionally
+        # even on the (impossible-at-runtime) path where the try body never runs.
+        _depth_token: contextvars.Token[DepthMode | None] | None = None
 
         def emit_llm_status(stage: str) -> None:
             if self._settings.llm_stream_status_updates and on_llm_stage is not None:
@@ -793,6 +798,10 @@ class AgentLoop:
         )
 
         try:
+            # Etap 3B: set the depth-mode contextvar FIRST, so the finally below
+            # resets it no matter what (even if context building raised). See
+            # the note above for why this was moved out of the pre-try range.
+            _depth_token = set_call_depth_mode(depth_mode) if depth_mode is not None else None
             # D-056 PR2: prev_turn_tools feeds PhasePolicy's semantic phase
             # signal. It holds the tool names invoked in the PREVIOUS turn
             # (per-turn, not cumulative). current_turn_tools is populated during

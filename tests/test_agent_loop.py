@@ -1816,3 +1816,36 @@ async def test_empty_response_retry_exhausted(
     result, stats = await loop.run(test_user, "task", channel="test")
     assert result == "Agent provided no response."
     assert stats.status == "ok"
+
+
+@pytest.mark.asyncio
+async def test_depth_mode_contextvar_reset_on_context_build_error(
+    test_user: User,
+    empty_registry: ToolRegistry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """L1 regression: if context building raises after set_call_depth_mode,
+    the finally must still reset the contextvar so it never leaks into the
+    next run() in the same task.
+
+    Before the fix, set_call_depth_mode lived BEFORE the try/finally; a failure
+    in build_initial (which runs between set and try) leaked the depth value.
+    """
+    from corpclaw_lite.agent.depth_mode import get_call_depth_mode, set_call_depth_mode
+
+    # Start clean: no leaked depth from a prior test.
+    set_call_depth_mode(None)
+
+    def _raising_build_initial(*_args: Any, **_kwargs: Any) -> ContextBuilder:
+        raise RuntimeError("simulated context-build failure")
+
+    monkeypatch.setattr(ContextBuilder, "build_initial", _raising_build_initial)
+
+    provider = MockProvider(responses=[LLMResponse(content="ok")])
+    loop = AgentLoop(AgentConfig(provider, empty_registry, AgentSettings()))
+
+    with pytest.raises(RuntimeError, match="simulated context-build failure"):
+        await loop.run(test_user, "task", depth_mode="research", channel="test")
+
+    # The depth contextvar MUST be reset — not still "research".
+    assert get_call_depth_mode() is None

@@ -1160,17 +1160,10 @@ class WebChannelOrchestrator:
         user = self._require_user(request)
         if self._stack is None or self._service is None:
             raise web.HTTPServiceUnavailable()
-        bootstrap = self._service._bootstrap  # type: ignore[attr-defined]
-        base_prompt = bootstrap.get_system_prompt()
-        dept_prompt = bootstrap.get_department_prompt(user.department)
-        user_prompt = bootstrap.get_user_prompt(user.id, user.telegram_id)
-        ctx = await self._stack.user_manager.async_get_agent_context(user.id)
-        personal_instructions = ctx.get("instructions", "") if ctx else ""
-        user_ctx = f"You are talking to {user.name} from the {user.department} department."
-        parts = [
-            p for p in [base_prompt, dept_prompt, user_prompt, personal_instructions, user_ctx] if p
-        ]
-        return web.json_response({"prompt": "\n\n".join(parts)})
+        # L2: delegate to the shared prompt assembly so the preview matches what
+        # run() feeds the agent (no private-attribute reach-in, no duplicated logic).
+        prompt = await self._service.build_system_prompt(user)
+        return web.json_response({"prompt": prompt or ""})
 
     # ------------------------------------------------------------------
     # Etap 2: chat history REST endpoints (list / create / activate).

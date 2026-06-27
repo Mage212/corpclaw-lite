@@ -464,6 +464,134 @@ async def test_agent_request_service_resets_user_context(tmp_path: Path) -> None
     assert loop.memory.cleared == [user.memory_key()]
 
 
+# --- M1 + L2: response-tone directive + shared system-prompt assembly --------
+
+
+def test_tone_directive_default_is_empty() -> None:
+    """'default' tone adds no directive (base SOUL.md tone line applies)."""
+    from corpclaw_lite.users.manager import tone_directive
+
+    assert tone_directive("default") == ""
+
+
+def test_tone_directive_concise_and_detailed_differ() -> None:
+    """concise/detailed return distinct non-empty directives."""
+    from corpclaw_lite.users.manager import tone_directive
+
+    concise = tone_directive("concise")
+    detailed = tone_directive("detailed")
+    assert concise and detailed
+    assert concise != detailed
+    assert "concise" in concise.lower()
+    assert "thorough" in detailed.lower()
+
+
+def test_tone_directive_unknown_returns_empty() -> None:
+    """Unknown tone values fall back to empty (defensive)."""
+    from corpclaw_lite.users.manager import tone_directive
+
+    assert tone_directive("bogus") == ""
+    assert tone_directive("") == ""
+
+
+def _build_service(tmp_path: Path) -> tuple[AgentRequestService, UserManager]:
+    """Minimal AgentRequestService with a real UserManager + empty bootstrap."""
+    user_manager = UserManager(db_path=str(tmp_path / "users.db"))
+    stack = AgentStack(
+        loop=object(),  # type: ignore[arg-type]
+        user_manager=user_manager,
+        tool_registry=None,  # type: ignore[arg-type]
+        full_tool_registry=None,
+        mcp_manager=None,
+        container_manager=None,
+        skill_registry=None,
+        plugin_registry=None,
+        skill_matcher=None,
+    )
+    service = AgentRequestService(
+        stack=stack,
+        bootstrap=BootstrapLoader(tmp_path / "bootstrap"),
+        workspace_base=tmp_path / "workspaces",
+    )
+    return service, user_manager
+
+
+@pytest.mark.asyncio
+async def test_build_system_prompt_injects_instructions_and_tone(tmp_path: Path) -> None:
+    """Saved agent-context instructions + tone both reach the assembled prompt."""
+    service, user_manager = _build_service(tmp_path)
+    user = User(id=3, name="Vadim", department="engineering")
+
+    user_manager.set_agent_context(user.id, instructions="Always cite sources.", tone="concise")
+    prompt = await service.build_system_prompt(user)
+
+    assert prompt is not None
+    assert "Always cite sources." in prompt
+    assert "You are talking to Vadim from the engineering department." in prompt
+    # M1: the concise directive is injected (previously dead field).
+    assert "Be concise" in prompt
+
+
+@pytest.mark.asyncio
+async def test_build_system_prompt_without_agent_context_is_not_none(tmp_path: Path) -> None:
+    """With no saved agent context, the user-context line still yields a prompt."""
+    service, _ = _build_service(tmp_path)
+    user = User(id=4, name="Anna", department="marketing")
+
+    prompt = await service.build_system_prompt(user)
+
+    # No base/bootstrap files exist, so only the synthesized user_ctx part remains.
+    assert prompt is not None
+    assert "You are talking to Anna from the marketing department." in prompt
+
+
+@pytest.mark.asyncio
+async def test_tone_directive_reaches_agent_loop_via_service_run(tmp_path: Path) -> None:
+    """End-to-end: run() passes the tone directive to the loop's system_prompt.
+
+    A SpyLoop captures the system_prompt kwarg; we assert the concise directive
+    survives the full run() path (bootstrap + agent-context load + tone mapping).
+    """
+
+    class SpyLoop:
+        captured_system_prompt: str | None = None
+
+        async def run(self, *_args: Any, **kwargs: Any) -> tuple[str, Any]:
+            from corpclaw_lite.agent.loop import RunStats
+
+            SpyLoop.captured_system_prompt = kwargs.get("system_prompt")
+            return "ok", RunStats()
+
+    spy = SpyLoop()
+    user_manager = UserManager(db_path=str(tmp_path / "users.db"))
+    stack = AgentStack(
+        loop=spy,  # type: ignore[arg-type]
+        user_manager=user_manager,
+        tool_registry=None,  # type: ignore[arg-type]
+        full_tool_registry=None,
+        mcp_manager=None,
+        container_manager=None,
+        skill_registry=None,
+        plugin_registry=None,
+        skill_matcher=None,
+    )
+    service = AgentRequestService(
+        stack=stack,
+        bootstrap=BootstrapLoader(tmp_path / "bootstrap"),
+        workspace_base=tmp_path / "workspaces",
+    )
+    user = User(id=5, name="Vadim", department="engineering")
+    user_manager.set_agent_context(user.id, instructions="Be precise.", tone="detailed")
+
+    await service.run(user=user, message="hi", mode="chat", channel="web")
+
+    captured = SpyLoop.captured_system_prompt
+    assert captured is not None
+    assert "Be precise." in captured
+    # M1 regression: tone directive is present (was missing before the fix).
+    assert "Be thorough" in captured
+
+
 @pytest.mark.asyncio
 async def test_web_chat_store_persists_and_pages_history(tmp_path: Path) -> None:
     store = WebChatStore(tmp_path / "memory.db")

@@ -18,9 +18,37 @@ from corpclaw_lite.utils.db import db_connect
 
 __all__ = [
     "UserManager",
+    "tone_directive",
 ]
 
 logger = logging.getLogger(__name__)
+
+# Response-tone directives injected into the system prompt per the user's
+# ``user_agent_context.tone`` setting (Etap 5). ``"default"`` has no directive —
+# the base SOUL.md tone line applies unchanged. ``tone_directive()`` is the
+# single point consumed by both ``AgentRequestService`` (run) and the web
+# preview handler, so the tone setting can never silently go unused.
+_TONE_DIRECTIVES: dict[str, str] = {
+    "concise": (
+        "Be concise: give short, direct answers. Skip preamble, hedging, and "
+        "restating the question. Prefer lists over prose when several items are involved."
+    ),
+    "detailed": (
+        "Be thorough: explain your reasoning, structure the answer with headings, "
+        "and include relevant context. Prefer completeness over brevity."
+    ),
+}
+
+
+def tone_directive(tone: str) -> str:
+    """Return the system-prompt directive for a response tone.
+
+    Returns an empty string for ``"default"`` and any unknown value, so callers
+    can always append the result without a special-case branch.
+    """
+    return _TONE_DIRECTIVES.get(tone, "")
+
+
 _PASSWORD_ITERATIONS = 200_000
 _SESSION_TOKEN_BYTES = 32
 _PASSWORD_MIN_LENGTH = 12
@@ -934,7 +962,7 @@ class UserManager:
     def get_agent_context(self, user_id: int) -> dict[str, str] | None:
         """Return the user's agent context (instructions + tone), or None if unset."""
         try:
-            with self._connect() as conn:
+            with db_connect(self._db) as conn:
                 conn.row_factory = sqlite3.Row
                 row = conn.execute(
                     "SELECT instructions, tone FROM user_agent_context WHERE user_id = ?",
@@ -960,7 +988,7 @@ class UserManager:
             tone = "default"
         instructions = instructions.strip()[:10000]  # cap at 10k chars
         try:
-            with self._connect() as conn:
+            with db_connect(self._db) as conn:
                 conn.execute(
                     """
                     INSERT INTO user_agent_context (user_id, instructions, tone, updated_at)
