@@ -1005,3 +1005,92 @@ async def test_web_container_prune_loop_noop_without_container_manager() -> None
     orchestrator._stack = None  # dev mode: no stack at all
     # Should return without entering the loop (no await asyncio.sleep).
     await asyncio.wait_for(orchestrator._container_prune_loop(), timeout=1.0)
+
+
+# --- Issue 1/2: load_chat read_only by is_active; delete active w/ replacement --
+
+
+async def _read_only_for_target(store: WebChatStore, user_id: str, session_id: int) -> bool:
+    """Mirror of the orchestrator's load_chat read_only decision: editable when
+    the target is the user's active session, read-only otherwise."""
+    summary = await store.get_session(user_id, session_id)
+    return not (summary is not None and summary.is_active)
+
+
+@pytest.mark.asyncio
+async def test_load_chat_active_session_is_editable(tmp_path: Path) -> None:
+    """load_chat on the active chat must report read_only=False (edit mode)."""
+    store = WebChatStore(tmp_path / "memory.db")
+    # create_session archives the prior active one, so the LAST created is active.
+    inactive_id = await store.create_session(user_id="7", section="chat")
+    active_id = await store.create_session(user_id="7", section="chat")
+    assert active_id != inactive_id
+
+    active_summary = await store.get_session("7", active_id)
+    inactive_summary = await store.get_session("7", inactive_id)
+    assert active_summary is not None and active_summary.is_active is True
+    assert inactive_summary is not None and inactive_summary.is_active is False
+
+    assert await _read_only_for_target(store, "7", active_id) is False
+    assert await _read_only_for_target(store, "7", inactive_id) is True
+
+
+@pytest.mark.asyncio
+async def test_load_chat_inactive_session_is_read_only(tmp_path: Path) -> None:
+    """load_chat on a non-active chat reports read_only=True; reactivating flips it."""
+    store = WebChatStore(tmp_path / "memory.db")
+    first_id = await store.create_session(user_id="7", section="chat")
+    second_id = await store.create_session(user_id="7", section="chat")
+    # second is active, first is inactive
+    first = await store.get_session("7", first_id)
+    assert first is not None and first.is_active is False
+    assert await _read_only_for_target(store, "7", first_id) is True
+
+    # reactivate the first → it becomes editable, second becomes inactive
+    await store.activate_session(user_id="7", session_id=first_id)
+    assert await _read_only_for_target(store, "7", first_id) is False
+    assert await _read_only_for_target(store, "7", second_id) is True
+
+
+@pytest.mark.asyncio
+async def test_delete_active_chat_creates_replacement(tmp_path: Path) -> None:
+    """Deleting the active chat must leave a fresh active chat behind (invariant:
+    exactly one active session per user) so the agent still has a place to write."""
+    store = WebChatStore(tmp_path / "memory.db")
+    active_id = await store.create_session(user_id="7", section="chat")
+    before = await store.get_session("7", active_id)
+    assert before is not None and before.is_active is True
+
+    ok = await store.delete_session("7", active_id)
+    assert ok is True
+
+    # No active session right after deletion…
+    sessions = await store.list_sessions("7")
+    assert not any(s.is_active for s in sessions)
+
+    # …so the orchestrator's delete handler calls ensure_active_session to create
+    # a replacement. Verify that produces exactly one new active session.
+    new_id = await store.ensure_active_session("7")
+    assert new_id != active_id
+    replacement = await store.get_session("7", new_id)
+    assert replacement is not None and replacement.is_active is True
+    sessions_after = await store.list_sessions("7")
+    assert sum(1 for s in sessions_after if s.is_active) == 1
+
+
+@pytest.mark.asyncio
+async def test_delete_inactive_chat_makes_no_replacement(tmp_path: Path) -> None:
+    """Deleting a non-active chat leaves the existing active chat untouched."""
+    store = WebChatStore(tmp_path / "memory.db")
+    inactive_id = await store.create_session(user_id="7", section="chat")
+    active_id = await store.create_session(user_id="7", section="chat")
+    assert active_id != inactive_id
+
+    ok = await store.delete_session("7", inactive_id)
+    assert ok is True
+
+    # The active chat is unaffected.
+    still_active = await store.get_session("7", active_id)
+    assert still_active is not None and still_active.is_active is True
+    gone = await store.get_session("7", inactive_id)
+    assert gone is None

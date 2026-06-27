@@ -631,27 +631,26 @@ class WebChatStore:
         return await run_in_thread(self._sync_rename_session, str(user_id), int(session_id), title)
 
     def _sync_delete_session(self, user_id: str, session_id: int) -> bool:
-        """Physically delete a session and its messages. Refuses the active session.
+        """Physically delete a session and its messages.
 
-        Etap 2B. The caller should also clear the agent context if it deleted the
-        chat the agent was working on (handled at the orchestrator layer).
+        Active sessions may be deleted; the caller (orchestrator) is responsible
+        for creating a replacement active session afterward so the agent still has
+        a chat to write to (the "one active chat per user" invariant is enforced
+        by ``idx_web_chat_sessions_active``). Returns True on success, False if
+        the session is not owned by the user.
         """
         try:
             with db_connect(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
                 row = conn.execute(
                     """
-                    SELECT (ended_at IS NULL) AS is_active
+                    SELECT 1 AS owned
                     FROM web_chat_sessions
                     WHERE id = ? AND user_id = ?
                     """,
                     (int(session_id), str(user_id)),
                 ).fetchone()
                 if row is None:
-                    return False
-                if bool(row["is_active"]):
-                    # Never delete the active session — that would orphan the
-                    # agent's single-thread memory. Caller surfaces a 409.
                     return False
                 # Scope the delete to this user (defense-in-depth): even though
                 # ownership was checked above, the DELETE itself must not touch
@@ -663,9 +662,10 @@ class WebChatStore:
             return False
 
     async def delete_session(self, user_id: str, session_id: int) -> bool:
-        """Delete a chat session owned by the user. Refuses the active session.
+        """Delete a chat session owned by the user (active or not).
 
-        Returns True on success, False if not found or if it's the active session.
+        Returns True on success, False if not found/not owned. The orchestrator
+        handles active-chat replacement after a successful delete.
         """
         return await run_in_thread(self._sync_delete_session, str(user_id), int(session_id))
 

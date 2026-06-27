@@ -219,13 +219,12 @@ function Workspace({
   }
 
   function selectChat(chat: ChatSummary) {
-    if (chat.active) {
-      // Already the active chat — follow it (drop read-only view).
-      setChatId(null);
-      return;
-    }
-    // View-only: load the chat's transcript read-only WITHOUT activating.
-    // Activation happens on send (activate-on-send flow in chatSession.send).
+    // Load the chat's transcript. The active chat loads as editable
+    // (read_only=false on the server, since it's the chat the agent writes to);
+    // any other chat loads read-only until the user sends (activate-on-send).
+    // Previously clicking the active chat did setChatId(null) ("follow"), but
+    // null means "no chat viewed → empty panel", which made returning to the
+    // active chat's transcript impossible after viewing another one.
     setChatId(chat.id);
   }
 
