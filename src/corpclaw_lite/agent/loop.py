@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from corpclaw_lite.agent.context import ContextBuilder
 from corpclaw_lite.agent.depth_mode import (
     DepthMode,
+    reset_call_depth_mode,
     resolve_depth_sampling,
     set_call_depth_mode,
 )
@@ -638,13 +639,10 @@ class AgentLoop:
 
         # Etap 3B: publish the depth mode to a per-run contextvar so tools
         # (notably DispatchSubagentTool) can read it without a schema/kwargs
-        # change. ContextVars are isolated per asyncio task, and run() is always
-        # awaited inside a task (orchestrator's asyncio.create_task), so
-        # concurrent runs never see each other's value. Subagents start their
-        # own run() with depth_mode=None → their contextvar default is restored
-        # in the subagent's task, so "research" does not leak into nested runs.
-        if depth_mode is not None:
-            set_call_depth_mode(depth_mode)
+        # change. The token is captured and reset before run() returns so the
+        # value does not leak into a subsequent run() in the same task
+        # (e.g. eval/calibration loops, or a subagent's nested run).
+        _depth_token = set_call_depth_mode(depth_mode) if depth_mode is not None else None
 
         def emit_llm_status(stage: str) -> None:
             if self._settings.llm_stream_status_updates and on_llm_stage is not None:
@@ -1380,6 +1378,8 @@ class AgentLoop:
             duration_ms=round(stats.duration_ms, 1),
             final_answer_len=len(fallback),
         )
+        if _depth_token is not None:
+            reset_call_depth_mode(_depth_token)
         return fallback, stats
 
     async def _save_memory(self, mem_key: str, role: str, content: str, **kwargs: Any) -> None:
@@ -1670,6 +1670,10 @@ class AgentLoop:
         default_provider = router.default
         route_model = getattr(default_provider, "_model", None)
         if not route_model:
+            logger.warning(
+                "Cannot apply depth override '%s': default provider has no model attribute.",
+                depth,
+            )
             return router
         sampling_name = resolve_depth_sampling(
             depth, str(route_model), self._depth_modes, self._preset_registry
