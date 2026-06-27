@@ -316,6 +316,9 @@ class WebChannelOrchestrator:
         app.router.add_post("/api/chats", self._handle_create_chat)
         app.router.add_get("/api/extensions", self._handle_list_extensions)
         app.router.add_post("/api/extensions/reload", self._handle_reload_extensions)
+        app.router.add_get("/api/agent-context", self._handle_get_agent_context)
+        app.router.add_put("/api/agent-context", self._handle_save_agent_context)
+        app.router.add_get("/api/agent-context/preview", self._handle_preview_agent_context)
         app.router.add_post("/api/chats/{id}/activate", self._handle_activate_chat)
         app.router.add_patch("/api/chats/{id}", self._handle_update_chat)
         app.router.add_delete("/api/chats/{id}", self._handle_delete_chat)
@@ -1120,6 +1123,54 @@ class WebChannelOrchestrator:
                 logger.error("Extensions reload failed for %s: %s", label, e)
                 errors.append(f"{label}: reload failed (see server logs)")
         return web.json_response({"ok": len(errors) == 0, "errors": errors})
+
+    # ------------------------------------------------------------------
+    # Etap 5: Agent Context endpoints (get / save / preview).
+    # ------------------------------------------------------------------
+
+    async def _handle_get_agent_context(self, request: web.Request) -> web.Response:
+        user = self._require_user(request)
+        if self._stack is None:
+            return web.json_response({"instructions": "", "tone": "default"})
+        ctx = await self._stack.user_manager.async_get_agent_context(user.id)
+        if ctx is None:
+            return web.json_response({"instructions": "", "tone": "default"})
+        return web.json_response(ctx)
+
+    async def _handle_save_agent_context(self, request: web.Request) -> web.Response:
+        user = self._require_user(request)
+        if self._stack is None:
+            raise web.HTTPServiceUnavailable()
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        instructions = body.get("instructions", "") if isinstance(body, dict) else ""
+        tone = body.get("tone", "default") if isinstance(body, dict) else "default"
+        if not isinstance(instructions, str):
+            instructions = ""
+        if not isinstance(tone, str):
+            tone = "default"
+        await self._stack.user_manager.async_set_agent_context(
+            user.id, instructions=instructions, tone=tone
+        )
+        return web.json_response({"ok": True})
+
+    async def _handle_preview_agent_context(self, request: web.Request) -> web.Response:
+        user = self._require_user(request)
+        if self._stack is None or self._service is None:
+            raise web.HTTPServiceUnavailable()
+        bootstrap = self._service._bootstrap  # type: ignore[attr-defined]
+        base_prompt = bootstrap.get_system_prompt()
+        dept_prompt = bootstrap.get_department_prompt(user.department)
+        user_prompt = bootstrap.get_user_prompt(user.id, user.telegram_id)
+        ctx = await self._stack.user_manager.async_get_agent_context(user.id)
+        personal_instructions = ctx.get("instructions", "") if ctx else ""
+        user_ctx = f"You are talking to {user.name} from the {user.department} department."
+        parts = [
+            p for p in [base_prompt, dept_prompt, user_prompt, personal_instructions, user_ctx] if p
+        ]
+        return web.json_response({"prompt": "\n\n".join(parts)})
 
     # ------------------------------------------------------------------
     # Etap 2: chat history REST endpoints (list / create / activate).

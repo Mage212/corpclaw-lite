@@ -179,8 +179,13 @@ class AgentRequestService:
         base_prompt = self._bootstrap.get_system_prompt()
         dept_prompt = self._bootstrap.get_department_prompt(user.department)
         user_prompt = self._bootstrap.get_user_prompt(user.id, user.telegram_id)
+        # Etap 5: inject personal instructions from user_agent_context.
+        agent_ctx = await stack.user_manager.async_get_agent_context(user.id)
+        personal_instructions = agent_ctx.get("instructions", "") if agent_ctx else ""
         user_ctx = f"You are talking to {user.name} from the {user.department} department."
-        parts = [p for p in [base_prompt, dept_prompt, user_prompt, user_ctx] if p]
+        parts = [
+            p for p in [base_prompt, dept_prompt, user_prompt, personal_instructions, user_ctx] if p
+        ]
         system_prompt: str | None = "\n\n".join(parts) if parts else None
 
         skill_registry = stack.skill_registry

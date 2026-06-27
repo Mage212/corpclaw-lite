@@ -163,6 +163,12 @@ export type ExtensionsPayload = {
   plugins: ExtensionSummary[];
 };
 
+/** Agent context (personal instructions + tone) from GET/PUT /api/agent-context. */
+export type AgentContextPayload = {
+  instructions: string;
+  tone: "default" | "concise" | "detailed";
+};
+
 /** Sidebar navigation section. Chat = conversational (tools off in Etap 2), Work = task (tools on). */
 export type SidebarSection = "chat" | "work";
 
