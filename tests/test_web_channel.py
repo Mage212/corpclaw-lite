@@ -1297,3 +1297,33 @@ async def test_chat_context_store_cascade_on_session_delete(tmp_path: Path) -> N
     await ws.delete_session("7", session_id)
     assert not store.has_context(session_id)
     assert await store.list_context(session_id) == []
+
+
+@pytest.mark.asyncio
+async def test_chat_context_store_unique_seq_under_concurrent_append(tmp_path: Path) -> None:
+    """B-063 S1 audit: concurrent appends to the same session must not collide
+    on seq. The UNIQUE(session_id, seq) index + retry-on-IntegrityError turns a
+    race into a recovered insert, keeping ordering deterministic."""
+    import asyncio
+
+    db = tmp_path / "memory.db"
+    ws = WebChatStore(db)
+    store = ChatContextStore(db)
+    session_id = await ws.create_session(user_id="7", section="chat")
+
+    # Fire several appends concurrently; with a plain MAX+1 and no UNIQUE these
+    # would produce duplicate seqs. With UNIQUE + retry, all succeed distinctly.
+    await asyncio.gather(
+        *(
+            store.append_context(
+                session_id=session_id, user_id="7", role="user", content=f"msg {i}"
+            )
+            for i in range(8)
+        )
+    )
+
+    ctx = await store.list_context(session_id)
+    assert len(ctx) == 8
+    # Every content is distinct and present (no lost inserts).
+    contents = {m["content"] for m in ctx}
+    assert contents == {f"msg {i}" for i in range(8)}

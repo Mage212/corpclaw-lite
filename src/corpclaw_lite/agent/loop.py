@@ -15,6 +15,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from corpclaw_lite.agent.context import ContextBuilder
+from corpclaw_lite.agent.context_target import (
+    ContextTargetTokens,
+    get_context_session_id,
+    get_context_user_id,
+    reset_context_target,
+    set_context_target,
+)
 from corpclaw_lite.agent.depth_mode import (
     DepthMode,
     reset_call_depth_mode,
@@ -333,8 +340,6 @@ class AgentLoop:
         self._depth_modes = config.depth_modes
         # B-063 S1: full LLM-context persistence per chat.
         self._chat_context_store = config.chat_context_store
-        self._ctx_session_id: int | None = None
-        self._ctx_user_id: str | None = None
         # Cache marker sets as frozensets for the hot path.
         self._phase_aggregation_markers = frozenset(self._settings.phase_policy.aggregation_markers)
         self._phase_gathering_tools = frozenset(self._settings.phase_policy.gathering_tools)
@@ -730,6 +735,8 @@ class AgentLoop:
         # Pre-initialised to None so the finally can reference it unconditionally
         # even on the (impossible-at-runtime) path where the try body never runs.
         _depth_token: contextvars.Token[DepthMode | None] | None = None
+        # B-063 S1 audit: context-persist target tokens (reset in finally).
+        _ctx_tokens: ContextTargetTokens | None = None
 
         def emit_llm_status(stage: str) -> None:
             if self._settings.llm_stream_status_updates and on_llm_stage is not None:
@@ -757,11 +764,10 @@ class AgentLoop:
 
         mem_key = user.memory_key()
 
-        # B-063 S1: set up per-run context-persistence targets. session_id is
-        # threaded from the web channel (the only place it exists today); when
-        # None (telegram/CLI/subagents) persistence is a no-op.
-        self._ctx_session_id = session_id
-        self._ctx_user_id = str(user.id)
+        # B-063 S1: context-persistence target (session_id, user_id) is bound via
+        # contextvars inside the try/finally below — NOT instance attrs — so
+        # concurrent runs on this shared singleton loop are isolated. See
+        # agent/context_target.py.
 
         # Load history BEFORE building context so it precedes the current message
         history: list[dict[str, Any]] = []
@@ -823,7 +829,9 @@ class AgentLoop:
 
         if self._memory:
             await self._save_memory(mem_key, "user", message)
-        await self._persist_context_msg(role="user", content=message)
+        # NOTE: the context-store persist of the user message is deferred to
+        # inside the try/finally (after set_context_target), since it reads the
+        # contextvar that the try block binds.
 
         # Budget is ALWAYS from settings. Department-specific iteration/tool-call
         # limits were removed — they silently overrode settings.max_steps, causing
@@ -891,6 +899,13 @@ class AgentLoop:
             # resets it no matter what (even if context building raised). See
             # the note above for why this was moved out of the pre-try range.
             _depth_token = set_call_depth_mode(depth_mode) if depth_mode is not None else None
+            # B-063 S1 audit: bind the context-persist target (session_id, user_id)
+            # via contextvars so concurrent runs are isolated. Reset in finally.
+            _ctx_tokens = set_context_target(session_id, str(user.id))
+            # Persist the user message now that the context-target is bound (it
+            # reads the contextvar set just above). Deferred from the pre-try
+            # section so the contextvar is populated.
+            await self._persist_context_msg(role="user", content=message)
             # D-056 PR2: prev_turn_tools feeds PhasePolicy's semantic phase
             # signal. It holds the tool names invoked in the PREVIOUS turn
             # (per-turn, not cumulative). current_turn_tools is populated during
@@ -1089,7 +1104,7 @@ class AgentLoop:
                             reset_request_options(_phase_call_token)
                 except TimeoutError:
                     msg = "I could not get a response from the language model (timed out)."
-                    await self._save_memory(mem_key, "assistant", msg)
+                    await self._save_turn(mem_key, msg, stats.tools_used)
                     stats.status = "timeout"
                     stats.duration_ms = (time.monotonic() - t0) * 1000
                     health.increment("llm_timeouts")
@@ -1483,6 +1498,10 @@ class AgentLoop:
             health.increment("active_requests", -1)
             if _depth_token is not None:
                 reset_call_depth_mode(_depth_token)
+            # B-063 S1 audit: reset the context-persist target so it never
+            # outlives the run (and never leaks into a sibling task's run).
+            if _ctx_tokens is not None:
+                reset_context_target(_ctx_tokens)
 
         fallback = _LOOP_FALLBACK
         await self._save_turn(mem_key, fallback, stats.tools_used)
@@ -1525,16 +1544,14 @@ class AgentLoop:
         No-op when no store is configured or when ``session_id`` is None
         (telegram/CLI/subagents — they have no web chat session concept).
         """
-        if (
-            self._chat_context_store is None
-            or self._ctx_session_id is None
-            or self._ctx_user_id is None
-        ):
+        session_id = get_context_session_id()
+        user_id = get_context_user_id()
+        if self._chat_context_store is None or session_id is None or user_id is None:
             return
         try:
             await self._chat_context_store.append_context(
-                session_id=self._ctx_session_id,
-                user_id=self._ctx_user_id,
+                session_id=session_id,
+                user_id=user_id,
                 role=role,
                 content=content,
                 tool_calls=tool_calls,
@@ -1545,7 +1562,7 @@ class AgentLoop:
         except Exception:
             logger.debug(
                 "[session=%s] chat_context persist failed (non-fatal)",
-                self._ctx_session_id,
+                session_id,
                 exc_info=True,
             )
 
