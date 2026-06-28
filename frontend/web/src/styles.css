@@ -1403,6 +1403,17 @@ a {
   min-width: 0;
 }
 
+/* The left-side controls (sidebar toggle + files) must occupy the first grid
+   column ("files") so they stick to the left edge. Without this they fall into
+   auto-placement and end up in the "actions" column, visually clumped with the
+   eye on the right. */
+.topbar-leading {
+  grid-area: files;
+  justify-content: flex-start;
+  gap: 10px;
+  min-width: 0;
+}
+
 @container (max-width: 760px) {
   .topbar {
     grid-template-columns: auto minmax(0, 1fr) auto;
@@ -2114,6 +2125,9 @@ a {
   background: transparent;
   color: var(--accent);
   font-size: 11px;
+}
+
+.context-size-bar .context-size-compact:disabled {
   cursor: not-allowed;
   opacity: 0.6;
 }
