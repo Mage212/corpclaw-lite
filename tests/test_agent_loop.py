@@ -2014,3 +2014,53 @@ async def test_agent_loop_skips_context_persist_without_session_id(
 
     # Nothing persisted for any session.
     assert store.has_context(1) is False
+
+
+@pytest.mark.asyncio
+async def test_context_target_isolates_concurrent_runs(
+    empty_registry: ToolRegistry, tmp_path: Path
+) -> None:
+    """B-063 S1 audit: two concurrent loop.run() calls for different users on
+    the SAME shared AgentLoop must not cross-write each other's session context.
+
+    Regression for the instance-attribute bug: previously the loop stored
+    session_id/user_id as instance attrs, so a concurrent run clobbered them.
+    Now they live in contextvars (task-scoped), so each task sees its own.
+    """
+    from corpclaw_lite.channels.web.chat_context_store import ChatContextStore
+    from corpclaw_lite.channels.web.chat_store import WebChatStore
+
+    db = tmp_path / "iso.db"
+    ws = WebChatStore(db)
+    store = ChatContextStore(db)
+    user_a = User(id=10, name="Alice", department="QA")
+    user_b = User(id=20, name="Bob", department="QA")
+    session_a = await ws.create_session(user_id=str(user_a.id), section="chat")
+    session_b = await ws.create_session(user_id=str(user_b.id), section="chat")
+
+    class YieldingProvider(MockProvider):
+        """Forces a yield point after binding the context target, so the two
+        runs interleave — exercising whether each sees its own session_id."""
+
+        async def chat(self, messages, tools=None, system=None):
+            await asyncio.sleep(0)  # yield to the other task
+            return await super().chat(messages, tools, system)
+
+    provider = YieldingProvider(responses=[LLMResponse(content="ok"), LLMResponse(content="ok")])
+    loop = AgentLoop(
+        AgentConfig(provider, empty_registry, AgentSettings(), chat_context_store=store)
+    )
+
+    # Run both concurrently on the SAME loop instance (as the web channel does).
+    await asyncio.gather(
+        loop.run(user_a, "hello from A", session_id=session_a, channel="web"),
+        loop.run(user_b, "hello from B", session_id=session_b, channel="web"),
+    )
+
+    ctx_a = await store.list_context(session_a)
+    ctx_b = await store.list_context(session_b)
+    # Each session got exactly its own user message — no cross-contamination.
+    assert any(m["content"] == "hello from A" for m in ctx_a)
+    assert not any(m["content"] == "hello from B" for m in ctx_a)
+    assert any(m["content"] == "hello from B" for m in ctx_b)
+    assert not any(m["content"] == "hello from A" for m in ctx_b)

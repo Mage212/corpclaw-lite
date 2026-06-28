@@ -36,6 +36,11 @@ __all__ = ["ChatContextStore"]
 
 logger = logging.getLogger(__name__)
 
+# How many times to retry a seq-colliding INSERT (UNIQUE(session_id, seq)).
+# 3 is plenty: each retry recomputes MAX(seq), so a collision resolves on the
+# very next attempt unless >=4 concurrent appends race in a single window.
+_SEQ_COLLISION_RETRIES = 3
+
 
 class ChatContextStore:
     """Persistent full-LLM-context store, keyed by ``(session_id, seq)``.
@@ -78,7 +83,7 @@ class ChatContextStore:
                 )
                 conn.execute(
                     """
-                    CREATE INDEX IF NOT EXISTS idx_web_chat_context_session
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_web_chat_context_session
                     ON web_chat_context(session_id, seq)
                     """
                 )
@@ -136,30 +141,41 @@ class ChatContextStore:
         tool_calls_json = json.dumps(tool_calls, ensure_ascii=False) if tool_calls else None
         with db_connect(self.db_path) as conn:
             conn.execute("PRAGMA foreign_keys=ON")
-            seq = conn.execute(
-                "SELECT COALESCE(MAX(seq), 0) + 1 FROM web_chat_context WHERE session_id = ?",
-                (session_id,),
-            ).fetchone()[0]
-            conn.execute(
-                """
-                INSERT INTO web_chat_context
-                    (session_id, user_id, role, content, tool_calls,
-                     tool_call_id, name, reasoning, seq)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    session_id,
-                    user_id,
-                    role,
-                    content,
-                    tool_calls_json,
-                    tool_call_id,
-                    name,
-                    reasoning,
-                    seq,
-                ),
+            # seq = MAX(seq)+1 is computed then INSERTed; the UNIQUE(session_id, seq)
+            # index turns a concurrent duplicate into an IntegrityError instead of a
+            # silent ordering corruption. Retry recomputes MAX on collision.
+            seq = 0
+            for _attempt in range(_SEQ_COLLISION_RETRIES):
+                seq = conn.execute(
+                    "SELECT COALESCE(MAX(seq), 0) + 1 FROM web_chat_context WHERE session_id = ?",
+                    (session_id,),
+                ).fetchone()[0]
+                try:
+                    conn.execute(
+                        """
+                        INSERT INTO web_chat_context
+                            (session_id, user_id, role, content, tool_calls,
+                             tool_call_id, name, reasoning, seq)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            session_id,
+                            user_id,
+                            role,
+                            content,
+                            tool_calls_json,
+                            tool_call_id,
+                            name,
+                            reasoning,
+                            seq,
+                        ),
+                    )
+                    return int(seq)
+                except sqlite3.IntegrityError:
+                    continue
+            raise sqlite3.IntegrityError(
+                f"web_chat_context seq collision after {_SEQ_COLLISION_RETRIES} retries"
             )
-        return int(seq)
 
     async def replace_context(
         self, *, session_id: int, user_id: str, messages: list[dict[str, Any]]
