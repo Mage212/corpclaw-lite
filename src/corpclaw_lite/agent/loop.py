@@ -777,6 +777,21 @@ class AgentLoop:
             except StorageError:
                 logger.error("[user=%s] Failed to load history", user.id)
 
+        # B-063 S2: prefer the FULL LLM context (tool_calls/tool-role) from the
+        # per-chat store when a session_id is bound and the store has data. Falls
+        # back to the SQLiteMemory history above (role+content only) for old chats
+        # or non-web channels. The full-history path reconstructs tool_calls and
+        # tool-role messages that get_history/build_initial would drop.
+        full_history: list[dict[str, Any]] | None = None
+        if self._chat_context_store is not None and session_id is not None:
+            try:
+                full_history = await self._chat_context_store.list_context(session_id)
+                if not full_history:
+                    full_history = None
+            except Exception:
+                logger.debug("[session=%s] context-store load failed", session_id, exc_info=True)
+                full_history = None
+
         # Prepend dynamic user context to the system prompt
         base_prompt = system_prompt or self._default_system_prompt or ""
 
@@ -819,13 +834,24 @@ class AgentLoop:
             f"{base_prompt}"
         )
 
-        context = ContextBuilder.build_initial(
-            user,
-            message,
-            history=history,
-            system_prompt_override=dynamic_prompt,
-            few_shots=few_shots,
-        )
+        if full_history is not None:
+            # B-063 S2: full-context path — reconstructs tool_calls + tool-role.
+            # few_shots are skipped here (calibration; can be added later if
+            # needed for restored chats).
+            context = ContextBuilder.build_from_full_history(
+                user,
+                message,
+                full_history,
+                system_prompt_override=dynamic_prompt,
+            )
+        else:
+            context = ContextBuilder.build_initial(
+                user,
+                message,
+                history=history,
+                system_prompt_override=dynamic_prompt,
+                few_shots=few_shots,
+            )
 
         if self._memory:
             await self._save_memory(mem_key, "user", message)

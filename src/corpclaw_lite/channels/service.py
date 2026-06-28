@@ -153,6 +153,40 @@ class AgentRequestService:
         if isinstance(provider, LLMRouter):
             await provider.mark_user_cache_reset(user.memory_key())
 
+    async def restore_user_context(self, user: User, session_id: int) -> bool:
+        """Load a chat's full LLM context into memory (B-063 S2: activate=load).
+
+        Clears memory and re-adds the per-chat context-store messages as
+        role/content (text only). The full tool_calls/tool-role structure is
+        reconstructed at ``AgentLoop.run()`` time directly from the context
+        store, NOT from memory (memory is a text-only fallback for non-web
+        channels and the get_history path).
+
+        Returns True if context was loaded; False if the store was empty or no
+        store is configured (caller falls back to ``reset_user_context``).
+        """
+        store = self._stack.chat_context_store
+        if store is None:
+            return False
+        messages = await store.list_context(session_id)
+        if not messages:
+            return False
+        memory = self._stack.loop.memory
+        if memory is not None:
+            await memory.clear(user.memory_key())
+            for msg in messages:
+                role = str(msg.get("role", "user"))
+                # Memory is text-only; skip tool-role (reconstructed at run()
+                # time from the context store, not memory).
+                if role in ("user", "assistant", "system"):
+                    await memory.add_message(user.memory_key(), role, str(msg.get("content", "")))
+        from corpclaw_lite.llm.router import LLMRouter
+
+        provider = self._stack.loop.provider
+        if isinstance(provider, LLMRouter):
+            await provider.mark_user_cache_reset(user.memory_key())
+        return True
+
     async def compress_user_context(self, user: User) -> tuple[bool, str]:
         """On-demand compression of the active chat's context.
 
