@@ -1627,6 +1627,7 @@ class WebChannelOrchestrator:
                     mode=effective_mode,
                     depth_mode=depth_mode,
                     channel="web",
+                    session_id=user_message.session_id if user_message is not None else None,
                     callbacks=AgentRequestCallbacks(
                         request_approval=approval_cb,
                         on_tool_start=lambda tool: send_status(

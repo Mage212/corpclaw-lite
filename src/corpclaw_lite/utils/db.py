@@ -24,6 +24,12 @@ def db_connect(db_path: Path) -> Generator[sqlite3.Connection, None, None]:
     """
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA busy_timeout=5000")
+    # Enforce FK constraints globally. SQLite has FK support compiled in but
+    # leaves it OFF by default per-connection; several tables declare
+    # ``ON DELETE CASCADE`` (file_changes→agent_change_sets,
+    # web_chat_context→web_chat_sessions) and rely on it firing. Without this
+    # pragma those cascades are dormant — orphaned child rows accumulate.
+    conn.execute("PRAGMA foreign_keys=ON")
     try:
         yield conn
         conn.commit()
