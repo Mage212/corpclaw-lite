@@ -153,6 +153,15 @@ class AgentRequestService:
         if isinstance(provider, LLMRouter):
             await provider.mark_user_cache_reset(user.memory_key())
 
+    async def compress_user_context(self, user: User) -> tuple[bool, str]:
+        """On-demand compression of the active chat's context.
+
+        Thin wrapper over ``AgentLoop.compress_now``; the caller (orchestrator)
+        holds the single-in-flight lock so this never races an active run.
+        Returns ``(ok, message)``.
+        """
+        return await self._stack.loop.compress_now(user)
+
     async def build_system_prompt(self, user: User) -> str | None:
         """Assemble the base system prompt exactly as ``run()`` does.
 

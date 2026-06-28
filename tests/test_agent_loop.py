@@ -1849,3 +1849,81 @@ async def test_depth_mode_contextvar_reset_on_context_build_error(
 
     # The depth contextvar MUST be reset — not still "research".
     assert get_call_depth_mode() is None
+
+
+@pytest.mark.asyncio
+async def test_compress_now_persists_compressed_context(
+    test_user: User, empty_registry: ToolRegistry, tmp_path: Path
+) -> None:
+    """compress_now loads history, runs the compressor, and writes the compressed
+    transcript back to memory (clear + re-add). Verified by reading history back
+    and checking it matches the compressor's output."""
+    from corpclaw_lite.memory.sqlite import SQLiteMemory
+
+    memory = SQLiteMemory(db_path=str(tmp_path / "compress.db"))
+    # Seed 6 messages (> the 5-message floor).
+    for i in range(6):
+        await memory.add_message(test_user.memory_key(), "user", f"msg {i}")
+        await memory.add_message(test_user.memory_key(), "assistant", f"reply {i}")
+
+    class StubCompressor:
+        """Returns a fixed 2-message summary regardless of input."""
+
+        async def compress(self, messages: list[dict[str, Any]], **_: Any) -> list[dict[str, Any]]:
+            return [
+                {"role": "system", "content": "[Context Summary] compressed"},
+                {"role": "user", "content": "latest"},
+            ]
+
+    loop = AgentLoop(
+        AgentConfig(
+            MockProvider(responses=[]),
+            empty_registry,
+            AgentSettings(),
+            memory=memory,
+            compressor=StubCompressor(),  # type: ignore[arg-type]
+        )
+    )
+
+    ok, message = await loop.compress_now(test_user)
+
+    assert ok is True
+    assert "сжат" in message
+    history = await memory.get_history(test_user.memory_key(), limit=20)
+    # The compressed transcript (2 messages) replaced the seeded 12.
+    assert len(history) == 2
+    assert history[0]["content"] == "[Context Summary] compressed"
+    assert history[1]["content"] == "latest"
+
+
+@pytest.mark.asyncio
+async def test_compress_now_too_few_messages_is_noop(
+    test_user: User, empty_registry: ToolRegistry, tmp_path: Path
+) -> None:
+    """compress_now refuses when there are fewer than 5 messages (<compress floor)."""
+    from corpclaw_lite.memory.sqlite import SQLiteMemory
+
+    memory = SQLiteMemory(db_path=str(tmp_path / "compress_few.db"))
+    await memory.add_message(test_user.memory_key(), "user", "only one")
+
+    class ExplodingCompressor:
+        async def compress(self, *_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+            raise AssertionError("compress should not be called for <5 messages")
+
+    loop = AgentLoop(
+        AgentConfig(
+            MockProvider(responses=[]),
+            empty_registry,
+            AgentSettings(),
+            memory=memory,
+            compressor=ExplodingCompressor(),  # type: ignore[arg-type]
+        )
+    )
+
+    ok, message = await loop.compress_now(test_user)
+
+    assert ok is False
+    assert "мало" in message
+    # History untouched.
+    history = await memory.get_history(test_user.memory_key(), limit=20)
+    assert len(history) == 1

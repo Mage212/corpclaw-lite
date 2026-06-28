@@ -41,7 +41,8 @@ export type TreeNode = FileEntry & {
 export type PreviewPayload =
   | { type: "image"; entry: FileEntry; url: string }
   | { type: "text"; entry: FileEntry; truncated: boolean; content: string; error?: string }
-  | { type: "metadata"; entry: FileEntry };
+  | { type: "metadata"; entry: FileEntry }
+  | { type: "empty" };
 
 export type ChatMessage = {
   id: string;

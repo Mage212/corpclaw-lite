@@ -152,11 +152,14 @@ export type WebChatSession = {
   runEventsByRequest: TimelineByRequest;
   /** True when viewing a non-active chat (composer should be disabled). */
   readOnly: boolean;
+  /** True while a compression request is in-flight (button shows "сжимаю…"). */
+  compressing: boolean;
   setInput: (value: string) => void;
   send: () => void;
   loadOlder: () => void;
   answerApproval: (approvalId: string, approved: boolean) => void;
   resetContext: () => void;
+  compress: () => void;
 };
 
 export function useWebChatSession({
@@ -180,6 +183,7 @@ export function useWebChatSession({
   const [historyHasMore, setHistoryHasMore] = useState(false);
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [readOnly, setReadOnly] = useState(false);
+  const [compressing, setCompressing] = useState(false);
   const [runEventsByRequest, setRunEventsByRequest] = useState<TimelineByRequest>(
     () => new Map()
   );
@@ -223,6 +227,24 @@ export function useWebChatSession({
       tone: "warning"
     });
   }, [addMessage, addRunEvent]);
+
+  const compress = useCallback(() => {
+    // Confirm before compressing — old turns get summarized (destructive to history).
+    if (!window.confirm("Сжать контекст текущего чата? Старые сообщения будут суммированы.")) {
+      return;
+    }
+    if (wsRef.current?.readyState !== WebSocket.OPEN) {
+      addMessage({
+        id: id("compress_warning"),
+        role: "system",
+        text: "Нет соединения с web-каналом. Контекст не сжат.",
+        tone: "warning"
+      });
+      return;
+    }
+    setCompressing(true);
+    wsRef.current.send(JSON.stringify({ type: "compress" }));
+  }, [addMessage]);
 
   const send = useCallback(async () => {
     const text = input.trim();
@@ -321,6 +343,7 @@ export function useWebChatSession({
               lastActiveRequestIdRef.current = requestId;
             },
             setReadOnly,
+            setCompressing,
             onChatRenamed,
             onChatListChanged
           });
@@ -389,11 +412,13 @@ export function useWebChatSession({
     loadingHistory,
     runEventsByRequest,
     readOnly,
+    compressing,
     setInput,
     send,
     loadOlder,
     answerApproval,
-    resetContext
+    resetContext,
+    compress
   };
 }
 
@@ -413,6 +438,8 @@ type WsEventHandlers = {
   setActiveRequestId: (requestId: string) => void;
   /** Set the read-only flag (true when viewing a non-active chat transcript). */
   setReadOnly: Dispatch<SetStateAction<boolean>>;
+  /** Set the in-flight compression flag (cleared on compress_done / error). */
+  setCompressing: Dispatch<SetStateAction<boolean>>;
   /** Fired when a chat was renamed or the chat list changed (refresh sidebar). */
   onChatRenamed: (() => void) | undefined;
   onChatListChanged: (() => void) | undefined;
@@ -436,6 +463,7 @@ function handleWsEvent(event: ServerWsEvent, handlers: WsEventHandlers) {
     setLoadingHistory,
     onWorkspaceChanged,
     setReadOnly,
+    setCompressing,
     onChatRenamed,
     onChatListChanged
   } = handlers;
@@ -560,6 +588,25 @@ function handleWsEvent(event: ServerWsEvent, handlers: WsEventHandlers) {
     });
     onWorkspaceChanged?.();
     window.setTimeout(() => setStatus(emptyStatus), 1600);
+  } else if (event.type === "compress_done") {
+    if (event.usage) {
+      onContextUsage(event.usage);
+    }
+    setCompressing(false);
+    addMessage({
+      id: id("compress_done"),
+      role: "system",
+      text: event.message,
+      tone: "normal"
+    });
+    setStatus({
+      active: true,
+      requestId: null,
+      label: event.message,
+      phase: "done",
+      tone: "done"
+    });
+    window.setTimeout(() => setStatus(emptyStatus), 1600);
   } else if (event.type === "warning") {
     if (!event.request_id) {
       addMessage({
@@ -585,6 +632,9 @@ function handleWsEvent(event: ServerWsEvent, handlers: WsEventHandlers) {
     });
   } else if (event.type === "error") {
     setLoadingHistory(false);
+    // A failed compress sends {type:"error"} (not compress_done); clear the
+    // compressing flag so the button stops showing "сжимаю…".
+    setCompressing(false);
     if (event.usage) {
       onContextUsage(event.usage);
     }
