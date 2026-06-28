@@ -2064,3 +2064,197 @@ async def test_context_target_isolates_concurrent_runs(
     assert not any(m["content"] == "hello from B" for m in ctx_a)
     assert any(m["content"] == "hello from B" for m in ctx_b)
     assert not any(m["content"] == "hello from A" for m in ctx_b)
+
+
+# --- B-063 S2: build_from_full_history + restore-on-activate ---
+
+
+def test_build_from_full_history_preserves_tool_calls_and_tool_role(
+    test_user: User,
+) -> None:
+    """build_from_full_history reconstructs tool_calls + tool-role messages
+    faithfully (unlike build_initial, which drops them)."""
+    full_history = [
+        {"role": "user", "content": "list files"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "list_files", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "content": "a.txt\nb.txt", "tool_call_id": "call_1", "name": "list_files"},
+        {"role": "assistant", "content": "Found 2 files."},
+    ]
+    builder = ContextBuilder.build_from_full_history(
+        test_user, "thanks", full_history, system_prompt_override="SYS"
+    )
+    # [user, assistant+tool_calls, tool, assistant, user(current)]
+    assert len(builder.messages) == 5
+    assert builder.messages[0] == {"role": "user", "content": "list files"}
+    # assistant with tool_calls
+    asst = builder.messages[1]
+    assert asst["role"] == "assistant"
+    assert "tool_calls" in asst
+    assert asst["tool_calls"][0]["function"]["name"] == "list_files"
+    # tool-role preserved
+    tool = builder.messages[2]
+    assert tool["role"] == "tool"
+    assert tool["tool_call_id"] == "call_1"
+    assert tool["name"] == "list_files"
+    assert builder.messages[3] == {"role": "assistant", "content": "Found 2 files."}
+    assert builder.messages[4] == {"role": "user", "content": "thanks"}
+
+
+def test_build_from_full_history_converts_arguments_json_string(test_user: User) -> None:
+    """arguments arrives as a JSON string from the store; build converts to dict."""
+    full_history = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "c1",
+                    "type": "function",
+                    "function": {
+                        "name": "write_file",
+                        "arguments": '{"path":"x.txt","content":"hi"}',
+                    },
+                }
+            ],
+        },
+    ]
+    builder = ContextBuilder.build_from_full_history(
+        test_user, "go", full_history, system_prompt_override="SYS"
+    )
+    asst = builder.messages[0]
+    args = asst["tool_calls"][0]["function"]["arguments"]
+    assert args == '{"path": "x.txt", "content": "hi"}'  # json.dumps of the parsed dict
+
+
+def test_build_from_full_history_merges_system_messages(test_user: User) -> None:
+    """system messages from history merge into the system prompt (not mid-context)."""
+    full_history = [
+        {"role": "system", "content": "Tools called in this turn: list_files"},
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "hello"},
+    ]
+    builder = ContextBuilder.build_from_full_history(
+        test_user, "next", full_history, system_prompt_override="BASE"
+    )
+    assert "Execution history:" in builder.system_prompt
+    assert "Tools called in this turn: list_files" in builder.system_prompt
+    # No system role in messages (merged away)
+    assert all(m["role"] != "system" for m in builder.messages)
+
+
+@pytest.mark.asyncio
+async def test_run_restores_full_context_from_store(
+    test_user: User, empty_registry: ToolRegistry, tmp_path: Path
+) -> None:
+    """B-063 S2: run(session_id) with a populated context-store builds the context
+    from the store (full tool_calls/tool-role), NOT from SQLiteMemory history."""
+    from corpclaw_lite.channels.web.chat_context_store import ChatContextStore
+    from corpclaw_lite.channels.web.chat_store import WebChatStore
+
+    db = tmp_path / "restore.db"
+    ws = WebChatStore(db)
+    store = ChatContextStore(db)
+    session_id = await ws.create_session(user_id=str(test_user.id), section="work")
+
+    # Seed the context-store with a prior turn that included a tool call.
+    await store.append_context(
+        session_id=session_id, user_id=str(test_user.id), role="user", content="what files?"
+    )
+    await store.append_context(
+        session_id=session_id,
+        user_id=str(test_user.id),
+        role="assistant",
+        content="",
+        tool_calls=[
+            {
+                "id": "c1",
+                "type": "function",
+                "function": {"name": "list_files", "arguments": "{}"},
+            }
+        ],
+    )
+    await store.append_context(
+        session_id=session_id,
+        user_id=str(test_user.id),
+        role="tool",
+        content="a.txt",
+        tool_call_id="c1",
+        name="list_files",
+    )
+    await store.append_context(
+        session_id=session_id, user_id=str(test_user.id), role="assistant", content="Found a.txt."
+    )
+
+    # Spy provider: capture the messages the loop actually sent to the model.
+    captured: list[dict[str, Any]] = []
+
+    class SpyProvider(MockProvider):
+        async def chat(self, messages, tools=None, system=None):
+            captured.extend(messages)
+            return await super().chat(messages, tools, system)
+
+    provider = SpyProvider(responses=[LLMResponse(content="ok")])
+    loop = AgentLoop(
+        AgentConfig(provider, empty_registry, AgentSettings(), chat_context_store=store)
+    )
+
+    await loop.run(test_user, "thanks", session_id=session_id, channel="web")
+
+    # The model should have seen the restored tool_calls + tool-role message,
+    # proving the full-context path was used (not the text-only get_history path).
+    roles = [m["role"] for m in captured]
+    assert "tool" in roles, "tool-role message missing — full-context restore did not fire"
+    asst_with_calls = [m for m in captured if m.get("tool_calls")]
+    assert asst_with_calls, "assistant tool_calls missing — full-context restore did not fire"
+
+
+@pytest.mark.asyncio
+async def test_run_falls_back_to_memory_when_store_empty(
+    test_user: User, empty_registry: ToolRegistry, tmp_path: Path
+) -> None:
+    """B-063 S2: when session_id is set but the context-store is empty, run()
+    falls back to the SQLiteMemory history path (build_initial)."""
+    from corpclaw_lite.channels.web.chat_context_store import ChatContextStore
+    from corpclaw_lite.channels.web.chat_store import WebChatStore
+    from corpclaw_lite.memory.sqlite import SQLiteMemory
+
+    db = tmp_path / "fallback.db"
+    ws = WebChatStore(db)
+    store = ChatContextStore(db)
+    session_id = await ws.create_session(user_id=str(test_user.id), section="chat")
+    # Seed MEMORY (not the context store) — the fallback source.
+    memory = SQLiteMemory(db_path=str(db))
+    await memory.add_message(test_user.memory_key(), "user", "old question")
+    await memory.add_message(test_user.memory_key(), "assistant", "old answer")
+
+    captured: list[dict[str, Any]] = []
+
+    class SpyProvider(MockProvider):
+        async def chat(self, messages, tools=None, system=None):
+            captured.extend(messages)
+            return await super().chat(messages, tools, system)
+
+    provider = SpyProvider(responses=[LLMResponse(content="ok")])
+    loop = AgentLoop(
+        AgentConfig(
+            provider, empty_registry, AgentSettings(), memory=memory, chat_context_store=store
+        )
+    )
+
+    await loop.run(test_user, "follow up", session_id=session_id, channel="web")
+
+    # Fallback path: text history present, but NO tool-role messages (those come
+    # only from the full-context path).
+    roles = [m["role"] for m in captured]
+    assert "tool" not in roles
+    assert any(m.get("content") == "old answer" for m in captured)

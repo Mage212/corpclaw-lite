@@ -1249,7 +1249,12 @@ class WebChannelOrchestrator:
                 status=409,
             )
         try:
-            await self._service.reset_user_context(user)
+            # B-063 S2: activate=load, not reset. Restore the chat's full LLM
+            # context from the per-chat store; fall back to a clean reset for
+            # chats without persisted context (old chats, no store).
+            restored = await self._service.restore_user_context(user, session_id)
+            if not restored:
+                await self._service.reset_user_context(user)
             new_id = await self._chat_store.activate_session(user.memory_key(), session_id)
         finally:
             await self._service.finish_user_request(user.id)

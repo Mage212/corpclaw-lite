@@ -1327,3 +1327,100 @@ async def test_chat_context_store_unique_seq_under_concurrent_append(tmp_path: P
     # Every content is distinct and present (no lost inserts).
     contents = {m["content"] for m in ctx}
     assert contents == {f"msg {i}" for i in range(8)}
+
+
+# --- B-063 S2: restore_user_context (activate=load) ---
+
+
+@pytest.mark.asyncio
+async def test_restore_user_context_loads_into_memory(tmp_path: Path) -> None:
+    """restore_user_context clears memory and re-adds the chat's context-store
+    messages (text only; tool-role skipped — reconstructed at run() time)."""
+    from corpclaw_lite.extensions.tools.registry import ToolRegistry
+    from corpclaw_lite.memory.sqlite import SQLiteMemory
+
+    memory = SQLiteMemory(db_path=str(tmp_path / "m.db"))
+    store = ChatContextStore(tmp_path / "m.db")
+    ws = WebChatStore(tmp_path / "m.db")
+    session_id = await ws.create_session(user_id="7", section="chat")
+    # Seed the context store with a full turn (user/assistant+tool_calls/tool/assistant).
+    await store.append_context(session_id=session_id, user_id="7", role="user", content="hi")
+    await store.append_context(
+        session_id=session_id,
+        user_id="7",
+        role="assistant",
+        content="",
+        tool_calls=[
+            {"id": "c1", "type": "function", "function": {"name": "echo", "arguments": "{}"}}
+        ],
+    )
+    await store.append_context(
+        session_id=session_id,
+        user_id="7",
+        role="tool",
+        content="echo:hi",
+        tool_call_id="c1",
+        name="echo",
+    )
+    await store.append_context(session_id=session_id, user_id="7", role="assistant", content="done")
+
+    # Stub loop: restore_user_context only needs .memory and .provider.
+    class _StubLoop:
+        def __init__(self, mem):
+            self.memory = mem
+            self.provider = None
+
+    stack = AgentStack(
+        loop=_StubLoop(memory),  # type: ignore[arg-type]
+        user_manager=UserManager(db_path=str(tmp_path / "u.db")),
+        chat_context_store=store,
+        tool_registry=ToolRegistry(),  # type: ignore[arg-type]
+        full_tool_registry=None,
+        mcp_manager=None,
+        container_manager=None,
+    )
+    service = AgentRequestService(stack=stack, bootstrap=None, workspace_base=tmp_path / "ws")  # type: ignore[arg-type]
+    user = User(id=7, name="Vadim", department="engineering")
+
+    # Pre-seed memory with something else, so we can confirm it's cleared.
+    await memory.add_message(user.memory_key(), "user", "STALE")
+    restored = await service.restore_user_context(user, session_id)
+
+    assert restored is True
+    history = await memory.get_history(user.memory_key(), limit=50)
+    # tool-role is skipped in memory (text-only); user + assistant text present.
+    contents = [m["content"] for m in history]
+    assert "hi" in contents
+    assert "done" in contents
+    assert "STALE" not in contents  # cleared
+    assert "echo:hi" not in contents  # tool-role skipped
+
+
+@pytest.mark.asyncio
+async def test_restore_user_context_returns_false_for_empty_store(tmp_path: Path) -> None:
+    """When the context-store has no data for the session, restore returns False
+    (caller falls back to reset_user_context)."""
+    from corpclaw_lite.extensions.tools.registry import ToolRegistry
+
+    store = ChatContextStore(tmp_path / "e.db")
+    WebChatStore(tmp_path / "e.db")
+
+    class _StubLoop:
+        def __init__(self):
+            self.memory = None
+            self.provider = None
+
+    stack = AgentStack(
+        loop=_StubLoop(),  # type: ignore[arg-type]
+        user_manager=UserManager(db_path=str(tmp_path / "u.db")),
+        chat_context_store=store,
+        tool_registry=ToolRegistry(),  # type: ignore[arg-type]
+        full_tool_registry=None,
+        mcp_manager=None,
+        container_manager=None,
+    )
+    service = AgentRequestService(stack=stack, bootstrap=None, workspace_base=tmp_path / "ws")  # type: ignore[arg-type]
+    user = User(id=7, name="Vadim", department="engineering")
+
+    restored = await service.restore_user_context(user, session_id=999)  # never created
+    assert restored is False

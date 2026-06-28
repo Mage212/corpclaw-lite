@@ -194,3 +194,98 @@ class ContextBuilder:
             # Skip "system" (merged in phase 1) and "tool" (orphaned) roles
         builder.add_user_message(message)
         return builder
+
+    @classmethod
+    def build_from_full_history(
+        cls,
+        user: User,
+        message: str,
+        full_history: list[dict[str, Any]],
+        system_prompt_override: str | None = None,
+    ) -> ContextBuilder:
+        """Build context restoring the FULL LLM message schema including tool_calls
+        and tool-role messages (B-063 S2: restore-on-activate).
+
+        Unlike :meth:`build_initial`, this does NOT drop tool-role messages — it
+        reconstructs them faithfully from the per-chat context store. System
+        messages from history are still merged into the system prompt
+        (chat-template safety); few-shot injection is not done here (calibration
+        concern, separate from restore).
+
+        Args:
+            user: Current user.
+            message: The current user message (appended last).
+            full_history: Ordered messages from ``ChatContextStore.list_context``
+                (role/content/tool_calls/tool_call_id/name).
+            system_prompt_override: Assembled system prompt (base + department +
+                onboarding + tone + user context + skills).
+        """
+        system = system_prompt_override or (
+            f"You are CorpClaw Lite, a helpful assistant. "
+            f"You are talking to {user.name} from the {user.department} department. "
+            f"Use the available tools to help the user. If a tool returns an error, try to fix it."
+        )
+
+        # Merge system messages from history into the system prompt (same
+        # rationale as build_initial phase 1: mid-conversation system messages
+        # break chat templates).
+        history_system_parts: list[str] = []
+        non_system: list[dict[str, Any]] = []
+        for item in full_history:
+            if str(item.get("role")) == "system":
+                history_system_parts.append(str(item.get("content", "")))
+            else:
+                non_system.append(item)
+        if history_system_parts:
+            system += "\n\n---\nExecution history:\n" + "\n".join(history_system_parts)
+
+        builder = cls(system_prompt=system)
+
+        for item in non_system:
+            role = str(item.get("role", "user"))
+            content = str(item.get("content", ""))
+            if role == "user":
+                builder.add_user_message(content)
+            elif role == "assistant":
+                calls = item.get("tool_calls")
+                if calls:
+                    builder.add_tool_calls(_tool_calls_from_dicts(calls), content=content or None)
+                else:
+                    builder.add_assistant_message(content)
+            elif role == "tool":
+                builder.add_tool_result(
+                    str(item.get("tool_call_id", "")),
+                    str(item.get("name", "")),
+                    content,
+                )
+            # Unknown roles are skipped (defensive).
+
+        builder.add_user_message(message)
+        return builder
+
+
+def _tool_calls_from_dicts(calls: list[dict[str, Any]]) -> list[ToolCall]:
+    """Convert context-store tool_call dicts → ToolCall models.
+
+    The store serializes them in the OpenAI schema
+    (``{id, type, function:{name, arguments:<json-string>}}``); the builder
+    expects ``ToolCall`` instances.
+    """
+    out: list[ToolCall] = []
+    for call in calls:
+        fn_raw = call.get("function")
+        fn: dict[str, Any] = cast(dict[str, Any], fn_raw) if isinstance(fn_raw, dict) else {}
+        raw_args = fn.get("arguments", "{}")
+        args: dict[str, Any]
+        try:
+            args = json.loads(raw_args) if isinstance(raw_args, str) else dict(raw_args)
+        except (json.JSONDecodeError, TypeError):
+            args = {}
+        out.append(
+            ToolCall(
+                id=str(call.get("id", "")),
+                name=str(fn.get("name", "")),
+                arguments=args,
+            )
+        )
+    return out
