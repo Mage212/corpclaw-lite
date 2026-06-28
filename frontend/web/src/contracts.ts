@@ -40,6 +40,7 @@ export type ServerWsEvent =
     }
   | { type: "context_usage"; usage: ContextUsage }
   | { type: "context_reset"; message: string; usage?: ContextUsage }
+  | { type: "compress_done"; message: string; usage?: ContextUsage }
   | { type: "warning"; message: string; request_id?: string }
   | { type: "error"; message: string; request_id?: string; usage?: ContextUsage }
   | { type: "file_ready"; name: string; url: string; caption: string; path?: string | null }
@@ -573,6 +574,17 @@ export function parseServerWsEvent(value: unknown): ServerWsEvent | null {
       const event: Extract<ServerWsEvent, { type: "context_reset" }> = {
         type: "context_reset",
         message: stringValue(value.message, "Сессия сброшена")
+      };
+      const usage = parseContextUsage(value.usage);
+      if (usage !== null) {
+        event.usage = usage;
+      }
+      return event;
+    }
+    case "compress_done": {
+      const event: Extract<ServerWsEvent, { type: "compress_done" }> = {
+        type: "compress_done",
+        message: stringValue(value.message, "Контекст сжат")
       };
       const usage = parseContextUsage(value.usage);
       if (usage !== null) {

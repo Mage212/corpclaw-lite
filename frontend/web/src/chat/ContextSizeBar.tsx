@@ -3,6 +3,10 @@ import type { ContextUsage } from "../types";
 
 export type ContextSizeBarProps = {
   usage: ContextUsage | null;
+  /** Triggered by the "сжать" button (the hook handles the confirm dialog). */
+  onCompress?: (() => void) | undefined;
+  /** True while a compression request is in-flight (button shows "сжимаю…"). */
+  compressing?: boolean;
 };
 
 /**
@@ -10,11 +14,11 @@ export type ContextSizeBarProps = {
  * the active conversation's context window is, so the user can judge whether a
  * follow-up request will fit or a compact is warranted.
  *
- * Etap 1B: the "сжать" (compact) button is decorative/disabled — the compact
- * action is future work. The bar reads the live `contextUsage` (last known
- * per-request usage); per-chat persisted sizes arrive with Etap 2.
+ * The "сжать" button triggers on-demand compression of the active chat's
+ * context (summarize old turns). Disabled when no handler is wired, while a
+ * compression is in-flight, or when the chat is read-only.
  */
-export function ContextSizeBar({ usage }: ContextSizeBarProps) {
+export function ContextSizeBar({ usage, onCompress, compressing = false }: ContextSizeBarProps) {
   const latest = usage?.latest_total_tokens ?? 0;
   const limit = usage?.context_limit_tokens ?? 0;
   const ratio = usage?.context_ratio ?? 0;
@@ -32,8 +36,13 @@ export function ContextSizeBar({ usage }: ContextSizeBarProps) {
         <b style={{ width: `${Math.min(100, Math.max(0, percent))}%` }} />
       </span>
       <span className="context-size-value">{valueLabel}</span>
-      <button className="context-size-compact" disabled title="Сжатие контекста будет доступно позже">
-        сжать
+      <button
+        className="context-size-compact"
+        disabled={!onCompress || compressing}
+        onClick={onCompress}
+        title={compressing ? "Сжатие…" : "Сжать контекст"}
+      >
+        {compressing ? "сжимаю…" : "сжать"}
       </button>
     </div>
   );

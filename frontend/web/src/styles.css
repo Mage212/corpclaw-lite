@@ -171,6 +171,19 @@ a {
   overflow: hidden;
 }
 
+/* Desktop: collapse the sidebar column when toggled off. The toggle
+   (App.tsx setSidebarOpen) already adds/removes .sidebar-open; this rule makes
+   it actually hide the sidebar outside the mobile @media block (which already
+   handles ≤900px). Without it the toggle changed state but nothing visual
+   happened on desktop. */
+.workspace:not(.sidebar-open) {
+  grid-template-columns: 0 minmax(0, 1fr);
+}
+
+.workspace:not(.sidebar-open) .sidebar {
+  display: none;
+}
+
 .sidebar {
   grid-area: sidebar;
   min-height: 0;
@@ -2202,6 +2215,18 @@ a {
   min-height: 0;
   overflow: auto;
   background: #fbfcfd;
+}
+
+/* Empty state shown when the preview overlay is opened with no file selected. */
+.preview-empty {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  text-align: center;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.6;
+  padding: 32px;
 }
 
 .text-preview pre {

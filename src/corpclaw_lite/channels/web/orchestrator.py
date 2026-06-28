@@ -732,6 +732,22 @@ class WebChannelOrchestrator:
         finally:
             await self._service.finish_user_request(user.id)
 
+    async def _compress_active_context(self, user: User) -> tuple[bool, str, dict[str, object]]:
+        """Run on-demand compression on the active chat's context.
+
+        The single-in-flight lock is held by the caller (the WS ``compress``
+        handler) so this never races an active ``run()``. Returns
+        ``(ok, message, usage)``; usage is refreshed from the compressed context.
+        """
+        if self._service is None:
+            raise web.HTTPServiceUnavailable()
+        ok, message = await self._service.compress_user_context(user)
+        # Refresh the cached usage snapshot (context shrank if compression ran).
+        usage = self._context_usage.get(user.id, self._context_usage_payload())
+        if ok:
+            self._context_usage[user.id] = usage
+        return ok, message, usage
+
     async def _handle_list_files(self, request: web.Request) -> web.Response:
         user = self._require_user(request)
         result = await list_directory(
@@ -1833,6 +1849,34 @@ class WebChannelOrchestrator:
                     ok, message, usage = await self._reset_context_for_user(user)
                     payload_out: dict[str, object] = {
                         "type": "context_reset" if ok else "error",
+                        "message": message,
+                        "usage": usage,
+                    }
+                    if ok:
+                        await self._broadcast_to_user(user.id, payload_out)
+                    else:
+                        await send(payload_out)
+                elif event_type == "compress":
+                    # On-demand compression of the active chat's context.
+                    # Held under the single-in-flight lock so it can't race an
+                    # active run() that also mutates memory.
+                    if self._service is None:
+                        await send({"type": "error", "message": "Сервис ещё не готов."})
+                        continue
+                    if not await self._service.try_start_user_request(user.id):
+                        await send(
+                            {
+                                "type": "error",
+                                "message": "Дождитесь завершения активной задачи перед сжатием контекста.",
+                            }
+                        )
+                        continue
+                    try:
+                        ok, message, usage = await self._compress_active_context(user)
+                    finally:
+                        await self._service.finish_user_request(user.id)
+                    payload_out = {
+                        "type": "compress_done" if ok else "error",
                         "message": message,
                         "usage": usage,
                     }

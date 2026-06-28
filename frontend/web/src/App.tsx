@@ -348,15 +348,18 @@ function Workspace({
           <div className="topbar-actions topbar-trailing">
             <button
               className="icon-button"
-              onClick={() =>
-                preview
-                  ? previewMode === "expanded"
-                    ? setPreviewMode("side")
-                    : setPreview(null)
-                  : undefined
-              }
+              onClick={() => {
+                if (!preview) {
+                  // No file open — open the overlay with an empty state so the
+                  // user sees where previews will appear (and that the panel works).
+                  setPreview({ type: "empty" });
+                } else if (previewMode === "expanded") {
+                  setPreviewMode("side");
+                } else {
+                  setPreview(null);
+                }
+              }}
               title="Просмотр"
-              disabled={!preview}
             >
               <Eye size={18} />
             </button>

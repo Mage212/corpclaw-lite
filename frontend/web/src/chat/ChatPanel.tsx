@@ -137,7 +137,11 @@ export function ChatPanel({
       </footer>
       <div className="composer-extras">
         <ModeSelector value={depthMode} onChange={onDepthModeChange} section={section} />
-        <ContextSizeBar usage={contextUsage} />
+        <ContextSizeBar
+          usage={contextUsage}
+          onCompress={session.readOnly ? undefined : session.compress}
+          compressing={session.compressing}
+        />
       </div>
     </main>
   );

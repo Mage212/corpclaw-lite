@@ -360,6 +360,77 @@ class AgentLoop:
         """Access the LLM provider."""
         return self._provider
 
+    @property
+    def compressor(self) -> ContextCompressor | None:
+        """Access the context compressor (if configured)."""
+        return self._compressor
+
+    async def compress_now(self, user: User) -> tuple[bool, str]:
+        """On-demand compression of the active chat's in-memory LLM context.
+
+        Loads the user's conversation history, runs it through the context
+        compressor (summarize old turns, prune tool results), and writes the
+        compressed transcript back to memory (clear + re-add). The caller is
+        responsible for holding the single-in-flight lock so this never races
+        an active ``run()``.
+
+        Returns ``(ok, message)``. On any failure the context is left untouched.
+        """
+        if self._compressor is None:
+            return False, "Компрессия контекста недоступна."
+        if self._memory is None:
+            return False, "Память недоступна."
+        mem_key = user.memory_key()
+        try:
+            history = await self._memory.get_history(mem_key, limit=self._settings.max_history)
+        except StorageError:
+            logger.error("[user=%s] compress_now: failed to load history", user.id)
+            return False, "Не удалось загрузить историю чата."
+        if len(history) < 5:
+            return False, "Слишком мало сообщений для сжатия."
+
+        try:
+            compressed = await self._compressor.compress(history, mem_key=mem_key)
+        except Exception:
+            logger.exception("[user=%s] compress_now: compression failed", user.id)
+            return False, "Ошибка при сжатии контекста."
+
+        if len(compressed) >= len(history):
+            # Nothing was actually compressed (compressor returned input unchanged).
+            return True, "Контекст уже достаточно компактный — сжатие не требуется."
+
+        # Write the compressed transcript back: clear the old history and re-add
+        # the compressed messages in order. Memory is the source of truth for the
+        # next run()'s context, so this is what makes the compression stick.
+        try:
+            await self._memory.clear(mem_key)
+            for msg in compressed:
+                role = str(msg.get("role", "user"))
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    # Tool/function message contents may be structured; stringify.
+                    content = json.dumps(content, ensure_ascii=False)
+                await self._memory.add_message(mem_key, role, str(content))
+        except StorageError:
+            logger.error("[user=%s] compress_now: failed to persist compressed context", user.id)
+            return False, "Не удалось сохранить сжатый контекст."
+
+        # Invalidate any hot KV-cache for this user so the next run reprocesses
+        # the (now shorter) prompt instead of trusting stale cached prefixes.
+        if isinstance(self._provider, LLMRouter):
+            try:
+                await self._provider.mark_user_cache_reset(mem_key)
+            except Exception:
+                logger.debug("[user=%s] compress_now: cache reset skipped", user.id)
+
+        logger.info(
+            "[user=%s] compress_now: %d → %d messages",
+            user.id,
+            len(history),
+            len(compressed),
+        )
+        return True, f"Контекст сжат: {len(history)} → {len(compressed)} сообщений."
+
     async def _call_llm_provider(
         self,
         provider: Provider,

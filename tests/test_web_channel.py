@@ -1094,3 +1094,61 @@ async def test_delete_inactive_chat_makes_no_replacement(tmp_path: Path) -> None
     assert still_active is not None and still_active.is_active is True
     gone = await store.get_session("7", inactive_id)
     assert gone is None
+
+
+# --- C: on-demand compression of the active chat's context ---
+
+
+@pytest.mark.asyncio
+async def test_compress_active_context_success(tmp_path: Path) -> None:
+    """_compress_active_context delegates to the service and refreshes usage."""
+
+    class FakeCompressService:
+        def __init__(self) -> None:
+            self.compress_calls = 0
+
+        async def try_start_user_request(self, _user_id: int) -> bool:
+            return True
+
+        async def finish_user_request(self, _user_id: int) -> None:
+            return None
+
+        async def compress_user_context(self, _user: User) -> tuple[bool, str]:
+            self.compress_calls += 1
+            return True, "Контекст сжат: 10 → 4 сообщений."
+
+    orchestrator = WebChannelOrchestrator(Settings())
+    service = FakeCompressService()
+    orchestrator._service = service  # type: ignore[assignment]
+    user = User(id=7, name="Vadim", department="engineering")
+
+    ok, message, _usage = await orchestrator._compress_active_context(user)
+
+    assert ok is True
+    assert "сжат" in message
+    assert service.compress_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_compress_active_context_propagates_failure(tmp_path: Path) -> None:
+    """When the service reports compression failed, _compress_active_context
+    forwards the failure (ok=False) without raising."""
+
+    class FakeCompressService:
+        async def try_start_user_request(self, _user_id: int) -> bool:
+            return True
+
+        async def finish_user_request(self, _user_id: int) -> None:
+            return None
+
+        async def compress_user_context(self, _user: User) -> tuple[bool, str]:
+            return False, "Слишком мало сообщений для сжатия."
+
+    orchestrator = WebChannelOrchestrator(Settings())
+    orchestrator._service = FakeCompressService()  # type: ignore[assignment]
+    user = User(id=7, name="Vadim", department="engineering")
+
+    ok, message, _usage = await orchestrator._compress_active_context(user)
+
+    assert ok is False
+    assert "мало" in message
