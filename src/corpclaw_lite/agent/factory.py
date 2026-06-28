@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from corpclaw_lite.agent.compressor import ContextCompressor
     from corpclaw_lite.agent.file_snapshots import FileSnapshotStore
     from corpclaw_lite.agent.file_state import FileStateRegistry
+    from corpclaw_lite.channels.web.chat_context_store import ChatContextStore
     from corpclaw_lite.config.settings import AgentSettings, ResearchSettings, Settings, WebSettings
     from corpclaw_lite.container.ipc import ContainerIPC
     from corpclaw_lite.container.manager import ContainerManager
@@ -74,6 +75,7 @@ class AgentStack:
     skill_registry: SkillRegistry | None = None
     plugin_registry: PluginRegistry | None = None
     skill_matcher: SkillMatcher | None = None
+    chat_context_store: ChatContextStore | None = None
 
 
 def _build_router(settings: Settings | None = None) -> Provider:
@@ -641,6 +643,13 @@ def build_agent_stack(
             few_shots = _examples
             logger.info("Loaded %d calibrated few-shot examples", len(_examples))
 
+    # B-063 S1: per-chat full-LLM-context store. Shares memory.db with
+    # SQLiteMemory; the loop writes the full message schema (tool_calls/
+    # reasoning/tool-role) here on every turn so any chat can later be restored.
+    from corpclaw_lite.channels.web.chat_context_store import ChatContextStore
+
+    chat_context_store = ChatContextStore(memory.db_path)
+
     loop = AgentLoop(
         AgentConfig(
             provider=provider,
@@ -658,6 +667,7 @@ def build_agent_stack(
             preset_registry=depth_preset_registry,
             provider_registry=depth_provider_registry,
             depth_modes=agent_settings.depth_modes,
+            chat_context_store=chat_context_store,
         )
     )
 
@@ -682,6 +692,7 @@ def build_agent_stack(
     return AgentStack(
         loop=loop,
         user_manager=user_manager,
+        chat_context_store=chat_context_store,
         tool_registry=registry,
         full_tool_registry=full_tool_reg,
         mcp_manager=mcp_manager,

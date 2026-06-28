@@ -16,6 +16,7 @@ from aiohttp.test_utils import make_mocked_request
 
 from corpclaw_lite.agent.factory import AgentStack
 from corpclaw_lite.channels.service import AgentRequestService, is_llm_transport_error
+from corpclaw_lite.channels.web.chat_context_store import ChatContextStore
 from corpclaw_lite.channels.web.chat_store import WebChatFile, WebChatStore
 from corpclaw_lite.channels.web.files import (
     build_tree,
@@ -1152,3 +1153,147 @@ async def test_compress_active_context_propagates_failure(tmp_path: Path) -> Non
 
     assert ok is False
     assert "мало" in message
+
+
+# --- B-063 S1: ChatContextStore (full LLM-context persistence per chat) ------
+
+
+def test_chat_context_store_schema_created(tmp_path: Path) -> None:
+    """The web_chat_context table + index exist after init."""
+    db = tmp_path / "memory.db"
+    # WebChatStore must exist first so the sessions table (FK target) is present.
+    WebChatStore(db)
+    ChatContextStore(db)  # creates web_chat_context schema
+    import sqlite3
+
+    with sqlite3.connect(db) as conn:
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        indexes = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+    assert "web_chat_context" in tables
+    assert "idx_web_chat_context_session" in indexes
+
+
+@pytest.mark.asyncio
+async def test_chat_context_store_append_list_roundtrip(tmp_path: Path) -> None:
+    """Append user/assistant+tool_calls/tool messages; list reconstructs them
+    with full structure (role/content/tool_calls/tool_call_id/name/reasoning)."""
+    db = tmp_path / "memory.db"
+    ws = WebChatStore(db)
+    store = ChatContextStore(db)
+    session_id = await ws.create_session(user_id="7", section="chat")
+
+    await store.append_context(
+        session_id=session_id, user_id="7", role="user", content="нормализуй Excel"
+    )
+    await store.append_context(
+        session_id=session_id,
+        user_id="7",
+        role="assistant",
+        content="",
+        tool_calls=[
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "normalize_excel", "arguments": '{"path":"a.xlsx"}'},
+            }
+        ],
+        reasoning="thinking about the file",
+    )
+    await store.append_context(
+        session_id=session_id,
+        user_id="7",
+        role="tool",
+        content="normalized 4 rows",
+        tool_call_id="call_1",
+        name="normalize_excel",
+    )
+    await store.append_context(
+        session_id=session_id, user_id="7", role="assistant", content="Готово!"
+    )
+
+    ctx = await store.list_context(session_id)
+    assert len(ctx) == 4
+    assert ctx[0] == {"role": "user", "content": "нормализуй Excel"}
+    assert ctx[1]["role"] == "assistant"
+    assert ctx[1]["content"] == ""
+    assert ctx[1]["tool_calls"] == [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "normalize_excel", "arguments": '{"path":"a.xlsx"}'},
+        }
+    ]
+    assert ctx[1]["reasoning"] == "thinking about the file"
+    assert ctx[2] == {
+        "role": "tool",
+        "content": "normalized 4 rows",
+        "tool_call_id": "call_1",
+        "name": "normalize_excel",
+    }
+    assert ctx[3] == {"role": "assistant", "content": "Готово!"}
+
+
+@pytest.mark.asyncio
+async def test_chat_context_store_seq_ordering(tmp_path: Path) -> None:
+    """seq is monotonic per session and list returns insertion order."""
+    db = tmp_path / "memory.db"
+    ws = WebChatStore(db)
+    store = ChatContextStore(db)
+    session_id = await ws.create_session(user_id="7", section="chat")
+
+    s1 = await store.append_context(session_id=session_id, user_id="7", role="user", content="a")
+    s2 = await store.append_context(
+        session_id=session_id, user_id="7", role="assistant", content="b"
+    )
+    s3 = await store.append_context(session_id=session_id, user_id="7", role="user", content="c")
+    assert (s1, s2, s3) == (1, 2, 3)
+
+    ctx = await store.list_context(session_id)
+    assert [m["content"] for m in ctx] == ["a", "b", "c"]
+
+
+@pytest.mark.asyncio
+async def test_chat_context_store_clear_and_replace(tmp_path: Path) -> None:
+    """clear empties the session; replace atomically swaps the full context."""
+    db = tmp_path / "memory.db"
+    ws = WebChatStore(db)
+    store = ChatContextStore(db)
+    session_id = await ws.create_session(user_id="7", section="chat")
+
+    await store.append_context(session_id=session_id, user_id="7", role="user", content="old1")
+    await store.append_context(session_id=session_id, user_id="7", role="assistant", content="old2")
+    assert store.has_context(session_id)
+
+    deleted = await store.clear_context(session_id)
+    assert deleted == 2
+    assert not store.has_context(session_id)
+    assert await store.list_context(session_id) == []
+
+    await store.replace_context(
+        session_id=session_id,
+        user_id="7",
+        messages=[
+            {"role": "user", "content": "new1"},
+            {"role": "assistant", "content": "new2", "reasoning": "summarized"},
+        ],
+    )
+    ctx = await store.list_context(session_id)
+    assert len(ctx) == 2
+    assert ctx[0]["content"] == "new1"
+    assert ctx[1]["content"] == "new2"
+    assert ctx[1]["reasoning"] == "summarized"
+
+
+@pytest.mark.asyncio
+async def test_chat_context_store_cascade_on_session_delete(tmp_path: Path) -> None:
+    """Deleting a web chat session cascades to its context rows."""
+    db = tmp_path / "memory.db"
+    ws = WebChatStore(db)
+    store = ChatContextStore(db)
+    session_id = await ws.create_session(user_id="7", section="chat")
+    await store.append_context(session_id=session_id, user_id="7", role="user", content="x")
+    assert store.has_context(session_id)
+
+    await ws.delete_session("7", session_id)
+    assert not store.has_context(session_id)
+    assert await store.list_context(session_id) == []

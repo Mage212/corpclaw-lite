@@ -69,6 +69,7 @@ if TYPE_CHECKING:
     from corpclaw_lite.agent.compressor import ContextCompressor
     from corpclaw_lite.agent.phase_policy import PhasePolicy
     from corpclaw_lite.calibration.trajectory import TrajectoryRecorder
+    from corpclaw_lite.channels.web.chat_context_store import ChatContextStore
     from corpclaw_lite.config.providers import ProviderRegistry
     from corpclaw_lite.config.settings import DepthModeSettings
     from corpclaw_lite.departments.permissions import PermissionChecker
@@ -295,6 +296,11 @@ class AgentConfig:
     preset_registry: PresetRegistry | None = None
     provider_registry: ProviderRegistry | None = None
     depth_modes: DepthModeSettings | None = None
+    # B-063 S1: full LLM-context persistence per chat. When set, the loop writes
+    # the full message schema (tool_calls/reasoning/tool-role) to the store on
+    # every turn, keyed by session_id. Restore (S2) and compress-any-chat (S3)
+    # are separate sprints; S1 only accumulates data.
+    chat_context_store: ChatContextStore | None = None
 
 
 class AgentLoop:
@@ -325,6 +331,10 @@ class AgentLoop:
         self._preset_registry = config.preset_registry
         self._provider_registry = config.provider_registry
         self._depth_modes = config.depth_modes
+        # B-063 S1: full LLM-context persistence per chat.
+        self._chat_context_store = config.chat_context_store
+        self._ctx_session_id: int | None = None
+        self._ctx_user_id: str | None = None
         # Cache marker sets as frozensets for the hot path.
         self._phase_aggregation_markers = frozenset(self._settings.phase_policy.aggregation_markers)
         self._phase_gathering_tools = frozenset(self._settings.phase_policy.gathering_tools)
@@ -668,6 +678,7 @@ class AgentLoop:
         channel: str | None = None,
         run_id: str | None = None,
         depth_mode: DepthMode | None = None,
+        session_id: int | None = None,
     ) -> tuple[str, RunStats]:
         """Run the ReAct loop until a final answer is given or limits are reached.
 
@@ -746,6 +757,12 @@ class AgentLoop:
 
         mem_key = user.memory_key()
 
+        # B-063 S1: set up per-run context-persistence targets. session_id is
+        # threaded from the web channel (the only place it exists today); when
+        # None (telegram/CLI/subagents) persistence is a no-op.
+        self._ctx_session_id = session_id
+        self._ctx_user_id = str(user.id)
+
         # Load history BEFORE building context so it precedes the current message
         history: list[dict[str, Any]] = []
         if self._memory:
@@ -806,6 +823,7 @@ class AgentLoop:
 
         if self._memory:
             await self._save_memory(mem_key, "user", message)
+        await self._persist_context_msg(role="user", content=message)
 
         # Budget is ALWAYS from settings. Department-specific iteration/tool-call
         # limits were removed — they silently overrode settings.max_steps, causing
@@ -1224,10 +1242,12 @@ class AgentLoop:
                         final = _LOOP_FALLBACK
                         stats.status = "loop"
                         stats.error = "model_echoed_loop_guard"
-                    if self._memory:
-                        await self._save_turn(mem_key, final, stats.tools_used, response.reasoning)
-                        if self._consolidator:
-                            await self._consolidator.maybe_consolidate(self._memory, mem_key)
+                    # _save_turn writes to both SQLiteMemory (skipped if no memory)
+                    # and the per-chat context store (B-063 S1). Called regardless
+                    # of self._memory so context-store persistence always runs.
+                    await self._save_turn(mem_key, final, stats.tools_used, response.reasoning)
+                    if self._memory and self._consolidator:
+                        await self._consolidator.maybe_consolidate(self._memory, mem_key)
                     stats.duration_ms = (time.monotonic() - t0) * 1000
                     logger.debug(
                         "[user=%s] final_answer | len=%d | iterations=%d | duration_ms=%.0f",
@@ -1255,6 +1275,24 @@ class AgentLoop:
                 # Agent requested tools — emit a single assistant message
                 # containing both content (if any) and tool_calls.
                 context.add_tool_calls(response.tool_calls, content=response.content or None)
+                # B-063 S1: persist the assistant tool-call message (same schema as
+                # ContextBuilder.add_tool_calls) to the per-chat context store.
+                await self._persist_context_msg(
+                    role="assistant",
+                    content=response.content or "",
+                    tool_calls=[
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.name,
+                                "arguments": json.dumps(tc.arguments),
+                            },
+                        }
+                        for tc in response.tool_calls
+                    ],
+                    reasoning=response.reasoning,
+                )
                 health.increment("tool_calls", len(response.tool_calls))
 
                 if self._can_parallelize(response.tool_calls):
@@ -1276,6 +1314,9 @@ class AgentLoop:
                     action_results: list[tuple[str, str]] = []
                     for tc, result in zip(response.tool_calls, results, strict=True):
                         context.add_tool_result(tc.id, tc.name, result)
+                        await self._persist_context_msg(
+                            role="tool", content=result, tool_call_id=tc.id, name=tc.name
+                        )
                         stats.tools_used.append(tc.name)
                         current_turn_tools.append(tc.name)
                         action_results.append((tc.name, result))
@@ -1327,6 +1368,9 @@ class AgentLoop:
                             task_run,
                         )
                         context.add_tool_result(tc.id, tc.name, result)
+                        await self._persist_context_msg(
+                            role="tool", content=result, tool_call_id=tc.id, name=tc.name
+                        )
                         stats.tools_used.append(tc.name)
                         current_turn_tools.append(tc.name)
                         action_results.append((tc.name, result))
@@ -1345,12 +1389,9 @@ class AgentLoop:
                             and len(response.tool_calls) == 1
                             and not result.startswith(TOOL_ERROR_PREFIX)
                         ):
-                            if self._memory:
-                                await self._save_turn(mem_key, result, stats.tools_used)
-                                if self._consolidator:
-                                    await self._consolidator.maybe_consolidate(
-                                        self._memory, mem_key
-                                    )
+                            await self._save_turn(mem_key, result, stats.tools_used)
+                            if self._memory and self._consolidator:
+                                await self._consolidator.maybe_consolidate(self._memory, mem_key)
                             stats.duration_ms = (time.monotonic() - t0) * 1000
                             logger.debug(
                                 "[user=%s] terminal_tool=%s | returning result directly",
@@ -1407,8 +1448,7 @@ class AgentLoop:
                 if salvage is not None:
                     stats.status = "ok"
                     stats.error = None
-                    if self._memory:
-                        await self._save_turn(mem_key, salvage, stats.tools_used)
+                    await self._save_turn(mem_key, salvage, stats.tools_used)
                     stats.duration_ms = (time.monotonic() - t0) * 1000
                     log_event(
                         "request_finished",
@@ -1423,8 +1463,7 @@ class AgentLoop:
                     return salvage, stats
             # Fallback: generic budget message (non-salvageable).
             msg = f"I reached my resource limit and had to stop: {e}"
-            if self._memory:
-                await self._save_turn(mem_key, msg, stats.tools_used)
+            await self._save_turn(mem_key, msg, stats.tools_used)
             stats.status = "budget"
             stats.error = str(e)
             stats.duration_ms = (time.monotonic() - t0) * 1000
@@ -1446,8 +1485,7 @@ class AgentLoop:
                 reset_call_depth_mode(_depth_token)
 
         fallback = _LOOP_FALLBACK
-        if self._memory:
-            await self._save_turn(mem_key, fallback, stats.tools_used)
+        await self._save_turn(mem_key, fallback, stats.tools_used)
         stats.status = "loop"
         stats.duration_ms = (time.monotonic() - t0) * 1000
         logger.warning("[user=%s] loop detected after %d iterations", user.id, stats.iterations)
@@ -1471,6 +1509,46 @@ class AgentLoop:
         except StorageError:
             logger.error("[user=%s] Failed to save %s message", mem_key, role)
 
+    async def _persist_context_msg(
+        self,
+        *,
+        role: str,
+        content: str,
+        tool_calls: list[dict[str, Any]] | None = None,
+        tool_call_id: str | None = None,
+        name: str | None = None,
+        reasoning: str | None = None,
+    ) -> None:
+        """Append one LLM-facing message to the per-chat context store (B-063 S1).
+
+        Non-fatal: a persist failure is logged at DEBUG but does NOT abort the run.
+        No-op when no store is configured or when ``session_id`` is None
+        (telegram/CLI/subagents — they have no web chat session concept).
+        """
+        if (
+            self._chat_context_store is None
+            or self._ctx_session_id is None
+            or self._ctx_user_id is None
+        ):
+            return
+        try:
+            await self._chat_context_store.append_context(
+                session_id=self._ctx_session_id,
+                user_id=self._ctx_user_id,
+                role=role,
+                content=content,
+                tool_calls=tool_calls,
+                tool_call_id=tool_call_id,
+                name=name,
+                reasoning=reasoning,
+            )
+        except Exception:
+            logger.debug(
+                "[session=%s] chat_context persist failed (non-fatal)",
+                self._ctx_session_id,
+                exc_info=True,
+            )
+
     async def _save_turn(
         self,
         mem_key: str,
@@ -1492,6 +1570,13 @@ class AgentLoop:
             reasoning_parts.append(response_reasoning)
         reasoning_parts.append(reasoning_marker)
         await self._save_memory(mem_key, "assistant", content, reasoning="\n".join(reasoning_parts))
+        # B-063 S1: persist the final assistant answer to the per-chat context
+        # store. Only the raw model reasoning (no synthetic tool-marker) — the
+        # context store mirrors what the model actually produced, not the audit
+        # annotation SQLiteMemory adds.
+        await self._persist_context_msg(
+            role="assistant", content=content, reasoning=response_reasoning
+        )
 
         # 2. Save factual execution record (visible to model as system message)
         if tools_used:

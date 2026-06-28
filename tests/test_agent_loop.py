@@ -1927,3 +1927,90 @@ async def test_compress_now_too_few_messages_is_noop(
     # History untouched.
     history = await memory.get_history(test_user.memory_key(), limit=20)
     assert len(history) == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_persists_full_context_with_session_id(
+    test_user: User, empty_registry: ToolRegistry, tmp_path: Path
+) -> None:
+    """B-063 S1: when run() is given a session_id and a chat_context_store, the
+    loop persists the full LLM-facing message schema (user / assistant+tool_calls
+    / tool-result / final assistant) to the per-chat store, including tool_calls
+    and reasoning — which SQLiteMemory does NOT capture."""
+    from corpclaw_lite.channels.web.chat_context_store import ChatContextStore
+    from corpclaw_lite.channels.web.chat_store import WebChatStore
+
+    db = tmp_path / "ctx.db"
+    ws = WebChatStore(db)
+    store = ChatContextStore(db)
+    session_id = await ws.create_session(user_id=str(test_user.id), section="work")
+
+    # Provider returns a tool_call, then a final answer.
+    provider = MockProvider(
+        responses=[
+            LLMResponse(
+                content="",
+                tool_calls=[ToolCall(id="call_1", name="echo", arguments={"text": "hi"})],
+                reasoning="deciding to call echo",
+            ),
+            LLMResponse(content="Done!"),
+        ]
+    )
+    # Register a trivial tool so the loop can execute the requested call.
+    from corpclaw_lite.extensions.tools.base import Tool, ToolParam
+
+    class EchoTool(Tool):
+        name = "echo"
+        description = "echo back"
+        params = [ToolParam(name="text", type="string", required=True, description="t")]
+        risk_level = "info"
+
+        async def execute(self, **kwargs: Any) -> str:
+            return f"echo:{kwargs.get('text')}"
+
+    empty_registry.register(EchoTool())
+
+    loop = AgentLoop(
+        AgentConfig(provider, empty_registry, AgentSettings(), chat_context_store=store)
+    )
+
+    await loop.run(test_user, "call echo", session_id=session_id, channel="test")
+
+    ctx = await store.list_context(session_id)
+    # Expected order: user / assistant(tool_calls) / tool(result) / assistant(final)
+    assert len(ctx) == 4
+    assert ctx[0]["role"] == "user"
+    assert ctx[0]["content"] == "call echo"
+    assert ctx[1]["role"] == "assistant"
+    assert ctx[1]["tool_calls"] is not None and len(ctx[1]["tool_calls"]) == 1
+    assert ctx[1]["tool_calls"][0]["function"]["name"] == "echo"
+    assert ctx[1]["reasoning"] == "deciding to call echo"
+    assert ctx[2]["role"] == "tool"
+    assert ctx[2]["tool_call_id"] == "call_1"
+    assert ctx[2]["name"] == "echo"
+    assert ctx[3]["role"] == "assistant"
+    assert ctx[3]["content"] == "Done!"
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_skips_context_persist_without_session_id(
+    test_user: User, empty_registry: ToolRegistry, tmp_path: Path
+) -> None:
+    """B-063 S1: without session_id (telegram/CLI/subagent path), the loop does
+    NOT write to the context store — even when a store is configured."""
+    from corpclaw_lite.channels.web.chat_context_store import ChatContextStore
+    from corpclaw_lite.channels.web.chat_store import WebChatStore
+
+    db = tmp_path / "ctx2.db"
+    WebChatStore(db)
+    store = ChatContextStore(db)
+
+    provider = MockProvider(responses=[LLMResponse(content="ok")])
+    loop = AgentLoop(
+        AgentConfig(provider, empty_registry, AgentSettings(), chat_context_store=store)
+    )
+
+    await loop.run(test_user, "hi", channel="test")  # no session_id
+
+    # Nothing persisted for any session.
+    assert store.has_context(1) is False
