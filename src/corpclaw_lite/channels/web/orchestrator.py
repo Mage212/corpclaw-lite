@@ -753,6 +753,18 @@ class WebChannelOrchestrator:
                 session_id = await self._chat_store.ensure_active_session(user.memory_key())
             except Exception:
                 logger.debug("[user=%s] compress: failed to resolve active session", user.id)
+        # B-063 S3-audit F1: ownership check. Verify the session belongs to the
+        # user before compressing — otherwise any user could compress (and
+        # destroy via replace_context) any other user's chat by sending an
+        # arbitrary session_id in the WS payload.
+        if session_id is not None and self._chat_store is not None:
+            summary = await self._chat_store.get_session(user.memory_key(), session_id)
+            if summary is None:
+                return (
+                    False,
+                    "Чат не найден или нет доступа.",
+                    self._context_usage.get(user.id, self._context_usage_payload()),
+                )
         ok, message = await self._service.compress_user_context(user, session_id=session_id)
         # Refresh the cached usage snapshot (context shrank if compression ran).
         usage = self._context_usage.get(user.id, self._context_usage_payload())
@@ -1900,6 +1912,11 @@ class WebChannelOrchestrator:
                         target_session = int(raw_target) if raw_target is not None else None
                     except (TypeError, ValueError):
                         target_session = None
+                    # B-063 S3-audit F2: reject non-positive session_id for
+                    # consistency with load_chat (no real session has id <= 0).
+                    if target_session is not None and target_session <= 0:
+                        await send({"type": "error", "message": "Некорректный чат."})
+                        continue
                     try:
                         ok, message, usage = await self._compress_active_context(
                             user, session_id=target_session

@@ -1162,7 +1162,8 @@ async def test_compress_active_context_propagates_failure(tmp_path: Path) -> Non
 @pytest.mark.asyncio
 async def test_compress_active_context_with_explicit_session_id(tmp_path: Path) -> None:
     """B-063 S3: _compress_active_context(user, session_id=N) passes the explicit
-    session_id to the service (does NOT resolve the active session)."""
+    session_id to the service (does NOT resolve the active session). The session
+    must be owned by the user (S3-audit ownership check)."""
 
     class SpyService:
         def __init__(self) -> None:
@@ -1180,14 +1181,87 @@ async def test_compress_active_context_with_explicit_session_id(tmp_path: Path) 
             self.passed_session_id = session_id
             return True, "Контекст сжат."
 
+    db = tmp_path / "compress_own.db"
+    ws = WebChatStore(db)
+    user = User(id=7, name="Vadim", department="engineering")
+    session_id = await ws.create_session(user_id=user.memory_key(), section="chat")
+
     orchestrator = WebChannelOrchestrator(Settings())
+    orchestrator._chat_store = ws  # type: ignore[assignment]
     spy = SpyService()
     orchestrator._service = spy  # type: ignore[assignment]
+
+    await orchestrator._compress_active_context(user, session_id=session_id)
+
+    assert spy.passed_session_id == session_id
+
+
+@pytest.mark.asyncio
+async def test_compress_rejects_foreign_session_id(tmp_path: Path) -> None:
+    """B-063 S3-audit F1: compressing a session owned by ANOTHER user is rejected
+    (IDOR protection). Without the ownership check, the caller could destroy
+    another user's context-store via replace_context."""
+
+    class SpyService:
+        async def try_start_user_request(self, _user_id: int) -> bool:
+            return True
+
+        async def finish_user_request(self, _user_id: int) -> None:
+            return None
+
+        async def compress_user_context(
+            self, _user: User, session_id: int | None = None
+        ) -> tuple[bool, str]:
+            return True, "SHOULD NOT BE CALLED"
+
+    db = tmp_path / "compress_foreign.db"
+    ws = WebChatStore(db)
+    user_a = User(id=7, name="Alice", department="engineering")
+    user_b = User(id=20, name="Bob", department="marketing")
+    # Session owned by user B.
+    foreign_session = await ws.create_session(user_id=user_b.memory_key(), section="chat")
+
+    orchestrator = WebChannelOrchestrator(Settings())
+    orchestrator._chat_store = ws  # type: ignore[assignment]
+    orchestrator._service = SpyService()  # type: ignore[assignment]
+
+    # User A tries to compress user B's chat.
+    ok, message, _usage = await orchestrator._compress_active_context(
+        user_a, session_id=foreign_session
+    )
+
+    assert ok is False
+    assert "не найден" in message.lower() or "нет доступа" in message.lower()
+
+
+@pytest.mark.asyncio
+async def test_compress_rejects_nonexistent_session_id(tmp_path: Path) -> None:
+    """B-063 S3-audit F1: compressing a non-existent session_id is rejected."""
+
+    class SpyService:
+        async def try_start_user_request(self, _user_id: int) -> bool:
+            return True
+
+        async def finish_user_request(self, _user_id: int) -> None:
+            return None
+
+        async def compress_user_context(
+            self, _user: User, session_id: int | None = None
+        ) -> tuple[bool, str]:
+            return True, "SHOULD NOT BE CALLED"
+
+    db = tmp_path / "compress_nonexist.db"
+    ws = WebChatStore(db)
     user = User(id=7, name="Vadim", department="engineering")
 
-    await orchestrator._compress_active_context(user, session_id=42)
+    orchestrator = WebChannelOrchestrator(Settings())
+    orchestrator._chat_store = ws  # type: ignore[assignment]
+    orchestrator._service = SpyService()  # type: ignore[assignment]
 
-    assert spy.passed_session_id == 42
+    ok, message, _usage = await orchestrator._compress_active_context(user, session_id=99999)
+
+    assert ok is False
+    assert "не найден" in message.lower() or "нет доступа" in message.lower()
 
 
 # --- B-063 S1: ChatContextStore (full LLM-context persistence per chat) ------
