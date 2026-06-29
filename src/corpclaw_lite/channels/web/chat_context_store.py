@@ -197,7 +197,12 @@ class ChatContextStore:
     ) -> None:
         with db_connect(self.db_path) as conn:
             conn.execute("PRAGMA foreign_keys=ON")
-            conn.execute("DELETE FROM web_chat_context WHERE session_id = ?", (session_id,))
+            # B-067: scope the DELETE by user_id too, so a foreign session_id
+            # can never re-attribute another user's context rows to the caller.
+            conn.execute(
+                "DELETE FROM web_chat_context WHERE session_id = ? AND user_id = ?",
+                (session_id, user_id),
+            )
             for seq, msg in enumerate(messages, start=1):
                 role = str(msg.get("role", "user"))
                 content = msg.get("content", "")
