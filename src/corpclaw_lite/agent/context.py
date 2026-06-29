@@ -248,7 +248,20 @@ class ContextBuilder:
         # or an orphaned tool result after compression) breaks the template.
         leading_parts: list[str] = []
         while non_system and str(non_system[0].get("role")) in ("assistant", "tool"):
-            leading_parts.append(str(non_system.pop(0).get("content", "")))
+            item = non_system.pop(0)
+            content = str(item.get("content", ""))
+            calls = item.get("tool_calls")
+            if calls:
+                # B-063 final-fix B2: preserve tool_calls info in the merged
+                # system text (can't emit structured tool_calls inside the system
+                # prompt). Same rendering as few_shots tool_call description.
+                calls_desc = ", ".join(
+                    f"{c.get('function', {}).get('name', '?')}"
+                    f"({c.get('function', {}).get('arguments', '')})"
+                    for c in calls
+                )
+                content = f"{content} [Tool call: {calls_desc}]".strip()
+            leading_parts.append(content)
         if leading_parts:
             system += "\n\n---\nPrevious context:\n" + "\n".join(leading_parts)
 

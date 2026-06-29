@@ -181,13 +181,27 @@ class AgentRequestService:
             return False
         memory = self._stack.loop.memory
         if memory is not None:
-            await memory.clear(user.memory_key())
-            for msg in messages:
-                role = str(msg.get("role", "user"))
-                # Memory is text-only; skip tool-role (reconstructed at run()
-                # time from the context store, not memory).
-                if role in ("user", "assistant", "system"):
-                    await memory.add_message(user.memory_key(), role, str(msg.get("content", "")))
+            # B-063 final-fix B4: wrap clear+add in try/except — the context
+            # store is the source of truth; memory is a text-only fallback. If
+            # the memory sync fails mid-loop, the store still has the full
+            # context and run() will load from it directly.
+            try:
+                await memory.clear(user.memory_key())
+                for msg in messages:
+                    role = str(msg.get("role", "user"))
+                    # Memory is text-only; skip tool-role (reconstructed at
+                    # run() time from the context store, not memory).
+                    if role in ("user", "assistant", "system"):
+                        await memory.add_message(
+                            user.memory_key(), role, str(msg.get("content", ""))
+                        )
+            except Exception:
+                logger.warning(
+                    "[session=%s] restore_user_context: memory sync failed "
+                    "(non-fatal; context store is source of truth)",
+                    session_id,
+                    exc_info=True,
+                )
         from corpclaw_lite.llm.router import LLMRouter
 
         provider = self._stack.loop.provider

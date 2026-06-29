@@ -2516,3 +2516,150 @@ async def test_capture_context_populated_during_run(
     assert captured["user_id"] == str(test_user.id)
     assert captured["session_id"] == 42
     assert captured["run_id"] == "test-run-123"
+
+
+# --- B-063 final closure: B1, B2 regression + integration tests ---
+
+
+@pytest.mark.asyncio
+async def test_terminal_tool_no_double_persist(
+    test_user: User, empty_registry: ToolRegistry, tmp_path: Path
+) -> None:
+    """B1 fix: terminal tool result is persisted as assistant (via _save_turn)
+    but NOT as a separate tool-role message in the context store."""
+    from corpclaw_lite.channels.web.chat_context_store import ChatContextStore
+    from corpclaw_lite.channels.web.chat_store import WebChatStore
+    from corpclaw_lite.extensions.tools.base import Tool, ToolParam
+
+    db = tmp_path / "terminal.db"
+    ws = WebChatStore(db)
+    store = ChatContextStore(db)
+    session_id = await ws.create_session(user_id=str(test_user.id), section="work")
+
+    class TerminalEchoTool(Tool):
+        name = "terminal_echo"
+        description = "echo back directly"
+        params = [ToolParam(name="text", type="string", required=True, description="t")]
+        risk_level = "info"
+        terminal = True
+
+        async def execute(self, **kwargs: Any) -> str:
+            return f"DIRECT:{kwargs.get('text')}"
+
+    empty_registry.register(TerminalEchoTool())
+
+    provider = MockProvider(
+        responses=[
+            LLMResponse(
+                content="",
+                tool_calls=[ToolCall(id="c1", name="terminal_echo", arguments={"text": "hi"})],
+            ),
+        ]
+    )
+    loop = AgentLoop(
+        AgentConfig(provider, empty_registry, AgentSettings(), chat_context_store=store)
+    )
+
+    await loop.run(test_user, "echo", session_id=session_id, channel="web")
+
+    ctx = await store.list_context(session_id)
+    # user, assistant(tool_calls), assistant(final) — NO tool-role (terminal skip).
+    assert len(ctx) == 3
+    assert all(m["role"] != "tool" for m in ctx)
+    assert ctx[2]["content"] == "DIRECT:hi"
+
+
+def test_build_from_full_history_preserves_tool_calls_in_leading_strip(
+    test_user: User,
+) -> None:
+    """B2 fix: leading assistant with tool_calls → tool_calls info preserved in
+    the merged system prompt text."""
+    full_history = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "c1",
+                    "type": "function",
+                    "function": {"name": "list_files", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "user", "content": "thanks"},
+    ]
+    builder = ContextBuilder.build_from_full_history(
+        test_user, "next", full_history, system_prompt_override="BASE"
+    )
+    assert "Tool call: list_files" in builder.system_prompt
+    assert builder.messages[0]["role"] == "user"
+
+
+@pytest.mark.asyncio
+async def test_restore_then_run_composition(
+    test_user: User, empty_registry: ToolRegistry, tmp_path: Path
+) -> None:
+    """Integration: restore writes text to memory, then run() loads full schema
+    from the context store (NOT from the memory shadow)."""
+    from corpclaw_lite.channels.web.chat_context_store import ChatContextStore
+    from corpclaw_lite.channels.web.chat_store import WebChatStore
+    from corpclaw_lite.memory.sqlite import SQLiteMemory
+
+    db = tmp_path / "composition.db"
+    ws = WebChatStore(db)
+    store = ChatContextStore(db)
+    memory = SQLiteMemory(db_path=str(db))
+    session_id = await ws.create_session(user_id=str(test_user.id), section="work")
+
+    await store.append_context(
+        session_id=session_id, user_id=str(test_user.id), role="user", content="do it"
+    )
+    await store.append_context(
+        session_id=session_id,
+        user_id=str(test_user.id),
+        role="assistant",
+        content="",
+        tool_calls=[
+            {"id": "c1", "type": "function", "function": {"name": "echo", "arguments": "{}"}}
+        ],
+    )
+    await store.append_context(
+        session_id=session_id,
+        user_id=str(test_user.id),
+        role="tool",
+        content="echo:done",
+        tool_call_id="c1",
+        name="echo",
+    )
+    await store.append_context(
+        session_id=session_id, user_id=str(test_user.id), role="assistant", content="All done."
+    )
+
+    # Simulate restore: writes text-only to memory.
+    mem_messages = await store.list_context(session_id)
+    await memory.clear(test_user.memory_key())
+    for msg in mem_messages:
+        role = str(msg.get("role", "user"))
+        if role in ("user", "assistant", "system"):
+            await memory.add_message(test_user.memory_key(), role, str(msg.get("content", "")))
+
+    # Now run() — should load from the STORE (full schema), not memory.
+    captured: list[dict[str, Any]] = []
+
+    class SpyProvider(MockProvider):
+        async def chat(self, messages, tools=None, system=None):
+            captured.extend(messages)
+            return await super().chat(messages, tools, system)
+
+    provider = SpyProvider(responses=[LLMResponse(content="ok")])
+    loop = AgentLoop(
+        AgentConfig(
+            provider, empty_registry, AgentSettings(), memory=memory, chat_context_store=store
+        )
+    )
+
+    await loop.run(test_user, "follow up", session_id=session_id, channel="web")
+
+    roles = [m["role"] for m in captured]
+    assert "tool" in roles, "store path not used — memory shadow took over"
+    assert any(m.get("tool_calls") for m in captured), "tool_calls missing"
