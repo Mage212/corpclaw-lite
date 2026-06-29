@@ -37,7 +37,7 @@ from corpclaw_lite.channels.web.files import (
 from corpclaw_lite.channels.web.orchestrator import WebChannelOrchestrator, _DownloadGrant
 from corpclaw_lite.config.bootstrap import BootstrapLoader
 from corpclaw_lite.config.settings import RoutingRule, Settings
-from corpclaw_lite.exceptions import LLMBackendUnavailableError
+from corpclaw_lite.exceptions import LLMBackendUnavailableError, StorageError
 from corpclaw_lite.users.manager import UserManager
 from corpclaw_lite.users.models import User
 
@@ -1586,6 +1586,15 @@ async def test_chat_context_store_unique_seq_under_concurrent_append(tmp_path: P
     # Every content is distinct and present (no lost inserts).
     contents = {m["content"] for m in ctx}
     assert contents == {f"msg {i}" for i in range(8)}
+
+
+def test_chat_store_migration_idempotent_on_already_migrated(tmp_path: Path) -> None:
+    """B-074/L9: re-init on an already-migrated DB swallows only the idempotent
+    "duplicate column" errors and succeeds (no StorageError)."""
+    db = tmp_path / "memory.db"
+    WebChatStore(db)  # first init migrates all columns
+    # second init must be idempotent — the "duplicate column" errors are swallowed.
+    WebChatStore(db)
 
 
 # --- B-063 S2: restore_user_context (activate=load) ---
