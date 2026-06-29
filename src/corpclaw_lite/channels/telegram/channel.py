@@ -612,7 +612,7 @@ class TelegramChannel(Channel):
         user = await self._resolve_user(update.effective_user.id)
         workspace = self.get_user_workspace(user)
 
-        handler = DeleteBrowserHandler(workspace=workspace)
+        handler = DeleteBrowserHandler(workspace=workspace, owner_uid=update.effective_user.id)
         # Store in context.user_data for thread safety
         if context.user_data is not None:
             context.user_data["delete_handler"] = handler
@@ -789,6 +789,17 @@ class TelegramChannel(Channel):
                 context.user_data.get("delete_handler") if context.user_data is not None else None
             )
             if handler is not None:
+                # B-068: in a group chat, context.user_data is shared per chat,
+                # so without this check user B could tap user A's inline delete
+                # buttons and delete files from A's workspace. Mirror the
+                # approval-flow identity check (caller_uid != expected_uid).
+                owner_uid = getattr(handler, "_owner_uid", None)
+                caller_uid = query.from_user.id if query.from_user else None
+                if owner_uid is not None and caller_uid != owner_uid:
+                    await query.answer(
+                        "Эта кнопка удаления не для вас.", show_alert=True
+                    )
+                    return
                 await query.answer()
                 await handler.handle_callback(update, context, data)
                 return
