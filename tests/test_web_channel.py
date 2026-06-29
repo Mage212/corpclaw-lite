@@ -1409,6 +1409,42 @@ async def test_chat_context_store_cascade_on_session_delete(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_chat_context_store_replace_does_not_relabel_foreign_rows(tmp_path: Path) -> None:
+    """B-067 store-layer defense-in-depth: replace_context DELETE is scoped by
+    user_id, so calling it with a foreign user_id on a session the caller doesn't
+    own cannot delete/relabel another user's rows. (The service-layer get_session
+    check is the primary control; this is the belt-and-suspenders.)"""
+    db = tmp_path / "memory.db"
+    ws = WebChatStore(db)
+    store = ChatContextStore(db)
+    # Victim owns the session and has context rows stamped user_id="8".
+    victim_session = await ws.create_session(user_id="8", section="chat")
+    await store.append_context(
+        session_id=victim_session, user_id="8", role="user", content="victim row"
+    )
+
+    # Attacker (user "7") calls replace_context on the victim's session_id.
+    # Before B-067 the DELETE was WHERE session_id=? only, so this would wipe
+    # the victim's rows and re-insert them stamped user_id="7" (re-attribution).
+    # After B-067 the DELETE is scoped by user_id, so it matches nothing; the
+    # subsequent INSERT then collides on UNIQUE(session_id, seq) — fail-closed.
+    import sqlite3
+
+    with pytest.raises(sqlite3.IntegrityError):
+        await store.replace_context(
+            session_id=victim_session,
+            user_id="7",  # attacker
+            messages=[{"role": "user", "content": "attacker row"}],
+        )
+
+    # Victim's original rows must be untouched — no silent re-attribution.
+    ctx = await store.list_context(victim_session)
+    contents = [m["content"] for m in ctx]
+    assert contents == ["victim row"]
+    assert "attacker row" not in contents
+
+
+@pytest.mark.asyncio
 async def test_chat_context_store_unique_seq_under_concurrent_append(tmp_path: Path) -> None:
     """B-063 S1 audit: concurrent appends to the same session must not collide
     on seq. The UNIQUE(session_id, seq) index + retry-on-IntegrityError turns a
@@ -1533,6 +1569,88 @@ async def test_restore_user_context_returns_false_for_empty_store(tmp_path: Path
 
     restored = await service.restore_user_context(user, session_id=999)  # never created
     assert restored is False
+
+
+@pytest.mark.asyncio
+async def test_restore_user_context_rejects_foreign_session(tmp_path: Path) -> None:
+    """B-067: restore_user_context verifies session ownership at the service
+    layer. A foreign session_id (owned by another user) returns False without
+    reading the transcript — closing the IDOR-by-read gap for any caller that
+    forgets the orchestrator's get_session pre-check."""
+    from corpclaw_lite.extensions.tools.registry import ToolRegistry
+    from corpclaw_lite.memory.sqlite import SQLiteMemory
+
+    db = tmp_path / "idor.db"
+    ws = WebChatStore(db)
+    store = ChatContextStore(db)
+    # Attacker is user 7; victim is user 8. Victim owns session_id.
+    victim_session = await ws.create_session(user_id="8", section="chat")
+    await store.append_context(
+        session_id=victim_session, user_id="8", role="user", content="victim secret"
+    )
+
+    memory = SQLiteMemory(db_path=str(tmp_path / "m.db"))
+
+    class _StubLoop:
+        def __init__(self, mem):
+            self.memory = mem
+            self.provider = None
+
+    stack = AgentStack(
+        loop=_StubLoop(memory),  # type: ignore[arg-type]
+        user_manager=UserManager(db_path=str(tmp_path / "u.db")),
+        chat_context_store=store,
+        chat_store=ws,  # B-067: wired so the service can verify ownership
+        tool_registry=ToolRegistry(),  # type: ignore[arg-type]
+        full_tool_registry=None,
+        mcp_manager=None,
+        container_manager=None,
+    )
+    service = AgentRequestService(stack=stack, bootstrap=None, workspace_base=tmp_path / "ws")  # type: ignore[arg-type]
+    attacker = User(id=7, name="Attacker", department="engineering")
+
+    restored = await service.restore_user_context(attacker, victim_session)
+    assert restored is False
+    # Memory must be untouched (not cleared, no victim content leaked).
+    history = await memory.get_history(attacker.memory_key(), limit=50)
+    assert all("victim secret" not in m.get("content", "") for m in history)
+
+
+@pytest.mark.asyncio
+async def test_compress_user_context_rejects_foreign_session(tmp_path: Path) -> None:
+    """B-067: compress_user_context verifies ownership at the service layer.
+    A foreign session_id returns (False, msg) without invoking compress_now."""
+    from corpclaw_lite.extensions.tools.registry import ToolRegistry
+
+    db = tmp_path / "idor_c.db"
+    ws = WebChatStore(db)
+    ChatContextStore(db)
+    victim_session = await ws.create_session(user_id="8", section="chat")
+
+    class _StubLoop:
+        def __init__(self):
+            self.memory = None
+            self.provider = None
+
+        async def compress_now(self, user, session_id=None):  # type: ignore[no-untyped-def]
+            raise AssertionError("compress_now must not run for a foreign session")
+
+    stack = AgentStack(
+        loop=_StubLoop(),  # type: ignore[arg-type]
+        user_manager=UserManager(db_path=str(tmp_path / "u.db")),
+        chat_context_store=None,
+        chat_store=ws,
+        tool_registry=ToolRegistry(),  # type: ignore[arg-type]
+        full_tool_registry=None,
+        mcp_manager=None,
+        container_manager=None,
+    )
+    service = AgentRequestService(stack=stack, bootstrap=None, workspace_base=tmp_path / "ws")  # type: ignore[arg-type]
+    attacker = User(id=7, name="Attacker", department="engineering")
+
+    ok, message = await service.compress_user_context(attacker, session_id=victim_session)
+    assert ok is False
+    assert "не найден" in message.lower() or "нет доступа" in message.lower()
 
 
 @pytest.mark.asyncio

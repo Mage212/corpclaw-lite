@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     from corpclaw_lite.agent.file_snapshots import FileSnapshotStore
     from corpclaw_lite.agent.file_state import FileStateRegistry
     from corpclaw_lite.channels.web.chat_context_store import ChatContextStore
+    from corpclaw_lite.channels.web.chat_store import WebChatStore
     from corpclaw_lite.config.settings import AgentSettings, ResearchSettings, Settings, WebSettings
     from corpclaw_lite.container.ipc import ContainerIPC
     from corpclaw_lite.container.manager import ContainerManager
@@ -76,6 +77,11 @@ class AgentStack:
     plugin_registry: PluginRegistry | None = None
     skill_matcher: SkillMatcher | None = None
     chat_context_store: ChatContextStore | None = None
+    # B-067: WebChatStore owns get_session (the chat-ownership primitive).
+    # Wired so AgentRequestService can verify session ownership at the service
+    # layer (not just in the channel orchestrator), closing the IDOR gap where
+    # a public service method accepted an unverified session_id.
+    chat_store: WebChatStore | None = None
 
 
 def _build_router(settings: Settings | None = None) -> Provider:
@@ -647,8 +653,12 @@ def build_agent_stack(
     # SQLiteMemory; the loop writes the full message schema (tool_calls/
     # reasoning/tool-role) here on every turn so any chat can later be restored.
     from corpclaw_lite.channels.web.chat_context_store import ChatContextStore
+    from corpclaw_lite.channels.web.chat_store import WebChatStore
 
     chat_context_store = ChatContextStore(memory.db_path)
+    # B-067: WebChatStore owns get_session — the chat-ownership primitive used
+    # by AgentRequestService to verify session ownership at the service layer.
+    chat_store = WebChatStore(memory.db_path)
 
     loop = AgentLoop(
         AgentConfig(
@@ -693,6 +703,7 @@ def build_agent_stack(
         loop=loop,
         user_manager=user_manager,
         chat_context_store=chat_context_store,
+        chat_store=chat_store,
         tool_registry=registry,
         full_tool_registry=full_tool_reg,
         mcp_manager=mcp_manager,

@@ -286,9 +286,50 @@ class TestTelegramChannel:
     async def test_handle_callback_delete(self, channel: TelegramChannel) -> None:
         update = MagicMock()
         update.callback_query.data = "del:ws"
+        update.callback_query.from_user.id = 4242
         update.callback_query.answer = AsyncMock()
         context = MagicMock()
         handler = AsyncMock()
+        handler._owner_uid = 4242  # owner taps their own button (B-068)
+        context.user_data = {"delete_handler": handler}
+
+        await channel._handle_callback(update, context)
+        handler.handle_callback.assert_awaited_once_with(update, context, "del:ws")
+
+    @pytest.mark.asyncio
+    async def test_handle_callback_delete_denied_for_wrong_owner(
+        self, channel: TelegramChannel
+    ) -> None:
+        """B-068: in a group chat, user B cannot tap user A's delete buttons."""
+        update = MagicMock()
+        update.callback_query.data = "del:ws"
+        update.callback_query.from_user.id = 9999  # user B
+        update.callback_query.answer = AsyncMock()
+        context = MagicMock()
+        handler = AsyncMock()
+        handler._owner_uid = 4242  # user A opened /delete
+        context.user_data = {"delete_handler": handler}
+
+        await channel._handle_callback(update, context)
+        # dispatch must NOT happen — wrong owner
+        handler.handle_callback.assert_not_awaited()
+        update.callback_query.answer.assert_awaited_once()
+        # the alert denial message was shown
+        args, kwargs = update.callback_query.answer.call_args
+        assert kwargs.get("show_alert") is True
+
+    @pytest.mark.asyncio
+    async def test_handle_callback_delete_no_owner_uid_allows_dispatch(
+        self, channel: TelegramChannel
+    ) -> None:
+        """B-068 backward-compat: a handler without owner_uid (e.g. legacy or
+        test mock) is dispatched as before — the check is opt-in via _owner_uid."""
+        update = MagicMock()
+        update.callback_query.data = "del:ws"
+        update.callback_query.answer = AsyncMock()
+        context = MagicMock()
+        handler = AsyncMock()
+        handler._owner_uid = None  # explicitly unset
         context.user_data = {"delete_handler": handler}
 
         await channel._handle_callback(update, context)

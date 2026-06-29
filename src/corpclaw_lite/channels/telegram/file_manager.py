@@ -383,10 +383,15 @@ class DeleteBrowserHandler:
 
     Args:
         workspace: Root workspace directory for browsing.
+        owner_uid: Telegram user id of the user who opened ``/delete``. The
+            channel checks ``callback_query.from_user.id`` against this before
+            dispatching a ``del:*`` callback, so in a group chat one user
+            cannot tap another's inline delete buttons (B-068).
     """
 
-    def __init__(self, workspace: Path) -> None:
+    def __init__(self, workspace: Path, owner_uid: int | None = None) -> None:
         self._workspace = workspace
+        self._owner_uid = owner_uid
 
     async def handle_delete_command(
         self,

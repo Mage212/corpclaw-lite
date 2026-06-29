@@ -168,6 +168,23 @@ class AgentRequestService:
         store = self._stack.chat_context_store
         if store is None:
             return False
+        # B-067: verify the caller owns the session before reading its full
+        # LLM transcript. The orchestrator already checks this, but
+        # restore_user_context is a public method — pushing the check down here
+        # closes the IDOR-by-read gap for any future caller that forgets it.
+        # When no WebChatStore is wired (e.g. CLI/Telegram channels without a
+        # web transcript), the check is skipped: those channels are not exposed
+        # to session_id-based access.
+        chat_store = self._stack.chat_store
+        if chat_store is not None:
+            session = await chat_store.get_session(user.memory_key(), session_id)
+            if session is None:
+                logger.warning(
+                    "[session=%s] restore_user_context: not owned by user %s (IDOR blocked)",
+                    session_id,
+                    user.id,
+                )
+                return False
         try:
             messages = await store.list_context(session_id)
         except Exception:
@@ -219,6 +236,21 @@ class AgentRequestService:
         ``session_id`` threads the per-chat context-store sync (B-063 S2-audit).
         Returns ``(ok, message)``.
         """
+        # B-067: verify ownership at the service layer (not just in the
+        # orchestrator) so the public method cannot be used to compress — and
+        # thereby re-attribute via replace_context — another user's chat.
+        if session_id is not None:
+            chat_store = self._stack.chat_store
+            if chat_store is not None:
+                session = await chat_store.get_session(user.memory_key(), session_id)
+                if session is None:
+                    logger.warning(
+                        "[session=%s] compress_user_context: session not owned by"
+                        " user %s (IDOR blocked)",
+                        session_id,
+                        user.id,
+                    )
+                    return False, "Чат не найден или нет доступа."
         return await self._stack.loop.compress_now(user, session_id=session_id)
 
     async def build_system_prompt(self, user: User) -> str | None:
