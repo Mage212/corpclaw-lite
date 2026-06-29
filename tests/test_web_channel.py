@@ -7,6 +7,7 @@ import os
 import sqlite3
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import quote
 
@@ -159,6 +160,46 @@ async def test_web_file_manager_operations(tmp_path: Path) -> None:
         recursive=False,
     )
     assert deleted == ["archive/summary.txt", "archive/summary_1.txt"]
+
+
+@pytest.mark.asyncio
+async def test_web_delete_rejects_symlink_escape(tmp_path: Path) -> None:
+    """B-072: a symlink inside the workspace pointing outside is rejected on
+    delete (the ancestor-walk in _reject_symlink_ancestors runs right before
+    the destructive op, closing the TOCTOU window)."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    secret = tmp_path / "secret.txt"
+    secret.write_text("outside-secret")
+    link = workspace / "escape"
+    os.symlink(secret, link)
+
+    with pytest.raises(PermissionError):
+        await delete_path(workspace, "escape")
+    # The outside file must be untouched.
+    assert secret.exists()
+    assert secret.read_text() == "outside-secret"
+
+
+@pytest.mark.asyncio
+async def test_web_copy_dereferences_safe_symlinks(tmp_path: Path) -> None:
+    """B-072: copytree uses symlinks=False, so a symlink whose target is inside
+    the workspace is dereferenced (content copied, not the link)."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    await make_directory(workspace, "", "source")
+    await make_directory(workspace, "", "destination")
+    (workspace / "data.txt").write_text("inside")
+    # Symlink to an in-workspace file — allowed, dereferenced on copy.
+    safe_link = workspace / "source" / "link_to_data"
+    os.symlink(workspace / "data.txt", safe_link)
+    copied = await copy_paths(workspace, ["source"], "destination")
+    assert copied == ["destination/source"]
+    # The copy contains the dereferenced content, not a symlink.
+    copied_link = workspace / "destination" / "source" / "link_to_data"
+    assert copied_link.exists()
+    assert not copied_link.is_symlink()
+    assert copied_link.read_text() == "inside"
 
 
 @pytest.mark.asyncio
@@ -760,6 +801,79 @@ def test_web_login_failures_lock_out_key() -> None:
     assert orchestrator._login_retry_after(key) > 0
     orchestrator._record_login_success(key)
     assert orchestrator._login_retry_after(key) == 0
+
+
+def test_client_ip_uses_xff_behind_trusted_proxy() -> None:
+    """B-071: behind a trusted proxy, the real client IP comes from the leftmost
+    X-Forwarded-For entry."""
+    settings = Settings()
+    settings.web_channel.trusted_proxies = ["127.0.0.1"]
+    orchestrator = WebChannelOrchestrator(settings)
+    request = SimpleNamespace(
+        remote="127.0.0.1",
+        headers={"X-Forwarded-For": "203.0.113.5, 10.0.0.1"},
+    )
+    assert orchestrator._client_ip(request) == "203.0.113.5"
+
+
+def test_client_ip_ignores_xff_from_untrusted_peer() -> None:
+    """B-071: when the peer is NOT a trusted proxy, XFF is ignored (the socket
+    peer is used) — a direct/localhost client cannot spoof its IP via XFF."""
+    settings = Settings()  # trusted_proxies defaults to []
+    orchestrator = WebChannelOrchestrator(settings)
+    request = SimpleNamespace(
+        remote="198.51.100.7",
+        headers={"X-Forwarded-For": "203.0.113.5"},
+    )
+    assert orchestrator._client_ip(request) == "198.51.100.7"
+
+
+def test_login_lockout_per_username_independent_of_ip() -> None:
+    """B-071: a distributed brute-force (many IPs, one account) trips the
+    per-username cap and locks the account out regardless of source IP."""
+    settings = Settings()
+    settings.web_channel.max_login_failures_per_username = 4
+    orchestrator = WebChannelOrchestrator(settings)
+    # Failures arrive from a different IP each time but target one username.
+    for i in range(settings.web_channel.max_login_failures_per_username):
+        request = SimpleNamespace(remote=f"10.0.0.{i}", headers={})
+        orchestrator._record_login_failure(request, "victim")
+    # The username is now locked out independently of IP.
+    assert orchestrator._login_username_locked("victim")
+    # Even a brand-new IP sees the username lockout in the handler (checked
+    # before the per-IP key), so the distributed attack is contained.
+
+
+@pytest.mark.asyncio
+async def test_broadcast_tasks_tracked_and_cleaned_up() -> None:
+    """B-070: fire-and-forget broadcast tasks must keep a strong reference
+    (no GC mid-execution) and be removed from the tracking set on completion
+    (no unbounded growth on the high-frequency status-tick path)."""
+    orchestrator = WebChannelOrchestrator(Settings())
+
+    sent: list[dict[str, object]] = []
+
+    async def fake_broadcast(user_id: int, payload: dict[str, object]) -> None:
+        sent.append({"user_id": user_id, "payload": payload})
+
+    orchestrator._broadcast_to_user = fake_broadcast  # type: ignore[method-assign]
+
+    # Mimic the broadcast_task closure defined inside _handle_chat_ws.
+    def broadcast_task(payload: dict[str, object]) -> None:
+        task = asyncio.create_task(orchestrator._broadcast_to_user(7, payload))
+        orchestrator._broadcast_tasks.add(task)
+        task.add_done_callback(orchestrator._broadcast_tasks.discard)
+
+    assert orchestrator._broadcast_tasks == set()
+    broadcast_task({"type": "status", "status": "thinking"})
+    broadcast_task({"type": "chat_list_changed"})
+    assert len(orchestrator._broadcast_tasks) == 2
+
+    # Let both tasks run to completion.
+    await asyncio.gather(*orchestrator._broadcast_tasks)
+    # Cleanup-on-done removed them — the set is empty, no growth.
+    assert orchestrator._broadcast_tasks == set()
+    assert len(sent) == 2
 
 
 def test_web_session_cookie_auto_secure_local_http() -> None:

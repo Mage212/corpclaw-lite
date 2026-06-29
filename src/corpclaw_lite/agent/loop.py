@@ -1844,8 +1844,28 @@ class AgentLoop:
                     tools=terminal_schema,
                     system=context.system_prompt or None,
                     on_acquired=None,
-                    call=lambda target_provider: self._call_llm_provider(
-                        target_provider,
+                    call=lambda target_provider: asyncio.wait_for(
+                        self._call_llm_provider(
+                            target_provider,
+                            messages=context.messages,
+                            tools=terminal_schema,
+                            system=context.system_prompt or None,
+                            run_id=stats.run_id,
+                            iteration=stats.iterations + 1,
+                            on_llm_stage=None,
+                            stats=None,
+                        ),
+                        timeout=self._settings.llm_timeout_seconds,
+                    ),
+                    on_queue_status=None,
+                    notify_position=_queue_notify_position(self._settings),
+                    notify_interval_seconds=_queue_notify_interval_seconds(self._settings),
+                )
+            else:
+                # Fallback: no queue (bare QueuedProvider or non-router) — raw call.
+                response = await asyncio.wait_for(
+                    self._call_llm_provider(
+                        self._resolve_target_provider(),
                         messages=context.messages,
                         tools=terminal_schema,
                         system=context.system_prompt or None,
@@ -1854,22 +1874,21 @@ class AgentLoop:
                         on_llm_stage=None,
                         stats=None,
                     ),
-                    on_queue_status=None,
-                    notify_position=_queue_notify_position(self._settings),
-                    notify_interval_seconds=_queue_notify_interval_seconds(self._settings),
+                    timeout=self._settings.llm_timeout_seconds,
                 )
-            else:
-                # Fallback: no queue (bare QueuedProvider or non-router) — raw call.
-                response = await self._call_llm_provider(
-                    self._resolve_target_provider(),
-                    messages=context.messages,
-                    tools=terminal_schema,
-                    system=context.system_prompt or None,
-                    run_id=stats.run_id,
-                    iteration=stats.iterations + 1,
-                    on_llm_stage=None,
-                    stats=None,
-                )
+        except TimeoutError:
+            # B-073: stage-B emergency call timed out (local LLM hang). Fall
+            # through to programmatic finalize (stage C) instead of blocking
+            # indefinitely past the budget. Parity with the main-loop timeout
+            # telemetry (llm_timeouts health counter).
+            health.increment("llm_timeouts")
+            logger.warning(
+                "[user=%s] auto-finalize stage B LLM call timed out"
+                " (%.1fs); falling back to programmatic finalize",
+                user.id,
+                self._settings.llm_timeout_seconds,
+            )
+            response = None
         except Exception:
             logger.warning(
                 "[user=%s] auto-finalize stage B (LLM call) failed; "

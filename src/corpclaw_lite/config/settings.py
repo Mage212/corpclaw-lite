@@ -282,6 +282,14 @@ class WebChannelSettings(BaseModel):
     login_rate_limit_per_minute: int = 5
     login_lockout_threshold: int = 5
     login_lockout_seconds: int = 300
+    # B-071: trusted reverse-proxy IPs. When request.remote is in this set, the
+    # real client IP is read from X-Forwarded-For; otherwise the socket peer is
+    # used. Empty (default) = never trust XFF (correct for direct/localhost deploys).
+    trusted_proxies: list[str] = []
+    # B-071: per-username failure cap independent of source IP — defeats a
+    # distributed brute-force where many IPs hammer one account. Set above the
+    # per-IP threshold so it only trips under a coordinated attack.
+    max_login_failures_per_username: int = 20
     password_min_length: int = 12
     password_max_length: int = 256
     session_ttl_hours: int = 12

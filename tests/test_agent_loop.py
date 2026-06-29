@@ -1779,6 +1779,62 @@ async def test_auto_finalize_skipped_if_terminal_already_called(
     assert provider.call_count == 2
 
 
+@pytest.mark.asyncio
+async def test_auto_finalize_stage_b_timeout_falls_through_to_stage_c(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """B-073: if the stage-B emergency LLM call hangs, asyncio.wait_for times
+    out and the cascade falls through to stage C (programmatic finalize) instead
+    of blocking indefinitely past the budget.
+
+    With llm_timeout_seconds set tiny and a provider whose chat() sleeps, stage B
+    times out → response=None → stage C runs the terminal tool programmatically
+    with an empty answer → status=="ok" (salvaged, not a crash).
+    """
+    _finalize_registry(empty_registry)
+    settings = AgentSettings(
+        max_steps=3, max_tool_calls=100, max_wall_time_ms=60000, llm_timeout_seconds=1
+    )
+
+    class HangingProvider(MockProvider):
+        """Stage-B emergency call hangs forever; loop iterations return instantly."""
+
+        async def chat(self, messages, tools=None, system=None):  # type: ignore[no-untyped-def,override]
+            # The loop's normal iterations call chat() and get research_search;
+            # the cascade's stage-B emergency call also hangs here.
+            call_index = self.call_count
+            self.call_count += 1
+            if call_index < 2:
+                # loop iterations 0,1: model loops on research_search
+                return LLMResponse(
+                    content="",
+                    tool_calls=[
+                        ToolCall(
+                            id=str(call_index + 1),
+                            name="research_search",
+                            arguments={},
+                        )
+                    ],
+                )
+            # stage-B emergency call (call_index >= 2): hang → times out
+            await asyncio.sleep(10)
+            return LLMResponse(content="unreachable")
+
+    provider = HangingProvider(responses=[])
+    loop = AgentLoop(
+        AgentConfig(
+            provider,
+            empty_registry,
+            settings,
+            terminal_tool="research_finalize",
+        )
+    )
+    result, stats = await loop.run(test_user, "research task", channel="test")
+    # Stage C ran research_finalize programmatically with empty answer.
+    assert "## Report" in result
+    assert stats.status == "ok"
+
+
 # ── Degenerate empty-response retry ──────────────────────────────────────────
 
 

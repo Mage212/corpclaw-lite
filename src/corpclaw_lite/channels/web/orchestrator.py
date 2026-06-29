@@ -158,6 +158,9 @@ class WebChannelOrchestrator:
         self._plugin_reloader: PluginHotReloader | None = None
         self._mcp_reloader: MCPHotReloader | None = None
         self._request_tasks: set[asyncio.Task[None]] = set()
+        # B-070: retain strong references to fire-and-forget broadcast tasks
+        # (status ticks, chat_list_changed) so they are not GC'd mid-execution.
+        self._broadcast_tasks: set[asyncio.Task[None]] = set()
         self._started = False
 
     async def start(self) -> None:
@@ -287,6 +290,10 @@ class WebChannelOrchestrator:
             task.cancel()
         if self._request_tasks:
             await asyncio.gather(*self._request_tasks, return_exceptions=True)
+        for task in list(self._broadcast_tasks):
+            task.cancel()
+        if self._broadcast_tasks:
+            await asyncio.gather(*self._broadcast_tasks, return_exceptions=True)
         if self._runner is not None:
             await self._runner.cleanup()
         if self._stack is not None and self._stack.mcp_manager is not None:
@@ -468,10 +475,27 @@ class WebChannelOrchestrator:
             user.id, ttl_hours=self._web_settings.session_ttl_hours
         )
 
+    def _client_ip(self, request: web.Request) -> str:
+        """Best-effort real client IP (B-071).
+
+        Behind a trusted reverse proxy (request.remote in trusted_proxies), read
+        the originating client from the leftmost X-Forwarded-For entry. Otherwise
+        use the direct socket peer — never trusting client-supplied XFF.
+        """
+        remote = request.remote or "unknown"
+        trusted = self._web_settings.trusted_proxies
+        if remote in trusted:
+            xff = request.headers.get("X-Forwarded-For", "")
+            if xff:
+                # Leftmost entry is the originating client (sanitized).
+                first = xff.split(",", 1)[0].strip()
+                if first:
+                    return first
+        return remote
+
     def _login_attempt_key(self, request: web.Request, username: str) -> str:
         clean_username = username.strip().lower()
-        remote = request.remote or "unknown"
-        return f"{remote}:{clean_username}"
+        return f"{self._client_ip(request)}:{clean_username}"
 
     def _login_retry_after(self, key: str) -> int:
         state = self._login_attempts.get(key)
@@ -487,9 +511,27 @@ class WebChannelOrchestrator:
             return self._web_settings.login_lockout_seconds
         return 0
 
-    def _record_login_failure(self, key: str) -> int:
+    def _record_login_failure(self, request_or_key: web.Request | str, username: str = "") -> int:
+        """Record a login failure and return lockout seconds (0 if not locked).
+
+        Accepts either a (request, username) pair (preferred — derives the
+        per-IP key via _client_ip and records a parallel per-username entry) or
+        a bare key (legacy callers). Records failures under both the per-IP key
+        and the per-username key (B-071: distributed brute-force defense).
+        """
         now = time.time()
         window_start = now - 60
+        if isinstance(request_or_key, str):
+            key = request_or_key
+        else:
+            key = self._login_attempt_key(request_or_key, username)
+            clean_username = username.strip().lower()
+            user_key = f"user:{clean_username}"
+            user_state = self._login_attempts.setdefault(user_key, _LoginAttemptState(failures=[]))
+            user_state.failures = [ts for ts in user_state.failures if ts >= window_start]
+            user_state.failures.append(now)
+            if len(user_state.failures) >= self._web_settings.max_login_failures_per_username:
+                user_state.lockout_until = now + self._web_settings.login_lockout_seconds
         state = self._login_attempts.setdefault(key, _LoginAttemptState(failures=[]))
         state.failures = [ts for ts in state.failures if ts >= window_start]
         state.failures.append(now)
@@ -501,8 +543,17 @@ class WebChannelOrchestrator:
             return self._web_settings.login_lockout_seconds
         return 0
 
-    def _record_login_success(self, key: str) -> None:
+    def _login_username_locked(self, username: str) -> bool:
+        """B-071: is this username locked out regardless of source IP?"""
+        user_key = f"user:{username.strip().lower()}"
+        state = self._login_attempts.get(user_key)
+        return state is not None and state.lockout_until > time.time()
+
+    def _record_login_success(self, key: str, username: str = "") -> None:
         self._login_attempts.pop(key, None)
+        # B-071: clear the per-username throttle on success too.
+        if username:
+            self._login_attempts.pop(f"user:{username.strip().lower()}", None)
 
     def _login_failure_json(self, retry_after: int = 0) -> web.Response:
         status = 429 if retry_after > 0 else 401
@@ -576,14 +627,17 @@ class WebChannelOrchestrator:
         data = await request.post()
         username = str(data.get("username", ""))
         password = str(data.get("password", ""))
+        # B-071: per-username lockout (independent of source IP) is checked first.
+        if self._login_username_locked(username):
+            return self._login_failure_html(self._web_settings.login_lockout_seconds)
         attempt_key = self._login_attempt_key(request, username)
         retry_after = self._login_retry_after(attempt_key)
         if retry_after > 0:
             return self._login_failure_html(retry_after)
         user = self._authenticate(username, password)
         if user is None:
-            return self._login_failure_html(self._record_login_failure(attempt_key))
-        self._record_login_success(attempt_key)
+            return self._login_failure_html(self._record_login_failure(request, username))
+        self._record_login_success(attempt_key, username)
         token, _csrf = self._create_session_response(user)
         response = self._redirect("/")
         self._set_session_cookie(request, response, token)
@@ -616,14 +670,17 @@ class WebChannelOrchestrator:
         password = payload.get("password")
         if not isinstance(username, str) or not isinstance(password, str):
             raise web.HTTPBadRequest(text="username and password are required")
+        # B-071: per-username lockout (independent of source IP) is checked first.
+        if self._login_username_locked(username):
+            return self._login_failure_json(self._web_settings.login_lockout_seconds)
         attempt_key = self._login_attempt_key(request, username)
         retry_after = self._login_retry_after(attempt_key)
         if retry_after > 0:
             return self._login_failure_json(retry_after)
         user = self._authenticate(username, password)
         if user is None:
-            return self._login_failure_json(self._record_login_failure(attempt_key))
-        self._record_login_success(attempt_key)
+            return self._login_failure_json(self._record_login_failure(request, username))
+        self._record_login_success(attempt_key, username)
         token, csrf_token = self._create_session_response(user)
         response = web.json_response(
             {
@@ -1429,7 +1486,12 @@ class WebChannelOrchestrator:
             await self._send_ws(ws, payload)
 
         def broadcast_task(payload: dict[str, object]) -> None:
-            asyncio.create_task(self._broadcast_to_user(user.id, payload))
+            # B-070: keep a strong reference + cleanup-on-done so the task is
+            # not GC'd mid-execution and the set doesn't grow unbounded on the
+            # high-frequency status-tick path.
+            task = asyncio.create_task(self._broadcast_to_user(user.id, payload))
+            self._broadcast_tasks.add(task)
+            task.add_done_callback(self._broadcast_tasks.discard)
 
         if self._chat_store is not None:
             try:

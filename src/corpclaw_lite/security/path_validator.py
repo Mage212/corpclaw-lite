@@ -31,6 +31,7 @@ from pathlib import Path
 __all__ = [
     "PermissionDenied",
     "resolve_and_validate_path",
+    "validate_no_symlink_escape",
 ]
 
 
@@ -159,6 +160,18 @@ def _reject_symlink_ancestors(workspace_root: Path, resolved: Path, original: st
                     f"('{part}') that leaves the workspace."
                 ) from None
         current = candidate
+
+
+def validate_no_symlink_escape(workspace_root: Path, resolved: Path, original: str) -> None:
+    """Public wrapper around :func:`_reject_symlink_ancestors`.
+
+    Re-validate that ``resolved`` does not cross a symlink leaving the workspace,
+    using a literal-component ``lstat`` walk. Intended to be called right before
+    a destructive filesystem operation (delete/rename/move/copy) to close the
+    TOCTOU window between an earlier ``resolve()``-based boundary check and the
+    op itself (B-072).
+    """
+    _reject_symlink_ancestors(workspace_root, resolved, original)
 
 
 def _reject_hardlink(resolved: Path) -> None:

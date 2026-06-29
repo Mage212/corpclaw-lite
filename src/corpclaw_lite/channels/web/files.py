@@ -12,6 +12,7 @@ import anyio
 
 from corpclaw_lite.channels.telegram.file_manager import is_protected_delete_target
 from corpclaw_lite.channels.telegram.upload import is_safe_extension, sanitize_filename
+from corpclaw_lite.security.path_validator import validate_no_symlink_escape
 
 __all__ = [
     "WebFileEntry",
@@ -225,7 +226,15 @@ async def rename_path(workspace: Path, raw_path: str, new_name: str) -> str:
     resolve_workspace_path(workspace, _relative(workspace, destination))
     if destination.exists():
         raise FileExistsError("Target already exists")
-    await anyio.to_thread.run_sync(lambda: target.rename(destination))
+    ws_root = workspace.resolve()
+    await anyio.to_thread.run_sync(
+        lambda: (
+            # B-072: re-validate source + destination symlinks right before rename.
+            validate_no_symlink_escape(ws_root, target.resolve(), raw_path),
+            validate_no_symlink_escape(ws_root, destination.resolve(), new_name),
+            target.rename(destination),
+        )
+    )
     return _relative(workspace, destination)
 
 
@@ -259,10 +268,14 @@ async def move_paths(workspace: Path, raw_paths: list[str], target_dir: str | No
                 raise ValueError("Cannot move a directory into itself")
             destination = _unique_destination(parent, source.name)
             resolve_workspace_path(workspace, _relative(workspace, destination))
+            # B-072: re-validate source + destination symlinks right before rename.
+            validate_no_symlink_escape(ws_root, source.resolve(), raw_path)
+            validate_no_symlink_escape(ws_root, destination.resolve(), destination.name)
             source.rename(destination)
             moved.append(_relative(workspace, destination))
         return moved
 
+    ws_root = workspace.resolve()
     return await anyio.to_thread.run_sync(_move)
 
 
@@ -281,13 +294,20 @@ async def copy_paths(workspace: Path, raw_paths: list[str], target_dir: str | No
                 raise PermissionError("Protected path cannot be copied")
             destination = _unique_destination(parent, source.name)
             resolve_workspace_path(workspace, _relative(workspace, destination))
+            # B-072: re-validate source symlink right before copy. symlinks=False
+            # dereferences any symlinks inside a copied tree (copies content,
+            # not the link), so a symlink pointing outside is followed only if
+            # its target already passed the ancestor-walk check.
+            validate_no_symlink_escape(ws_root, source.resolve(), raw_path)
+            validate_no_symlink_escape(ws_root, destination.resolve(), destination.name)
             if source.is_dir():
-                shutil.copytree(source, destination)
+                shutil.copytree(source, destination, symlinks=False)
             else:
                 shutil.copy2(source, destination)
             copied.append(_relative(workspace, destination))
         return copied
 
+    ws_root = workspace.resolve()
     return await anyio.to_thread.run_sync(_copy)
 
 
@@ -297,8 +317,13 @@ async def delete_path(workspace: Path, raw_path: str, *, recursive: bool = True)
         raise FileNotFoundError("Path not found")
     if target == workspace.resolve() or is_protected_delete_target(target, workspace):
         raise PermissionError("Protected path cannot be deleted")
+    ws_root = workspace.resolve()
 
     def _delete() -> None:
+        # B-072: re-validate inside the thread, right before the op, to close
+        # the TOCTOU window between resolve_workspace_path and the destructive
+        # rmtree/unlink (a symlink swapped in between would otherwise escape).
+        validate_no_symlink_escape(ws_root, target.resolve(), raw_path)
         if target.is_dir():
             if not recursive and any(target.iterdir()):
                 raise ValueError("Directory is not empty")
