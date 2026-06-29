@@ -1011,6 +1011,12 @@ class AgentLoop:
             current_turn_tools: list[str] = []
             while True:
                 budget.consume_iteration()
+                # B-066: check ALL budget limits at the top of every iteration so the
+                # retry ``continue`` paths below (empty-response / XML-repair /
+                # planning-text) cannot burn extra LLM calls past the budget. The
+                # ``except BudgetExceededError`` handler gracefully finalizes even
+                # when this fires before the iteration's LLM call.
+                budget.check()
                 stats.iterations += 1
                 # Promote the previous turn's collected tools, then reset for
                 # this turn. PhasePolicy reads prev_turn_tools below.

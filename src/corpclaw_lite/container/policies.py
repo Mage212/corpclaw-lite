@@ -49,7 +49,16 @@ def build_docker_args(
         },
     }
 
+    # Hardening is ON by default (strict_capabilities defaults True). It drops ALL
+    # Linux capabilities, applies a deny-by-default seccomp allow-list, and pins an
+    # explicit non-root user. The corpclaw-agent-base image already declares
+    # ``USER agent`` (UID 1001) with ``/workspace`` chowned inside it, so the
+    # explicit ``user`` kwarg is defense-in-depth — it makes the non-root contract
+    # independent of image metadata. Setting ``strict_capabilities = False`` is an
+    # opt-out for dev/debug: cap_drop/seccomp/explicit-user are skipped, but the
+    # image's own ``USER agent`` still applies, so the container never runs as root.
     if settings.strict_capabilities:
+        args["user"] = "agent"
         args["cap_drop"] = ["ALL"]
         seccomp_path = PROJECT_ROOT / seccomp_profile_path
         if seccomp_path.exists():

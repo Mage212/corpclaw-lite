@@ -69,6 +69,10 @@ def test_container_manager_ensure_running_creates_new(mock_docker):
     assert args["image"] == "corpclaw-agent-base:latest"
     assert args["name"] == "corpclaw_agent_900000042"
     assert args["mem_limit"] == "512m"
+    # B-064: hardening applied by default (cap_drop + non-root + seccomp)
+    assert args["user"] == "agent"
+    assert args["cap_drop"] == ["ALL"]
+    assert any(s.startswith("seccomp=") for s in args["security_opt"])
 
 
 def test_container_manager_stop(mock_docker):

@@ -290,14 +290,38 @@ async def test_install_signal_handlers_windows_fallback() -> None:
         install_signal_handlers(event)
 
 
-# ── Container Policies — strict capabilities ────────────────────────────────
+# ── Container Policies — hardening (B-064) ──────────────────────────────────
+# Hardening (cap_drop ALL + seccomp + explicit non-root user) is ON by default;
+# strict_capabilities=False is the dev/debug opt-out.
 
 
-def test_build_docker_args_strict_capabilities() -> None:
+def test_build_docker_args_hardened_by_default() -> None:
+    """Default ContainerSettings() produces a hardened container (B-064)."""
     from corpclaw_lite.config.settings import ContainerSettings
     from corpclaw_lite.container.policies import build_docker_args
 
-    settings = ContainerSettings(strict_capabilities=True)
+    settings = ContainerSettings()
+    assert settings.strict_capabilities is True  # default flipped in B-064
     args = build_docker_args(user_id=99, settings=settings)
-    assert args["cap_drop"] == ["ALL"]
     assert args["name"] == "corpclaw_agent_99"
+    assert args["user"] == "agent"
+    assert args["cap_drop"] == ["ALL"]
+    assert "no-new-privileges:true" in args["security_opt"]
+    # seccomp profile is appended when the file exists on disk
+    assert any(s.startswith("seccomp=") for s in args["security_opt"])
+
+
+def test_build_docker_args_strict_capabilities_opt_out() -> None:
+    """strict_capabilities=False skips cap_drop/seccomp/explicit-user (dev/debug)."""
+    from corpclaw_lite.config.settings import ContainerSettings
+    from corpclaw_lite.container.policies import build_docker_args
+
+    settings = ContainerSettings(strict_capabilities=False)
+    args = build_docker_args(user_id=99, settings=settings)
+    assert args["name"] == "corpclaw_agent_99"
+    # Hardening kwargs absent in opt-out mode (image still runs non-root via USER agent)
+    assert "user" not in args
+    assert "cap_drop" not in args
+    assert not any(s.startswith("seccomp=") for s in args["security_opt"])
+    # no-new-privileges is always on regardless of the flag
+    assert "no-new-privileges:true" in args["security_opt"]

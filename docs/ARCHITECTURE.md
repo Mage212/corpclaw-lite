@@ -889,11 +889,14 @@ session_id)` — защита от IDOR) → `compress_now(session_id)` → `_co
 | `mem_limit` | 512m |
 | `nano_cpus` | 0.5 × 10⁹ |
 | `pids_limit` | 100 |
-| `cap_drop` | ALL |
-| `security_opt` | seccomp (100+ allowed syscalls) |
+| `user` | agent (UID 1001, explicit — B-064) |
+| `cap_drop` | ALL (B-064: by default) |
+| `security_opt` | seccomp deny-by-default allow-list (unshare/personality trimmed, B-064) |
 | `network_mode` | none (deny-by-default) |
 | `read_only` | True (except /workspace, /tmp) |
 | `workspace` | bind-mount host workspace_base |
+
+Hardening (`cap_drop` + seccomp + explicit `user`) применяется при `container.strict_capabilities=true` (по умолчанию с B-064). Opt-out для dev/debug: `strict_capabilities=false` (контейнер всё равно non-root через `USER agent` образа).
 
 **Dev mode:** `container.enabled=false` → инструменты выполняются на хосте.
 

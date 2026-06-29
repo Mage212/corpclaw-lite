@@ -209,7 +209,7 @@ container:
   cpus: 0.5
   idle_timeout_seconds: 600
   max_concurrent_containers: 20
-  strict_capabilities: false
+  strict_capabilities: true  # cap_drop ALL + seccomp + explicit non-root user (Sprint 1, B-064)
   ipc_timeout_seconds: 120.0
 
 telegram:
