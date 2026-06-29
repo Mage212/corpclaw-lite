@@ -201,6 +201,43 @@ def get_run_id() -> str | None:
     return _run_id_ctx.get()
 
 
+# ── Capture-correlation contextvars (B-063 S4) ──────────────────────────────
+# Set by AgentLoop.run() so providers can tag raw-payload captures with the
+# originating user_id + session_id without threading them through call
+# signatures. Mirrors the run_id pattern above.
+_capture_user_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "llm_capture_user_id", default=None
+)
+_capture_session_id: contextvars.ContextVar[int | None] = contextvars.ContextVar(
+    "llm_capture_session_id", default=None
+)
+
+
+def set_capture_context(
+    user_id: str | None, session_id: int | None
+) -> tuple[contextvars.Token[str | None], contextvars.Token[int | None]]:
+    """Bind user_id + session_id for payload-capture tagging (B-063 S4)."""
+    return (_capture_user_id.set(user_id), _capture_session_id.set(session_id))
+
+
+def reset_capture_context(
+    tokens: tuple[contextvars.Token[str | None], contextvars.Token[int | None]],
+) -> None:
+    """Reset the capture-correlation contextvars."""
+    _capture_user_id.reset(tokens[0])
+    _capture_session_id.reset(tokens[1])
+
+
+def get_capture_user_id() -> str | None:
+    """Return the user_id bound for capture, or None."""
+    return _capture_user_id.get()
+
+
+def get_capture_session_id() -> int | None:
+    """Return the session_id bound for capture, or None."""
+    return _capture_session_id.get()
+
+
 class LLMResponse(BaseModel):
     """Standardized response from an LLM provider."""
 

@@ -51,8 +51,12 @@ from corpclaw_lite.llm.base import (
     Provider,
     StreamingProvider,
     ToolCall,
+    reset_capture_context,
     reset_request_options,
+    reset_run_id,
+    set_capture_context,
     set_request_options,
+    set_run_id,
 )
 from corpclaw_lite.llm.queue import LLMQueueStatus
 from corpclaw_lite.llm.router import LLMRouter, QueuedProvider
@@ -795,6 +799,9 @@ class AgentLoop:
         _depth_token: contextvars.Token[DepthMode | None] | None = None
         # B-063 S1 audit: context-persist target tokens (reset in finally).
         _ctx_tokens: ContextTargetTokens | None = None
+        # B-063 S4: capture-correlation tokens (user_id, session_id, run_id).
+        _capture_tokens: tuple[Any, Any] | None = None
+        _run_id_token: Any = None
 
         def emit_llm_status(stage: str) -> None:
             if self._settings.llm_stream_status_updates and on_llm_stage is not None:
@@ -985,6 +992,11 @@ class AgentLoop:
             # B-063 S1 audit: bind the context-persist target (session_id, user_id)
             # via contextvars so concurrent runs are isolated. Reset in finally.
             _ctx_tokens = set_context_target(session_id, str(user.id))
+            # B-063 S4: populate capture-correlation contextvars so payload
+            # captures carry user_id + session_id + run_id (previously run_id
+            # was always null because set_run_id was never called).
+            _capture_tokens = set_capture_context(str(user.id), session_id)
+            _run_id_token = set_run_id(stats.run_id)
             # Persist the user message now that the context-target is bound (it
             # reads the contextvar set just above). Deferred from the pre-try
             # section so the contextvar is populated.
@@ -1585,6 +1597,12 @@ class AgentLoop:
             # outlives the run (and never leaks into a sibling task's run).
             if _ctx_tokens is not None:
                 reset_context_target(_ctx_tokens)
+            # B-063 S4: reset capture-correlation contextvars so they never
+            # leak into a sibling task's payload captures.
+            if _capture_tokens is not None:
+                reset_capture_context(_capture_tokens)
+            if _run_id_token is not None:
+                reset_run_id(_run_id_token)
 
         fallback = _LOOP_FALLBACK
         await self._save_turn(mem_key, fallback, stats.tools_used)

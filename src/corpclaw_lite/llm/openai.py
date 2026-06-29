@@ -321,13 +321,19 @@ class OpenAIProvider(Provider):
         if pl is None or not pl.enabled:
             return
 
-        from corpclaw_lite.llm.base import get_run_id
+        from corpclaw_lite.llm.base import (
+            get_capture_session_id,
+            get_capture_user_id,
+            get_run_id,
+        )
 
         response_summary = (
             self._response_summary(raw_response, finish_reason) if raw_response else None
         )
         pl.capture(
             run_id=get_run_id(),
+            user_id=get_capture_user_id(),
+            session_id=get_capture_session_id(),
             phase=phase,
             request=self._request_summary(kwargs),
             response=response_summary,
@@ -633,13 +639,19 @@ class OpenAIProvider(Provider):
                 # unparsed content for diagnosis (the "could not safely parse"
                 # path). Always captured regardless of allowlist so the model's
                 # raw output is visible when tool-call parsing breaks.
-                from corpclaw_lite.llm.base import get_run_id
+                from corpclaw_lite.llm.base import (
+                    get_capture_session_id,
+                    get_capture_user_id,
+                    get_run_id,
+                )
                 from corpclaw_lite.logging.payload import get_payload_logger
 
                 pl = get_payload_logger()
                 if pl is not None and pl.enabled:
                     pl.capture(
                         run_id=get_run_id(),
+                        user_id=get_capture_user_id(),
+                        session_id=get_capture_session_id(),
                         phase="xml_parse_failure",
                         request=None,
                         response=None,
