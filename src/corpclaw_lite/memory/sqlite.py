@@ -78,8 +78,13 @@ class SQLiteMemory:
                 try:
                     conn.execute("ALTER TABLE messages ADD COLUMN reasoning TEXT")
                     logger.debug("Added 'reasoning' column to messages table")
-                except sqlite3.OperationalError:
-                    pass  # Column already exists
+                except sqlite3.OperationalError as e:
+                    # B-074/L9: swallow only the idempotent "duplicate column";
+                    # re-raise + warn on disk I/O / lock so the outer handler
+                    # surfaces it rather than silently skipping the migration.
+                    if "duplicate column" not in str(e).lower():
+                        logger.warning("Memory migration failed (reasoning column): %s", e)
+                        raise
         except Exception as e:
             logger.critical("Failed to initialize SQLite Memory: %s", e)
             raise StorageError(f"Database initialization failed: {e}") from e

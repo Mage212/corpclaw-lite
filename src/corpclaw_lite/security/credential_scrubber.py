@@ -50,11 +50,12 @@ class CredentialScrubber(logging.Filter):
 
     def __init__(self, name: str = "") -> None:
         super().__init__(name)
+        # B-074/L3: only static patterns here. The IPC secret is re-read from
+        # the environment on each filter() call (see _scrub) so a secret that
+        # is rotated or loaded from .env after logging setup is still redacted
+        # — matching the module-level scrub_text() behaviour. Caching it here
+        # (the previous behaviour) leaked the secret into logs in that window.
         self._patterns: list[re.Pattern[str]] = list(self.PATTERNS)
-        # Dynamically scrub the IPC secret if set
-        ipc_secret = os.environ.get("CORPCLAW_IPC_SECRET")
-        if ipc_secret and len(ipc_secret) > 8:
-            self._patterns.append(re.compile(re.escape(ipc_secret)))
 
     def filter(self, record: logging.LogRecord) -> bool:
         """Process the log record and scrub sensitive text."""
@@ -89,4 +90,9 @@ class CredentialScrubber(logging.Filter):
         res = text
         for pattern in self._patterns:
             res = pattern.sub(self.MASK, res)
+        # B-074/L3: dynamically scrub the IPC secret on each call, matching
+        # scrub_text(). Cheap (a single str.replace) and rotation-safe.
+        ipc_secret = os.environ.get("CORPCLAW_IPC_SECRET")
+        if ipc_secret and len(ipc_secret) > 8:
+            res = res.replace(ipc_secret, self.MASK)
         return res

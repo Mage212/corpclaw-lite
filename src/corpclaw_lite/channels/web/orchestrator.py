@@ -598,9 +598,14 @@ class WebChannelOrchestrator:
 
     @staticmethod
     def _origin_matches_request(request: web.Request) -> bool:
+        # B-074/L4: require an Origin header and a host match. Browsers always
+        # send Origin on WS handshakes; a missing Origin implies a non-browser
+        # client and is rejected (it used to be treated as a match). Layered
+        # with the auth cookie + single-use WS ticket, this closes the last
+        # gap for a CSRF-style handshake.
         origin = request.headers.get("Origin")
         if not origin:
-            return True
+            return False
         parsed = urlparse(origin)
         return bool(parsed.scheme and parsed.netloc and parsed.netloc == request.host)
 
@@ -1000,6 +1005,9 @@ class WebChannelOrchestrator:
             raise web.HTTPNotFound()
         if not _is_path_inside(grant.path, self._workspace_for(user)):
             raise web.HTTPNotFound()
+        # B-074/L5: single-use — pop the token on successful resolution so a
+        # URL leaked into history/Referer/logs cannot be replayed within the TTL.
+        self._download_grants.pop(token, None)
         return _file_response(grant.path, disposition="attachment", filename=grant.filename)
 
     async def _send_ws(self, ws: web.WebSocketResponse, payload: dict[str, object]) -> None:

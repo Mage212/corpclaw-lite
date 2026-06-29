@@ -314,3 +314,57 @@ class TestEstimateTokens:
 
         # Cyrillic estimate should be significantly higher than latin of same char count
         assert cyrillic_estimate > latin_estimate
+
+
+class TestTailBoundaryToolPairs:
+    """B-074/M3: the tail boundary must not split an assistant tool_calls
+    message from its trailing tool result(s)."""
+
+    def test_boundary_moves_back_to_include_assistant_caller(
+        self, provider: MockProvider, settings: CompressionSettings
+    ) -> None:
+        """When the token-budget boundary lands on a `tool` result, the boundary
+        must move back so the originating `assistant` tool_calls message is also
+        in the tail (otherwise the pair is split and the result is stubbed)."""
+        compressor = ContextCompressor(provider, settings)
+        big = "x" * 500  # large enough to dominate the tail token budget
+
+        messages = [
+            {"role": "user", "content": "q1"},  # 0
+            {"role": "assistant", "content": "a1"},  # 1
+            {"role": "user", "content": big},  # 2  (middle — will be summarized)
+            {"role": "assistant", "content": big},  # 3  (middle)
+            {
+                # 4 — assistant issuing a tool call; must stay with its result
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {"id": "c1", "type": "function", "function": {"name": "t", "arguments": "{}"}}
+                ],
+            },
+            {"role": "tool", "tool_call_id": "c1", "name": "t", "content": "real result"},  # 5
+            {"role": "user", "content": big},  # 6
+        ]
+        # With protect_tail_tokens=200, the budget lands around index 4-5.
+        boundary = compressor._find_tail_boundary(messages, tail_budget_tokens=200)
+        # The boundary must NOT be index 5 (would split the pair: assistant@4
+        # in middle, tool@5 in tail). It must be <= 4 so the assistant caller
+        # is included in the tail alongside its result.
+        assert boundary <= 4
+        assert str(messages[boundary].get("role", "")) != "tool"
+
+    def test_boundary_unaffected_when_no_tool_pair_at_boundary(
+        self, provider: MockProvider, settings: CompressionSettings
+    ) -> None:
+        """No adjustment when the boundary message is a plain user/assistant turn."""
+        compressor = ContextCompressor(provider, settings)
+        messages = [
+            {"role": "user", "content": "q1"},  # 0
+            {"role": "assistant", "content": "a1"},  # 1
+            {"role": "user", "content": "x" * 500},  # 2
+            {"role": "assistant", "content": "x" * 500},  # 3
+            {"role": "user", "content": "x" * 500},  # 4
+        ]
+        boundary = compressor._find_tail_boundary(messages, tail_budget_tokens=200)
+        # No tool messages here — the adjustment is a no-op.
+        assert str(messages[boundary].get("role", "")) in ("user", "assistant")

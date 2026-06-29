@@ -290,13 +290,41 @@ Summary:"""
         return "\n".join(lines)
 
     def _find_tail_boundary(self, messages: list[dict[str, Any]], tail_budget_tokens: int) -> int:
-        """Find where tail protection should start to preserve token budget."""
+        """Find where tail protection should start to preserve token budget.
+
+        B-074/M3: after the token-budget point is found, walk the boundary
+        backward so it never lands between an ``assistant`` message carrying
+        ``tool_calls`` and its trailing ``tool`` result messages. Severing a
+        pair would force ``_sanitize_tool_pairs`` to replace real tool output
+        with a placeholder (lossy). Keeping the pair intact in the tail avoids
+        the data loss while still respecting the token budget approximately.
+        """
         tokens = 0
         for i in range(len(messages) - 1, -1, -1):
             tokens += self._estimate_tokens([messages[i]])
             if tokens >= tail_budget_tokens:
-                return i
+                return self._align_boundary_to_tool_pair(messages, i)
         return 0
+
+    @staticmethod
+    def _align_boundary_to_tool_pair(messages: list[dict[str, Any]], i: int) -> int:
+        """If ``messages[i]`` is a ``tool`` result, move the boundary back to
+        include its originating ``assistant`` tool_calls message (and any other
+        consecutive tool results from the same batch) so the pair is not split.
+
+        ``i`` is the candidate tail_start. Returns an adjusted index <= ``i``
+        that does not begin in the middle of a tool_call/result pair. Bounded
+        by head_count (the caller rejects boundaries too close to the head).
+        """
+        # Walk back while the current boundary message is a tool-role result:
+        # its assistant caller must also be in the tail.
+        boundary = i
+        while boundary > 0 and str(messages[boundary].get("role", "")) == "tool":
+            boundary -= 1
+        # If we stopped on an assistant that issued tool_calls, it is now the
+        # tail start (the pair is fully inside the tail). Otherwise boundary
+        # landed on a non-tool message and is unchanged.
+        return boundary
 
     @staticmethod
     def _bytes_to_tokens(text: str) -> int:

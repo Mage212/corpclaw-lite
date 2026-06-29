@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
 import sqlite3
@@ -171,9 +170,17 @@ class WebChatStore:
                     ("updated_at", "DATETIME"),
                     ("folder_id", "INTEGER"),
                 ]:
-                    with contextlib.suppress(sqlite3.OperationalError):
-                        # "duplicate column name" when already migrated — swallow.
+                    # B-074/L9: swallow only the idempotent "duplicate column"
+                    # case; re-raise + warn on any other OperationalError (disk
+                    # I/O, lock) so the outer handler surfaces it as StorageError
+                    # instead of silently leaving the column missing on every boot.
+                    try:
                         conn.execute(f"ALTER TABLE web_chat_sessions ADD COLUMN {col} {decl}")
+                    except sqlite3.OperationalError as e:
+                        if "duplicate column" in str(e).lower():
+                            continue
+                        logger.warning("Web chat migration failed for column %s: %s", col, e)
+                        raise
         except Exception as e:
             logger.critical("Failed to initialize web chat store: %s", e)
             raise StorageError(f"Web chat store initialization failed: {e}") from e
