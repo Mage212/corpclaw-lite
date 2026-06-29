@@ -37,7 +37,7 @@ from corpclaw_lite.channels.web.files import (
 from corpclaw_lite.channels.web.orchestrator import WebChannelOrchestrator, _DownloadGrant
 from corpclaw_lite.config.bootstrap import BootstrapLoader
 from corpclaw_lite.config.settings import RoutingRule, Settings
-from corpclaw_lite.exceptions import LLMBackendUnavailableError, StorageError
+from corpclaw_lite.exceptions import LLMBackendUnavailableError
 from corpclaw_lite.users.manager import UserManager
 from corpclaw_lite.users.models import User
 
@@ -442,7 +442,9 @@ async def test_web_download_grant_is_single_use(tmp_path: Path) -> None:
 
 def test_origin_matches_request_present_and_matching() -> None:
     """B-074/L4: a present Origin matching request.host is accepted."""
-    request = SimpleNamespace(host="app.example:8090", headers={"Origin": "https://app.example:8090"})
+    request = SimpleNamespace(
+        host="app.example:8090", headers={"Origin": "https://app.example:8090"}
+    )
     assert WebChannelOrchestrator._origin_matches_request(request)  # type: ignore[arg-type]
 
 
