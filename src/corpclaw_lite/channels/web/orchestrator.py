@@ -741,7 +741,16 @@ class WebChannelOrchestrator:
         """
         if self._service is None:
             raise web.HTTPServiceUnavailable()
-        ok, message = await self._service.compress_user_context(user)
+        # Resolve the active session id so compress_now can sync the per-chat
+        # context store (without this, the store would keep the uncompressed
+        # transcript and the compression would be invisible).
+        session_id: int | None = None
+        if self._chat_store is not None:
+            try:
+                session_id = await self._chat_store.ensure_active_session(user.memory_key())
+            except Exception:
+                logger.debug("[user=%s] compress: failed to resolve active session", user.id)
+        ok, message = await self._service.compress_user_context(user, session_id=session_id)
         # Refresh the cached usage snapshot (context shrank if compression ran).
         usage = self._context_usage.get(user.id, self._context_usage_payload())
         if ok:
@@ -1249,13 +1258,16 @@ class WebChannelOrchestrator:
                 status=409,
             )
         try:
+            # Activate the session FIRST (commit the intent), then restore memory.
+            # If restore raises, the session flag is correct and memory can be
+            # re-loaded from the context store on the next run().
+            new_id = await self._chat_store.activate_session(user.memory_key(), session_id)
             # B-063 S2: activate=load, not reset. Restore the chat's full LLM
             # context from the per-chat store; fall back to a clean reset for
             # chats without persisted context (old chats, no store).
             restored = await self._service.restore_user_context(user, session_id)
             if not restored:
                 await self._service.reset_user_context(user)
-            new_id = await self._chat_store.activate_session(user.memory_key(), session_id)
         finally:
             await self._service.finish_user_request(user.id)
         if new_id is None:
