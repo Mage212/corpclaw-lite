@@ -162,6 +162,46 @@ async def test_web_file_manager_operations(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_web_delete_rejects_symlink_escape(tmp_path: Path) -> None:
+    """B-072: a symlink inside the workspace pointing outside is rejected on
+    delete (the ancestor-walk in _reject_symlink_ancestors runs right before
+    the destructive op, closing the TOCTOU window)."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    secret = tmp_path / "secret.txt"
+    secret.write_text("outside-secret")
+    link = workspace / "escape"
+    os.symlink(secret, link)
+
+    with pytest.raises(PermissionError):
+        await delete_path(workspace, "escape")
+    # The outside file must be untouched.
+    assert secret.exists()
+    assert secret.read_text() == "outside-secret"
+
+
+@pytest.mark.asyncio
+async def test_web_copy_dereferences_safe_symlinks(tmp_path: Path) -> None:
+    """B-072: copytree uses symlinks=False, so a symlink whose target is inside
+    the workspace is dereferenced (content copied, not the link)."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    await make_directory(workspace, "", "source")
+    await make_directory(workspace, "", "destination")
+    (workspace / "data.txt").write_text("inside")
+    # Symlink to an in-workspace file — allowed, dereferenced on copy.
+    safe_link = workspace / "source" / "link_to_data"
+    os.symlink(workspace / "data.txt", safe_link)
+    copied = await copy_paths(workspace, ["source"], "destination")
+    assert copied == ["destination/source"]
+    # The copy contains the dereferenced content, not a symlink.
+    copied_link = workspace / "destination" / "source" / "link_to_data"
+    assert copied_link.exists()
+    assert not copied_link.is_symlink()
+    assert copied_link.read_text() == "inside"
+
+
+@pytest.mark.asyncio
 async def test_web_recent_files_are_workspace_relative_and_recent_first(tmp_path: Path) -> None:
     workspace = tmp_path / "ws"
     workspace.mkdir()
