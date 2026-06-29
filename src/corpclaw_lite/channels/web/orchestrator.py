@@ -158,6 +158,9 @@ class WebChannelOrchestrator:
         self._plugin_reloader: PluginHotReloader | None = None
         self._mcp_reloader: MCPHotReloader | None = None
         self._request_tasks: set[asyncio.Task[None]] = set()
+        # B-070: retain strong references to fire-and-forget broadcast tasks
+        # (status ticks, chat_list_changed) so they are not GC'd mid-execution.
+        self._broadcast_tasks: set[asyncio.Task[None]] = set()
         self._started = False
 
     async def start(self) -> None:
@@ -287,6 +290,10 @@ class WebChannelOrchestrator:
             task.cancel()
         if self._request_tasks:
             await asyncio.gather(*self._request_tasks, return_exceptions=True)
+        for task in list(self._broadcast_tasks):
+            task.cancel()
+        if self._broadcast_tasks:
+            await asyncio.gather(*self._broadcast_tasks, return_exceptions=True)
         if self._runner is not None:
             await self._runner.cleanup()
         if self._stack is not None and self._stack.mcp_manager is not None:
@@ -1429,7 +1436,12 @@ class WebChannelOrchestrator:
             await self._send_ws(ws, payload)
 
         def broadcast_task(payload: dict[str, object]) -> None:
-            asyncio.create_task(self._broadcast_to_user(user.id, payload))
+            # B-070: keep a strong reference + cleanup-on-done so the task is
+            # not GC'd mid-execution and the set doesn't grow unbounded on the
+            # high-frequency status-tick path.
+            task = asyncio.create_task(self._broadcast_to_user(user.id, payload))
+            self._broadcast_tasks.add(task)
+            task.add_done_callback(self._broadcast_tasks.discard)
 
         if self._chat_store is not None:
             try:

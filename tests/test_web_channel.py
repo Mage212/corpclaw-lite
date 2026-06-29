@@ -762,6 +762,38 @@ def test_web_login_failures_lock_out_key() -> None:
     assert orchestrator._login_retry_after(key) == 0
 
 
+@pytest.mark.asyncio
+async def test_broadcast_tasks_tracked_and_cleaned_up() -> None:
+    """B-070: fire-and-forget broadcast tasks must keep a strong reference
+    (no GC mid-execution) and be removed from the tracking set on completion
+    (no unbounded growth on the high-frequency status-tick path)."""
+    orchestrator = WebChannelOrchestrator(Settings())
+
+    sent: list[dict[str, object]] = []
+
+    async def fake_broadcast(user_id: int, payload: dict[str, object]) -> None:
+        sent.append({"user_id": user_id, "payload": payload})
+
+    orchestrator._broadcast_to_user = fake_broadcast  # type: ignore[method-assign]
+
+    # Mimic the broadcast_task closure defined inside _handle_chat_ws.
+    def broadcast_task(payload: dict[str, object]) -> None:
+        task = asyncio.create_task(orchestrator._broadcast_to_user(7, payload))
+        orchestrator._broadcast_tasks.add(task)
+        task.add_done_callback(orchestrator._broadcast_tasks.discard)
+
+    assert orchestrator._broadcast_tasks == set()
+    broadcast_task({"type": "status", "status": "thinking"})
+    broadcast_task({"type": "chat_list_changed"})
+    assert len(orchestrator._broadcast_tasks) == 2
+
+    # Let both tasks run to completion.
+    await asyncio.gather(*orchestrator._broadcast_tasks)
+    # Cleanup-on-done removed them — the set is empty, no growth.
+    assert orchestrator._broadcast_tasks == set()
+    assert len(sent) == 2
+
+
 def test_web_session_cookie_auto_secure_local_http() -> None:
     settings = Settings()
     settings.web_channel.cookie_secure = "auto"
