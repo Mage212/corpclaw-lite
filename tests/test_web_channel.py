@@ -1159,6 +1159,37 @@ async def test_compress_active_context_propagates_failure(tmp_path: Path) -> Non
     assert "мало" in message
 
 
+@pytest.mark.asyncio
+async def test_compress_active_context_with_explicit_session_id(tmp_path: Path) -> None:
+    """B-063 S3: _compress_active_context(user, session_id=N) passes the explicit
+    session_id to the service (does NOT resolve the active session)."""
+
+    class SpyService:
+        def __init__(self) -> None:
+            self.passed_session_id: int | None = None
+
+        async def try_start_user_request(self, _user_id: int) -> bool:
+            return True
+
+        async def finish_user_request(self, _user_id: int) -> None:
+            return None
+
+        async def compress_user_context(
+            self, _user: User, session_id: int | None = None
+        ) -> tuple[bool, str]:
+            self.passed_session_id = session_id
+            return True, "Контекст сжат."
+
+    orchestrator = WebChannelOrchestrator(Settings())
+    spy = SpyService()
+    orchestrator._service = spy  # type: ignore[assignment]
+    user = User(id=7, name="Vadim", department="engineering")
+
+    await orchestrator._compress_active_context(user, session_id=42)
+
+    assert spy.passed_session_id == 42
+
+
 # --- B-063 S1: ChatContextStore (full LLM-context persistence per chat) ------
 
 

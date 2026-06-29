@@ -243,8 +243,13 @@ export function useWebChatSession({
       return;
     }
     setCompressing(true);
-    wsRef.current.send(JSON.stringify({ type: "compress" }));
-  }, [addMessage]);
+    // B-063 S3: send the viewed chat's session_id so the server compresses
+    // that chat's context-store, not just the active one. When chatId is null
+    // (following the active chat), omit it — the server resolves the active.
+    const payload: Record<string, unknown> = { type: "compress" };
+    if (chatId != null) payload.session_id = chatId;
+    wsRef.current.send(JSON.stringify(payload));
+  }, [addMessage, chatId]);
 
   const send = useCallback(async () => {
     const text = input.trim();

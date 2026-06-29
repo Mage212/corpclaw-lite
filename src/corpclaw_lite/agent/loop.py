@@ -381,92 +381,123 @@ class AgentLoop:
         return self._compressor
 
     async def compress_now(self, user: User, session_id: int | None = None) -> tuple[bool, str]:
-        """On-demand compression of the active chat's LLM context.
+        """On-demand compression of a chat's LLM context (B-063 S3).
 
-        Loads the user's conversation history, runs it through the context
-        compressor (summarize old turns, prune tool results), and writes the
-        compressed transcript back to memory (clear + re-add). When ``session_id``
-        is provided AND a chat-context-store is configured, the compressed
-        transcript is ALSO written to the per-chat store (replace_context), so
-        the compression is visible on the next run() (which prefers the store).
-        The caller is responsible for holding the single-in-flight lock so this
-        never races an active ``run()``.
+        When ``session_id`` is provided AND a chat-context-store is configured,
+        compresses the FULL LLM context (tool_calls + reasoning) from the
+        per-chat store — works for ANY chat, not just the active one.
+
+        When ``session_id`` is None (telegram/CLI/legacy, or no store),
+        compresses the active chat's in-memory history (role+content only) and
+        writes back to SQLiteMemory.
+
+        The caller holds the single-in-flight lock so this never races a run().
 
         Returns ``(ok, message)``. On any failure the context is left untouched.
         """
         if self._compressor is None:
             return False, "Компрессия контекста недоступна."
+
+        # B-063 S3: prefer the full-context path from the per-chat store.
+        if session_id is not None and self._chat_context_store is not None:
+            return await self._compress_from_context_store(user, session_id)
+        return await self._compress_from_memory(user)
+
+    async def _compress_from_context_store(self, user: User, session_id: int) -> tuple[bool, str]:
+        """Compress a chat's full LLM context from the per-chat store (S3).
+
+        Loads the full message schema (tool_calls/tool-role/reasoning), compresses,
+        and writes back to the store via ``replace_context``. Does NOT touch
+        SQLiteMemory — the store is the source of truth for restored chats, and
+        the chat may not be the active one (its memory shadow is irrelevant).
+        """
+        store = self._chat_context_store
+        compressor = self._compressor
+        if store is None or compressor is None:  # caller guards, but satisfy type checker
+            return False, "Компрессия контекста недоступна."
+        try:
+            messages = await store.list_context(session_id)
+        except Exception:
+            logger.warning("[session=%s] compress: context-store load failed", session_id)
+            return False, "Не удалось загрузить историю чата."
+        if len(messages) < 5:
+            return False, "Слишком мало сообщений для сжатия."
+
+        try:
+            compressed = await compressor.compress(messages, mem_key=f"{user.id}:{session_id}")
+        except Exception:
+            logger.exception("[session=%s] compress: compression failed", session_id)
+            return False, "Ошибка при сжатии контекста."
+
+        if len(compressed) >= len(messages):
+            return True, "Контекст уже достаточно компактный — сжатие не требуется."
+
+        try:
+            await store.replace_context(
+                session_id=session_id, user_id=str(user.id), messages=compressed
+            )
+        except Exception:
+            logger.warning("[session=%s] compress: context-store write-back failed", session_id)
+            return False, "Не удалось сохранить сжатый контекст."
+
+        logger.info(
+            "[user=%s session=%s] compress: %d → %d messages (context-store)",
+            user.id,
+            session_id,
+            len(messages),
+            len(compressed),
+        )
+        return True, f"Контекст сжат: {len(messages)} → {len(compressed)} сообщений."
+
+    async def _compress_from_memory(self, user: User) -> tuple[bool, str]:
+        """Compress the active chat's in-memory history (legacy/telegram path).
+
+        Loads from SQLiteMemory (role+content only), compresses, writes back to
+        memory (clear + re-add), and invalidates the KV-cache.
+        """
         if self._memory is None:
             return False, "Память недоступна."
+        compressor = self._compressor
+        if compressor is None:
+            return False, "Компрессия контекста недоступна."
         mem_key = user.memory_key()
         try:
             history = await self._memory.get_history(mem_key, limit=self._settings.max_history)
         except StorageError:
-            logger.error("[user=%s] compress_now: failed to load history", user.id)
+            logger.error("[user=%s] compress: failed to load history", user.id)
             return False, "Не удалось загрузить историю чата."
         if len(history) < 5:
             return False, "Слишком мало сообщений для сжатия."
 
         try:
-            compressed = await self._compressor.compress(history, mem_key=mem_key)
+            compressed = await compressor.compress(history, mem_key=mem_key)
         except Exception:
-            logger.exception("[user=%s] compress_now: compression failed", user.id)
+            logger.exception("[user=%s] compress: compression failed", user.id)
             return False, "Ошибка при сжатии контекста."
 
         if len(compressed) >= len(history):
-            # Nothing was actually compressed (compressor returned input unchanged).
             return True, "Контекст уже достаточно компактный — сжатие не требуется."
 
-        # Write the compressed transcript back: clear the old history and re-add
-        # the compressed messages in order. Memory is the source of truth for the
-        # next run()'s context, so this is what makes the compression stick.
         try:
             await self._memory.clear(mem_key)
             for msg in compressed:
                 role = str(msg.get("role", "user"))
                 content = msg.get("content", "")
                 if isinstance(content, list):
-                    # Tool/function message contents may be structured; stringify.
                     content = json.dumps(content, ensure_ascii=False)
                 await self._memory.add_message(mem_key, role, str(content))
         except StorageError:
-            logger.error("[user=%s] compress_now: failed to persist compressed context", user.id)
+            logger.error("[user=%s] compress: failed to persist", user.id)
             return False, "Не удалось сохранить сжатый контекст."
 
-        # Invalidate any hot KV-cache for this user so the next run reprocesses
-        # the (now shorter) prompt instead of trusting stale cached prefixes.
         if isinstance(self._provider, LLMRouter):
             try:
                 await self._provider.mark_user_cache_reset(mem_key)
             except Exception:
-                logger.debug("[user=%s] compress_now: cache reset skipped", user.id)
-
-        # B-063 S2-audit fix: also sync the per-chat context store so the
-        # compression is visible on the next run() (which prefers the store over
-        # SQLiteMemory). Without this the store would still hold the full
-        # uncompressed transcript and the compression would be a silent no-op.
-        if self._chat_context_store is not None and session_id is not None:
-            try:
-                await self._chat_context_store.replace_context(
-                    session_id=session_id,
-                    user_id=str(user.id),
-                    messages=compressed,
-                )
-                logger.info(
-                    "[user=%s session=%s] compress_now: context-store synced",
-                    user.id,
-                    session_id,
-                )
-            except Exception:
-                logger.warning(
-                    "[user=%s session=%s] compress_now: context-store sync failed",
-                    user.id,
-                    session_id,
-                    exc_info=True,
-                )
+                logger.debug("[user=%s] compress: cache reset skipped", user.id)
 
         logger.info(
-            "[user=%s] compress_now: %d → %d messages",
+            "[user=%s] compress: %d → %d messages (memory)",
             user.id,
             len(history),
             len(compressed),
