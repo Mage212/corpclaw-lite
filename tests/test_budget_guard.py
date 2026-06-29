@@ -61,3 +61,35 @@ class TestPauseResume:
         guard = SimpleBudgetGuard(SimpleBudgetGuardConfig(max_time_ms=5000))
         guard.resume()  # Should not raise or change state
         guard.check()
+
+
+class TestIterationBudget:
+    """Iteration-budget enforcement via consume_iteration() → check() (B-066).
+
+    The loop calls consume_iteration() then check() at the top of every
+    iteration so retry ``continue`` paths cannot burn extra LLM calls past the
+    limit. check() uses ``>=``, so reaching the limit trips BEFORE the
+    iteration's work.
+    """
+
+    def test_check_passes_below_limit(self) -> None:
+        guard = SimpleBudgetGuard(SimpleBudgetGuardConfig(max_iterations=3, max_time_ms=60_000))
+        guard.consume_iteration()  # iterations_used = 1
+        guard.check()  # 1 < 3 → ok
+        guard.consume_iteration()  # iterations_used = 2
+        guard.check()  # 2 < 3 → ok
+
+    def test_check_raises_at_limit(self) -> None:
+        guard = SimpleBudgetGuard(SimpleBudgetGuardConfig(max_iterations=2, max_time_ms=60_000))
+        guard.consume_iteration()  # 1
+        guard.check()  # 1 < 2 → ok
+        guard.consume_iteration()  # 2
+        with pytest.raises(BudgetExceededError, match="Iteration budget"):
+            guard.check()  # 2 >= 2 → raises
+
+    def test_consume_without_check_does_not_raise(self) -> None:
+        """consume_iteration() alone never raises — only check() enforces."""
+        guard = SimpleBudgetGuard(SimpleBudgetGuardConfig(max_iterations=1, max_time_ms=60_000))
+        guard.consume_iteration()
+        guard.consume_iteration()  # over limit, but no raise yet
+        guard.consume_iteration()

@@ -206,7 +206,9 @@ class ContainerSettings(BaseModel):
     # hot path is never serialized. Per-user 1-container invariant is guaranteed by
     # ContainerManager._get_lock, not by this setting.
     max_concurrent_containers: int = 20
-    strict_capabilities: bool = False  # Set to True on Linux production for cap_drop ALL + seccomp
+    strict_capabilities: bool = (
+        True  # cap_drop ALL + seccomp + explicit non-root user. Set False only for dev/debug.
+    )
     # Timeout for the outer docker exec call (host-side IPC envelope)
     ipc_timeout_seconds: float = 120.0
 

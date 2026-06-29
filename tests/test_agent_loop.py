@@ -285,7 +285,12 @@ async def test_agent_loop_trace_tool_events(
 async def test_agent_loop_budget_exceeded_returns_string(
     test_user: User, empty_registry: ToolRegistry
 ) -> None:
-    """BudgetExceededError is caught internally — run() returns a string, not raises."""
+    """BudgetExceededError is caught internally — run() returns a string, not raises.
+
+    B-066: budget.check() now runs at the top of every iteration (after
+    consume_iteration), so the second iteration trips the limit BEFORE its LLM
+    call — call_count is 1, not 2.
+    """
     settings = AgentSettings(max_steps=2)
 
     provider = MockProvider(
@@ -300,7 +305,7 @@ async def test_agent_loop_budget_exceeded_returns_string(
     result, stats = await loop.run(test_user, "Loop forever")
     assert isinstance(result, str)
     assert "resource limit" in result.lower() or "budget" in result.lower()
-    assert provider.call_count == 2
+    assert provider.call_count == 1
     assert stats.status == "budget"
 
 
@@ -1631,23 +1636,26 @@ async def test_auto_finalize_stage_b_model_calls_terminal(
     The model never finalized on its own (kept calling research_search), hit
     the iteration limit, then the cascade's emergency prompt made it call
     research_finalize.
+
+    B-066: budget.check() now runs at the top of every iteration, so with
+    max_steps=3 the third iteration trips the limit BEFORE its LLM call.
+    Only 2 research_search iterations run; the cascade's stage-B call consumes
+    the third scripted response.
     """
     _finalize_registry(empty_registry)
     settings = AgentSettings(max_steps=3, max_tool_calls=100, max_wall_time_ms=60000)
 
     provider = MockProvider(
         responses=[
-            # 3 iterations: model loops on research_search, never finalizes.
+            # 2 iterations: model loops on research_search, never finalizes.
             LLMResponse(
                 content="", tool_calls=[ToolCall(id="1", name="research_search", arguments={})]
             ),
             LLMResponse(
                 content="", tool_calls=[ToolCall(id="2", name="research_search", arguments={})]
             ),
-            LLMResponse(
-                content="", tool_calls=[ToolCall(id="3", name="research_search", arguments={})]
-            ),
-            # Stage B: emergency call → model cooperates, calls research_finalize.
+            # Stage B: emergency call (3rd iter tripped budget before its LLM call)
+            # → model cooperates, calls research_finalize.
             LLMResponse(
                 content="",
                 tool_calls=[
@@ -1676,7 +1684,13 @@ async def test_auto_finalize_stage_c_programmatic(
     test_user: User, empty_registry: ToolRegistry
 ) -> None:
     """Stage B returns plain text (no tool call) → stage C calls terminal
-    programmatically with the model's text as the answer."""
+    programmatically with the model's text as the answer.
+
+    B-066: budget.check() now runs at the top of every iteration, so with
+    max_steps=3 the third iteration trips the limit BEFORE its LLM call.
+    Only 2 research_search iterations run; the cascade's stage-B call consumes
+    the third scripted response.
+    """
     _finalize_registry(empty_registry)
     settings = AgentSettings(max_steps=3, max_tool_calls=100, max_wall_time_ms=60000)
 
@@ -1688,10 +1702,8 @@ async def test_auto_finalize_stage_c_programmatic(
             LLMResponse(
                 content="", tool_calls=[ToolCall(id="2", name="research_search", arguments={})]
             ),
-            LLMResponse(
-                content="", tool_calls=[ToolCall(id="3", name="research_search", arguments={})]
-            ),
-            # Stage B: model returns text instead of calling terminal.
+            # Stage B (3rd iter tripped budget before its LLM call):
+            # model returns text instead of calling terminal.
             LLMResponse(content="Here is what I found: the answer is 42."),
         ]
     )
@@ -1816,6 +1828,73 @@ async def test_empty_response_retry_exhausted(
     result, stats = await loop.run(test_user, "task", channel="test")
     assert result == "Agent provided no response."
     assert stats.status == "ok"
+
+
+@pytest.mark.asyncio
+async def test_budget_fires_on_empty_response_retry_loop(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """B-066: budget.check() now runs at the top of every iteration, so an
+    empty-response retry loop trips the iteration budget instead of looping
+    forever (previously the continue path skipped the check at loop.py:1382).
+
+    With max_steps=2: iter 1 (tool call), iter 2 trips the budget before its
+    LLM call — status is 'budget', not 'ok'.
+    """
+    settings = AgentSettings(max_steps=2, max_tool_calls=50)
+    provider = MockProvider(
+        responses=[
+            # iter 1: normal tool call
+            LLMResponse(content="", tool_calls=[ToolCall(id="1", name="x", arguments={})]),
+            # iter 2 would be empty-response retry, but budget trips first
+            LLMResponse(content="", tool_calls=[]),
+        ]
+    )
+    loop = AgentLoop(AgentConfig(provider, empty_registry, settings))
+    result, stats = await loop.run(test_user, "task", channel="test")
+    assert stats.status == "budget"
+    assert "resource limit" in result.lower() or "budget" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_budget_fires_on_planning_text_retry_loop(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """B-066: budget.check() catches a planning-text retry loop. The model
+    keeps emitting a planning phrase ("Let me now...") as a final answer; the
+    loop would retry indefinitely, but the iteration budget trips first.
+    """
+    settings = AgentSettings(max_steps=2, max_tool_calls=50)
+    provider = MockProvider(
+        responses=[
+            # iter 1: planning-text final answer → correction injected, continue
+            LLMResponse(content="Let me now search for the document."),
+            # iter 2 would be another planning-text, but budget trips first
+            LLMResponse(content="Let me now check that."),
+        ]
+    )
+    loop = AgentLoop(AgentConfig(provider, empty_registry, settings))
+    result, stats = await loop.run(test_user, "task", channel="test")
+    assert stats.status == "budget"
+    assert "resource limit" in result.lower() or "budget" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_budget_check_does_not_fire_on_healthy_first_iteration(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """B-066 regression: a healthy budget must not trip the ``>=`` boundary on
+    an iteration that should run. consume_iteration() sets iterations_used=N;
+    with max_steps > N the check passes so the LLM call runs. (max_steps must
+    exceed the consumed count because check() uses ``>=``.)
+    """
+    settings = AgentSettings(max_steps=3, max_tool_calls=50)
+    provider = MockProvider(responses=[LLMResponse(content="immediate answer")])
+    loop = AgentLoop(AgentConfig(provider, empty_registry, settings))
+    result, stats = await loop.run(test_user, "task", channel="test")
+    assert result == "immediate answer"
+    assert stats.status == "ok"
+    assert provider.call_count == 1
 
 
 @pytest.mark.asyncio
