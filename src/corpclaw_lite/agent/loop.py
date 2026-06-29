@@ -1478,18 +1478,11 @@ class AgentLoop:
                             task_run,
                         )
                         context.add_tool_result(tc.id, tc.name, result)
-                        await self._persist_context_msg(
-                            role="tool", content=result, tool_call_id=tc.id, name=tc.name
-                        )
-                        stats.tools_used.append(tc.name)
-                        current_turn_tools.append(tc.name)
-                        action_results.append((tc.name, result))
-
                         # Terminal tool: return result directly (no LLM re-paraphrase).
                         # Used for tools like read_image where the vision model already
                         # produces a complete user-facing response.
                         tool_obj = self._registry.get(tc.name)
-                        if (
+                        is_terminal = (
                             tool_obj is not None
                             and (
                                 tool_obj.should_return_direct(tc.arguments, result)
@@ -1498,7 +1491,23 @@ class AgentLoop:
                             )
                             and len(response.tool_calls) == 1
                             and not result.startswith(TOOL_ERROR_PREFIX)
-                        ):
+                        )
+                        # B-063 final-fix B1: for terminal tools, skip the tool-role
+                        # persist — _save_turn below persists the result as the
+                        # assistant's final answer, and duplicating it as tool-role
+                        # inflates the restored context.
+                        if not is_terminal:
+                            await self._persist_context_msg(
+                                role="tool",
+                                content=result,
+                                tool_call_id=tc.id,
+                                name=tc.name,
+                            )
+                        stats.tools_used.append(tc.name)
+                        current_turn_tools.append(tc.name)
+                        action_results.append((tc.name, result))
+
+                        if is_terminal:
                             await self._save_turn(mem_key, result, stats.tools_used)
                             if self._memory and self._consolidator:
                                 await self._consolidator.maybe_consolidate(self._memory, mem_key)
