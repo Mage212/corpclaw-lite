@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
+
 from corpclaw_lite.users.manager import UserManager
 
 PASSWORD = "secret-password-123"
@@ -267,6 +269,39 @@ def test_merge_web_user_moves_credentials_workspace_and_memory(tmp_path) -> None
     assert fact_user_ids == [(str(target.id),)]
     assert web_session_user_ids == [(str(target.id),)]
     assert web_message_user_ids == [(str(target.id),)]
+
+
+def test_merge_web_user_failure_does_not_disable_source(tmp_path, monkeypatch) -> None:
+    """B-074/M4: if a sub-migration (workspace/memory) fails mid-merge, the
+    source user must NOT be left disabled. Credentials are moved and the
+    source's username/password nulled (so it can't log in), but disabled=0
+    keeps the row recoverable instead of a half-moved disabled user."""
+    db = tmp_path / "users.db"
+    memory_db = tmp_path / "memory.db"
+    workspace_base = tmp_path / "workspaces"
+    mgr = UserManager(db_path=str(db))
+    target = mgr.create_user(telegram_id=278278319, department="engineering", name="Vadim")
+    source = mgr.create_web_user(username="vadim", password=PASSWORD, department="engineering")
+    (workspace_base / f"user_{source.id}").mkdir(parents=True)
+
+    # Force _merge_memory to fail mid-merge.
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated memory-merge failure")
+
+    monkeypatch.setattr(mgr, "_merge_memory", boom)
+
+    with pytest.raises(RuntimeError, match="simulated memory-merge failure"):
+        mgr.merge_web_user(
+            source_user_id=source.id,
+            target_user_id=target.id,
+            workspace_base=workspace_base,
+            memory_db_path=memory_db,
+        )
+
+    # Source is NOT disabled (disabled flag stays 0) — recoverable.
+    source_after = mgr.get_by_id(source.id)
+    assert source_after is not None
+    assert not source_after.disabled
 
 
 def test_migrate_canonical_ids_moves_legacy_telegram_data(tmp_path) -> None:

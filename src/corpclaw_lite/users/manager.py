@@ -395,10 +395,19 @@ class UserManager:
                 "UPDATE web_sessions SET user_id = ? WHERE user_id = ?",
                 (target_user_id, source_user_id),
             )
+            # B-074/M4: copy credentials onto the target first (needed to resolve
+            # target.workspace_key() below) and null the source's credentials so
+            # the source can no longer log in, but do NOT set disabled=1 yet.
+            # The disabled flag is set only after the workspace/memory
+            # sub-migrations succeed, so a mid-merge failure leaves the source
+            # recoverable (credentials already moved, but the merge can be
+            # retried or rolled back rather than leaving a half-moved disabled
+            # user). Nulling source.username here also clears the UNIQUE
+            # constraint so the target can take it over.
             conn.execute(
                 """
                 UPDATE users
-                SET username = NULL, password_hash = NULL, disabled = 1
+                SET username = NULL, password_hash = NULL
                 WHERE id = ?
                 """,
                 (source_user_id,),
@@ -433,6 +442,19 @@ class UserManager:
                 memory_db_path=memory_db_path,
                 source_key=source_after.memory_key(),
                 target_key=target_after.memory_key(),
+            )
+
+        # B-074/M4: disable the source only after all sub-migrations succeeded.
+        # A failure above propagates with the source still enabled and its data
+        # intact (recoverable), rather than disabled with half-moved memory.
+        with db_connect(self._db) as conn:
+            conn.execute(
+                """
+                UPDATE users
+                SET username = NULL, password_hash = NULL, disabled = 1
+                WHERE id = ?
+                """,
+                (source_user_id,),
             )
 
         return {
