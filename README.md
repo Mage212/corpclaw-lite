@@ -147,7 +147,8 @@ React build is missing, the backend returns an explicit warning page instead of 
 | 5 Skills + 5 Subagents | Markdown skills with scope filtering and isolated subagents; plugins are a framework (no plugins shipped) |
 | Private Extensions Overlay | Keep corporate customizations in a separate private repo, composed at runtime — no private files in this public repo ([docs](CONTRIBUTING.md#private-extensions-overlay)) |
 | TF-IDF Matching | Bilingual (RU+EN) semantic skill selection |
-| Web + Telegram Channels | Browser chat, collapsible file manager, single statusline, approvals, rate limiting |
+| Web + Telegram Channels | Browser chat (Mistral.ai-style redesign: multi-chat history, Fast/Think/Research depth modes, extensions manager, agent context), collapsible file manager, single statusline, approvals, rate limiting |
+| Per-chat LLM-context Persistence | Full LLM-facing context (tool_calls + reasoning) stored per web chat → restore on chat switch, compress-any-chat, and capture correlation for dataset collection (B-063) |
 | Workspace Isolation | Unified per-human workspace across linked Telegram and web logins |
 | Auto-Calibration | Adapt prompts for specific local models |
 | RBAC | 10 departments with per-department permissions |

@@ -1,7 +1,7 @@
 # CorpClaw Lite — Архитектура проекта
 
-> Версия документа: 2026-06-25
-> Версия проекта: 0.2.1 — 163 Python-модуля, ~37K LOC, 1607 pytest-кейсов
+> Версия документа: 2026-06-29
+> Версия проекта: 0.2.2 — 166 Python-модулей, ~40K LOC, 1666 pytest-кейсов
 
 ---
 
@@ -113,7 +113,9 @@ corpclaw-lite/
 │   │   ├── plugins/        # Плагины с manifest.yaml + sandbox worker + hot-reload (10s)
 │   │   ├── subagents/      # Специализированные субагенты (5 builtin)
 │   │   └── mcp/            # Model Context Protocol интеграция + hot-reload (10s)
-│   ├── channels/           # CLI, Telegram и Web каналы
+│   ├── agent/              # Ядро агента (loop, context, context_target, guards, compressor,
+│   │                       #   factory, subagent, vision) — loop.persist full LLM-context per chat (B-063)
+│   ├── channels/           # CLI, Telegram и Web каналы (web/chat_context_store.py — B-063)
 │   ├── security/           # ToolGuard (YAML + Smart), NetworkPolicy, CredentialScrubber, IPCAuth
 │   ├── container/          # Docker-изоляция + IPC-прокси + agent worker
 │   ├── memory/             # SQLite + консолидация
@@ -127,7 +129,7 @@ corpclaw-lite/
 ├── skills/                 # 5 Markdown-скиллов с scope-фильтрацией
 ├── plugins/                # Директория плагинов
 ├── docker/                 # Dockerfile, Dockerfile.agent, seccomp_default.json
-└── tests/                  # Тесты (1607 pytest-кейсов, 139 Python test-файлов)
+└── tests/                  # Тесты (1666 pytest-кейсов, 149 Python test-файлов)
 ```
 
 ---
@@ -151,6 +153,9 @@ no tool_calls? → Response → Save to Memory
 - `registry: ToolRegistry` — доступные инструменты
 - `settings: AgentSettings` — конфигурация (max_steps=30, max_tool_calls=60, max_wall_time_ms=300000)
 - `permission_checker`, `tool_guard`, `memory`, `consolidator`, `compressor`, `approval_callback`
+- `chat_context_store: ChatContextStore | None` — full LLM-context persistence per web-чат (B-063;
+  `None` для CLI/Telegram). `run(session_id)` пишет в него user/tool_calls/tool-result/answer,
+  восстанавливает на activate, сжимает через `compress_now`
 
 **RunStats** (dataclass) — метрики выполнения:
 - `iterations`, `tools_used`, `duration_ms`
@@ -187,7 +192,7 @@ results = await asyncio.gather(*[execute_one(tc) for tc in tool_calls])
 6. **System Prompt**: BootstrapLoader из `config/bootstrap/*.md` + calibrated overrides
 7. **Few-shots**: Из `config/calibrated/few_shots.yaml`
 
-**AgentStack** содержит: `loop`, `user_manager`, `tool_registry`, `mcp_manager`, `container_manager`, `few_shots`, `subagent_registry`, `skill_registry`, `plugin_registry`, `skill_matcher`.
+**AgentStack** содержит: `loop`, `user_manager`, `tool_registry`, `mcp_manager`, `container_manager`, `few_shots`, `subagent_registry`, `skill_registry`, `plugin_registry`, `skill_matcher`, `chat_context_store` (B-063; `ChatContextStore` шарит `db_path` с `SQLiteMemory`).
 
 ### Context Builder (`agent/context.py`)
 
@@ -199,6 +204,55 @@ results = await asyncio.gather(*[execute_one(tc) for tc in tool_calls])
 | 2 | Strip leading assistant messages → merge в system_prompt | Qwen3.5 требует user-first |
 | 3 | Inject few-shots (calibration) | Примеры "вопрос → tool_call" |
 | 4 | Add history (user/assistant only) + current message | Drop orphaned tool messages |
+
+`build_from_full_history(user, message, full_history, ...)` (B-063) — реконструирует полный
+LLM-facing контекст из `ChatContextStore` (а не из text-only `SQLiteMemory`): восстанавливает
+`tool_calls`/`tool_call_id`/`name`/`reasoning` через `_tool_calls_from_dicts` + `add_tool_result`,
+применяет те же 4 фазы (phase-1 system-merge, phase-2 leading assistant+tool strip с сохранением
+tool_calls — рендерятся как `[Tool call: name(args)]` в system prompt, chat-template-безопасно),
+инъекцию few-shots и system-merge. Используется restore-on-activate и compress-any-chat.
+
+### Per-chat LLM-context persistence (B-063)
+
+**Проблема:** `web_chat_messages` хранит только user-visible транскрипт (role/content/tone).
+Полный LLM-facing контекст (`tool_calls`, `reasoning_content`, порядок сообщений) жил только
+in-memory для активного чата → restore при переключении не возвращал точное LLM-состояние,
+compress работал только с активным чатом.
+
+**Решение — двухслойная гибридная персистентность** (0.2.2):
+
+| Слой | Таблица | Что хранит | Роль |
+|------|---------|------------|------|
+| `SQLiteMemory` | `messages` | text-only транскрипт | fallback |
+| `ChatContextStore` | `web_chat_context` | полный LLM-facing контекст | приоритет при наличии |
+
+`ChatContextStore` (`channels/web/chat_context_store.py`): `role/content/tool_calls/
+tool_call_id/name/reasoning/seq`, `UNIQUE(session_id, seq)` (retry на collision), `FK … ON DELETE
+CASCADE` к `web_chat_sessions`. Шарит `db_path` с `SQLiteMemory`.
+
+**Isolation под shared singleton AgentLoop:** `agent/context_target.py` хранит `session_id`/
+`user_id` в `ContextVar` (task-scoped, как `depth_mode.py`), а не в атрибутах инстанса — иначе
+конкурентные `run()` на одном `AgentLoop` перетирали бы session_id друг друга. `set_context_target`
+возвращает токены, `reset_context_target(tokens)` — в `finally`.
+
+**Поток persist** (`AgentLoop.run(session_id)`) — 5 точек: user-message → assistant tool_calls →
+tool-result (parallel `gather` + sequential) → финальный answer. Terminal-инструменты
+(`read_image`, `dispatch_subagent`) **skip** tool-role persist (результат уже идёт как
+assistant-content — иначе double-content в restored history).
+
+**Restore-on-activate** (`channels/service.py → restore_user_context`): clear+re-add в
+`SQLiteMemory` (text-only fallback, non-fatal try/except) + `AgentLoop.run()` предпочитает
+`ChatContextStore.list_context` → `build_from_full_history`, когда store непуст для сессии.
+
+**Compress-any-chat** (`AgentLoop.compress_now(session_id)`): бранчуется в
+`_compress_from_context_store` (грузит полную схему из store, сжимает, `replace_context`) или
+`_compress_from_memory` (legacy, только активный чат). Ownership-check (`get_session(user.memory_key(),
+session_id)`) перед compress — защита от IDOR.
+
+**`db_connect` FK pragma:** `utils/db.py` теперь глобально включает `PRAGMA foreign_keys=ON` →
+все `ON DELETE CASCADE` (`web_chat_context→web_chat_sessions`,
+`file_changes→agent_change_sets`) реально срабатывают. Ранее FK-декларации были dormant
+(SQLite off by default).
 
 ### Context Compression (`agent/compressor.py`)
 
@@ -786,6 +840,38 @@ Production-ready интеграция:
 
 **Команды бота:** `/start`, `/help`, `/new`, `/delete`, `/chat`, `/execute`
 
+### Web Channel (`channels/web/`)
+
+Браузерный канал (0.2.2 — полный редизайн в Mistral.ai-стиле + B-063 persistence):
+
+| Компонент | Назначение |
+|-----------|------------|
+| `runner.py` | Entry point (`uv run corpclaw-lite web`) |
+| `orchestrator.py` | Lifecycle: auth, multi-chat, activate/restore, compress, depth modes, extensions mgmt |
+| `chat_store.py` | `web_chat_sessions` + `web_chat_messages` (multi-chat модель: section/title/updated_at/folder_id; 1 активный чат на пользователя — partial unique index) |
+| `chat_context_store.py` | `web_chat_context` — полный LLM-facing контекст per chat (B-063, см. §1 и §7) |
+| `files.py` | Файловый диспетчер: дерево, поиск, preview, drag-and-drop, rename/move/copy/delete с подтверждением |
+
+**Multi-chat модель:** создание/список/активация/переименование/удаление; auto-naming из первого
+user-message; time-range grouping (Сегодня / Вчера / Предыдущие 7 дней / Ранее). **View vs Activate:**
+клик → read-only transcript; активация — отдельный REST call или activate-on-send. **Empty start:**
+стартовая панель пустая, первое сообщение продолжает активный чат.
+
+**Restore-on-activate (B-063):** `POST /api/chats/{id}/activate` вызывает `restore_user_context`
+(раньше reset). Контекст восстанавливается из persistent store, не стирается.
+
+**Depth modes:** Fast / Think / Research selector в композере → sampling profile (Fast=thinking-off,
+Think=thinking-on) или force `deep_research` через contextvar (Research). `AgentLoop.run(depth_mode)`
+резолвит профиль по режиму.
+
+**Compress-any-chat (B-063):** WS compress handler с ownership-check (`get_session(user.memory_key(),
+session_id)` — защита от IDOR) → `compress_now(session_id)` → `_compress_from_context_store`.
+
+**Frontend:** React/Vite отдельной production-сборкой (`frontend/web/dist`); Vite dev server
+проксирует `/api` и `/ws` на backend `:8090`. Локальные аккаунты с паролем и HttpOnly session cookie;
+общий профиль с Telegram по внутреннему `users.id`.
+
+
 ---
 
 ## 6. Container System
@@ -847,6 +933,15 @@ Host → verify(response) → result
 - WAL-режим для конкурентности
 - Автоматическая schema migration
 - JSON десериализация
+
+### Per-chat LLM-context store (`channels/web/chat_context_store.py`) — B-063
+
+Полный LLM-facing контекст per web-чат (см. §1 «Per-chat LLM-context persistence»):
+таблица `web_chat_context` (`role/content/tool_calls/tool_call_id/name/reasoning/seq`,
+`UNIQUE(session_id, seq)`, `FK CASCADE` к `web_chat_sessions`). Параллельный слой к text-only
+`SQLiteMemory.messages` — приоритетный источник для restore-on-activate и compress-any-chat.
+Методы: `append_context` (с retry на seq-collision), `list_context`, `clear_context`,
+`replace_context`, `has_context`.
 
 ### Memory Consolidation (`memory/consolidation.py`)
 
@@ -1023,6 +1118,13 @@ skills:
 - **`run_id` contextvar** (`llm/base.py`) тегирует каждую запись агентским
   run_id → корреляция с `agent_trace.jsonl` (per-iteration метрики, phase,
   tool calls).
+- **Capture correlation (B-063 S4):** дополнительно `_capture_user_id`/
+  `_capture_session_id` contextvar'ы (`set_capture_context`/`reset_capture_context`
+  в `llm/base.py`) населяются в `AgentLoop.run()` (через `agent/context_target.py`).
+  `payload.py → capture(user_id, session_id)` пишет их в каждую запись **вне allowlist**
+  (всегда) → корреляция траектории с конкретным web-чатом и пользователем — фундамент
+  для будущего сбора датасета дообучения. Ранее `set_run_id` не вызывался вовсе
+  (run_id всегда был null) — пофикшено в S4.
 
 **Конфигурация** (`config/settings.yaml → logging`):
 
@@ -1164,17 +1266,17 @@ Raw-capture — фундамент для будущей системы сбор
 ## Ключевые метрики
 
 > Per-component breakdown приблизительный (модули переезжали между пакетами с момента
-> последнего точного подсчёта); totals проверены на 0.2.1.
+> последнего точного подсчёта); totals проверены на 0.2.2.
 
 | Компонент | LOC | Файлов |
 |-----------|-----|--------|
-| Agent Core | ~4,620 | 14 |
+| Agent Core | ~5,760 | 15 |
 | Calibration | ~1,560 | 8 |
 | Onboarding | ~630 | 5 |
-| LLM Providers + Queue + Cache | ~5,070 | 9 |
+| LLM Providers + Queue + Cache | ~5,210 | 9 |
 | Extensions | ~9,100 | 51 |
 | Security | ~800 | 6 |
-| Channels | ~6,540 | 22 |
+| Channels | ~7,900 | 22 |
 | Container | ~870 | 6 |
 | Memory | ~840 | 4 |
 | Config + RBAC | ~800 | 6 |
@@ -1182,12 +1284,12 @@ Raw-capture — фундамент для будущей системы сбор
 | Users | ~955 | 3 |
 | Eval harness (B-060) | ~2,350 | 10 |
 | Runtime | ~47 | 2 |
-| Logging | ~610 | 5 |
+| Logging | ~620 | 5 |
 | Utils | ~200 | 4 |
 | Root (cli, etc.) | ~1,480 | 5 |
-| **Исходники** | **~37,060** | **163** |
-| **Тесты** | **~33,400** | **~139** |
-| **Тест-кейсов pytest** | **1607** | |
+| **Исходники** | **~39,680** | **166** |
+| **Тесты** | **~35,550** | **~149** |
+| **Тест-кейсов pytest** | **1666** | |
 
 ---
 
