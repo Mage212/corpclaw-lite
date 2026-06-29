@@ -59,10 +59,13 @@ class SimpleProgressGuard:
         signatures: list[tuple[str, str]] = []
         for tool_name, result in tool_results:
             if not result.startswith(TOOL_ERROR_PREFIX):
-                # Any successful result in the action is progress.
-                self.state.last_tool_error_signature = None
-                self.state.same_error_count = 0
-                return False
+                # Success on one tool is progress for THAT tool, but a sibling tool
+                # in the same batch may still be looping on an identical error.
+                # Skip successes and keep accumulating error signatures so a
+                # mixed batch like [error_A, success, error_A] repeated across
+                # turns is still detected (B-069). A fully-successful batch
+                # resets via the ``if not signatures`` branch below.
+                continue
 
             normalized_error = self._normalize_error(result)
             signature = (tool_name, normalized_error)
