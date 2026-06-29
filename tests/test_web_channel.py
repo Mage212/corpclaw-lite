@@ -408,6 +408,57 @@ async def test_web_download_grant_is_owner_scoped_and_expires(tmp_path: Path) ->
     assert "expired" not in orchestrator._download_grants
 
 
+@pytest.mark.asyncio
+async def test_web_download_grant_is_single_use(tmp_path: Path) -> None:
+    """B-074/L5: a download-grant token is consumed on the first successful
+    download and cannot be replayed within its TTL (tokens live in URL
+    history/Referer/logs)."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    target = workspace / "report.pdf"
+    target.write_bytes(b"pdf")
+    owner = User(id=1, name="Vadim", department="engineering")
+    orchestrator = WebChannelOrchestrator(Settings())
+    orchestrator._service = FakeWorkspaceService(workspace)  # type: ignore[assignment]
+    orchestrator._download_grants["once"] = _DownloadGrant(
+        user_id=owner.id,
+        path=target,
+        filename=target.name,
+        caption="",
+        expires_at=time.time() + 60,
+    )
+
+    # First download succeeds and consumes the token.
+    await orchestrator._handle_download_grant(
+        web_request("GET", "/api/download/once", owner, match_info={"token": "once"})
+    )
+    assert "once" not in orchestrator._download_grants
+    # A replay with the same token is rejected even within the TTL.
+    with pytest.raises(web.HTTPNotFound):
+        await orchestrator._handle_download_grant(
+            web_request("GET", "/api/download/once", owner, match_info={"token": "once"})
+        )
+
+
+def test_origin_matches_request_present_and_matching() -> None:
+    """B-074/L4: a present Origin matching request.host is accepted."""
+    request = SimpleNamespace(host="app.example:8090", headers={"Origin": "https://app.example:8090"})
+    assert WebChannelOrchestrator._origin_matches_request(request)  # type: ignore[arg-type]
+
+
+def test_origin_matches_request_missing_rejected() -> None:
+    """B-074/L4: a missing Origin header is rejected (was previously treated as a match).
+    Browsers always send Origin on WS handshakes; only a non-browser client omits it."""
+    request = SimpleNamespace(host="app.example:8090", headers={})
+    assert not WebChannelOrchestrator._origin_matches_request(request)  # type: ignore[arg-type]
+
+
+def test_origin_matches_request_mismatch_rejected() -> None:
+    """B-074/L4: a present-but-mismatched Origin is rejected (CSRF defense)."""
+    request = SimpleNamespace(host="app.example:8090", headers={"Origin": "https://evil.example"})
+    assert not WebChannelOrchestrator._origin_matches_request(request)  # type: ignore[arg-type]
+
+
 def test_llm_transport_error_detection() -> None:
     assert is_llm_transport_error(APIConnectionError("Connection error.")) is True
     assert (
