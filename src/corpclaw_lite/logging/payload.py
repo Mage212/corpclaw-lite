@@ -139,6 +139,8 @@ class PayloadCaptureLogger:
         finish_reason: str | None = None,
         error: str | None = None,
         diagnostic: dict[str, Any] | None = None,
+        user_id: str | None = None,
+        session_id: int | None = None,
     ) -> None:
         """Write one request+response record, filtered by the allowlist.
 
@@ -153,6 +155,8 @@ class PayloadCaptureLogger:
             error: Error message if the call failed (e.g. XML-parse failure code).
             diagnostic: Diagnostic fields (e.g. raw unparsed content on XML
                 failures). **Always captured regardless of allowlist.**
+            user_id: Originating user id (B-063 S4 capture correlation).
+            session_id: Originating web chat session id (B-063 S4).
         """
         if not self.enabled:
             return
@@ -160,6 +164,8 @@ class PayloadCaptureLogger:
         record: dict[str, Any] = {
             "ts": time.time(),
             "run_id": run_id,
+            "user_id": user_id,
+            "session_id": session_id,
             "phase": phase,
             "finish_reason": finish_reason,
             "error": error,

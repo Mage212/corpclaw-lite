@@ -2480,3 +2480,39 @@ async def test_compress_falls_back_to_memory_without_session_id(
     # Memory should hold the compressed single message, not the original 12.
     assert len(history) == 1
     assert history[0]["content"] == "summarized"
+
+
+# --- B-063 S4: capture correlation (user_id + session_id in payload) ---
+
+
+@pytest.mark.asyncio
+async def test_capture_context_populated_during_run(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """S4: AgentLoop.run() populates the capture-correlation contextvars
+    (user_id, session_id, run_id) so payload captures can be correlated to a
+    specific chat. Verified by reading the contextvars inside the provider's
+    chat() call (which runs under the contextvar scope set by run())."""
+    from corpclaw_lite.llm.base import (
+        get_capture_session_id,
+        get_capture_user_id,
+        get_run_id,
+    )
+
+    captured: dict[str, Any] = {}
+
+    class CaptureSpyProvider(MockProvider):
+        async def chat(self, messages, tools=None, system=None):
+            captured["user_id"] = get_capture_user_id()
+            captured["session_id"] = get_capture_session_id()
+            captured["run_id"] = get_run_id()
+            return await super().chat(messages, tools, system)
+
+    provider = CaptureSpyProvider(responses=[LLMResponse(content="ok")])
+    loop = AgentLoop(AgentConfig(provider, empty_registry, AgentSettings()))
+
+    await loop.run(test_user, "hi", session_id=42, channel="web", run_id="test-run-123")
+
+    assert captured["user_id"] == str(test_user.id)
+    assert captured["session_id"] == 42
+    assert captured["run_id"] == "test-run-123"

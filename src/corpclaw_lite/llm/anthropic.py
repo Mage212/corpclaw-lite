@@ -201,7 +201,11 @@ class AnthropicProvider(Provider):
         )
 
         # D-056 post-0.2.0: raw request/response capture (no-op when disabled).
-        from corpclaw_lite.llm.base import get_run_id
+        from corpclaw_lite.llm.base import (
+            get_capture_session_id,
+            get_capture_user_id,
+            get_run_id,
+        )
         from corpclaw_lite.logging.payload import get_payload_logger
 
         pl = get_payload_logger()
@@ -212,6 +216,8 @@ class AnthropicProvider(Provider):
                 resp_dict = None
             pl.capture(
                 run_id=get_run_id(),
+                user_id=get_capture_user_id(),
+                session_id=get_capture_session_id(),
                 phase="chat",
                 request={
                     "model": kwargs.get("model"),
@@ -278,7 +284,11 @@ class AnthropicProvider(Provider):
         )
 
         # D-056 post-0.2.0: raw request/response capture (no-op when disabled).
-        from corpclaw_lite.llm.base import get_run_id
+        from corpclaw_lite.llm.base import (
+            get_capture_session_id,
+            get_capture_user_id,
+            get_run_id,
+        )
         from corpclaw_lite.logging.payload import get_payload_logger
 
         pl = get_payload_logger()
@@ -289,6 +299,8 @@ class AnthropicProvider(Provider):
                 resp_dict = None
             pl.capture(
                 run_id=get_run_id(),
+                user_id=get_capture_user_id(),
+                session_id=get_capture_session_id(),
                 phase="chat_with_image",
                 request={
                     "model": kwargs.get("model"),
