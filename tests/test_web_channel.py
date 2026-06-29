@@ -1114,7 +1114,9 @@ async def test_compress_active_context_success(tmp_path: Path) -> None:
         async def finish_user_request(self, _user_id: int) -> None:
             return None
 
-        async def compress_user_context(self, _user: User) -> tuple[bool, str]:
+        async def compress_user_context(
+            self, _user: User, session_id: int | None = None
+        ) -> tuple[bool, str]:
             self.compress_calls += 1
             return True, "Контекст сжат: 10 → 4 сообщений."
 
@@ -1142,7 +1144,9 @@ async def test_compress_active_context_propagates_failure(tmp_path: Path) -> Non
         async def finish_user_request(self, _user_id: int) -> None:
             return None
 
-        async def compress_user_context(self, _user: User) -> tuple[bool, str]:
+        async def compress_user_context(
+            self, _user: User, session_id: int | None = None
+        ) -> tuple[bool, str]:
             return False, "Слишком мало сообщений для сжатия."
 
     orchestrator = WebChannelOrchestrator(Settings())

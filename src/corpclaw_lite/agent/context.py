@@ -202,15 +202,16 @@ class ContextBuilder:
         message: str,
         full_history: list[dict[str, Any]],
         system_prompt_override: str | None = None,
+        few_shots: list[dict[str, Any]] | None = None,
     ) -> ContextBuilder:
         """Build context restoring the FULL LLM message schema including tool_calls
         and tool-role messages (B-063 S2: restore-on-activate).
 
         Unlike :meth:`build_initial`, this does NOT drop tool-role messages — it
         reconstructs them faithfully from the per-chat context store. System
-        messages from history are still merged into the system prompt
-        (chat-template safety); few-shot injection is not done here (calibration
-        concern, separate from restore).
+        messages and leading assistant/tool messages are merged into the system
+        prompt (chat-template safety, same as build_initial phases 1-2). Few-shot
+        injection mirrors build_initial.
 
         Args:
             user: Current user.
@@ -219,6 +220,8 @@ class ContextBuilder:
                 (role/content/tool_calls/tool_call_id/name).
             system_prompt_override: Assembled system prompt (base + department +
                 onboarding + tone + user context + skills).
+            few_shots: Calibrated few-shot examples (same format as
+                ``build_initial``).
         """
         system = system_prompt_override or (
             f"You are CorpClaw Lite, a helpful assistant. "
@@ -239,7 +242,33 @@ class ContextBuilder:
         if history_system_parts:
             system += "\n\n---\nExecution history:\n" + "\n".join(history_system_parts)
 
+        # Phase 2: strip leading assistant AND tool messages → merge into system
+        # prompt. Qwen3.5 Jinja template requires the first non-system message to
+        # be role=user; a leading assistant/tool (e.g. a consolidation summary,
+        # or an orphaned tool result after compression) breaks the template.
+        leading_parts: list[str] = []
+        while non_system and str(non_system[0].get("role")) in ("assistant", "tool"):
+            leading_parts.append(str(non_system.pop(0).get("content", "")))
+        if leading_parts:
+            system += "\n\n---\nPrevious context:\n" + "\n".join(leading_parts)
+
         builder = cls(system_prompt=system)
+
+        # Inject few-shot examples before history (calibration support) — same
+        # logic as build_initial, so restored chats keep the calibrated behavior.
+        for shot in few_shots or []:
+            user_msg = str(shot.get("user", ""))
+            assistant_raw: Any = shot.get("assistant", {})
+            if user_msg:
+                builder.add_user_message(user_msg)
+            if isinstance(assistant_raw, dict) and "content" in assistant_raw:
+                builder.add_assistant_message(str(cast(str, assistant_raw["content"])))
+            elif isinstance(assistant_raw, dict) and "tool_calls" in assistant_raw:
+                raw_calls = cast(list[dict[str, Any]], assistant_raw["tool_calls"])
+                calls_desc = ", ".join(
+                    f"{tc.get('name', '?')}({tc.get('arguments', {})})" for tc in raw_calls
+                )
+                builder.add_assistant_message(f"[Tool call: {calls_desc}]")
 
         for item in non_system:
             role = str(item.get("role", "user"))
@@ -249,7 +278,7 @@ class ContextBuilder:
             elif role == "assistant":
                 calls = item.get("tool_calls")
                 if calls:
-                    builder.add_tool_calls(_tool_calls_from_dicts(calls), content=content or None)
+                    builder.add_tool_calls(_tool_calls_from_dicts(calls), content=content)
                 else:
                     builder.add_assistant_message(content)
             elif role == "tool":

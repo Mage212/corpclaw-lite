@@ -168,7 +168,15 @@ class AgentRequestService:
         store = self._stack.chat_context_store
         if store is None:
             return False
-        messages = await store.list_context(session_id)
+        try:
+            messages = await store.list_context(session_id)
+        except Exception:
+            logger.warning(
+                "[session=%s] restore_user_context: context-store load failed",
+                session_id,
+                exc_info=True,
+            )
+            return False
         if not messages:
             return False
         memory = self._stack.loop.memory
@@ -187,14 +195,17 @@ class AgentRequestService:
             await provider.mark_user_cache_reset(user.memory_key())
         return True
 
-    async def compress_user_context(self, user: User) -> tuple[bool, str]:
+    async def compress_user_context(
+        self, user: User, session_id: int | None = None
+    ) -> tuple[bool, str]:
         """On-demand compression of the active chat's context.
 
         Thin wrapper over ``AgentLoop.compress_now``; the caller (orchestrator)
         holds the single-in-flight lock so this never races an active run.
+        ``session_id`` threads the per-chat context-store sync (B-063 S2-audit).
         Returns ``(ok, message)``.
         """
-        return await self._stack.loop.compress_now(user)
+        return await self._stack.loop.compress_now(user, session_id=session_id)
 
     async def build_system_prompt(self, user: User) -> str | None:
         """Assemble the base system prompt exactly as ``run()`` does.

@@ -2113,6 +2113,9 @@ def test_build_from_full_history_preserves_tool_calls_and_tool_role(
 def test_build_from_full_history_converts_arguments_json_string(test_user: User) -> None:
     """arguments arrives as a JSON string from the store; build converts to dict."""
     full_history = [
+        # A leading user message so the assistant-with-tool_calls below is NOT
+        # treated as "leading" by phase-2 strip (which would merge it into system).
+        {"role": "user", "content": "do it"},
         {
             "role": "assistant",
             "content": "",
@@ -2131,7 +2134,7 @@ def test_build_from_full_history_converts_arguments_json_string(test_user: User)
     builder = ContextBuilder.build_from_full_history(
         test_user, "go", full_history, system_prompt_override="SYS"
     )
-    asst = builder.messages[0]
+    asst = builder.messages[1]
     args = asst["tool_calls"][0]["function"]["arguments"]
     assert args == '{"path": "x.txt", "content": "hi"}'  # json.dumps of the parsed dict
 
@@ -2150,6 +2153,113 @@ def test_build_from_full_history_merges_system_messages(test_user: User) -> None
     assert "Tools called in this turn: list_files" in builder.system_prompt
     # No system role in messages (merged away)
     assert all(m["role"] != "system" for m in builder.messages)
+
+
+def test_build_from_full_history_strips_leading_assistant(test_user: User) -> None:
+    """S2-audit F1: leading assistant messages are merged into the system prompt,
+    not emitted as the first message (Qwen3.5 chat-template requires user-first)."""
+    full_history = [
+        {"role": "assistant", "content": "[Conversation summary]: ..."},
+        {"role": "user", "content": "what next?"},
+        {"role": "assistant", "content": "do X"},
+    ]
+    builder = ContextBuilder.build_from_full_history(
+        test_user, "thanks", full_history, system_prompt_override="BASE"
+    )
+    assert "Previous context:" in builder.system_prompt
+    assert "[Conversation summary]: ..." in builder.system_prompt
+    # First message must be user (not assistant)
+    assert builder.messages[0]["role"] == "user"
+
+
+def test_build_from_full_history_strips_leading_tool(test_user: User) -> None:
+    """S2-audit F1: leading tool messages are also stripped (orphaned without
+    preceding assistant tool_calls, breaks chat-template even worse)."""
+    full_history = [
+        {"role": "tool", "content": "result", "tool_call_id": "c1", "name": "echo"},
+        {"role": "user", "content": "ok"},
+    ]
+    builder = ContextBuilder.build_from_full_history(
+        test_user, "next", full_history, system_prompt_override="BASE"
+    )
+    assert "Previous context:" in builder.system_prompt
+    assert builder.messages[0]["role"] == "user"
+    # No tool-role message in the built context (stripped)
+    assert all(m["role"] != "tool" for m in builder.messages)
+
+
+def test_build_from_full_history_injects_few_shots(test_user: User) -> None:
+    """S2-audit F3: few_shots are injected (same as build_initial), so restored
+    chats keep calibrated behavior."""
+    full_history = [
+        {"role": "user", "content": "old q"},
+        {"role": "assistant", "content": "old a"},
+    ]
+    few_shots = [{"user": "example question", "assistant": {"content": "example answer"}}]
+    builder = ContextBuilder.build_from_full_history(
+        test_user, "current", full_history, system_prompt_override="BASE", few_shots=few_shots
+    )
+    contents = [m["content"] for m in builder.messages]
+    assert "example question" in contents
+    assert "example answer" in contents
+
+
+@pytest.mark.asyncio
+async def test_compress_now_syncs_context_store(
+    test_user: User, empty_registry: ToolRegistry, tmp_path: Path
+) -> None:
+    """S2-audit F2: compress_now(session_id) also replaces the context store, so
+    the compression is visible on the next run() (which prefers the store)."""
+    from corpclaw_lite.channels.web.chat_context_store import ChatContextStore
+    from corpclaw_lite.channels.web.chat_store import WebChatStore
+    from corpclaw_lite.memory.sqlite import SQLiteMemory
+
+    db = tmp_path / "compress_sync.db"
+    ws = WebChatStore(db)
+    store = ChatContextStore(db)
+    session_id = await ws.create_session(user_id=str(test_user.id), section="work")
+    # Seed memory with 6 messages (>5 floor) so compress actually runs.
+    memory = SQLiteMemory(db_path=str(db))
+    for i in range(6):
+        await memory.add_message(test_user.memory_key(), "user", f"q{i}")
+        await memory.add_message(test_user.memory_key(), "assistant", f"a{i}")
+    # Seed the context store with the same 12 messages (uncompressed).
+    for i in range(6):
+        await store.append_context(
+            session_id=session_id, user_id=str(test_user.id), role="user", content=f"q{i}"
+        )
+        await store.append_context(
+            session_id=session_id, user_id=str(test_user.id), role="assistant", content=f"a{i}"
+        )
+
+    class StubCompressor:
+        async def compress(self, messages, **_):
+            # Return a 2-message summary (simulates real compression).
+            return [
+                {"role": "system", "content": "[Summary] compressed"},
+                {"role": "user", "content": "latest"},
+            ]
+
+    loop = AgentLoop(
+        AgentConfig(
+            MockProvider(responses=[]),
+            empty_registry,
+            AgentSettings(),
+            memory=memory,
+            chat_context_store=store,
+            compressor=StubCompressor(),  # type: ignore[arg-type]
+        )
+    )
+
+    ok, _msg = await loop.compress_now(test_user, session_id=session_id)
+    assert ok is True
+
+    # The context store should now hold the COMPRESSED messages, not the
+    # original 12. Without F2 it would still have 12 (no-op).
+    ctx = await store.list_context(session_id)
+    assert len(ctx) == 2
+    assert ctx[0]["content"] == "[Summary] compressed"
+    assert ctx[1]["content"] == "latest"
 
 
 @pytest.mark.asyncio

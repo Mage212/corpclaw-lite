@@ -380,14 +380,17 @@ class AgentLoop:
         """Access the context compressor (if configured)."""
         return self._compressor
 
-    async def compress_now(self, user: User) -> tuple[bool, str]:
-        """On-demand compression of the active chat's in-memory LLM context.
+    async def compress_now(self, user: User, session_id: int | None = None) -> tuple[bool, str]:
+        """On-demand compression of the active chat's LLM context.
 
         Loads the user's conversation history, runs it through the context
         compressor (summarize old turns, prune tool results), and writes the
-        compressed transcript back to memory (clear + re-add). The caller is
-        responsible for holding the single-in-flight lock so this never races
-        an active ``run()``.
+        compressed transcript back to memory (clear + re-add). When ``session_id``
+        is provided AND a chat-context-store is configured, the compressed
+        transcript is ALSO written to the per-chat store (replace_context), so
+        the compression is visible on the next run() (which prefers the store).
+        The caller is responsible for holding the single-in-flight lock so this
+        never races an active ``run()``.
 
         Returns ``(ok, message)``. On any failure the context is left untouched.
         """
@@ -437,6 +440,30 @@ class AgentLoop:
                 await self._provider.mark_user_cache_reset(mem_key)
             except Exception:
                 logger.debug("[user=%s] compress_now: cache reset skipped", user.id)
+
+        # B-063 S2-audit fix: also sync the per-chat context store so the
+        # compression is visible on the next run() (which prefers the store over
+        # SQLiteMemory). Without this the store would still hold the full
+        # uncompressed transcript and the compression would be a silent no-op.
+        if self._chat_context_store is not None and session_id is not None:
+            try:
+                await self._chat_context_store.replace_context(
+                    session_id=session_id,
+                    user_id=str(user.id),
+                    messages=compressed,
+                )
+                logger.info(
+                    "[user=%s session=%s] compress_now: context-store synced",
+                    user.id,
+                    session_id,
+                )
+            except Exception:
+                logger.warning(
+                    "[user=%s session=%s] compress_now: context-store sync failed",
+                    user.id,
+                    session_id,
+                    exc_info=True,
+                )
 
         logger.info(
             "[user=%s] compress_now: %d → %d messages",
@@ -789,7 +816,7 @@ class AgentLoop:
                 if not full_history:
                     full_history = None
             except Exception:
-                logger.debug("[session=%s] context-store load failed", session_id, exc_info=True)
+                logger.warning("[session=%s] context-store load failed", session_id, exc_info=True)
                 full_history = None
 
         # Prepend dynamic user context to the system prompt
@@ -836,13 +863,12 @@ class AgentLoop:
 
         if full_history is not None:
             # B-063 S2: full-context path — reconstructs tool_calls + tool-role.
-            # few_shots are skipped here (calibration; can be added later if
-            # needed for restored chats).
             context = ContextBuilder.build_from_full_history(
                 user,
                 message,
                 full_history,
                 system_prompt_override=dynamic_prompt,
+                few_shots=few_shots,
             )
         else:
             context = ContextBuilder.build_initial(
