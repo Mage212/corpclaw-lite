@@ -2368,3 +2368,115 @@ async def test_run_falls_back_to_memory_when_store_empty(
     roles = [m["role"] for m in captured]
     assert "tool" not in roles
     assert any(m.get("content") == "old answer" for m in captured)
+
+
+# --- B-063 S3: compress-any-chat (compress from context-store) ---
+
+
+@pytest.mark.asyncio
+async def test_compress_from_context_store_full_schema(
+    test_user: User, empty_registry: ToolRegistry, tmp_path: Path
+) -> None:
+    """S3: compress_now(session_id=N) loads from the context-store (full schema
+    with tool_calls/tool-role), compresses, and writes back to the store. Does
+    NOT touch SQLiteMemory (the chat may not be active)."""
+    from corpclaw_lite.channels.web.chat_context_store import ChatContextStore
+    from corpclaw_lite.channels.web.chat_store import WebChatStore
+    from corpclaw_lite.memory.sqlite import SQLiteMemory
+
+    db = tmp_path / "s3.db"
+    ws = WebChatStore(db)
+    store = ChatContextStore(db)
+    memory = SQLiteMemory(db_path=str(db))
+    session_id = await ws.create_session(user_id=str(test_user.id), section="work")
+
+    # Seed the context-store with 6 user/assistant turns (12 messages > 5 floor),
+    # including a tool-call turn to verify full-schema handling.
+    for i in range(5):
+        await store.append_context(
+            session_id=session_id, user_id=str(test_user.id), role="user", content=f"q{i}"
+        )
+        await store.append_context(
+            session_id=session_id, user_id=str(test_user.id), role="assistant", content=f"a{i}"
+        )
+    await store.append_context(
+        session_id=session_id, user_id=str(test_user.id), role="user", content="do it"
+    )
+    await store.append_context(
+        session_id=session_id,
+        user_id=str(test_user.id),
+        role="assistant",
+        content="",
+        tool_calls=[
+            {"id": "c1", "type": "function", "function": {"name": "echo", "arguments": "{}"}}
+        ],
+    )
+    # Seed memory with DIFFERENT content so we can verify it's NOT touched.
+    await memory.add_message(test_user.memory_key(), "user", "MEMORY-NOT-TOUCHED")
+
+    class StubCompressor:
+        async def compress(self, messages, **_):
+            return [
+                {"role": "system", "content": "[Summary] compressed"},
+                {"role": "user", "content": "latest"},
+            ]
+
+    loop = AgentLoop(
+        AgentConfig(
+            MockProvider(responses=[]),
+            empty_registry,
+            AgentSettings(),
+            memory=memory,
+            chat_context_store=store,
+            compressor=StubCompressor(),  # type: ignore[arg-type]
+        )
+    )
+
+    ok, msg = await loop.compress_now(test_user, session_id=session_id)
+    assert ok is True
+    assert "сжат" in msg
+
+    # Context-store should hold the COMPRESSED messages (2, not 14).
+    ctx = await store.list_context(session_id)
+    assert len(ctx) == 2
+    assert ctx[0]["content"] == "[Summary] compressed"
+
+    # SQLiteMemory should be UNTOUCHED (still has MEMORY-NOT-TOUCHED).
+    mem_history = await memory.get_history(test_user.memory_key(), limit=50)
+    assert any(m["content"] == "MEMORY-NOT-TOUCHED" for m in mem_history)
+
+
+@pytest.mark.asyncio
+async def test_compress_falls_back_to_memory_without_session_id(
+    test_user: User, empty_registry: ToolRegistry, tmp_path: Path
+) -> None:
+    """S3: compress_now(user) without session_id uses the legacy memory path
+    (load from SQLiteMemory, compress, write-back to memory)."""
+    from corpclaw_lite.memory.sqlite import SQLiteMemory
+
+    memory = SQLiteMemory(db_path=str(tmp_path / "s3mem.db"))
+    for i in range(6):
+        await memory.add_message(test_user.memory_key(), "user", f"q{i}")
+        await memory.add_message(test_user.memory_key(), "assistant", f"a{i}")
+
+    class StubCompressor:
+        async def compress(self, messages, **_):
+            return [{"role": "user", "content": "summarized"}]
+
+    loop = AgentLoop(
+        AgentConfig(
+            MockProvider(responses=[]),
+            empty_registry,
+            AgentSettings(),
+            memory=memory,
+            compressor=StubCompressor(),  # type: ignore[arg-type]
+        )
+    )
+
+    ok, msg = await loop.compress_now(test_user)  # no session_id
+    assert ok is True
+
+    history = await memory.get_history(test_user.memory_key(), limit=50)
+    # Memory should hold the compressed single message, not the original 12.
+    assert len(history) == 1
+    assert history[0]["content"] == "summarized"

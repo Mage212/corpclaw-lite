@@ -732,8 +732,14 @@ class WebChannelOrchestrator:
         finally:
             await self._service.finish_user_request(user.id)
 
-    async def _compress_active_context(self, user: User) -> tuple[bool, str, dict[str, object]]:
-        """Run on-demand compression on the active chat's context.
+    async def _compress_active_context(
+        self, user: User, *, session_id: int | None = None
+    ) -> tuple[bool, str, dict[str, object]]:
+        """Run on-demand compression on a chat's context.
+
+        When ``session_id`` is provided (B-063 S3), compresses that chat's full
+        context from the per-chat store (works for any chat, read-only too).
+        When None, resolves the active session for backwards compatibility.
 
         The single-in-flight lock is held by the caller (the WS ``compress``
         handler) so this never races an active ``run()``. Returns
@@ -741,11 +747,8 @@ class WebChannelOrchestrator:
         """
         if self._service is None:
             raise web.HTTPServiceUnavailable()
-        # Resolve the active session id so compress_now can sync the per-chat
-        # context store (without this, the store would keep the uncompressed
-        # transcript and the compression would be invisible).
-        session_id: int | None = None
-        if self._chat_store is not None:
+        if session_id is None and self._chat_store is not None:
+            # Resolve the active session id (legacy path: no explicit target).
             try:
                 session_id = await self._chat_store.ensure_active_session(user.memory_key())
             except Exception:
@@ -1875,9 +1878,11 @@ class WebChannelOrchestrator:
                     else:
                         await send(payload_out)
                 elif event_type == "compress":
-                    # On-demand compression of the active chat's context.
-                    # Held under the single-in-flight lock so it can't race an
-                    # active run() that also mutates memory.
+                    # On-demand compression. B-063 S3: when the client sends a
+                    # session_id, compress THAT chat's context-store (works for
+                    # any chat, read-only too). Without it, compress the active
+                    # chat (legacy path). Held under the single-in-flight lock so
+                    # it can't race an active run().
                     if self._service is None:
                         await send({"type": "error", "message": "Сервис ещё не готов."})
                         continue
@@ -1889,8 +1894,16 @@ class WebChannelOrchestrator:
                             }
                         )
                         continue
+                    raw_target = payload.get("session_id")
+                    target_session: int | None
                     try:
-                        ok, message, usage = await self._compress_active_context(user)
+                        target_session = int(raw_target) if raw_target is not None else None
+                    except (TypeError, ValueError):
+                        target_session = None
+                    try:
+                        ok, message, usage = await self._compress_active_context(
+                            user, session_id=target_session
+                        )
                     finally:
                         await self._service.finish_user_request(user.id)
                     payload_out = {
