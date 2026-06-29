@@ -4,6 +4,234 @@
 
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/).
 
+## [0.2.2] — 2026-06-29
+
+**Minor bump** `0.2.1 → 0.2.2`. Версия не релизнута в main (как и 0.2.1);
+накоплена в `pre-release`. Два больших блока + множество фиксов.
+
+Фокус версии:
+
+1. **Полный редизайн веб-интерфейса (Mistral.ai-стиль)** — 5 этапов: layout,
+   multi-chat history, depth modes (Fast/Think/Research), extensions management,
+   agent context (personal instructions + tone). + 8 раундов аудитов и фиксов.
+2. **Full LLM-context persistence per chat (B-063)** — 4 спринта: persist
+   полного LLM-context (tool_calls + reasoning) per chat, restore-on-activate,
+   compress-any-chat, capture correlation. + 4 раунда аудитов.
+
+### Breaking changes
+
+- **Web channel: стартовая панель — пустая.** Раньше при загрузке страницы
+  автоматически грузилась история активного чата. Теперь панель пуста, и
+  пользователь сам выбирает чат или пишет сообщение (продолжает активный).
+- **Web channel: активация чата = LOAD, не RESET.** Переключение чатов больше
+  не стирает контекст — он восстанавливается из persistent store. Это меняет
+  контракт `POST /api/chats/{id}/activate` (раньше reset_user_context, теперь
+  restore_user_context с fallback на reset).
+- **Web channel: удаление активного чата разрешено.** Раньше блокировалось
+  (FE disabled + BE 409). Теперь — auto-replacement (ensure_active_session
+  создаёт новый активный чат). `chat_store.delete_session` больше не отказывает
+  для активной сессии.
+- **`db_connect` включает `PRAGMA foreign_keys=ON` глобально.** Ранее FK
+  декларации были dormant (SQLite по умолчанию off). Все `ON DELETE CASCADE`
+  (file_changes→agent_change_sets, web_chat_context→web_chat_sessions) теперь
+  реально работают. Код, удалявший parent без очистки children, теперь получит
+  `FOREIGN KEY constraint failed` вместо silent orphan.
+
+### Added
+
+#### Веб-интерфейс — полный редизайн (Mistral.ai-стиль)
+
+**Etape 1 — Layout & Navigation:**
+- **2-колоночный layout** (sidebar + main-area) вместо 3-панельной сетки.
+  Bottom-drawer для файлов, preview-overlay (side/expanded), минималистичный
+  topbar. 3-мерное resize (sidebar/drawer/preview) с persist в localStorage.
+- **ActivityCard** — inline run-timeline между user-message и assistant-reply.
+  Сворачиваемая, auto-expand при running/approval, auto-collapse при done.
+  Events scoped per-request (Map<requestId, events[]>).
+- **ContextSizeBar** — компактный индикатор заполненности context-window под
+  композером + кнопка «Сжать» (подключена в S3).
+
+**Etape 2 — Multi-chat History:**
+- **Multi-session модель.** `web_chat_sessions` + `web_chat_messages` с
+  section/title/updated_at/folder_id колонками. 1 активный чат на пользователя
+  (partial unique index). Создание/список/активация/переименование/удаление.
+  Auto-naming из первого user-message (truncation, без LLM). Time-range
+  grouping (Сегодня / Вчера / Предыдущие 7 дней / Ранее).
+- **View vs Activate.** Клик по чату → read-only transcript (load_chat WS).
+  Активация — отдельный REST call или activate-on-send.
+- **Empty start.** Стартовая панель пустая; первое сообщение продолжает активный
+  чат. Пользователь сам решает — выбрать старый или начать новый.
+
+**Etape 3 — Depth Modes:**
+- **Fast/Think/Research** selector в композере. Fast → sampling profile без
+  thinking (model-specific: gemma4-fast, qwen-instruct). Think → sampling с
+  thinking (gemma4-default, qwen-thinking). Research → force deep_research
+  через contextvar (Work-only).
+- **`AgentLoop.run(depth_mode)`** — резолвит sampling profile по
+  `(depth, route_model)` через `LLMRouter.with_overrides(sampling_name=...)`.
+  depth_mode contextvar thread'ится в `DispatchSubagentTool` (gated на
+  `spec.id == "research-agent"` — не-исследовательские субагенты не
+  контаминируются).
+
+**Etape 4 — Extensions Management:**
+- **Read-only ExtensionsView** (Skills/Subagents/MCP/Plugins) с status badges.
+  Manual reload button (POST /api/extensions/reload) вызывает `reload_now()`
+  на всех 4 watcher'ах.
+- **4 watcher'а встроены в web/telegram orchestrator** start/stop lifecycle:
+  SkillHotReloader, SubagentHotReloader, PluginHotReloader, MCPHotReloader.
+
+**Etape 5 — Agent Context:**
+- **Personal instructions + response tone.** `user_agent_context` table
+  (instructions TEXT + tone TEXT). GET/PUT /api/agent-context +
+  /api/agent-context/preview (BE-assembled system prompt). Tone (concise/
+  detailed) → directive injected в system prompt через `tone_directive()`.
+  Live preview обновляется при сохранении.
+
+#### B-063 — Full LLM-context persistence per chat
+
+**S1 — Persistence:**
+- **`ChatContextStore`** (`channels/web/chat_context_store.py`) — новый store:
+  `web_chat_context` table (session_id, user_id, role, content, tool_calls,
+  tool_call_id, name, reasoning, seq). UNIQUE(session_id, seq). FK CASCADE.
+- **Persist на каждый turn** — `AgentLoop.run(session_id)` persist'ит полный
+  LLM-facing message schema (tool_calls + reasoning) в 5 точках: user message,
+  assistant tool-call message, tool result (parallel + sequential), final
+  assistant answer. Non-fatal (persist failure не роняет run).
+- **Contextvar isolation** (`agent/context_target.py`) — session_id/user_id
+  хранятся в contextvars (task-scoped), НЕ в instance attrs → concurrent
+  multi-user runs на shared singleton loop изолированы.
+
+**S2 — Restore-on-activate:**
+- **`build_from_full_history`** (`agent/context.py`) — реконструкция полного
+  LLM-context из store: tool_calls (dict→ToolCall), tool-role, system-merge,
+  phase-2 leading-strip (assistant+tool), few_shots injection.
+- **`restore_user_context`** (`channels/service.py`) — clear+re-add в
+  SQLiteMemory (text-only fallback); run() грузит full schema из store
+  (приоритетный путь).
+- **`_handle_activate_chat`** — load вместо reset. activate_session ПЕРЕД
+  restore (F4 fix: если restore raise'нет, session flag корректен, memory
+  восстанавливается при следующем run()).
+
+**S3 — Compress-any-chat:**
+- **`_compress_from_context_store`** (`agent/loop.py`) — compress грузит
+  full schema из store для любого session_id, сжимает, write-back через
+  `replace_context`. Не трогает SQLiteMemory (чат может быть неактивным).
+- **IDOR ownership-check** — `_compress_active_context` проверяет
+  `get_session(user.memory_key(), session_id)` → reject if None.
+- **FE** — compress payload несёт `session_id` (chatId viewed chat).
+
+**S4 — Capture correlation:**
+- **Capture contextvars** (`llm/base.py`) — `set_capture_context(user_id,
+  session_id)` + `set_run_id(stats.run_id)` populate'ятся в `AgentLoop.run()`,
+  reset'ятся в finally. Task-scoped, no leak.
+- **Payload enrichment** — `payload.py` capture() пишет `user_id`,
+  `session_id`, `run_id` в каждую запись `llm_payloads.jsonl`. Провайдеры
+  (OpenAI, Anthropic) читают contextvars и передают в pl.capture().
+- **Bonus fix:** `set_run_id` теперь вызывается → `run_id` больше не null.
+
+#### Core improvements
+
+- **Background idle-container pruner** в web и telegram channels (раньше
+  CLI-only). Периодический `prune_idle()` каждые 300s, try/except на каждый
+  pass — transient Docker hiccup не убивает reaper.
+- **Per-user approval locks** (`loop.py`) — `dict[int, asyncio.Lock]`, lazy
+  creation + stale-pruning past `_MAX_APPROVAL_LOCKS=10000`. Разные
+  пользователи больше не блокируют друг друга на approval prompts.
+- **TaskRun journal I/O offloaded to thread pool** — `anyio.to_thread` для
+  file writes в `task_run.py`, не блокирует event loop.
+
+### Changed
+
+- **`AgentLoop._save_turn`** — теперь вызывается unconditionally (не под
+  `if self._memory:` guard). `_save_memory` внутри no-op'ит при отсутствии
+  memory, но `_persist_context_msg` (context store) работает независимо.
+- **`AgentLoop.run(session_id)`** — опциональный параметр; threaded от web
+  orchestrator → service → loop. None для telegram/CLI/subagents → persist
+  выключен.
+- **`AgentRequestService.run(session_id)` / `.compress_user_context(session_id)` /
+  `.restore_user_context(session_id)`** — session_id threaded через весь стек.
+- **Web channel: mode derived from section.** Chat/Work заменяют legacy
+  mode-toggle. Work → execute (tools on), Chat → chat (tools off).
+- **`config/settings.yaml`**: `agent.depth_modes` (fast/think per-model mapping),
+  `web.chat_active_max_messages` (2000), `web.chat_archived_session_ttl_days` (30),
+  `web.chat_max_archived_sessions_per_user` (20).
+
+### Fixed
+
+#### Web UI (аудиты и фиксы)
+
+- **Layout grid-collapse** (PR #57) — `.main-pane` рос до content-height
+  (2052px), скроллилась вся страница вместо панели сообщений. Root: grid
+  `minmax(0,1fr)` + `min-height:0` + flex враппер.
+- **Composer на коротких чатах** (PR #59) — `.chat-shell` без `flex:1`
+  сворачивался до content-height → композер по центру. Fix: `flex:1`.
+- **Sidebar toggle на десктопе** (PR #61) — CSS-правило скрывало сайдбар
+  только в `@media ≤900px`. Добавлено desktop-правило.
+- **User menu popover** (PR #62) — открывался вниз, обрезался `overflow:hidden`
+  сайдбара. Fix: `bottom: calc(100% + 8px)` → открывается вверх.
+- **Compress button** (PR #60) — заглушка `disabled` → подключена к on-demand
+  компрессии через WS `compress` event.
+- **Eye «Просмотр»** (PR #60) — `disabled={!preview}` → always-clickable;
+  без файла открывает overlay с empty-state.
+- **Sidebar-toggle position** (PR #61) — был справа рядом с eye; fix:
+  `.topbar-leading { grid-area: files }`.
+- **False «overridden by overlay» warnings** (PR #56) — watcher'ы на initial
+  scan ре-регистрировали уже загруженные файлы → попадали в overlay branch.
+  Fix: `_prime()` кэширует mtimes только для файлов уже в registry.
+
+#### Memory & context
+
+- **Latent `self._connect()` bug** (PR #55) — `get_agent_context`/
+  `set_agent_context` вызывали `self._connect()` (не существует на UserManager)
+  → весь Etap 5 (agent context: instructions AND tone) молча no-op'ил.
+  Fix: `db_connect(self._db)`.
+- **Terminal-tool double-persist** (PR #71) — terminal tools persist'или
+  результат дважды (tool + assistant). Fix: skip tool-role для terminal tools.
+- **Phase-2 strip drops tool_calls** (PR #71) — leading assistant+tool_calls
+  strip'ился, но tool_calls терялись. Fix: render в system prompt text.
+- **restore_user_context partial-write** (PR #71) — clear+add без try/except.
+  Fix: non-fatal wrap.
+- **Tone directive not injected** (PR #55, M1) — tone поле сохранялось, но
+  не доходило до промпта. Fix: `tone_directive()` + inject в `build_system_prompt`.
+- **Contextvar leak** (PR #55, L1) — `set_call_depth_mode` вне try/finally →
+  leak при exception в context-build. Fix: set внутри try.
+
+#### DB & infrastructure
+
+- **`db_connect` FK pragma** (PR #63) — `PRAGMA foreign_keys=ON` globally.
+  Ранее CASCADE декларации были dormant.
+- **LLM queue semaphore double-release** — guard against double-release.
+- **Smart-eval LLM slot** — acquires under real user_id/run_id.
+- **Auto-finalize LLM call** — routed through the queue.
+
+### Backward compatibility
+
+- Legacy `presets:` / `RoutingRule.preset` / `ModelPreset` — back-compat reader
+  (без изменений с 0.2.1).
+- Telegram channel — `session_id=None` → persist/restore/compress = legacy path
+  (без изменений).
+- `web_chat_messages` (user-visible transcript) — без schema изменений;
+  `web_chat_context` — новая таблица (additive).
+- Старые чаты (до S1) — нет данных в `web_chat_context` → activate falls back
+  to reset (как до S2).
+
+### Known limitations
+
+- **B3:** `append_context` retry (3 попытки) может исчерпаться под extreme
+  concurrent writers → message silently dropped (mitigated single-in-flight lock).
+- **B5:** SQLiteMemory `get_history` грузится всегда, даже когда `full_history`
+  из context-store перекрывает (premature optimization, не блокирующее).
+- **B6:** Synthetic correction prompts (empty-response/XML-repair) не
+  persist'ятся в context-store (intentional — они transient recovery nudges).
+- **Stale usage snapshot** — `compress_done` сообщает устаревший context-usage
+  (cache не пересчитывается после compress; pre-existing с PR #60).
+- **`should_compress` bypass** — on-demand compress() вызывается напрямую, минуя
+  guard "last message is pending tool result" (pre-existing с PR #60).
+- **Anthropic stream() не captured** — pre-existing, не B-063 regression.
+- **Full-LLM-context хранится только in-memory для активного чата** (AGENTS.md
+  §Reasoning known limitation) — **устранено в B-063** (S1-S4). Теперь persist
+  + restore + compress-any-chat работают для всех чатов.
+
 ## [0.2.1] — 2026-06-25
 
 **Minor bump** `0.1.13 → 0.2.1`. Первоначально планировалась как major `0.2.0`
