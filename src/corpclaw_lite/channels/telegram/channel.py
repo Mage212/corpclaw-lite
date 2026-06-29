@@ -796,9 +796,7 @@ class TelegramChannel(Channel):
                 owner_uid = getattr(handler, "_owner_uid", None)
                 caller_uid = query.from_user.id if query.from_user else None
                 if owner_uid is not None and caller_uid != owner_uid:
-                    await query.answer(
-                        "Эта кнопка удаления не для вас.", show_alert=True
-                    )
+                    await query.answer("Эта кнопка удаления не для вас.", show_alert=True)
                     return
                 await query.answer()
                 await handler.handle_callback(update, context, data)
