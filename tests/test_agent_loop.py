@@ -1807,7 +1807,14 @@ async def test_auto_finalize_stage_b_timeout_falls_through_to_stage_c(
             if call_index < 2:
                 # loop iterations 0,1: model loops on research_search
                 return LLMResponse(
-                    content="", tool_calls=[ToolCall(id=str(call_index + 1), name="research_search", arguments={})]
+                    content="",
+                    tool_calls=[
+                        ToolCall(
+                            id=str(call_index + 1),
+                            name="research_search",
+                            arguments={},
+                        )
+                    ],
                 )
             # stage-B emergency call (call_index >= 2): hang → times out
             await asyncio.sleep(10)

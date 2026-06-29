@@ -12,7 +12,7 @@ import anyio
 
 from corpclaw_lite.channels.telegram.file_manager import is_protected_delete_target
 from corpclaw_lite.channels.telegram.upload import is_safe_extension, sanitize_filename
-from corpclaw_lite.security.path_validator import _reject_symlink_ancestors
+from corpclaw_lite.security.path_validator import validate_no_symlink_escape
 
 __all__ = [
     "WebFileEntry",
@@ -230,8 +230,8 @@ async def rename_path(workspace: Path, raw_path: str, new_name: str) -> str:
     await anyio.to_thread.run_sync(
         lambda: (
             # B-072: re-validate source + destination symlinks right before rename.
-            _reject_symlink_ancestors(ws_root, target.resolve(), raw_path),
-            _reject_symlink_ancestors(ws_root, destination.resolve(), new_name),
+            validate_no_symlink_escape(ws_root, target.resolve(), raw_path),
+            validate_no_symlink_escape(ws_root, destination.resolve(), new_name),
             target.rename(destination),
         )
     )
@@ -269,8 +269,8 @@ async def move_paths(workspace: Path, raw_paths: list[str], target_dir: str | No
             destination = _unique_destination(parent, source.name)
             resolve_workspace_path(workspace, _relative(workspace, destination))
             # B-072: re-validate source + destination symlinks right before rename.
-            _reject_symlink_ancestors(ws_root, source.resolve(), raw_path)
-            _reject_symlink_ancestors(ws_root, destination.resolve(), destination.name)
+            validate_no_symlink_escape(ws_root, source.resolve(), raw_path)
+            validate_no_symlink_escape(ws_root, destination.resolve(), destination.name)
             source.rename(destination)
             moved.append(_relative(workspace, destination))
         return moved
@@ -298,8 +298,8 @@ async def copy_paths(workspace: Path, raw_paths: list[str], target_dir: str | No
             # dereferences any symlinks inside a copied tree (copies content,
             # not the link), so a symlink pointing outside is followed only if
             # its target already passed the ancestor-walk check.
-            _reject_symlink_ancestors(ws_root, source.resolve(), raw_path)
-            _reject_symlink_ancestors(ws_root, destination.resolve(), destination.name)
+            validate_no_symlink_escape(ws_root, source.resolve(), raw_path)
+            validate_no_symlink_escape(ws_root, destination.resolve(), destination.name)
             if source.is_dir():
                 shutil.copytree(source, destination, symlinks=False)
             else:
@@ -323,7 +323,7 @@ async def delete_path(workspace: Path, raw_path: str, *, recursive: bool = True)
         # B-072: re-validate inside the thread, right before the op, to close
         # the TOCTOU window between resolve_workspace_path and the destructive
         # rmtree/unlink (a symlink swapped in between would otherwise escape).
-        _reject_symlink_ancestors(ws_root, target.resolve(), raw_path)
+        validate_no_symlink_escape(ws_root, target.resolve(), raw_path)
         if target.is_dir():
             if not recursive and any(target.iterdir()):
                 raise ValueError("Directory is not empty")

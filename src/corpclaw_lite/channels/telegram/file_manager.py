@@ -29,7 +29,7 @@ from corpclaw_lite.channels.telegram.callback_data import (
     CB_DELETE_ROOT,
     CB_DELETE_UP,
 )
-from corpclaw_lite.security.path_validator import _reject_symlink_ancestors
+from corpclaw_lite.security.path_validator import validate_no_symlink_escape
 
 __all__ = [
     "DELETE_PAGE_SIZE",
@@ -341,7 +341,7 @@ async def _path_delete_async(path: Path, workspace: Path | None = None) -> None:
         # B-072: re-validate symlinks right before the op to close the TOCTOU
         # window between _execute_delete's resolve and this unlink/rmdir.
         if ws_root is not None:
-            _reject_symlink_ancestors(ws_root, path.resolve(), str(path))
+            validate_no_symlink_escape(ws_root, path.resolve(), str(path))
         if path.is_dir():
             path.rmdir()
         else:
