@@ -20,9 +20,9 @@ from corpclaw_lite.utils.fs import atomic_save_via, file_signature
 
 __all__ = ["ExcelWorkbookTool"]
 
-_MAX_DEFAULT_ROWS = 50
-_MAX_ROWS_PER_CALL = 100
-_MAX_OUTPUT_CHARS = 15_000
+_MAX_DEFAULT_ROWS = 25
+_MAX_ROWS_PER_CALL = 50
+_MAX_OUTPUT_CHARS = 10_000
 _FORMULA_MODES = {"both", "values", "formulas"}
 _MISSING_CACHED_VALUE = "<unavailable>"
 
@@ -43,7 +43,7 @@ def _resolve_sheet(wb: Any, sheet_name: str | None) -> Any:
 
 def _normalize_formula_mode(show_formulas: bool, formula_mode: Any) -> str:
     if formula_mode is None or formula_mode == "":
-        return "formulas" if show_formulas else "both"
+        return "formulas" if show_formulas else "values"
     mode = str(formula_mode).strip().lower()
     if mode not in _FORMULA_MODES:
         allowed = ", ".join(sorted(_FORMULA_MODES))
@@ -378,9 +378,9 @@ class ExcelWorkbookTool(Tool):
 
     name = "excel_workbook"
     description = (
-        "Read Excel cells by coordinate. Default: first 50 non-empty rows. "
+        "Read Excel cells by coordinate. Default: first 25 non-empty rows. "
         "Use 'cells' for specific ranges. Use 'offset'/'limit' for pagination "
-        "(max 100 rows per call). If output shows 'More rows may exist', "
+        "(max 50 rows per call). If output shows 'More rows may exist', "
         "call again with increased offset to continue reading. For fill action, "
         "the default is a safe <name>_filled.xlsx copy; use in_place=true only "
         "when overwriting the original is explicitly requested."
@@ -437,9 +437,10 @@ class ExcelWorkbookTool(Tool):
             name="formula_mode",
             type="string",
             description=(
-                "Read formula handling: both (default: show formula cells with cached values), "
-                "values (old value-only data_only read), or formulas (formula strings only). "
-                "Cached values come from the workbook; formulas are not recalculated."
+                "Read formula handling: values (default: value-only data_only read), "
+                "both (show formula text together with cached workbook value), or "
+                "formulas (formula strings only). Cached values come from the workbook; "
+                "formulas are not recalculated."
             ),
             enum=["both", "values", "formulas"],
             required=False,
@@ -453,7 +454,7 @@ class ExcelWorkbookTool(Tool):
         ToolParam(
             name="limit",
             type="integer",
-            description="Max rows to return (default: 50, max: 100)",
+            description="Max rows to return (default: 25, max: 50)",
             required=False,
         ),
         ToolParam(
