@@ -6,7 +6,12 @@
 
 ## [Unreleased]
 
-### Фаза 1 — Agent Stability (B-076 / B-107)
+## [0.2.4] — 2026-07-13
+
+**Patch** `0.2.3 → 0.2.4`. **Фаза 1 — Agent Stability** (B-076 / B-107), плюс
+hotfix после code-trace аудита compose/mandate.
+
+### Added — Фаза 1 (Agent Stability)
 
 - **LoopState state bag (B-076 / DC-001 Phase 1).** Run-scoped mutable pieces of
   `AgentLoop.run` live on `agent/loop_state.LoopState` (`budget`, guards,
@@ -22,6 +27,21 @@
   rebuild so B-046 stays correct.
 - Settings: `agent.tool_surface.{enabled,soft_hint_enabled,soft_hint_top_k,
   hard_filter_profiles}`.
+
+### Fixed — post-Phase-1 audit (H1 / H2 / soft-hint)
+
+- **B-047 mandate restrict survives base-schema rebuild (H1).** After B-107,
+  `_apply_tool_surface` rebuilt `tools_schema` from `base_tools_schema` every
+  turn while `should_restrict` is one-shot — restrict never reached the next
+  LLM call. Added `TerminalToolMandate.apply_schema_restrict` (re-entrant) and
+  re-apply after every compose. `tool_surface.enabled=false` is a true no-op
+  on schema (no base wipe).
+- **Office READING includes analyze tools (H2).** Default phase no longer
+  chicken-eggs `table_query` / `pdf_reader` / `chart_generate` / `excel_workbook`.
+  Mutating tools (`write_file`, `edit_file`, `exec_script`, `normalize_excel`,
+  `convert_format`) stay EXECUTING-only.
+- **Soft-hint injected once per LLM call** (pre-LLM only), not twice per
+  iteration.
 
 ## [0.2.3] — 2026-07-13
 

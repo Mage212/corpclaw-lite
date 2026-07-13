@@ -101,6 +101,28 @@ def test_restrict_is_idempotent() -> None:
     assert mandate.restricted is True
 
 
+def test_apply_schema_restrict_reentrant_after_one_shot() -> None:
+    """H1: after should_restrict fires once, apply_schema_restrict still filters."""
+    mandate = _mandate(restrict_ratio=0.1, max_time_ms=200)
+    time.sleep(0.05)
+    assert mandate.should_restrict([]) is True
+    assert mandate.should_restrict([]) is False  # one-shot
+    schema = [
+        {"function": {"name": "research_search"}},
+        {"function": {"name": "research_list_facts"}},
+        {"function": {"name": "research_finalize"}},
+    ]
+    filtered = mandate.apply_schema_restrict(schema)
+    assert filtered is not None
+    names = {str(e["function"]["name"]) for e in filtered}  # type: ignore[index]
+    assert names == {"research_list_facts", "research_finalize"}
+    # Re-entrant
+    filtered2 = mandate.apply_schema_restrict(schema)
+    assert filtered2 is not None
+    names2 = {str(e["function"]["name"]) for e in filtered2}  # type: ignore[index]
+    assert names2 == names
+
+
 # ── escalation ordering ──────────────────────────────────────────────────────
 
 

@@ -47,47 +47,59 @@ _EXECUTING_KW = re.compile(
     re.IGNORECASE,
 )
 
+# Read/analyze-safe tools (no host file mutation via write/edit/exec).
+# H2 fix: READING includes these so office agents can table_query/pdf/chart
+# without chicken-egg (previously ANALYZING required tools already used).
 _ANALYZE_TOOLS = frozenset(
     {
         "table_query",
-        "excel_workbook",
+        "excel_workbook",  # read ranges; fill still model-driven
         "excel_inspect",
         "pdf_reader",
         "chart_generate",
         "diff_text",
-        "convert_format",
-        "normalize_excel",
     }
 )
-_WRITE_TOOLS = frozenset(
+# Mutating tools — only after EXECUTING signal (keywords or prior write tools).
+_MUTATING_TOOLS = frozenset(
     {
         "write_file",
         "edit_file",
         "exec_script",
         "normalize_excel",
-        "excel_workbook",
         "convert_format",
+    }
+)
+_WRITE_TOOLS = _MUTATING_TOOLS | frozenset(
+    {
+        # sticky EXECUTING when these ran (includes analyze that mutate outputs)
+        "excel_workbook",
         "chart_generate",
+        "normalize_excel",
+        "convert_format",
     }
 )
 _MEMORY_TOOLS = frozenset({"memory_store", "memory_recall"})
 
-_READING_ALLOW = frozenset(
-    {
-        "read_file",
-        "list_files",
-        "search_files",
-        "excel_inspect",
-        "read_image",
-        "memory_recall",
-        "dispatch_subagent",
-        "web_fetch",
-        "web_search",
-        "send_file",
-    }
+_READING_ALLOW = (
+    frozenset(
+        {
+            "read_file",
+            "list_files",
+            "search_files",
+            "excel_inspect",
+            "read_image",
+            "memory_recall",
+            "dispatch_subagent",
+            "web_fetch",
+            "web_search",
+            "send_file",
+        }
+    )
+    | _ANALYZE_TOOLS
 )
-_ANALYZING_ALLOW = _READING_ALLOW | _ANALYZE_TOOLS | frozenset({"memory_store"})
-_EXECUTING_ALLOW = _ANALYZING_ALLOW | _WRITE_TOOLS
+_ANALYZING_ALLOW = _READING_ALLOW | frozenset({"memory_store"})
+_EXECUTING_ALLOW = _ANALYZING_ALLOW | _MUTATING_TOOLS | _WRITE_TOOLS
 _MEMORY_ALLOW = frozenset(
     {
         "memory_store",

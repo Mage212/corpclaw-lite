@@ -1092,7 +1092,8 @@ class AgentLoop:
                         system_prompt_chars=len(state.context.system_prompt or ""),
                         streaming_enabled=self._settings.llm_streaming_enabled,
                     )
-                    # B-107 again then B-046: phase from base, then soft deadline.
+                    # B-107 again then B-046: phase from base, mandate re-restrict,
+                    # soft deadline, then single soft-hint (not at top-of-iter).
                     self._apply_tool_surface(state, user_message=message)
                     # B-046: re-check the soft deadline immediately before the LLM call.
                     # A long previous iteration may have crossed the wall-clock deadline
@@ -1102,6 +1103,7 @@ class AgentLoop:
                     state.tools_schema = await self._apply_closing_mode(
                         state.soft_deadline, state.tools_schema, state.task_run, user, state.stats
                     )
+                    self._inject_tool_soft_hint(state, user_message=message)
                     # D-056 PR2: phase-based per-call thinking override. The
                     # policy returns RequestOptions (or None) based on the task
                     # phase (closing mode / research gathering / aggregation),
@@ -1802,15 +1804,13 @@ class AgentLoop:
             ToolSurfaceProfile,
             apply_phase_filter,
             detect_tool_surface_phase,
-            inject_soft_hint,
-            rank_tool_names,
         )
 
         ts_cfg = self._settings.tool_surface
+        # True no-op when disabled: do not rebuild from base (preserves mandate
+        # restrict / closing mutations). Soft-hint off.
         if not ts_cfg.enabled:
-            state.tools_schema = (
-                list(state.base_tools_schema) if state.base_tools_schema is not None else None
-            )
+            state.tools_schema = state.mandate.apply_schema_restrict(state.tools_schema)
             return
 
         profile_raw = self._tool_surface_profile
@@ -1854,23 +1854,35 @@ class AgentLoop:
                 enabled=True,
             )
         else:
-            # Soft-hint only path: still start from full base each call so
-            # closing-mode can re-narrow cleanly from a known set.
+            # Start from full base so closing-mode / mandate can re-narrow cleanly.
             state.tools_schema = (
                 list(state.base_tools_schema) if state.base_tools_schema is not None else None
             )
 
-        if ts_cfg.soft_hint_enabled and profile not in ("none", "execution"):
-            ranked = rank_tool_names(
-                user_message,
-                state.tools_schema,
-                top_k=ts_cfg.soft_hint_top_k,
-            )
-            state.context.messages = inject_soft_hint(
-                state.context.messages,
-                ranked,
-                enabled=True,
-            )
+        # H1: re-apply mandate restrict after any base rebuild (one-shot should_restrict
+        # alone cannot re-filter on subsequent turns).
+        state.tools_schema = state.mandate.apply_schema_restrict(state.tools_schema)
+
+    def _inject_tool_soft_hint(self, state: LoopState, *, user_message: str) -> None:
+        """B-107: one soft-hint in messages tail (cache-safe). Call only pre-LLM."""
+        from corpclaw_lite.agent.tool_surface import inject_soft_hint, rank_tool_names
+
+        ts_cfg = self._settings.tool_surface
+        if not ts_cfg.enabled or not ts_cfg.soft_hint_enabled:
+            return
+        profile = self._tool_surface_profile
+        if profile in ("none", "execution"):
+            return
+        ranked = rank_tool_names(
+            user_message,
+            state.tools_schema,
+            top_k=ts_cfg.soft_hint_top_k,
+        )
+        state.context.messages = inject_soft_hint(
+            state.context.messages,
+            ranked,
+            enabled=True,
+        )
 
     async def _apply_closing_mode(
         self,
@@ -2211,11 +2223,9 @@ class AgentLoop:
                 allowed=sorted(allowed),
                 elapsed_ratio=round(mandate.elapsed_ratio(iteration), 3),
             )
-            if tools_schema:
-                return [
-                    s for s in tools_schema if str(s.get("function", {}).get("name", "")) in allowed
-                ]
-        return tools_schema
+        # Re-apply restrict every call (idempotent). Critical after B-107 base
+        # schema rebuild: should_restrict is one-shot and would not re-filter.
+        return mandate.apply_schema_restrict(tools_schema)
 
     async def _execute_parallel(
         self,

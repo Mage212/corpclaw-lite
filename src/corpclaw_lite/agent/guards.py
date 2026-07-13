@@ -6,6 +6,7 @@ import hashlib
 import re
 import time
 from dataclasses import dataclass, field
+from typing import Any
 
 from corpclaw_lite.extensions.tools.base import TOOL_ERROR_PREFIX
 
@@ -544,6 +545,44 @@ class TerminalToolMandate:
             return False
         self._restricted = True
         return True
+
+    def restricted_tool_names(self) -> frozenset[str] | None:
+        """If restrict is active, return allowed tool names; else None.
+
+        Re-entrant: used after base schema rebuild (B-107) so restrict still
+        applies on subsequent LLM calls. Unlike :meth:`should_restrict`, this
+        does not flip state — it only reports the active restrict allowlist.
+        """
+        if not self.enabled or not self._restricted:
+            return None
+        return frozenset(self.config.required_before) | {self.config.terminal_tool}
+
+    def apply_schema_restrict(
+        self, tools_schema: list[dict[str, Any]] | None
+    ) -> list[dict[str, Any]] | None:
+        """Re-filter ``tools_schema`` when restrict is already active.
+
+        Safe to call every LLM turn after a base-schema rebuild. No-op until
+        :meth:`should_restrict` has fired once (or ``_restricted`` is True).
+        """
+        allowed = self.restricted_tool_names()
+        if allowed is None or not tools_schema:
+            return tools_schema
+        out: list[dict[str, Any]] = []
+        for entry in tools_schema:
+            name = ""
+            fn_obj: object = entry.get("function")
+            if isinstance(fn_obj, dict):
+                raw_name_obj: object = fn_obj.get("name")  # type: ignore[attr-defined]
+                if isinstance(raw_name_obj, str):
+                    name = raw_name_obj
+            else:
+                raw_top: object = entry.get("name")
+                if isinstance(raw_top, str):
+                    name = raw_top
+            if name in allowed:
+                out.append(entry)
+        return out
 
     @property
     def nudge_injected(self) -> bool:
