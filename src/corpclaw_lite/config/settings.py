@@ -224,6 +224,20 @@ class CompressionSettings(BaseModel):
     prune_min_messages: int = 10
 
 
+class ToolSurfaceSettings(BaseModel):
+    """B-107 / DC-036: phase-aware tool schema + BM25 soft-hint.
+
+    Hard filter recomputes schema from base only on phase transition (D-087).
+    Soft-hint is cache-safe (messages tail). Research mandate path stays separate.
+    """
+
+    enabled: bool = True
+    soft_hint_enabled: bool = True
+    soft_hint_top_k: int = 5
+    # Profiles that apply hard phase filter (office = document/data/filesystem).
+    hard_filter_profiles: list[str] = ["office"]
+
+
 class AgentSettings(BaseModel):
     """Settings for the AgentLoop."""
 
@@ -257,6 +271,8 @@ class AgentSettings(BaseModel):
     # Etap 3: user-selectable depth modes (Fast/Think). Each resolves to a
     # per-model SamplingProfile name applied via router.with_overrides.
     depth_modes: DepthModeSettings = DepthModeSettings()
+    # B-107: tool-surface phase filter + BM25 soft-hint (orthogonal to phase_policy).
+    tool_surface: ToolSurfaceSettings = ToolSurfaceSettings()
 
 
 class WebSettings(BaseModel):

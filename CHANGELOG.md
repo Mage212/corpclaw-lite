@@ -6,6 +6,23 @@
 
 ## [Unreleased]
 
+### Фаза 1 — Agent Stability (B-076 / B-107)
+
+- **LoopState state bag (B-076 / DC-001 Phase 1).** Run-scoped mutable pieces of
+  `AgentLoop.run` live on `agent/loop_state.LoopState` (`budget`, guards,
+  `base_tools_schema` / `tools_schema`, turn tool lists, etc.). Behavior-neutral
+  structure extraction; enables phase-aware schema refilters from a stable base.
+- **Tool-surface phase filter + BM25 soft-hint (B-107 / DC-036 / D-087).**
+  New `agent/tool_surface.py`: deterministic READING/ANALYZING/EXECUTING/MEMORY
+  detection; hard filter for **office** subagents from `base_tools_schema` only on
+  phase change (cache-breaking once); BM25 ranking hint appended to **messages tail**
+  (cache-safe, does not rewrite system prompt). Research (`mandate.enabled`) and
+  execution-agent profiles skip hard filter. Main agent: soft-hint only (already
+  light toolset, D-028). Closing-mode re-narrows to terminal tools after base
+  rebuild so B-046 stays correct.
+- Settings: `agent.tool_surface.{enabled,soft_hint_enabled,soft_hint_top_k,
+  hard_filter_profiles}`.
+
 ## [0.2.3] — 2026-07-13
 
 **Patch bump** `0.2.2 → 0.2.3`. Фокус: **Фаза 0 — Foundation Hardening**
