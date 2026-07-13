@@ -1,7 +1,7 @@
 # CorpClaw Lite — Архитектура проекта
 
 > Версия документа: 2026-07-13
-> Версия проекта: 0.2.3 — Foundation Hardening (Фаза 0): closed-contour defaults + security gates
+> Версия проекта: 0.2.4 — Phase 0/1 + tool-surface/mandate hotfixes
 
 ---
 
@@ -177,6 +177,28 @@ results = await asyncio.gather(*[execute_one(tc) for tc in tool_calls])
 - Нормальный ответ (no tool calls)
 - Budget exceeded
 - Loop detected (2x warning)
+
+### Tools schema pipeline (B-107 / B-047 / B-046, v0.2.4)
+
+Перед каждым LLM-call schema собирается **с нуля из `base_tools_schema`** (immutable
+копия на старте run), затем сужается по слоям:
+
+```
+base_tools_schema
+  → tool_surface phase filter (office: READING = read+analyze, EXECUTING = +write/exec)
+  → mandate.apply_schema_restrict (re-entrant; B-047 после one-shot should_restrict)
+  → closing-mode terminal narrow (B-046, re-apply when already closing)
+  → soft-hint once in messages tail (BM25, cache-safe; not system_prompt)
+```
+
+- **Research** (`tool_surface_profile=none` + `TerminalToolMandate`): hard phase-filter off;
+  restrict **re-applied** after base rebuild (fix 0.2.4 / H1).
+- **Office** subagents: READING includes `table_query` / `pdf_reader` / `chart_generate` /
+  `excel_workbook` (fix 0.2.4 / H2); mutating tools only in EXECUTING.
+- **Main**: soft-hint only (light toolset, D-028).
+- `agent.tool_surface.enabled=false` → true no-op on schema (no base wipe).
+
+`LoopState` (`agent/loop_state.py`, B-076) holds run-scoped guards, schemas, turn tool lists.
 - Timeout (LLM call)
 - Terminal tool success
 

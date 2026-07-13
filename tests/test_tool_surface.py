@@ -88,28 +88,72 @@ def test_detect_skips_closing() -> None:
 
 
 def test_filter_reading_drops_write() -> None:
-    base = _schema("read_file", "write_file", "exec_script", "search_files", "custom_mcp")
+    base = _schema(
+        "read_file",
+        "write_file",
+        "exec_script",
+        "search_files",
+        "table_query",
+        "pdf_reader",
+        "chart_generate",
+        "normalize_excel",
+        "custom_mcp",
+    )
     filtered = apply_phase_filter(base, ToolSurfacePhase.READING, profile="office", enabled=True)
     assert filtered is not None
     names = {schema_tool_name(e) for e in filtered}
     assert "read_file" in names
     assert "search_files" in names
+    # H2: analyze tools available on READING (no chicken-egg)
+    assert "table_query" in names
+    assert "pdf_reader" in names
+    assert "chart_generate" in names
+    # Mutating tools still blocked until EXECUTING
     assert "write_file" not in names
     assert "exec_script" not in names
+    assert "normalize_excel" not in names
     # unknown MCP kept (fail-open)
     assert "custom_mcp" in names
 
 
+def test_office_analyze_query_defaults_to_reading_with_analyze_tools() -> None:
+    phase = detect_tool_surface_phase(
+        user_message="проанализируй sales.csv и построй график",
+        tools_used=[],
+        prev_phase=None,
+        closing_mode=False,
+        mandate_enabled=False,
+        profile="office",
+    )
+    assert phase is ToolSurfacePhase.READING
+    base = _schema(
+        "read_file",
+        "table_query",
+        "chart_generate",
+        "write_file",
+        "exec_script",
+    )
+    filtered = apply_phase_filter(base, phase, profile="office", enabled=True)
+    names = {schema_tool_name(e) for e in filtered or []}
+    assert "table_query" in names
+    assert "chart_generate" in names
+    assert "write_file" not in names
+
+
 def test_filter_executing_restores_write_from_base() -> None:
-    base = _schema("read_file", "write_file", "excel_workbook")
+    base = _schema("read_file", "write_file", "excel_workbook", "normalize_excel")
     reading = apply_phase_filter(base, ToolSurfacePhase.READING, profile="office", enabled=True)
     assert reading is not None
-    assert "write_file" not in {schema_tool_name(e) for e in reading}
+    rnames = {schema_tool_name(e) for e in reading}
+    assert "write_file" not in rnames
+    assert "normalize_excel" not in rnames
+    assert "excel_workbook" in rnames  # analyze/read path allowed on READING
 
     executing = apply_phase_filter(base, ToolSurfacePhase.EXECUTING, profile="office", enabled=True)
     assert executing is not None
     names = {schema_tool_name(e) for e in executing}
     assert "write_file" in names
+    assert "normalize_excel" in names
     assert "excel_workbook" in names
 
 

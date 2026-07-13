@@ -1549,6 +1549,103 @@ async def test_workflow_mandate_nudges_then_restricts(
 
 
 @pytest.mark.asyncio
+async def test_workflow_mandate_restrict_survives_base_rebuild(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """H1: after restrict fires, subsequent LLM calls stay restricted even with
+    tool_surface base rebuild — closing-mode must NOT be required for this.
+    """
+    import asyncio
+
+    from corpclaw_lite.config.settings import ToolSurfaceSettings
+
+    class SearchTool:
+        name = "research_search"
+        description = "search"
+        params = []
+        terminal = False
+        parallel_safe = True
+
+        async def execute(self, **kwargs: Any) -> str:
+            await asyncio.sleep(0.01)
+            return "results"
+
+    class ListFactsTool:
+        name = "research_list_facts"
+        description = "list facts"
+        params = []
+        terminal = False
+        parallel_safe = True
+
+        async def execute(self, **kwargs: Any) -> str:
+            return "facts"
+
+    class FinalizeTool:
+        name = "research_finalize"
+        description = "finalize"
+        params = []
+        terminal = True
+        parallel_safe = True
+
+        async def execute(self, **kwargs: Any) -> str:
+            return "## Report\nfinal"
+
+    for t in (SearchTool(), ListFactsTool(), FinalizeTool()):
+        empty_registry._tools[t.name] = t  # type: ignore[attr-defined]
+
+    captured_tools: list[list[dict[str, Any]]] = []
+
+    class CapturingProvider(MockProvider):
+        async def chat(self, messages, tools=None, system=None):  # type: ignore[override]
+            captured_tools.append(list(tools or []))
+            return await super().chat(messages, tools=tools, system=system)
+
+    # Long wall-time + high soft_deadline so closing never fires; restrict via iterations.
+    settings = AgentSettings(
+        max_steps=10,
+        max_tool_calls=40,
+        max_wall_time_ms=600_000,
+        soft_deadline_ratio=0.99,
+        tool_surface=ToolSurfaceSettings(enabled=True),
+    )
+    provider = CapturingProvider(
+        responses=[
+            LLMResponse(
+                content="", tool_calls=[ToolCall(id=f"t{i}", name="research_search", arguments={})]
+            )
+            for i in range(9)
+        ]
+        + [LLMResponse(content="## Report\nfinal answer")]
+    )
+    loop = AgentLoop(
+        AgentConfig(
+            provider,
+            empty_registry,
+            settings,
+            terminal_tool="research_finalize",
+            required_before_terminal=["research_list_facts"],
+            tool_surface_profile="none",
+        )
+    )
+
+    await loop.run(test_user, "research", channel="test")
+
+    names_per_call = [
+        {str(t.get("function", {}).get("name", "")) for t in tools} for tools in captured_tools
+    ]
+    # restrict_ratio 0.75 * max_steps 10 → iteration >= 8; after that LLM schema
+    # must not include research_search (mandate re-applied after base rebuild).
+    late = names_per_call[7:] if len(names_per_call) > 7 else names_per_call[-2:]
+    assert late, f"expected multiple LLM calls, got {names_per_call}"
+    assert any("research_search" not in names for names in late), (
+        f"expected restrict without research_search on late calls, got {names_per_call}"
+    )
+    for names in late:
+        if "research_search" not in names:
+            assert "research_finalize" in names
+
+
+@pytest.mark.asyncio
 async def test_workflow_mandate_neutral_without_terminal_tool(
     test_user: User, empty_registry: ToolRegistry
 ) -> None:
