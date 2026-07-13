@@ -40,6 +40,7 @@ from corpclaw_lite.agent.guards import (
     TerminalToolMandate,
     TerminalToolMandateConfig,
 )
+from corpclaw_lite.agent.loop_state import LoopState
 from corpclaw_lite.agent.task_run import TaskRun
 from corpclaw_lite.agent.workspace_context import (
     reset_workspace_root,
@@ -316,6 +317,9 @@ class AgentConfig:
     # every turn, keyed by session_id. Restore (S2) and compress-any-chat (S3)
     # are separate sprints; S1 only accumulates data.
     chat_context_store: ChatContextStore | None = None
+    # B-107: tool-surface profile — "main" | "office" | "execution" | "none".
+    # Hard phase-filter applies to "office" (and optionally main soft-hint only).
+    tool_surface_profile: str = "main"
 
 
 class AgentLoop:
@@ -348,6 +352,7 @@ class AgentLoop:
         self._depth_modes = config.depth_modes
         # B-063 S1: full LLM-context persistence per chat.
         self._chat_context_store = config.chat_context_store
+        self._tool_surface_profile = config.tool_surface_profile
         # Cache marker sets as frozensets for the hot path.
         self._phase_aggregation_markers = frozenset(self._settings.phase_policy.aggregation_markers)
         self._phase_gathering_tools = frozenset(self._settings.phase_policy.gathering_tools)
@@ -939,22 +944,6 @@ class AgentLoop:
             max_tool_calls=self._settings.max_tool_calls,
             max_time_ms=self._settings.max_wall_time_ms,
         )
-        budget = SimpleBudgetGuard(guard_config)
-        progress = SimpleProgressGuard()
-        # B-055: result-based dedup guard. Complementary to SimpleProgressGuard:
-        # the progress guard detects repeated *errors*, this one detects repeated
-        # identical *successful results* (the common loop mode for local LLMs).
-        # Config is sourced from AgentSettings so the eval harness (B-060) can run
-        # A/B passes with the guard disabled, and operators can tune thresholds.
-        result_dedup = ResultDedupGuard(self._settings.result_dedup_guard)
-        # B-056: planning-text guard. Detects intent-statements ("let me now...")
-        # and Qwen3/Gemma tool-artifacts ([tool:<name>]) emitted as final answers,
-        # and gives the model a bounded number of correction turns.
-        planning_guard = PlanningTextGuard(self._settings.planning_text_guard)
-        soft_deadline = SoftDeadline(
-            SoftDeadlineConfig(ratio=self._settings.soft_deadline_ratio),
-            max_time_ms=self._settings.max_wall_time_ms,
-        )
         # B-047: workflow-finalize guard. Neutral when no terminal tool is configured
         # (main agent, non-research subagents); active for research-agent.
         mandate = TerminalToolMandate(
@@ -977,32 +966,55 @@ class AgentLoop:
                 )
             else:
                 tools_schema = self._registry.to_schemas()
+        # B-076: pack run-scoped mutable state into an explicit bag so adaptations
+        # (closing-mode, mandate, phase-policy, tool-surface) share one object.
+        # base_tools_schema is the immutable source of truth for schema refilters.
+        state = LoopState(
+            stats=stats,
+            budget=SimpleBudgetGuard(guard_config),
+            progress=SimpleProgressGuard(),
+            # B-055: result-based dedup (success loops); config from AgentSettings.
+            result_dedup=ResultDedupGuard(self._settings.result_dedup_guard),
+            # B-056: planning-text guard.
+            planning_guard=PlanningTextGuard(self._settings.planning_text_guard),
+            soft_deadline=SoftDeadline(
+                SoftDeadlineConfig(ratio=self._settings.soft_deadline_ratio),
+                max_time_ms=self._settings.max_wall_time_ms,
+            ),
+            mandate=mandate,
+            context=context,
+            base_tools_schema=list(tools_schema) if tools_schema is not None else None,
+            tools_schema=tools_schema,
+            task_run=task_run,
+            mem_key=mem_key,
+            last_actual_total_tokens=last_actual_total_tokens,
+        )
         health.increment("requests")
         health.increment("active_requests")
         log_event(
             "context_built",
-            stats.run_id,
+            state.stats.run_id,
             history_count=len(history),
             facts_count=facts_count,
             recent_files_count=recent_files_count,
-            tools_available_count=len(tools_schema or []),
-            system_prompt_chars=len(context.system_prompt or ""),
-            message_count=context.message_count,
+            tools_available_count=len(state.tools_schema or []),
+            system_prompt_chars=len(state.context.system_prompt or ""),
+            message_count=state.context.message_count,
         )
 
         try:
             # Etap 3B: set the depth-mode contextvar FIRST, so the finally below
-            # resets it no matter what (even if context building raised). See
+            # resets it no matter what (even if state.context building raised). See
             # the note above for why this was moved out of the pre-try range.
             _depth_token = set_call_depth_mode(depth_mode) if depth_mode is not None else None
-            # B-063 S1 audit: bind the context-persist target (session_id, user_id)
+            # B-063 S1 audit: bind the state.context-persist target (session_id, user_id)
             # via contextvars so concurrent runs are isolated. Reset in finally.
             _ctx_tokens = set_context_target(session_id, str(user.id))
             # B-063 S4: populate capture-correlation contextvars so payload
             # captures carry user_id + session_id + run_id (previously run_id
             # was always null because set_run_id was never called).
             _capture_tokens = set_capture_context(str(user.id), session_id)
-            _run_id_token = set_run_id(stats.run_id)
+            _run_id_token = set_run_id(state.stats.run_id)
             # DC-017 / B-098: bind per-user workspace so file tools do not share
             # process cwd across users in host mode. Path-validated tools only;
             # shell absolute paths still need container isolation (DC-016).
@@ -1015,79 +1027,80 @@ class AgentLoop:
             _user_ws = user_workspace_path(_ws_base, user)
             _user_ws.mkdir(parents=True, exist_ok=True)
             _ws_token = set_workspace_root(_user_ws)
-            # Persist the user message now that the context-target is bound (it
+            # Persist the user message now that the state.context-target is bound (it
             # reads the contextvar set just above). Deferred from the pre-try
             # section so the contextvar is populated.
             await self._persist_context_msg(role="user", content=message)
-            # D-056 PR2: prev_turn_tools feeds PhasePolicy's semantic phase
-            # signal. It holds the tool names invoked in the PREVIOUS turn
-            # (per-turn, not cumulative). current_turn_tools is populated during
-            # tool execution and promoted to prev_turn_tools at the top of the
-            # next iteration, then reset to accumulate the new turn's tools.
-            # On the first turn prev_turn_tools is [] (gathering, by convention).
-            prev_turn_tools: list[str] = []
-            current_turn_tools: list[str] = []
+            # D-056 PR2: state.prev_turn_tools feeds PhasePolicy's semantic phase
+            # (previous turn's tools). state.current_turn_tools is populated during
+            # tool execution and promoted at the top of each iteration.
+            # Defaults on LoopState are [] (gathering on first turn).
             while True:
-                budget.consume_iteration()
-                # B-066: check ALL budget limits at the top of every iteration so the
+                state.budget.consume_iteration()
+                # B-066: check ALL state.budget limits at the top of every iteration so the
                 # retry ``continue`` paths below (empty-response / XML-repair /
-                # planning-text) cannot burn extra LLM calls past the budget. The
+                # planning-text) cannot burn extra LLM calls past the state.budget. The
                 # ``except BudgetExceededError`` handler gracefully finalizes even
                 # when this fires before the iteration's LLM call.
-                budget.check()
-                stats.iterations += 1
+                state.budget.check()
+                state.stats.iterations += 1
                 # Promote the previous turn's collected tools, then reset for
-                # this turn. PhasePolicy reads prev_turn_tools below.
-                prev_turn_tools = current_turn_tools
-                current_turn_tools = []
+                # this turn. PhasePolicy reads state.prev_turn_tools below.
+                state.prev_turn_tools = state.current_turn_tools
+                state.current_turn_tools = []
 
                 # Soft deadline (wall-clock) -> closing mode: reduce tool schema to
                 # finalize-only terminal tools so the model wraps up instead of being
                 # hard-cancelled by asyncio.wait_for. Fixes the subagent-timeout race
-                # where wait_for (wall-clock) always beat the active-time budget guard.
+                # where wait_for (wall-clock) always beat the active-time state.budget guard.
                 # B-046: the same check is also applied right before each LLM call (see
                 # _apply_closing_mode) so a single long iteration that straddles the
                 # deadline still triggers it before the model is asked to produce more
                 # tool calls.
-                tools_schema = await self._apply_closing_mode(
-                    soft_deadline, tools_schema, task_run, user, stats
+                # B-107: recompute tools from base by phase (before closing narrows).
+                self._apply_tool_surface(state, user_message=message)
+
+                state.tools_schema = await self._apply_closing_mode(
+                    state.soft_deadline, state.tools_schema, state.task_run, user, state.stats
                 )
 
                 compression_cfg = self._settings.compression
-                if compression_cfg.enabled and context.message_count > (
+                if compression_cfg.enabled and state.context.message_count > (
                     compression_cfg.prune_min_messages
                 ):
-                    context.prune_old_tool_results(protect_tail=6)
+                    state.context.prune_old_tool_results(protect_tail=6)
 
                 if self._compressor and self._compressor.should_compress(
-                    context.messages,
-                    actual_tokens=last_actual_total_tokens,
+                    state.context.messages,
+                    actual_tokens=state.last_actual_total_tokens,
                 ):
-                    context.messages = await self._compressor.compress(
-                        context.messages,
-                        mem_key,
-                        actual_tokens=last_actual_total_tokens,
+                    state.context.messages = await self._compressor.compress(
+                        state.context.messages,
+                        state.mem_key,
+                        actual_tokens=state.last_actual_total_tokens,
                     )
-                    last_actual_total_tokens = None
+                    state.last_actual_total_tokens = None
 
                 llm_t0 = time.monotonic()
                 try:
                     log_event(
                         "llm_call_started",
-                        stats.run_id,
-                        iteration=stats.iterations,
-                        tools_count=len(tools_schema or []),
-                        message_count=context.message_count,
-                        system_prompt_chars=len(context.system_prompt or ""),
+                        state.stats.run_id,
+                        iteration=state.stats.iterations,
+                        tools_count=len(state.tools_schema or []),
+                        message_count=state.context.message_count,
+                        system_prompt_chars=len(state.context.system_prompt or ""),
                         streaming_enabled=self._settings.llm_streaming_enabled,
                     )
+                    # B-107 again then B-046: phase from base, then soft deadline.
+                    self._apply_tool_surface(state, user_message=message)
                     # B-046: re-check the soft deadline immediately before the LLM call.
                     # A long previous iteration may have crossed the wall-clock deadline
                     # mid-iteration; without this check the model is asked for another
                     # round of tool calls and closing mode only engages next iteration
                     # (by which point asyncio.wait_for may already cancel the run).
-                    tools_schema = await self._apply_closing_mode(
-                        soft_deadline, tools_schema, task_run, user, stats
+                    state.tools_schema = await self._apply_closing_mode(
+                        state.soft_deadline, state.tools_schema, state.task_run, user, state.stats
                     )
                     # D-056 PR2: phase-based per-call thinking override. The
                     # policy returns RequestOptions (or None) based on the task
@@ -1099,16 +1112,16 @@ class AgentLoop:
                     from corpclaw_lite.agent.phase_policy import PhaseContext
 
                     phase_ctx = PhaseContext(
-                        is_workflow_subagent=mandate.enabled,
-                        iteration=stats.iterations,
-                        elapsed_ratio=mandate.elapsed_ratio(stats.iterations)
-                        if mandate.enabled
+                        is_workflow_subagent=state.mandate.enabled,
+                        iteration=state.stats.iterations,
+                        elapsed_ratio=state.mandate.elapsed_ratio(state.stats.iterations)
+                        if state.mandate.enabled
                         else None,
-                        closing_mode=soft_deadline.closing_mode,
-                        nudge_injected=mandate.nudge_injected,
-                        restricted=mandate.restricted,
-                        prev_tool_calls=prev_turn_tools,
-                        tools_used=stats.tools_used,
+                        closing_mode=state.soft_deadline.closing_mode,
+                        nudge_injected=state.mandate.nudge_injected,
+                        restricted=state.mandate.restricted,
+                        prev_tool_calls=state.prev_turn_tools,
+                        tools_used=state.stats.tools_used,
                         aggregation_markers=self._phase_aggregation_markers,
                         gathering_tools=self._phase_gathering_tools,
                     )
@@ -1119,47 +1132,49 @@ class AgentLoop:
                     if req_opts is not None:
                         log_event(
                             "phase_changed",
-                            stats.run_id,
-                            iteration=stats.iterations,
-                            prev_tools=prev_turn_tools,
+                            state.stats.run_id,
+                            iteration=state.stats.iterations,
+                            prev_tools=state.prev_turn_tools,
                             thinking=(
                                 req_opts.thinking.mode if req_opts.thinking is not None else None
                             ),
-                            closing_mode=soft_deadline.closing_mode,
-                            is_workflow_subagent=mandate.enabled,
+                            closing_mode=state.soft_deadline.closing_mode,
+                            is_workflow_subagent=state.mandate.enabled,
                         )
                     try:
                         # When the provider is a queued router, separate queue wait
-                        # from LLM inference so the budget only counts active time.
+                        # from LLM inference so the state.budget only counts active time.
                         # Etap 3: uses effective_provider (depth override) instead of
                         # self._provider so Fast/Think applies to this run only.
                         is_router_queue = isinstance(effective_provider, LLMRouter)
                         if is_router_queue and effective_provider.has_queue:
-                            budget.pause()
+                            state.budget.pause()
 
                             def on_router_acquired() -> None:
-                                budget.resume()
+                                state.budget.resume()
                                 emit_llm_status("model_preparing")
 
                             response = await effective_provider.call_default_with_slot(
                                 user_id=str(user.id),
-                                run_id=stats.run_id,
-                                messages=context.messages,
-                                tools=tools_schema,
-                                system=context.system_prompt or None,
+                                run_id=state.stats.run_id,
+                                messages=state.context.messages,
+                                tools=state.tools_schema,
+                                system=state.context.system_prompt or None,
                                 on_acquired=on_router_acquired,
-                                call=lambda target_provider, _tools=tools_schema: asyncio.wait_for(
-                                    self._call_llm_provider(
-                                        target_provider,
-                                        messages=context.messages,
-                                        tools=_tools,
-                                        system=context.system_prompt or None,
-                                        run_id=stats.run_id,
-                                        iteration=stats.iterations,
-                                        on_llm_stage=on_llm_stage,
-                                        stats=stats,
-                                    ),
-                                    timeout=self._settings.llm_timeout_seconds,
+                                call=lambda target_provider, _tools=state.tools_schema: (
+                                    asyncio.wait_for(
+                                        self._call_llm_provider(
+                                            target_provider,
+                                            messages=state.context.messages,
+                                            tools=_tools,
+                                            system=state.context.system_prompt or None,
+                                            run_id=state.stats.run_id,
+                                            iteration=state.stats.iterations,
+                                            on_llm_stage=on_llm_stage,
+                                            stats=state.stats,
+                                        ),
+                                        timeout=self._settings.llm_timeout_seconds,
+                                    )
                                 ),
                                 on_queue_status=on_llm_queue_status,
                                 notify_position=_queue_notify_position(self._settings),
@@ -1168,34 +1183,36 @@ class AgentLoop:
                                 ),
                             )
                         elif isinstance(effective_provider, QueuedProvider):
-                            budget.pause()
+                            state.budget.pause()
 
                             def on_queued_provider_acquired() -> None:
-                                budget.resume()
+                                state.budget.resume()
                                 emit_llm_status("model_preparing")
 
                             response = await effective_provider.call_with_slot(
-                                messages=context.messages,
-                                tools=tools_schema,
-                                system=context.system_prompt or None,
+                                messages=state.context.messages,
+                                tools=state.tools_schema,
+                                system=state.context.system_prompt or None,
                                 on_acquired=on_queued_provider_acquired,
                                 on_queue_status=on_llm_queue_status,
                                 notify_position=_queue_notify_position(self._settings),
                                 notify_interval_seconds=_queue_notify_interval_seconds(
                                     self._settings
                                 ),
-                                call=lambda target_provider, _tools=tools_schema: asyncio.wait_for(
-                                    self._call_llm_provider(
-                                        target_provider,
-                                        messages=context.messages,
-                                        tools=_tools,
-                                        system=context.system_prompt or None,
-                                        run_id=stats.run_id,
-                                        iteration=stats.iterations,
-                                        on_llm_stage=on_llm_stage,
-                                        stats=stats,
-                                    ),
-                                    timeout=self._settings.llm_timeout_seconds,
+                                call=lambda target_provider, _tools=state.tools_schema: (
+                                    asyncio.wait_for(
+                                        self._call_llm_provider(
+                                            target_provider,
+                                            messages=state.context.messages,
+                                            tools=_tools,
+                                            system=state.context.system_prompt or None,
+                                            run_id=state.stats.run_id,
+                                            iteration=state.stats.iterations,
+                                            on_llm_stage=on_llm_stage,
+                                            stats=state.stats,
+                                        ),
+                                        timeout=self._settings.llm_timeout_seconds,
+                                    )
                                 ),
                             )
                         else:
@@ -1208,13 +1225,13 @@ class AgentLoop:
                             response = await asyncio.wait_for(
                                 self._call_llm_provider(
                                     target_provider,
-                                    messages=context.messages,
-                                    tools=tools_schema,
-                                    system=context.system_prompt or None,
-                                    run_id=stats.run_id,
-                                    iteration=stats.iterations,
+                                    messages=state.context.messages,
+                                    tools=state.tools_schema,
+                                    system=state.context.system_prompt or None,
+                                    run_id=state.stats.run_id,
+                                    iteration=state.stats.iterations,
                                     on_llm_stage=on_llm_stage,
-                                    stats=stats,
+                                    stats=state.stats,
                                 ),
                                 timeout=self._settings.llm_timeout_seconds,
                             )
@@ -1223,68 +1240,68 @@ class AgentLoop:
                             reset_request_options(_phase_call_token)
                 except TimeoutError:
                     msg = "I could not get a response from the language model (timed out)."
-                    await self._save_turn(mem_key, msg, stats.tools_used)
-                    stats.status = "timeout"
-                    stats.duration_ms = (time.monotonic() - t0) * 1000
+                    await self._save_turn(state.mem_key, msg, state.stats.tools_used)
+                    state.stats.status = "timeout"
+                    state.stats.duration_ms = (time.monotonic() - t0) * 1000
                     health.increment("llm_timeouts")
                     log_event(
                         "llm_call_finished",
-                        stats.run_id,
-                        iteration=stats.iterations,
+                        state.stats.run_id,
+                        iteration=state.stats.iterations,
                         status="timeout",
                         duration_ms=round((time.monotonic() - llm_t0) * 1000, 1),
                     )
                     log_event(
                         "request_finished",
-                        stats.run_id,
-                        status=stats.status,
-                        iterations=stats.iterations,
-                        tools_used=stats.tools_used,
-                        duration_ms=round(stats.duration_ms, 1),
+                        state.stats.run_id,
+                        status=state.stats.status,
+                        iterations=state.stats.iterations,
+                        tools_used=state.stats.tools_used,
+                        duration_ms=round(state.stats.duration_ms, 1),
                         final_answer_len=len(msg),
                     )
                     logger.warning(
-                        "[user=%s] LLM timeout on iteration %d", user.id, stats.iterations
+                        "[user=%s] LLM timeout on iteration %d", user.id, state.stats.iterations
                     )
-                    return msg, stats
+                    return msg, state.stats
                 except Exception as e:
                     health.increment("errors")
-                    stats.status = "error"
-                    stats.error = str(e)
-                    stats.duration_ms = (time.monotonic() - t0) * 1000
+                    state.stats.status = "error"
+                    state.stats.error = str(e)
+                    state.stats.duration_ms = (time.monotonic() - t0) * 1000
                     log_event(
                         "llm_call_finished",
-                        stats.run_id,
-                        iteration=stats.iterations,
+                        state.stats.run_id,
+                        iteration=state.stats.iterations,
                         status="error",
                         duration_ms=round((time.monotonic() - llm_t0) * 1000, 1),
                         error=type(e).__name__,
                     )
                     log_event(
                         "request_finished",
-                        stats.run_id,
-                        status=stats.status,
-                        iterations=stats.iterations,
-                        tools_used=stats.tools_used,
-                        duration_ms=round(stats.duration_ms, 1),
+                        state.stats.run_id,
+                        status=state.stats.status,
+                        iterations=state.stats.iterations,
+                        tools_used=state.stats.tools_used,
+                        duration_ms=round(state.stats.duration_ms, 1),
                         final_answer_len=0,
-                        error=stats.error,
+                        error=state.stats.error,
                     )
                     raise
 
-                stats.llm_calls += 1
-                stats.input_tokens += response.usage.input_tokens
-                stats.output_tokens += response.usage.output_tokens
-                stats.total_tokens += response.usage.total_tokens
-                stats.latest_total_tokens = response.usage.total_tokens
-                last_actual_total_tokens = (
+                state.stats.llm_calls += 1
+                state.stats.input_tokens += response.usage.input_tokens
+                state.stats.output_tokens += response.usage.output_tokens
+                state.stats.total_tokens += response.usage.total_tokens
+                state.stats.latest_total_tokens = response.usage.total_tokens
+                state.last_actual_total_tokens = (
                     response.usage.total_tokens if response.usage.total_tokens > 0 else None
                 )
                 health.increment("llm_calls")
                 log_event(
                     "llm_call_finished",
-                    stats.run_id,
-                    iteration=stats.iterations,
+                    state.stats.run_id,
+                    iteration=state.stats.iterations,
                     status="ok",
                     duration_ms=round((time.monotonic() - llm_t0) * 1000, 1),
                     input_tokens=response.usage.input_tokens,
@@ -1301,12 +1318,12 @@ class AgentLoop:
                 logger.debug(
                     "[user=%s] llm_response iter=%d | content=%r | tool_calls=%d",
                     user.id,
-                    stats.iterations,
+                    state.stats.iterations,
                     (response.content or "")[:200],
                     len(response.tool_calls or []),
                 )
 
-                # Log reasoning (if present) — does NOT enter agent context
+                # Log reasoning (if present) — does NOT enter agent state.context
                 if response.reasoning:
                     logger.debug(
                         "[user=%s] reasoning (%d chars): %s",
@@ -1325,22 +1342,22 @@ class AgentLoop:
                         and empty_response_retries < _EMPTY_RESPONSE_MAX_RETRIES
                     ):
                         empty_response_retries += 1
-                        context.add_user_message(_EMPTY_RESPONSE_PROMPT)
+                        state.context.add_user_message(_EMPTY_RESPONSE_PROMPT)
                         log_event(
                             "empty_response_retry",
-                            stats.run_id,
-                            iteration=stats.iterations,
+                            state.stats.run_id,
+                            iteration=state.stats.iterations,
                             retries=empty_response_retries,
                         )
                         continue
-                    # Final answer — ALWAYS return, even if time budget exceeded.
+                    # Final answer — ALWAYS return, even if time state.budget exceeded.
                     # The model already completed its work; discarding it wastes the
                     # entire LLM call and frustrates users who waited for a response.
                     final = response.content if response.content else "Agent provided no response."
                     if contains_xml_tool_call_markers(final):
                         if not xml_repair_attempted:
                             xml_repair_attempted = True
-                            context.add_user_message(
+                            state.context.add_user_message(
                                 build_xml_repair_prompt(
                                     "Raw XML tool-call markup was returned as assistant text "
                                     "instead of parsed tool calls."
@@ -1348,69 +1365,74 @@ class AgentLoop:
                             )
                             log_event(
                                 "xml_tool_call_repair_requested",
-                                stats.run_id,
-                                iteration=stats.iterations,
+                                state.stats.run_id,
+                                iteration=state.stats.iterations,
                                 content_hash=_payload_hash(final),
                             )
                             continue
                         final = _XML_TOOL_CALL_FALLBACK
-                        stats.status = "error"
-                        stats.error = "malformed_xml_tool_call"
+                        state.stats.status = "error"
+                        state.stats.error = "malformed_xml_tool_call"
                     # B-056: planning-text / tool-artifact guard. If the final
                     # answer is a statement of intent ("Let me now...") or a
                     # Qwen3/Gemma tool-artifact ([tool:<name>]) instead of an
                     # action or real answer, inject a correction and give the
                     # model another turn — bounded by max_corrections.
-                    if planning_guard.detect(final):
-                        context.add_user_message(planning_guard.correction_message())
+                    if state.planning_guard.detect(final):
+                        state.context.add_user_message(state.planning_guard.correction_message())
                         log_event(
                             "planning_text_blocked",
-                            stats.run_id,
-                            iteration=stats.iterations,
+                            state.stats.run_id,
+                            iteration=state.stats.iterations,
                             content_hash=_payload_hash(final),
-                            corrections_used=planning_guard.corrections_used,
+                            corrections_used=state.planning_guard.corrections_used,
                         )
-                        planning_guard.note_correction()
+                        state.planning_guard.note_correction()
                         continue
                     if _is_loop_guard_echo(final):
                         final = _LOOP_FALLBACK
-                        stats.status = "loop"
-                        stats.error = "model_echoed_loop_guard"
+                        state.stats.status = "loop"
+                        state.stats.error = "model_echoed_loop_guard"
                     # _save_turn writes to both SQLiteMemory (skipped if no memory)
-                    # and the per-chat context store (B-063 S1). Called regardless
-                    # of self._memory so context-store persistence always runs.
-                    await self._save_turn(mem_key, final, stats.tools_used, response.reasoning)
+                    # and the per-chat state.context store (B-063 S1). Called regardless
+                    # of self._memory so state.context-store persistence always runs.
+                    await self._save_turn(
+                        state.mem_key,
+                        final,
+                        state.stats.tools_used,
+                        response.reasoning,
+                    )
                     if self._memory and self._consolidator:
-                        await self._consolidator.maybe_consolidate(self._memory, mem_key)
-                    stats.duration_ms = (time.monotonic() - t0) * 1000
+                        await self._consolidator.maybe_consolidate(self._memory, state.mem_key)
+                    state.stats.duration_ms = (time.monotonic() - t0) * 1000
                     logger.debug(
                         "[user=%s] final_answer | len=%d | iterations=%d | duration_ms=%.0f",
                         user.id,
                         len(final),
-                        stats.iterations,
-                        stats.duration_ms,
+                        state.stats.iterations,
+                        state.stats.duration_ms,
                     )
                     log_event(
                         "request_finished",
-                        stats.run_id,
-                        status=stats.status,
-                        iterations=stats.iterations,
-                        tools_used=stats.tools_used,
-                        duration_ms=round(stats.duration_ms, 1),
+                        state.stats.run_id,
+                        status=state.stats.status,
+                        iterations=state.stats.iterations,
+                        tools_used=state.stats.tools_used,
+                        duration_ms=round(state.stats.duration_ms, 1),
                         final_answer_len=len(final),
-                        error=stats.error,
+                        error=state.stats.error,
                     )
-                    return final, stats
+                    return final, state.stats
 
-                # Model wants more work — check ALL budget limits before continuing.
-                budget.check()
-                budget.consume_tool_calls(len(response.tool_calls))
+                # Model wants more work — check ALL state.budget limits before continuing.
+                state.budget.check()
+                state.budget.consume_tool_calls(len(response.tool_calls))
 
                 # Agent requested tools — emit a single assistant message
                 # containing both content (if any) and tool_calls.
-                context.add_tool_calls(response.tool_calls, content=response.content or None)
+                state.context.add_tool_calls(response.tool_calls, content=response.content or None)
                 # B-063 S1: persist the assistant tool-call message (same schema as
-                # ContextBuilder.add_tool_calls) to the per-chat context store.
+                # ContextBuilder.add_tool_calls) to the per-chat state.context store.
                 await self._persist_context_msg(
                     role="assistant",
                     content=response.content or "",
@@ -1441,46 +1463,48 @@ class AgentLoop:
                         on_subagent_llm_stage,
                         on_subagent_llm_queue_status,
                         trajectory_recorder,
-                        stats,
-                        task_run,
+                        state.stats,
+                        state.task_run,
                     )
-                    # Add ALL results first to keep context valid (no orphaned tool_calls)
+                    # Add ALL results first to keep state.context valid (no orphaned tool_calls)
                     action_results: list[tuple[str, str]] = []
                     for tc, result in zip(response.tool_calls, results, strict=True):
-                        context.add_tool_result(tc.id, tc.name, result)
+                        state.context.add_tool_result(tc.id, tc.name, result)
                         await self._persist_context_msg(
                             role="tool", content=result, tool_call_id=tc.id, name=tc.name
                         )
-                        stats.tools_used.append(tc.name)
-                        current_turn_tools.append(tc.name)
+                        state.stats.tools_used.append(tc.name)
+                        state.current_turn_tools.append(tc.name)
                         action_results.append((tc.name, result))
                     # B-047 FIRST: the wall-clock deadline is time-critical and must
                     # always get a chance to nudge/restrict, even if the same tools
                     # keep returning identical results (B-055) or errors
                     # (SimpleProgressGuard). Without this ordering, a dedup/error
-                    # loop would burn the whole budget before the mandate fires.
-                    tools_schema = self._apply_workflow_mandate(
-                        mandate, tools_schema, context, stats
+                    # loop would burn the whole state.budget before the state.mandate fires.
+                    state.tools_schema = self._apply_workflow_mandate(
+                        state.mandate, state.tools_schema, state.context, state.stats
                     )
                     # B-055: result-based dedup. Catches repeated identical
                     # successful results (the common loop mode for local LLMs).
                     # Only considers non-error results; error loops are handled
                     # below by SimpleProgressGuard.detect_loop_for_results.
-                    dedup_tool, dedup_result = _detect_result_dedup(result_dedup, action_results)
+                    dedup_tool, dedup_result = _detect_result_dedup(
+                        state.result_dedup, action_results
+                    )
                     if dedup_tool is not None:
-                        _append_dedup_instruction(context)
+                        _append_dedup_instruction(state.context)
                         log_event(
                             "dedup_result_triggered",
-                            stats.run_id,
-                            iteration=stats.iterations,
+                            state.stats.run_id,
+                            iteration=state.stats.iterations,
                             tool_name=dedup_tool,
                             result_hash=_payload_hash(dedup_result),
-                            repeat_count=result_dedup.last_count(dedup_result),
+                            repeat_count=state.result_dedup.last_count(dedup_result),
                         )
                         continue
-                    loop_detected = progress.detect_loop_for_results(action_results)
+                    loop_detected = state.progress.detect_loop_for_results(action_results)
                     if loop_detected:
-                        _append_loop_recovery_instruction(context)
+                        _append_loop_recovery_instruction(state.context)
                         loop_warning_count += 1
                         if loop_warning_count >= 2:
                             break
@@ -1498,10 +1522,10 @@ class AgentLoop:
                             on_subagent_llm_stage,
                             on_subagent_llm_queue_status,
                             trajectory_recorder,
-                            stats,
-                            task_run,
+                            state.stats,
+                            state.task_run,
                         )
-                        context.add_tool_result(tc.id, tc.name, result)
+                        state.context.add_tool_result(tc.id, tc.name, result)
                         # Terminal tool: return result directly (no LLM re-paraphrase).
                         # Used for tools like read_image where the vision model already
                         # produces a complete user-facing response.
@@ -1519,7 +1543,7 @@ class AgentLoop:
                         # B-063 final-fix B1: for terminal tools, skip the tool-role
                         # persist — _save_turn below persists the result as the
                         # assistant's final answer, and duplicating it as tool-role
-                        # inflates the restored context.
+                        # inflates the restored state.context.
                         if not is_terminal:
                             await self._persist_context_msg(
                                 role="tool",
@@ -1527,15 +1551,17 @@ class AgentLoop:
                                 tool_call_id=tc.id,
                                 name=tc.name,
                             )
-                        stats.tools_used.append(tc.name)
-                        current_turn_tools.append(tc.name)
+                        state.stats.tools_used.append(tc.name)
+                        state.current_turn_tools.append(tc.name)
                         action_results.append((tc.name, result))
 
                         if is_terminal:
-                            await self._save_turn(mem_key, result, stats.tools_used)
+                            await self._save_turn(state.mem_key, result, state.stats.tools_used)
                             if self._memory and self._consolidator:
-                                await self._consolidator.maybe_consolidate(self._memory, mem_key)
-                            stats.duration_ms = (time.monotonic() - t0) * 1000
+                                await self._consolidator.maybe_consolidate(
+                                    self._memory, state.mem_key
+                                )
+                            state.stats.duration_ms = (time.monotonic() - t0) * 1000
                             logger.debug(
                                 "[user=%s] terminal_tool=%s | returning result directly",
                                 user.id,
@@ -1543,36 +1569,38 @@ class AgentLoop:
                             )
                             log_event(
                                 "request_finished",
-                                stats.run_id,
-                                status=stats.status,
-                                iterations=stats.iterations,
-                                tools_used=stats.tools_used,
-                                duration_ms=round(stats.duration_ms, 1),
+                                state.stats.run_id,
+                                status=state.stats.status,
+                                iterations=state.stats.iterations,
+                                tools_used=state.stats.tools_used,
+                                duration_ms=round(state.stats.duration_ms, 1),
                                 final_answer_len=len(result),
                             )
-                            return result, stats
+                            return result, state.stats
 
                     # B-047 FIRST (see parallel branch): wall-clock deadline wins
                     # over dedup/error-loop detection.
-                    tools_schema = self._apply_workflow_mandate(
-                        mandate, tools_schema, context, stats
+                    state.tools_schema = self._apply_workflow_mandate(
+                        state.mandate, state.tools_schema, state.context, state.stats
                     )
                     # B-055: result-based dedup (sequential branch).
-                    dedup_tool, dedup_result = _detect_result_dedup(result_dedup, action_results)
+                    dedup_tool, dedup_result = _detect_result_dedup(
+                        state.result_dedup, action_results
+                    )
                     if dedup_tool is not None:
-                        _append_dedup_instruction(context)
+                        _append_dedup_instruction(state.context)
                         log_event(
                             "dedup_result_triggered",
-                            stats.run_id,
-                            iteration=stats.iterations,
+                            state.stats.run_id,
+                            iteration=state.stats.iterations,
                             tool_name=dedup_tool,
                             result_hash=_payload_hash(dedup_result),
-                            repeat_count=result_dedup.last_count(dedup_result),
+                            repeat_count=state.result_dedup.last_count(dedup_result),
                         )
                         continue
-                    loop_detected = progress.detect_loop_for_results(action_results)
+                    loop_detected = state.progress.detect_loop_for_results(action_results)
                     if loop_detected:
-                        _append_loop_recovery_instruction(context)
+                        _append_loop_recovery_instruction(state.context)
                         loop_warning_count += 1
                         if loop_warning_count >= 2:
                             break
@@ -1582,51 +1610,51 @@ class AgentLoop:
             health.increment("errors")
             # Auto-finalize cascade: if this is a workflow subagent with a
             # terminal tool that was never called, try to salvage the work
-            # instead of returning a generic "budget exceeded" message.
+            # instead of returning a generic "state.budget exceeded" message.
             # B = one emergency LLM call; C = programmatic finalize fallback.
-            if self._terminal_tool and not mandate.terminal_called(stats.tools_used):
+            if self._terminal_tool and not state.mandate.terminal_called(state.stats.tools_used):
                 salvage = await self._auto_finalize_cascade(
-                    context, stats, user, self._terminal_tool, e
+                    state.context, state.stats, user, self._terminal_tool, e
                 )
                 if salvage is not None:
-                    stats.status = "ok"
-                    stats.error = None
-                    await self._save_turn(mem_key, salvage, stats.tools_used)
-                    stats.duration_ms = (time.monotonic() - t0) * 1000
+                    state.stats.status = "ok"
+                    state.stats.error = None
+                    await self._save_turn(state.mem_key, salvage, state.stats.tools_used)
+                    state.stats.duration_ms = (time.monotonic() - t0) * 1000
                     log_event(
                         "request_finished",
-                        stats.run_id,
+                        state.stats.run_id,
                         status="auto_finalized",
-                        iterations=stats.iterations,
-                        tools_used=stats.tools_used,
-                        duration_ms=round(stats.duration_ms, 1),
+                        iterations=state.stats.iterations,
+                        tools_used=state.stats.tools_used,
+                        duration_ms=round(state.stats.duration_ms, 1),
                         final_answer_len=len(salvage),
                         budget_exceeded=str(e),
                     )
-                    return salvage, stats
-            # Fallback: generic budget message (non-salvageable).
+                    return salvage, state.stats
+            # Fallback: generic state.budget message (non-salvageable).
             msg = f"I reached my resource limit and had to stop: {e}"
-            await self._save_turn(mem_key, msg, stats.tools_used)
-            stats.status = "budget"
-            stats.error = str(e)
-            stats.duration_ms = (time.monotonic() - t0) * 1000
+            await self._save_turn(state.mem_key, msg, state.stats.tools_used)
+            state.stats.status = "budget"
+            state.stats.error = str(e)
+            state.stats.duration_ms = (time.monotonic() - t0) * 1000
             logger.warning("[user=%s] budget exceeded: %s", user.id, e)
             log_event(
                 "request_finished",
-                stats.run_id,
-                status=stats.status,
-                iterations=stats.iterations,
-                tools_used=stats.tools_used,
-                duration_ms=round(stats.duration_ms, 1),
+                state.stats.run_id,
+                status=state.stats.status,
+                iterations=state.stats.iterations,
+                tools_used=state.stats.tools_used,
+                duration_ms=round(state.stats.duration_ms, 1),
                 final_answer_len=len(msg),
-                error=stats.error,
+                error=state.stats.error,
             )
-            return msg, stats
+            return msg, state.stats
         finally:
             health.increment("active_requests", -1)
             if _depth_token is not None:
                 reset_call_depth_mode(_depth_token)
-            # B-063 S1 audit: reset the context-persist target so it never
+            # B-063 S1 audit: reset the state.context-persist target so it never
             # outlives the run (and never leaks into a sibling task's run).
             if _ctx_tokens is not None:
                 reset_context_target(_ctx_tokens)
@@ -1640,20 +1668,24 @@ class AgentLoop:
                 reset_workspace_root(_ws_token)
 
         fallback = _LOOP_FALLBACK
-        await self._save_turn(mem_key, fallback, stats.tools_used)
-        stats.status = "loop"
-        stats.duration_ms = (time.monotonic() - t0) * 1000
-        logger.warning("[user=%s] loop detected after %d iterations", user.id, stats.iterations)
+        await self._save_turn(state.mem_key, fallback, state.stats.tools_used)
+        state.stats.status = "loop"
+        state.stats.duration_ms = (time.monotonic() - t0) * 1000
+        logger.warning(
+            "[user=%s] loop detected after %d iterations",
+            user.id,
+            state.stats.iterations,
+        )
         log_event(
             "request_finished",
-            stats.run_id,
-            status=stats.status,
-            iterations=stats.iterations,
-            tools_used=stats.tools_used,
-            duration_ms=round(stats.duration_ms, 1),
+            state.stats.run_id,
+            status=state.stats.status,
+            iterations=state.stats.iterations,
+            tools_used=state.stats.tools_used,
+            duration_ms=round(state.stats.duration_ms, 1),
             final_answer_len=len(fallback),
         )
-        return fallback, stats
+        return fallback, state.stats
 
     async def _save_memory(self, mem_key: str, role: str, content: str, **kwargs: Any) -> None:
         """Persist a message to memory, swallowing StorageError."""
@@ -1759,6 +1791,87 @@ class AgentLoop:
                 return False
         return True
 
+    def _apply_tool_surface(self, state: LoopState, *, user_message: str) -> None:
+        """B-107: phase-filter schema from base + BM25 soft-hint in messages tail.
+
+        Mutates ``state.tools_schema``, ``state.tool_surface_phase``, and
+        ``state.context.messages``. No-op when tool_surface disabled or profile
+        is research-owned (mandate.enabled).
+        """
+        from corpclaw_lite.agent.tool_surface import (
+            ToolSurfaceProfile,
+            apply_phase_filter,
+            detect_tool_surface_phase,
+            inject_soft_hint,
+            rank_tool_names,
+        )
+
+        ts_cfg = self._settings.tool_surface
+        if not ts_cfg.enabled:
+            state.tools_schema = (
+                list(state.base_tools_schema) if state.base_tools_schema is not None else None
+            )
+            return
+
+        profile_raw = self._tool_surface_profile
+        profile: ToolSurfaceProfile = (
+            profile_raw  # type: ignore[assignment]
+            if profile_raw in ("main", "office", "execution", "none")
+            else "main"
+        )
+
+        # Research mandate owns the funnel — hard filter off.
+        hard_enabled = (
+            ts_cfg.enabled and profile in ts_cfg.hard_filter_profiles and not state.mandate.enabled
+        )
+
+        phase = detect_tool_surface_phase(
+            user_message=user_message,
+            tools_used=state.stats.tools_used,
+            prev_phase=state.tool_surface_phase,
+            closing_mode=state.soft_deadline.closing_mode,
+            mandate_enabled=state.mandate.enabled,
+            profile=profile,
+        )
+
+        if hard_enabled and phase is not None:
+            prev = state.tool_surface_phase
+            phase_str = str(phase)
+            if prev != phase_str:
+                state.tool_surface_phase = phase_str
+                log_event(
+                    "tool_surface_phase_changed",
+                    state.stats.run_id,
+                    iteration=state.stats.iterations,
+                    phase=phase_str,
+                    prev_phase=prev,
+                    profile=profile,
+                )
+            state.tools_schema = apply_phase_filter(
+                state.base_tools_schema,
+                phase,
+                profile=profile,
+                enabled=True,
+            )
+        else:
+            # Soft-hint only path: still start from full base each call so
+            # closing-mode can re-narrow cleanly from a known set.
+            state.tools_schema = (
+                list(state.base_tools_schema) if state.base_tools_schema is not None else None
+            )
+
+        if ts_cfg.soft_hint_enabled and profile not in ("none", "execution"):
+            ranked = rank_tool_names(
+                user_message,
+                state.tools_schema,
+                top_k=ts_cfg.soft_hint_top_k,
+            )
+            state.context.messages = inject_soft_hint(
+                state.context.messages,
+                ranked,
+                enabled=True,
+            )
+
     async def _apply_closing_mode(
         self,
         soft_deadline: SoftDeadline,
@@ -1780,7 +1893,26 @@ class AgentLoop:
 
         Async because ``task_run.mark_soft_deadline`` writes to disk off the event loop.
         """
-        if not soft_deadline.is_reached() or soft_deadline.closing_mode:
+
+        def _narrow_to_terminal(
+            schema: list[dict[str, Any]] | None,
+        ) -> list[dict[str, Any]] | None:
+            if not schema:
+                return schema
+            terminal_names = {
+                t.name for t in self._registry.list_all() if getattr(t, "terminal", False)
+            }
+            if not terminal_names:
+                return schema
+            return [
+                s for s in schema if str(s.get("function", {}).get("name", "")) in terminal_names
+            ]
+
+        # Already in closing mode: re-apply terminal filter. B-107 rebuilds schema
+        # from base each iteration; without this re-narrow, closing would be undone.
+        if soft_deadline.closing_mode:
+            return _narrow_to_terminal(tools_schema)
+        if not soft_deadline.is_reached():
             return tools_schema
         soft_deadline.enter_closing_mode()
         await task_run.mark_soft_deadline(user, stats.run_id)
@@ -1790,16 +1922,7 @@ class AgentLoop:
             max_time_ms=self._settings.max_wall_time_ms,
             ratio=self._settings.soft_deadline_ratio,
         )
-        if not tools_schema:
-            return tools_schema
-        terminal_names = {
-            t.name for t in self._registry.list_all() if getattr(t, "terminal", False)
-        }
-        if not terminal_names:
-            return tools_schema
-        return [
-            s for s in tools_schema if str(s.get("function", {}).get("name", "")) in terminal_names
-        ]
+        return _narrow_to_terminal(tools_schema)
 
     async def _auto_finalize_cascade(
         self,

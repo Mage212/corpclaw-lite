@@ -268,6 +268,20 @@ class SubagentDispatcher:
                 update={"max_wall_time_ms": spec.max_wall_time_ms}
             )
 
+        # B-107: map subagent id → tool-surface profile (research skips hard filter).
+        if spec.terminal_tool:
+            surface_profile = "none"  # mandate owns funnel
+        elif spec.id in {
+            "document-agent",
+            "data-agent",
+            "filesystem-agent",
+        }:
+            surface_profile = "office"
+        elif spec.id == "execution-agent":
+            surface_profile = "execution"
+        else:
+            surface_profile = "office"
+
         # Setup isolated loop — pass security guards through from parent
         loop = AgentLoop(
             AgentConfig(
@@ -283,6 +297,7 @@ class SubagentDispatcher:
                 # nudges/restricts toward it as the budget runs out.
                 terminal_tool=spec.terminal_tool,
                 required_before_terminal=list(spec.required_before_terminal),
+                tool_surface_profile=surface_profile,
             )
         )
 
