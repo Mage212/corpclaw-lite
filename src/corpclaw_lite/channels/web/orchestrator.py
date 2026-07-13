@@ -177,7 +177,7 @@ class WebChannelOrchestrator:
             capture_dir=PROJECT_ROOT / (log_cfg.capture_dir or log_cfg.log_dir),
         )
 
-        stack = build_agent_stack(self._settings)
+        stack = build_agent_stack(self._settings, host_tools_surface="multiuser")
         self._stack = stack
         workspace_base = (PROJECT_ROOT / self._web_settings.workspace_base).resolve()
         llm_provider_name, llm_base_url = _default_llm_endpoint(self._settings)

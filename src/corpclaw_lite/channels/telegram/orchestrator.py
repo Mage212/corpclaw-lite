@@ -169,7 +169,7 @@ class TelegramBotOrchestrator:
         )
         self._agent_activity_logger = AgentLogger(log_dir=PROJECT_ROOT / log_cfg.log_dir)
 
-        stack = build_agent_stack(self._settings)
+        stack = build_agent_stack(self._settings, host_tools_surface="multiuser")
         self._stack = stack
         agent_loop = stack.loop
         user_manager = stack.user_manager

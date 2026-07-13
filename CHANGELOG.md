@@ -6,21 +6,52 @@
 
 ## [Unreleased]
 
-### Изменённое поведение
+## [0.2.3] — 2026-07-13
 
-- **table_query: лимиты вывода снижены под целевые локальные модели (26–35B).**
-  `_MAX_RESULT_ROWS`: 10 000 → 500, `_MAX_RESULT_CHARS`: 50 000 → 8 000 (~2K
-  токенов за вызов вместо ~12K). При результате >50 строк добавляется advisory-нота,
-  направляющая модель к `GROUP BY` / `LIMIT` / `output_path`. `output_path`
-  по-прежнему сохраняет полный результат (не обрезанный). Исправлен скрытый дефект
-  взаимодействия row/char truncation: char-лимит больше не «съедает» row-truncation
-  message — оба условия объединены в одно консолидированное сообщение.
-- **excel_workbook: лимиты и дефолт formula_mode снижены под локальные модели.**
-  `_MAX_DEFAULT_ROWS`: 50 → 25, `_MAX_ROWS_PER_CALL`: 100 → 50,
-  `_MAX_OUTPUT_CHARS`: 15 000 → 10 000. **Дефолт `formula_mode` изменён с `both`
-  на `values`** — простое чтение больше не дублирует каждую ячейку-формулу
-  формулой+кэшем. Все скилы и промпты субагентов, где формулы нужны, уже указывают
-  `formula_mode=both` явно, поэтому изменение обратно-совместимо для рабочих процессов.
+**Patch bump** `0.2.2 → 0.2.3`. Фокус: **Фаза 0 — Foundation Hardening**
+(closed-contour defaults + security gates) и снижение объёма Excel/SQL
+tool-output под локальные 26–35B модели.
+
+### Breaking / behaviour changes
+
+- **LLM payload capture: shipped default OFF (DC-037).**
+  `config/settings.yaml → logging.capture_enabled: false`. Opt-in only for
+  diagnostics / fine-tuning dataset collection (closed-contour privacy).
+- **Default department: office-without-web (DC-039).**
+  `default` loses `web_fetch` / `web_search` / `research-agent` and gains
+  office subagents (`filesystem` / `document` / `execution` / `data`).
+  Unclassified users can run Excel/SQL office Work without host-side web egress.
+- **Container host-tools gate (DC-016 / D-070).**
+  `container.enabled=false` requires `CORPCLAW_ALLOW_HOST_TOOLS=1`. Telegram/web
+  (multi-user surfaces) additionally require
+  `CORPCLAW_ENFORCE_PROD_CONTAINER=false` to run without Docker isolation.
+  Silent host-mode in production is no longer possible.
+- **Per-user workspace root via contextvar (DC-017 / D-071).**
+  File tools honor `workspaces/user_<key>/` even in dev mode (not only container
+  bind-mount). Protects path-validated tools; absolute-path shell still needs
+  container isolation.
+- **table_query output limits** for local 26–35B models:
+  `_MAX_RESULT_ROWS` 10 000 → 500, `_MAX_RESULT_CHARS` 50 000 → 8 000; advisory
+  note when result >50 rows. `output_path` still stores the full result.
+- **excel_workbook limits + formula_mode default:**
+  smaller page sizes; default `formula_mode` `both` → `values` (skills/prompts
+  that need formulas already set `formula_mode=both` explicitly).
+
+### Security / cleanup
+
+- **Credential scrubber: `ghp_` regex synced to `{20,}` (DC-020)** — matches
+  `tool_guard_rules.yaml` (was strict `{36}`).
+- **Removed diverged `docker/Dockerfile.agent` (DC-022)** — image build uses only
+  `docker/Dockerfile`.
+- **Docs: `send_file` is main-agent only (DC-038)** — subagents create files;
+  main delivers via two-step create→`send_file` (`BEHAVIOR.md`).
+
+### Added
+
+- `security/host_tools_gate.py` — Level 1/2 startup gate for host tools.
+- `agent/workspace_context.py` — per-run `workspace_root` contextvar.
+- Tests: `test_host_tools_gate.py`, `test_workspace_context.py`,
+  `test_default_department_rbac.py`.
 
 ## [0.2.2] — 2026-06-29
 

@@ -219,6 +219,11 @@ def resolve_and_validate_path(
     """
     _reject_null_byte(path_str)
 
+    # DC-017: prefer explicit arg → per-run contextvar → process cwd (CLI/eval).
+    if workspace_root is None:
+        from corpclaw_lite.agent.workspace_context import get_workspace_root
+
+        workspace_root = get_workspace_root()
     ws = (workspace_root or Path.cwd()).resolve()
     target = Path(path_str)
     if not target.is_absolute():

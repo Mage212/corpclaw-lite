@@ -75,6 +75,8 @@ def agent_stack_no_container() -> tuple[AgentLoop, ToolRegistry]:
     )
 
     os.environ.setdefault("CORPCLAW_IPC_SECRET", "debug-test-secret")
+    # DC-016: host tools require explicit opt-in when container.enabled=false.
+    os.environ.setdefault("CORPCLAW_ALLOW_HOST_TOOLS", "1")
 
     try:
         stack = build_agent_stack(settings=patched_settings)

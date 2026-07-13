@@ -41,6 +41,7 @@ def _disable_containers() -> None:  # type: ignore[misc]
 
     Also rewrites routing rules to use 'ollama' provider (matching _PROVIDER_ENV)
     since settings.yaml may reference different provider names (e.g. 'lmstudio').
+    DC-016: host tools require CORPCLAW_ALLOW_HOST_TOOLS=1.
     """
     from corpclaw_lite.config import loader as config_loader
     from corpclaw_lite.config.settings import (
@@ -67,7 +68,10 @@ def _disable_containers() -> None:  # type: ignore[misc]
         )
         return settings
 
-    with patch.object(config_loader, "load_settings", side_effect=_mock_load):
+    with (
+        patch.object(config_loader, "load_settings", side_effect=_mock_load),
+        patch.dict(os.environ, {"CORPCLAW_ALLOW_HOST_TOOLS": "1"}, clear=False),
+    ):
         yield  # type: ignore[misc]
 
 

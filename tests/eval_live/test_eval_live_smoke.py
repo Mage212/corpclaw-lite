@@ -52,6 +52,10 @@ async def test_eval_live_smoke_single_scenario(tmp_path: Path) -> None:
                 RoutingRule(task_kind="default", provider="live", model=model),
             ]
         )
+        # DC-016: host tools require explicit opt-in when containers are off.
+        import os
+
+        os.environ.setdefault("CORPCLAW_ALLOW_HOST_TOOLS", "1")
         return settings
 
     # Write a one-scenario corpus.

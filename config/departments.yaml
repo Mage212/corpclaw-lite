@@ -22,7 +22,10 @@
 
 departments:
   default:
-    description: "Default department for unclassified users"
+    # DC-039: office-without-web — closed-loop office Work for unclassified users.
+    # No host-side web egress; office subagents (document/data/execution/filesystem)
+    # instead of research-only. send_file stays on main for two-step delivery.
+    description: "Default department for unclassified users (office Work, no web egress)"
     allowed_tools:
       - read_file
       - list_files
@@ -32,11 +35,12 @@ departments:
       - read_image
       - dispatch_subagent
       - excel_inspect
-      - web_fetch
-      - web_search
       - send_file
     allowed_subagents:
-      - research-agent
+      - filesystem-agent
+      - document-agent
+      - execution-agent
+      - data-agent
 
   engineering:
     description: "Software engineering and IT teams"

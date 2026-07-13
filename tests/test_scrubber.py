@@ -52,6 +52,14 @@ def test_scrub_text_removes_github_pat():
     assert "***REDACTED***" in result
 
 
+def test_scrub_text_removes_short_github_pat():
+    """DC-020: scrubber must match tool_guard width ghp_…{20,} (not only 36)."""
+    short_pat = "ghp_" + "A" * 20
+    result = scrub_text(f"token={short_pat}")
+    assert short_pat not in result
+    assert "***REDACTED***" in result
+
+
 def test_scrub_text_removes_telegram_bot_token():
     fake_token = "123456" + ":" + "abcdefghijklmnopqrstuvwxyzABCDEF"
     raw = f"https://api.telegram.org/bot{fake_token}/getMe"

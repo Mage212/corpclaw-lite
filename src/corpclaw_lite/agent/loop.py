@@ -41,6 +41,10 @@ from corpclaw_lite.agent.guards import (
     TerminalToolMandateConfig,
 )
 from corpclaw_lite.agent.task_run import TaskRun
+from corpclaw_lite.agent.workspace_context import (
+    reset_workspace_root,
+    set_workspace_root,
+)
 from corpclaw_lite.config.settings import AgentSettings
 from corpclaw_lite.exceptions import ContainerIPCError, StorageError
 from corpclaw_lite.extensions.tools.base import TOOL_ERROR_PREFIX
@@ -802,6 +806,8 @@ class AgentLoop:
         # B-063 S4: capture-correlation tokens (user_id, session_id, run_id).
         _capture_tokens: tuple[Any, Any] | None = None
         _run_id_token: Any = None
+        # DC-017: per-user workspace root for path-validated tools / exec_script cwd.
+        _ws_token: contextvars.Token[Path | None] | None = None
 
         def emit_llm_status(stage: str) -> None:
             if self._settings.llm_stream_status_updates and on_llm_stage is not None:
@@ -997,6 +1003,18 @@ class AgentLoop:
             # was always null because set_run_id was never called).
             _capture_tokens = set_capture_context(str(user.id), session_id)
             _run_id_token = set_run_id(stats.run_id)
+            # DC-017 / B-098: bind per-user workspace so file tools do not share
+            # process cwd across users in host mode. Path-validated tools only;
+            # shell absolute paths still need container isolation (DC-016).
+            from corpclaw_lite.extensions.tools.builtin._path_utils import (
+                user_workspace_path,
+            )
+            from corpclaw_lite.paths import PROJECT_ROOT
+
+            _ws_base = self._workspace_base or (PROJECT_ROOT / "workspaces")
+            _user_ws = user_workspace_path(_ws_base, user)
+            _user_ws.mkdir(parents=True, exist_ok=True)
+            _ws_token = set_workspace_root(_user_ws)
             # Persist the user message now that the context-target is bound (it
             # reads the contextvar set just above). Deferred from the pre-try
             # section so the contextvar is populated.
@@ -1618,6 +1636,8 @@ class AgentLoop:
                 reset_capture_context(_capture_tokens)
             if _run_id_token is not None:
                 reset_run_id(_run_id_token)
+            if _ws_token is not None:
+                reset_workspace_root(_ws_token)
 
         fallback = _LOOP_FALLBACK
         await self._save_turn(mem_key, fallback, stats.tools_used)

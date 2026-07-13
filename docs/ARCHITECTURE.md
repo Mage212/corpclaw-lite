@@ -1,7 +1,7 @@
 # CorpClaw Lite — Архитектура проекта
 
-> Версия документа: 2026-06-29
-> Версия проекта: 0.2.2 — 166 Python-модулей, ~40K LOC, 1666 pytest-кейсов
+> Версия документа: 2026-07-13
+> Версия проекта: 0.2.3 — Foundation Hardening (Фаза 0): closed-contour defaults + security gates
 
 ---
 
@@ -128,8 +128,8 @@ corpclaw-lite/
 ├── config/                 # YAML-конфигурации + bootstrap prompts
 ├── skills/                 # 5 Markdown-скиллов с scope-фильтрацией
 ├── plugins/                # Директория плагинов
-├── docker/                 # Dockerfile, Dockerfile.agent, seccomp_default.json
-└── tests/                  # Тесты (1666 pytest-кейсов, 149 Python test-файлов)
+├── docker/                 # Dockerfile, seccomp_default.json
+└── tests/                  # Тесты (1719+ pytest-кейсов)
 ```
 
 ---
@@ -632,7 +632,10 @@ components:
 | `document-agent` | read_file, write_file, edit_file, normalize_excel, list_files | `config/bootstrap/subagents/document.md` |
 | `execution-agent` | exec_script, write_file, read_file | `config/bootstrap/subagents/execution.md` |
 | `research-agent` | web_fetch, read_file, search_files, list_files, memory_store, memory_recall | `config/bootstrap/subagents/research.md` |
-| `data-agent` | table_query, chart_generate, convert_format, pdf_reader, diff_text, read/write_file, list_files, search_files, send_file | `config/bootstrap/subagents/data-agent.md` |
+| `data-agent` | table_query, chart_generate, convert_format, pdf_reader, diff_text, excel_workbook, read/write_file, list_files, search_files | `config/bootstrap/subagents/data-agent.md` |
+
+> **Delivery:** `send_file` is main-agent only. Subagents create/modify files; the
+> main agent delivers them via two-step create→`send_file` (`BEHAVIOR.md`).
 
 ### MCP Integration (`extensions/mcp/`)
 
@@ -774,13 +777,33 @@ User Message
 выполняются host-side инструментами (`web_fetch`, `web_search`) с SSRF-защитой и
 department/RBAC-контролем, чтобы не открывать сеть внутри пользовательской песочницы.
 
+### Host-tools gate (`security/host_tools_gate.py`, DC-016 / D-070)
+
+Защита от случайного prod-деплоя с `container.enabled=false` (тулзы на хосте без
+Docker-изоляции). Два уровня:
+
+| Уровень | Когда | Условие |
+|---------|-------|---------|
+| **1. Env gate** | любой `build_agent_stack` при `container.enabled=false` | нужен `CORPCLAW_ALLOW_HOST_TOOLS=1` |
+| **2. Multi-user** | telegram/web (`host_tools_surface="multiuser"`) | дополнительно `CORPCLAW_ENFORCE_PROD_CONTAINER=false` (по умолчанию enforce) |
+
+Иначе — `StartupConfigurationError` (fail-fast, тот же класс, что и «Docker unavailable»).
+
+### Workspace root contextvar (`agent/workspace_context.py`, DC-017 / D-071)
+
+На каждый `AgentLoop.run` выставляется `workspace_root = workspaces/user_<id>/`.
+`path_validator.resolve_and_validate_path` и `exec_script` cwd читают contextvar
+(fallback: `Path.cwd()` для CLI/eval). **Честное ограничение:** защищает
+path-validated file-тулзы; absolute-path shell (`cat /etc/passwd`) по-прежнему
+требует container isolation (DC-016).
+
 ### CredentialScrubber (`security/credential_scrubber.py`)
 
 Маскирование секретов в логах и результатах:
 - `sk-*` — OpenAI/Anthropic API ключи
-- `ghp_*` — GitHub PAT
+- `ghp_*` — GitHub PAT (`{20,}`, синхронизировано с tool_guard_rules, DC-020)
 - `Bearer *` — токены
-- `CORPCLAW_IPC_SECRET` — динамически из env
+- `CORPCLAW_IPC_SECRET` — динамически из env (re-read per filter call)
 - Работает как `logging.Filter` + функция `scrub_text()` для tool results
 
 ### IPCAuth (`security/ipc_auth.py`)
@@ -1011,18 +1034,21 @@ skills:
 
 10 департаментов с RBAC:
 
-| Департамент | Tools | Budget (iter/tools/time) |
-|-------------|-------|--------------------------|
-| default | read, list, search, memory, normalize_excel, read_image, dispatch | 10/20/60s |
-| engineering | * (all) | 20/50/120s |
-| development | * (all) | 20/50/120s |
-| it | file ops + memory + read_image + dispatch | 15/30/90s |
-| marketing | content + web_fetch + normalize_excel + send_file | 10/20/60s |
-| finance | data + normalize_excel + send_file | 10/20/60s |
-| hr | docs + normalize_excel + send_file + read_image | 10/20/60s |
-| analytics | data + web_fetch + normalize_excel | 15/30/90s |
-| product | research + web_fetch + read_image + dispatch | 10/20/60s |
-| admin | * (all) | 25/60/180s |
+| Департамент | Tools / subagents | Notes |
+|-------------|-------------------|-------|
+| **default** | inspect + memory + dispatch + send_file; subagents: filesystem/document/execution/data | **office-without-web** (DC-039): no web_fetch/web_search/research |
+| engineering | * (all) + all subagents | |
+| development | * (all) + all subagents | |
+| it | file ops + memory + read_image + dispatch | |
+| marketing | content + web_fetch + send_file + office subagents | |
+| finance | data tools + send_file + data/document agents | |
+| hr | docs + send_file + read_image | |
+| analytics | data + web_fetch | |
+| product | research + web_fetch + read_image + dispatch | |
+| admin | * (all) | |
+
+> Budget (max_iterations / max_tool_calls / max_wall_time_ms) — **глобально** в
+> `settings.yaml → agent.*`, не per-department (D-035/D-037).
 
 ### PermissionChecker (`departments/permissions.py`)
 
@@ -1133,7 +1159,7 @@ skills:
 
 ```yaml
 logging:
-  capture_enabled: true
+  capture_enabled: false   # opt-in (DC-037 closed-contour default)
   capture_fields:
     - "request.model"
     - "request.messages"
