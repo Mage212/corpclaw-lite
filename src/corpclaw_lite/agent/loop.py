@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import contextvars
 import hashlib
 import inspect
 import json
@@ -16,7 +15,6 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from corpclaw_lite.agent.context import ContextBuilder
 from corpclaw_lite.agent.context_target import (
-    ContextTargetTokens,
     get_context_session_id,
     get_context_user_id,
     reset_context_target,
@@ -40,7 +38,7 @@ from corpclaw_lite.agent.guards import (
     TerminalToolMandate,
     TerminalToolMandateConfig,
 )
-from corpclaw_lite.agent.loop_state import LoopState
+from corpclaw_lite.agent.loop_state import LoopState, TurnTokens
 from corpclaw_lite.agent.task_run import TaskRun
 from corpclaw_lite.agent.workspace_context import (
     reset_workspace_root,
@@ -146,6 +144,14 @@ _AUTO_FINALIZE_EMERGENCY_PROMPT = (
     "facts you have gathered so far. Call {terminal} with the full Markdown "
     "report as the 'answer' argument. If your evidence is incomplete, say so "
     "honestly in a limitations section — but you MUST finalize now."
+)
+
+# B-047 ext / B-077: empty-response retry (was locals inside run()).
+_EMPTY_RESPONSE_MAX_RETRIES = 3
+_EMPTY_RESPONSE_PROMPT = (
+    "You returned an empty response with no tool call. This is not a valid "
+    "final answer. Continue your task: call a tool to gather more data, or "
+    "if you have enough information, provide a complete response now."
 )
 
 
@@ -765,276 +771,38 @@ class AgentLoop:
 
         Returns:
             (reply, stats) — the agent's final answer and execution metrics.
+
+        B-077: prologue (``_build_turn_context``) packs ``LoopState`` + contextvars;
+        epilogue (``_finalize_turn``) resets tokens. ReAct body is behavior-neutral.
         """
-        stats = RunStats(run_id=run_id) if run_id is not None else RunStats()
-        loop_warning_count = 0
-        xml_repair_attempted = False
-        # B-047 ext: degenerate-empty-response retry. Local LLMs (gemma4) with
-        # thinking-OFF sometimes emit a tiny garbage reasoning fragment + empty
-        # content + no tool calls + finish=stop after a tool result. Without
-        # this guard the loop treats it as a final answer and exits with
-        # "Agent provided no response", losing the run. Instead, give the model
-        # a bounded number of correction turns (like planning-text guard).
-        empty_response_retries = 0
-        _EMPTY_RESPONSE_MAX_RETRIES = 3
-        _EMPTY_RESPONSE_PROMPT = (
-            "You returned an empty response with no tool call. This is not a valid "
-            "final answer. Continue your task: call a tool to gather more data, or "
-            "if you have enough information, provide a complete response now."
-        )
-        last_actual_total_tokens: int | None = None
-        t0 = time.monotonic()
-
-        # Etap 3 (Sprint 3A): resolve a depth-mode override provider for this run.
-        # Fast/Think map to a per-model SamplingProfile name; with_overrides
-        # rebuilds the default-route provider with that profile (thinking_mode +
-        # inference_overrides). The override is a RUN-SCOPE local — it never
-        # mutates self._provider, so concurrent runs on this shared loop are
-        # isolated. When depth_mode is None or resolution fails, the route's
-        # default provider is used unchanged.
-        effective_provider: Provider = self._provider
-        if depth_mode is not None and isinstance(self._provider, LLMRouter):
-            effective_provider = self._apply_depth_override(self._provider, depth_mode)
-
-        # Etap 3B: publish the depth mode to a per-run contextvar so tools
-        # (notably DispatchSubagentTool) can read it without a schema/kwargs
-        # change. The token is set as the FIRST statement inside the try/finally
-        # below so every code path — including context-build failures between
-        # here and the try — is covered by the reset in finally. Previously the
-        # set lived here (before the try), which leaked the value when
-        # log_event/build_initial/task_run.initialize raised in the gap.
-        # Pre-initialised to None so the finally can reference it unconditionally
-        # even on the (impossible-at-runtime) path where the try body never runs.
-        _depth_token: contextvars.Token[DepthMode | None] | None = None
-        # B-063 S1 audit: context-persist target tokens (reset in finally).
-        _ctx_tokens: ContextTargetTokens | None = None
-        # B-063 S4: capture-correlation tokens (user_id, session_id, run_id).
-        _capture_tokens: tuple[Any, Any] | None = None
-        _run_id_token: Any = None
-        # DC-017: per-user workspace root for path-validated tools / exec_script cwd.
-        _ws_token: contextvars.Token[Path | None] | None = None
-
-        def emit_llm_status(stage: str) -> None:
-            if self._settings.llm_stream_status_updates and on_llm_stage is not None:
-                on_llm_stage(stage)
-
-        logger.debug(
-            "[user=%s] run() start | msg=%r",
-            user.id,
-            message[:120],
-        )
-        log_event(
-            "request_started",
-            stats.run_id,
-            user_id=user.id,
-            department=user.department,
-            channel=channel,
-            message_len=len(message),
-            message_preview=message,
-        )
-
-        # Per-call callback takes priority over the instance-level default
-        _approval_cb = (
-            approval_callback if approval_callback is not None else self._approval_callback
-        )
-
-        mem_key = user.memory_key()
-
-        # B-063 S1: context-persistence target (session_id, user_id) is bound via
-        # contextvars inside the try/finally below — NOT instance attrs — so
-        # concurrent runs on this shared singleton loop are isolated. See
-        # agent/context_target.py.
-
-        # Load history BEFORE building context so it precedes the current message
-        history: list[dict[str, Any]] = []
-        if self._memory:
-            try:
-                history = await self._memory.get_history(mem_key, limit=self._settings.max_history)
-            except StorageError:
-                logger.error("[user=%s] Failed to load history", user.id)
-
-        # B-063 S2: prefer the FULL LLM context (tool_calls/tool-role) from the
-        # per-chat store when a session_id is bound and the store has data. Falls
-        # back to the SQLiteMemory history above (role+content only) for old chats
-        # or non-web channels. The full-history path reconstructs tool_calls and
-        # tool-role messages that get_history/build_initial would drop.
-        full_history: list[dict[str, Any]] | None = None
-        if self._chat_context_store is not None and session_id is not None:
-            try:
-                full_history = await self._chat_context_store.list_context(session_id)
-                if not full_history:
-                    full_history = None
-            except Exception:
-                logger.warning("[session=%s] context-store load failed", session_id, exc_info=True)
-                full_history = None
-
-        # Prepend dynamic user context to the system prompt
-        base_prompt = system_prompt or self._default_system_prompt or ""
-
-        # Load user facts from memory (onboarding + manually stored via memory_store)
-        user_facts_block = ""
-        facts_count = 0
-        if self._memory:
-            facts: list[dict[str, str]] = []
-            try:
-                facts = await self._memory.recall_facts(
-                    mem_key, limit=self._settings.max_facts_recall
-                )
-            except StorageError:
-                logger.error("[user=%s] Failed to recall facts", user.id)
-            if facts:
-                facts_count = len(facts)
-                lines = [f"- {f['key']}: {f['value']}" for f in facts]
-                user_facts_block = "\n\n## Known Facts About This User\n" + "\n".join(lines)
-
-        # B-040: inject recently-touched files so the agent has cross-session
-        # memory of what the user worked on.
-        recent_files_block = ""
-        recent_files_count = 0
-        if self._file_change_dao is not None:
-            try:
-                recent_changes = await self._file_change_dao.list_recent_for_user(mem_key, limit=3)
-            except StorageError:
-                logger.error("[user=%s] Failed to load recent files", user.id)
-                recent_changes = []
-            if recent_changes:
-                recent_files_count = len(recent_changes)
-                lines = [f"- {c.file_path} ({c.tool_name})" for c in recent_changes]
-                recent_files_block = "\n\n## Recently Touched Files\n" + "\n".join(lines)
-
-        dynamic_prompt = (
-            f"Current User Context:\n"
-            f"- Name: {user.name}\n"
-            f"- Department: {user.department}\n"
-            f"{user_facts_block}{recent_files_block}\n\n"
-            f"{base_prompt}"
-        )
-
-        if full_history is not None:
-            # B-063 S2: full-context path — reconstructs tool_calls + tool-role.
-            context = ContextBuilder.build_from_full_history(
-                user,
-                message,
-                full_history,
-                system_prompt_override=dynamic_prompt,
+        tokens = TurnTokens()
+        # Prologue outside the ReAct try so ``state`` is always bound for except/
+        # fallback; epilogue still runs if prologue fails mid-bind.
+        try:
+            (
+                state,
+                effective_provider,
+                _approval_cb,
+                emit_llm_status,
+            ) = await self._build_turn_context(
+                user=user,
+                message=message,
+                system_prompt=system_prompt,
+                approval_callback=approval_callback,
+                on_llm_stage=on_llm_stage,
+                tools_enabled=tools_enabled,
                 few_shots=few_shots,
+                channel=channel,
+                run_id=run_id,
+                depth_mode=depth_mode,
+                session_id=session_id,
+                tokens=tokens,
             )
-        else:
-            context = ContextBuilder.build_initial(
-                user,
-                message,
-                history=history,
-                system_prompt_override=dynamic_prompt,
-                few_shots=few_shots,
-            )
-
-        if self._memory:
-            await self._save_memory(mem_key, "user", message)
-        # NOTE: the context-store persist of the user message is deferred to
-        # inside the try/finally (after set_context_target), since it reads the
-        # contextvar that the try block binds.
-
-        # Budget is ALWAYS from settings. Department-specific iteration/tool-call
-        # limits were removed — they silently overrode settings.max_steps, causing
-        # "config change has no effect" bugs (the operator changes settings.yaml
-        # but the department budget wins). RBAC (tools, subagents, skills) remains
-        # department-scoped; only resource limits are now global.
-        guard_config = SimpleBudgetGuardConfig(
-            max_iterations=self._settings.max_steps,
-            max_tool_calls=self._settings.max_tool_calls,
-            max_time_ms=self._settings.max_wall_time_ms,
-        )
-        # B-047: workflow-finalize guard. Neutral when no terminal tool is configured
-        # (main agent, non-research subagents); active for research-agent.
-        mandate = TerminalToolMandate(
-            TerminalToolMandateConfig(
-                terminal_tool=self._terminal_tool or "",
-                required_before=tuple(self._required_before_terminal),
-            ),
-            max_time_ms=self._settings.max_wall_time_ms,
-            max_iterations=guard_config.max_iterations,
-        )
-        task_run = TaskRun(self._workspace_base)
-        await task_run.initialize(user, stats.run_id)
-        tools_schema: list[dict[str, Any]] | None = None
-        if tools_enabled:
-            if self._permission_checker:
-                tools_schema = self._registry.to_schemas_for_user(
-                    self._permission_checker,
-                    user,
-                    enforce_tool_allowlist=self._enforce_tool_permissions,
-                )
-            else:
-                tools_schema = self._registry.to_schemas()
-        # B-076: pack run-scoped mutable state into an explicit bag so adaptations
-        # (closing-mode, mandate, phase-policy, tool-surface) share one object.
-        # base_tools_schema is the immutable source of truth for schema refilters.
-        state = LoopState(
-            stats=stats,
-            budget=SimpleBudgetGuard(guard_config),
-            progress=SimpleProgressGuard(),
-            # B-055: result-based dedup (success loops); config from AgentSettings.
-            result_dedup=ResultDedupGuard(self._settings.result_dedup_guard),
-            # B-056: planning-text guard.
-            planning_guard=PlanningTextGuard(self._settings.planning_text_guard),
-            soft_deadline=SoftDeadline(
-                SoftDeadlineConfig(ratio=self._settings.soft_deadline_ratio),
-                max_time_ms=self._settings.max_wall_time_ms,
-            ),
-            mandate=mandate,
-            context=context,
-            base_tools_schema=list(tools_schema) if tools_schema is not None else None,
-            tools_schema=tools_schema,
-            task_run=task_run,
-            mem_key=mem_key,
-            last_actual_total_tokens=last_actual_total_tokens,
-        )
-        health.increment("requests")
-        health.increment("active_requests")
-        log_event(
-            "context_built",
-            state.stats.run_id,
-            history_count=len(history),
-            facts_count=facts_count,
-            recent_files_count=recent_files_count,
-            tools_available_count=len(state.tools_schema or []),
-            system_prompt_chars=len(state.context.system_prompt or ""),
-            message_count=state.context.message_count,
-        )
+        except BaseException:
+            self._finalize_turn(tokens)
+            raise
 
         try:
-            # Etap 3B: set the depth-mode contextvar FIRST, so the finally below
-            # resets it no matter what (even if state.context building raised). See
-            # the note above for why this was moved out of the pre-try range.
-            _depth_token = set_call_depth_mode(depth_mode) if depth_mode is not None else None
-            # B-063 S1 audit: bind the state.context-persist target (session_id, user_id)
-            # via contextvars so concurrent runs are isolated. Reset in finally.
-            _ctx_tokens = set_context_target(session_id, str(user.id))
-            # B-063 S4: populate capture-correlation contextvars so payload
-            # captures carry user_id + session_id + run_id (previously run_id
-            # was always null because set_run_id was never called).
-            _capture_tokens = set_capture_context(str(user.id), session_id)
-            _run_id_token = set_run_id(state.stats.run_id)
-            # DC-017 / B-098: bind per-user workspace so file tools do not share
-            # process cwd across users in host mode. Path-validated tools only;
-            # shell absolute paths still need container isolation (DC-016).
-            from corpclaw_lite.extensions.tools.builtin._path_utils import (
-                user_workspace_path,
-            )
-            from corpclaw_lite.paths import PROJECT_ROOT
-
-            _ws_base = self._workspace_base or (PROJECT_ROOT / "workspaces")
-            _user_ws = user_workspace_path(_ws_base, user)
-            _user_ws.mkdir(parents=True, exist_ok=True)
-            _ws_token = set_workspace_root(_user_ws)
-            # Persist the user message now that the state.context-target is bound (it
-            # reads the contextvar set just above). Deferred from the pre-try
-            # section so the contextvar is populated.
-            await self._persist_context_msg(role="user", content=message)
-            # D-056 PR2: state.prev_turn_tools feeds PhasePolicy's semantic phase
-            # (previous turn's tools). state.current_turn_tools is populated during
-            # tool execution and promoted at the top of each iteration.
-            # Defaults on LoopState are [] (gathering on first turn).
             while True:
                 state.budget.consume_iteration()
                 # B-066: check ALL state.budget limits at the top of every iteration so the
@@ -1244,7 +1012,7 @@ class AgentLoop:
                     msg = "I could not get a response from the language model (timed out)."
                     await self._save_turn(state.mem_key, msg, state.stats.tools_used)
                     state.stats.status = "timeout"
-                    state.stats.duration_ms = (time.monotonic() - t0) * 1000
+                    state.stats.duration_ms = (time.monotonic() - state.t0) * 1000
                     health.increment("llm_timeouts")
                     log_event(
                         "llm_call_finished",
@@ -1270,7 +1038,7 @@ class AgentLoop:
                     health.increment("errors")
                     state.stats.status = "error"
                     state.stats.error = str(e)
-                    state.stats.duration_ms = (time.monotonic() - t0) * 1000
+                    state.stats.duration_ms = (time.monotonic() - state.t0) * 1000
                     log_event(
                         "llm_call_finished",
                         state.stats.run_id,
@@ -1341,15 +1109,15 @@ class AgentLoop:
                     # retry instead of exiting with "Agent provided no response".
                     if (
                         not response.content.strip()
-                        and empty_response_retries < _EMPTY_RESPONSE_MAX_RETRIES
+                        and state.empty_response_retries < _EMPTY_RESPONSE_MAX_RETRIES
                     ):
-                        empty_response_retries += 1
+                        state.empty_response_retries += 1
                         state.context.add_user_message(_EMPTY_RESPONSE_PROMPT)
                         log_event(
                             "empty_response_retry",
                             state.stats.run_id,
                             iteration=state.stats.iterations,
-                            retries=empty_response_retries,
+                            retries=state.empty_response_retries,
                         )
                         continue
                     # Final answer — ALWAYS return, even if time state.budget exceeded.
@@ -1357,8 +1125,8 @@ class AgentLoop:
                     # entire LLM call and frustrates users who waited for a response.
                     final = response.content if response.content else "Agent provided no response."
                     if contains_xml_tool_call_markers(final):
-                        if not xml_repair_attempted:
-                            xml_repair_attempted = True
+                        if not state.xml_repair_attempted:
+                            state.xml_repair_attempted = True
                             state.context.add_user_message(
                                 build_xml_repair_prompt(
                                     "Raw XML tool-call markup was returned as assistant text "
@@ -1406,7 +1174,7 @@ class AgentLoop:
                     )
                     if self._memory and self._consolidator:
                         await self._consolidator.maybe_consolidate(self._memory, state.mem_key)
-                    state.stats.duration_ms = (time.monotonic() - t0) * 1000
+                    state.stats.duration_ms = (time.monotonic() - state.t0) * 1000
                     logger.debug(
                         "[user=%s] final_answer | len=%d | iterations=%d | duration_ms=%.0f",
                         user.id,
@@ -1507,8 +1275,8 @@ class AgentLoop:
                     loop_detected = state.progress.detect_loop_for_results(action_results)
                     if loop_detected:
                         _append_loop_recovery_instruction(state.context)
-                        loop_warning_count += 1
-                        if loop_warning_count >= 2:
+                        state.loop_warning_count += 1
+                        if state.loop_warning_count >= 2:
                             break
                         continue
                 else:
@@ -1563,7 +1331,7 @@ class AgentLoop:
                                 await self._consolidator.maybe_consolidate(
                                     self._memory, state.mem_key
                                 )
-                            state.stats.duration_ms = (time.monotonic() - t0) * 1000
+                            state.stats.duration_ms = (time.monotonic() - state.t0) * 1000
                             logger.debug(
                                 "[user=%s] terminal_tool=%s | returning result directly",
                                 user.id,
@@ -1603,8 +1371,8 @@ class AgentLoop:
                     loop_detected = state.progress.detect_loop_for_results(action_results)
                     if loop_detected:
                         _append_loop_recovery_instruction(state.context)
-                        loop_warning_count += 1
-                        if loop_warning_count >= 2:
+                        state.loop_warning_count += 1
+                        if state.loop_warning_count >= 2:
                             break
                         continue
 
@@ -1622,7 +1390,7 @@ class AgentLoop:
                     state.stats.status = "ok"
                     state.stats.error = None
                     await self._save_turn(state.mem_key, salvage, state.stats.tools_used)
-                    state.stats.duration_ms = (time.monotonic() - t0) * 1000
+                    state.stats.duration_ms = (time.monotonic() - state.t0) * 1000
                     log_event(
                         "request_finished",
                         state.stats.run_id,
@@ -1639,7 +1407,7 @@ class AgentLoop:
             await self._save_turn(state.mem_key, msg, state.stats.tools_used)
             state.stats.status = "budget"
             state.stats.error = str(e)
-            state.stats.duration_ms = (time.monotonic() - t0) * 1000
+            state.stats.duration_ms = (time.monotonic() - state.t0) * 1000
             logger.warning("[user=%s] budget exceeded: %s", user.id, e)
             log_event(
                 "request_finished",
@@ -1653,26 +1421,12 @@ class AgentLoop:
             )
             return msg, state.stats
         finally:
-            health.increment("active_requests", -1)
-            if _depth_token is not None:
-                reset_call_depth_mode(_depth_token)
-            # B-063 S1 audit: reset the state.context-persist target so it never
-            # outlives the run (and never leaks into a sibling task's run).
-            if _ctx_tokens is not None:
-                reset_context_target(_ctx_tokens)
-            # B-063 S4: reset capture-correlation contextvars so they never
-            # leak into a sibling task's payload captures.
-            if _capture_tokens is not None:
-                reset_capture_context(_capture_tokens)
-            if _run_id_token is not None:
-                reset_run_id(_run_id_token)
-            if _ws_token is not None:
-                reset_workspace_root(_ws_token)
+            self._finalize_turn(tokens)
 
         fallback = _LOOP_FALLBACK
         await self._save_turn(state.mem_key, fallback, state.stats.tools_used)
         state.stats.status = "loop"
-        state.stats.duration_ms = (time.monotonic() - t0) * 1000
+        state.stats.duration_ms = (time.monotonic() - state.t0) * 1000
         logger.warning(
             "[user=%s] loop detected after %d iterations",
             user.id,
@@ -1688,6 +1442,268 @@ class AgentLoop:
             final_answer_len=len(fallback),
         )
         return fallback, state.stats
+
+    async def _build_turn_context(
+        self,
+        *,
+        user: User,
+        message: str,
+        system_prompt: str | None,
+        approval_callback: Callable[[str, str], Awaitable[bool]] | None,
+        on_llm_stage: Callable[[str], None] | None,
+        tools_enabled: bool,
+        few_shots: list[dict[str, Any]] | None,
+        channel: str | None,
+        run_id: str | None,
+        depth_mode: DepthMode | None,
+        session_id: int | None,
+        tokens: TurnTokens,
+    ) -> tuple[
+        LoopState,
+        Provider,
+        Callable[[str, str], Awaitable[bool]] | None,
+        Callable[[str], None],
+    ]:
+        """B-077 prologue: history, prompt, LoopState, contextvars, user persist.
+
+        Populates ``tokens`` in place so ``_finalize_turn`` can reset even if a
+        later step fails. Pure move-and-name from the pre-B-077 ``run()`` setup.
+        """
+        stats = RunStats(run_id=run_id) if run_id is not None else RunStats()
+        t0 = time.monotonic()
+
+        # Etap 3 (Sprint 3A): resolve a depth-mode override provider for this run.
+        # Fast/Think map to a per-model SamplingProfile name; with_overrides
+        # rebuilds the default-route provider with that profile (thinking_mode +
+        # inference_overrides). The override is a RUN-SCOPE local — it never
+        # mutates self._provider, so concurrent runs on this shared loop are
+        # isolated. When depth_mode is None or resolution fails, the route's
+        # default provider is used unchanged.
+        effective_provider: Provider = self._provider
+        if depth_mode is not None and isinstance(self._provider, LLMRouter):
+            effective_provider = self._apply_depth_override(self._provider, depth_mode)
+
+        def emit_llm_status(stage: str) -> None:
+            if self._settings.llm_stream_status_updates and on_llm_stage is not None:
+                on_llm_stage(stage)
+
+        logger.debug(
+            "[user=%s] run() start | msg=%r",
+            user.id,
+            message[:120],
+        )
+        log_event(
+            "request_started",
+            stats.run_id,
+            user_id=user.id,
+            department=user.department,
+            channel=channel,
+            message_len=len(message),
+            message_preview=message,
+        )
+
+        # Per-call callback takes priority over the instance-level default
+        approval_cb = (
+            approval_callback if approval_callback is not None else self._approval_callback
+        )
+
+        mem_key = user.memory_key()
+
+        # Load history BEFORE building context so it precedes the current message
+        history: list[dict[str, Any]] = []
+        if self._memory:
+            try:
+                history = await self._memory.get_history(mem_key, limit=self._settings.max_history)
+            except StorageError:
+                logger.error("[user=%s] Failed to load history", user.id)
+
+        # B-063 S2: prefer the FULL LLM context (tool_calls/tool-role) from the
+        # per-chat store when a session_id is bound and the store has data. Falls
+        # back to the SQLiteMemory history above (role+content only) for old chats
+        # or non-web channels. The full-history path reconstructs tool_calls and
+        # tool-role messages that get_history/build_initial would drop.
+        full_history: list[dict[str, Any]] | None = None
+        if self._chat_context_store is not None and session_id is not None:
+            try:
+                full_history = await self._chat_context_store.list_context(session_id)
+                if not full_history:
+                    full_history = None
+            except Exception:
+                logger.warning("[session=%s] context-store load failed", session_id, exc_info=True)
+                full_history = None
+
+        # Prepend dynamic user context to the system prompt
+        base_prompt = system_prompt or self._default_system_prompt or ""
+
+        # Load user facts from memory (onboarding + manually stored via memory_store)
+        user_facts_block = ""
+        facts_count = 0
+        if self._memory:
+            facts: list[dict[str, str]] = []
+            try:
+                facts = await self._memory.recall_facts(
+                    mem_key, limit=self._settings.max_facts_recall
+                )
+            except StorageError:
+                logger.error("[user=%s] Failed to recall facts", user.id)
+            if facts:
+                facts_count = len(facts)
+                lines = [f"- {f['key']}: {f['value']}" for f in facts]
+                user_facts_block = "\n\n## Known Facts About This User\n" + "\n".join(lines)
+
+        # B-040: inject recently-touched files so the agent has cross-session
+        # memory of what the user worked on.
+        recent_files_block = ""
+        recent_files_count = 0
+        if self._file_change_dao is not None:
+            try:
+                recent_changes = await self._file_change_dao.list_recent_for_user(mem_key, limit=3)
+            except StorageError:
+                logger.error("[user=%s] Failed to load recent files", user.id)
+                recent_changes = []
+            if recent_changes:
+                recent_files_count = len(recent_changes)
+                lines = [f"- {c.file_path} ({c.tool_name})" for c in recent_changes]
+                recent_files_block = "\n\n## Recently Touched Files\n" + "\n".join(lines)
+
+        dynamic_prompt = (
+            f"Current User Context:\n"
+            f"- Name: {user.name}\n"
+            f"- Department: {user.department}\n"
+            f"{user_facts_block}{recent_files_block}\n\n"
+            f"{base_prompt}"
+        )
+
+        if full_history is not None:
+            # B-063 S2: full-context path — reconstructs tool_calls + tool-role.
+            context = ContextBuilder.build_from_full_history(
+                user,
+                message,
+                full_history,
+                system_prompt_override=dynamic_prompt,
+                few_shots=few_shots,
+            )
+        else:
+            context = ContextBuilder.build_initial(
+                user,
+                message,
+                history=history,
+                system_prompt_override=dynamic_prompt,
+                few_shots=few_shots,
+            )
+
+        if self._memory:
+            await self._save_memory(mem_key, "user", message)
+
+        # Budget is ALWAYS from settings. Department-specific iteration/tool-call
+        # limits were removed — they silently overrode settings.max_steps, causing
+        # "config change has no effect" bugs (the operator changes settings.yaml
+        # but the department budget wins). RBAC (tools, subagents, skills) remains
+        # department-scoped; only resource limits are now global.
+        guard_config = SimpleBudgetGuardConfig(
+            max_iterations=self._settings.max_steps,
+            max_tool_calls=self._settings.max_tool_calls,
+            max_time_ms=self._settings.max_wall_time_ms,
+        )
+        # B-047: workflow-finalize guard. Neutral when no terminal tool is configured
+        # (main agent, non-research subagents); active for research-agent.
+        mandate = TerminalToolMandate(
+            TerminalToolMandateConfig(
+                terminal_tool=self._terminal_tool or "",
+                required_before=tuple(self._required_before_terminal),
+            ),
+            max_time_ms=self._settings.max_wall_time_ms,
+            max_iterations=guard_config.max_iterations,
+        )
+        task_run = TaskRun(self._workspace_base)
+        await task_run.initialize(user, stats.run_id)
+        tools_schema: list[dict[str, Any]] | None = None
+        if tools_enabled:
+            if self._permission_checker:
+                tools_schema = self._registry.to_schemas_for_user(
+                    self._permission_checker,
+                    user,
+                    enforce_tool_allowlist=self._enforce_tool_permissions,
+                )
+            else:
+                tools_schema = self._registry.to_schemas()
+        # B-076/B-077: pack run-scoped mutable state into an explicit bag.
+        # base_tools_schema is the immutable source of truth for schema refilters.
+        state = LoopState(
+            stats=stats,
+            budget=SimpleBudgetGuard(guard_config),
+            progress=SimpleProgressGuard(),
+            # B-055: result-based dedup (success loops); config from AgentSettings.
+            result_dedup=ResultDedupGuard(self._settings.result_dedup_guard),
+            # B-056: planning-text guard.
+            planning_guard=PlanningTextGuard(self._settings.planning_text_guard),
+            soft_deadline=SoftDeadline(
+                SoftDeadlineConfig(ratio=self._settings.soft_deadline_ratio),
+                max_time_ms=self._settings.max_wall_time_ms,
+            ),
+            mandate=mandate,
+            context=context,
+            base_tools_schema=list(tools_schema) if tools_schema is not None else None,
+            tools_schema=tools_schema,
+            task_run=task_run,
+            mem_key=mem_key,
+            t0=t0,
+        )
+        health.increment("requests")
+        health.increment("active_requests")
+        tokens.active_request_counted = True
+        log_event(
+            "context_built",
+            state.stats.run_id,
+            history_count=len(history),
+            facts_count=facts_count,
+            recent_files_count=recent_files_count,
+            tools_available_count=len(state.tools_schema or []),
+            system_prompt_chars=len(state.context.system_prompt or ""),
+            message_count=state.context.message_count,
+        )
+
+        # Etap 3B: set the depth-mode contextvar FIRST, so the epilogue
+        # resets it no matter what. Tokens live on ``tokens`` (B-077).
+        tokens.depth = set_call_depth_mode(depth_mode) if depth_mode is not None else None
+        # B-063 S1 audit: bind the state.context-persist target (session_id, user_id)
+        # via contextvars so concurrent runs are isolated. Reset in epilogue.
+        tokens.context_target = set_context_target(session_id, str(user.id))
+        # B-063 S4: populate capture-correlation contextvars so payload
+        # captures carry user_id + session_id + run_id.
+        tokens.capture = set_capture_context(str(user.id), session_id)
+        tokens.run_id = set_run_id(state.stats.run_id)
+        # DC-017 / B-098: bind per-user workspace so file tools do not share
+        # process cwd across users in host mode. Path-validated tools only;
+        # shell absolute paths still need container isolation (DC-016).
+        from corpclaw_lite.extensions.tools.builtin._path_utils import (
+            user_workspace_path,
+        )
+        from corpclaw_lite.paths import PROJECT_ROOT
+
+        _ws_base = self._workspace_base or (PROJECT_ROOT / "workspaces")
+        _user_ws = user_workspace_path(_ws_base, user)
+        _user_ws.mkdir(parents=True, exist_ok=True)
+        tokens.workspace = set_workspace_root(_user_ws)
+        # Persist the user message now that the state.context-target is bound.
+        await self._persist_context_msg(role="user", content=message)
+
+        return state, effective_provider, approval_cb, emit_llm_status
+
+    def _finalize_turn(self, tokens: TurnTokens) -> None:
+        """B-077 epilogue: health counter + contextvar resets for one run."""
+        if tokens.active_request_counted:
+            health.increment("active_requests", -1)
+        if tokens.depth is not None:
+            reset_call_depth_mode(tokens.depth)
+        if tokens.context_target is not None:
+            reset_context_target(tokens.context_target)
+        if tokens.capture is not None:
+            reset_capture_context(tokens.capture)
+        if tokens.run_id is not None:
+            reset_run_id(tokens.run_id)
+        if tokens.workspace is not None:
+            reset_workspace_root(tokens.workspace)
 
     async def _save_memory(self, mem_key: str, role: str, content: str, **kwargs: Any) -> None:
         """Persist a message to memory, swallowing StorageError."""

@@ -6,6 +6,31 @@
 
 ## [Unreleased]
 
+## [0.2.5] — 2026-07-13
+
+**Patch** `0.2.4 → 0.2.5`. **Фаза 1 — Agent Stability — complete** (B-076 + B-107 +
+B-077 + audit hotfixes). Ready for roadmap **Фаза 2** (B-078 adaptations / B-079
+event-sink / memory unify B-102…106 / B-111).
+
+### Changed
+
+- **B-077 Prologue / Epilogue extraction (DC-001 Phase 2).** `AgentLoop.run()` is a
+  thin orchestrator: `_build_turn_context` packs history, dynamic prompt, guards,
+  `LoopState`, contextvars, and user-message persist; `_finalize_turn` resets
+  health + contextvars via `TurnTokens`. Run counters (`t0`, loop-warning /
+  empty-response / XML-repair) live on `LoopState`. Behavior-neutral pure
+  move-and-name — ReAct body unchanged.
+- Gate tests: office READING excludes mutating tools; prologue packs `LoopState`.
+
+### Handoff → Phase 2
+
+- **Invariants for B-078:** B-046 closing ×2 (top-of-iter + pre-LLM); B-047 mandate
+  before dedup; B-066 budget on retry paths; B-073 auto-finalize never re-raises.
+- **Schema compose order:** base → phase filter → mandate re-apply → closing →
+  soft-hint once (messages tail).
+- **Not in this release:** B-078/B-079, memory dual-write unify (B-102…106), prompt
+  Path A/B unify (B-111) — roadmap Фаза 2.
+
 ## [0.2.4] — 2026-07-13
 
 **Patch** `0.2.3 → 0.2.4`. **Фаза 1 — Agent Stability** (B-076 / B-107), плюс
