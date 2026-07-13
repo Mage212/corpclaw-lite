@@ -1,7 +1,7 @@
 # CorpClaw Lite — Архитектура проекта
 
 > Версия документа: 2026-07-13
-> Версия проекта: 0.2.4 — Phase 0/1 + tool-surface/mandate hotfixes
+> Версия проекта: 0.2.5 — Phase 1 complete (B-076 / B-107 / B-077)
 
 ---
 
@@ -178,7 +178,21 @@ results = await asyncio.gather(*[execute_one(tc) for tc in tool_calls])
 - Budget exceeded
 - Loop detected (2x warning)
 
-### Tools schema pipeline (B-107 / B-047 / B-046, v0.2.4)
+### AgentLoop structure (B-077 / DC-001 Phase 2, v0.2.5)
+
+```
+run()
+  → _build_turn_context  # prologue: history, prompt, LoopState, contextvars
+  → while ReAct          # adaptations stay as methods (_apply_*, cascade)
+  → except budget        # auto-finalize cascade when terminal tool pending
+  → finally _finalize_turn  # epilogue: health + contextvar reset (TurnTokens)
+```
+
+- `LoopState` / `TurnTokens` — `agent/loop_state.py` (B-076 + B-077).
+- Next (roadmap Фаза 2 / B-078): move `_apply_*` into `agent/adaptations/` with
+  isolated unit tests; B-079 event-sink. Do not start until 0.2.5 is green.
+
+### Tools schema pipeline (B-107 / B-047 / B-046, v0.2.4+)
 
 Перед каждым LLM-call schema собирается **с нуля из `base_tools_schema`** (immutable
 копия на старте run), затем сужается по слоям:

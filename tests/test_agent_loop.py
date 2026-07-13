@@ -7,6 +7,7 @@ import pytest
 
 from corpclaw_lite.agent.context import ContextBuilder
 from corpclaw_lite.agent.loop import AgentConfig, AgentLoop, RunStats
+from corpclaw_lite.agent.loop_state import TurnTokens
 from corpclaw_lite.config.settings import AgentSettings
 from corpclaw_lite.extensions.tools.registry import ToolRegistry
 from corpclaw_lite.llm.base import (
@@ -72,6 +73,45 @@ async def test_agent_loop_basic(test_user: User, empty_registry: ToolRegistry) -
     assert stats.iterations == 1
     assert stats.duration_ms >= 0
     assert stats.run_id
+
+
+@pytest.mark.asyncio
+async def test_build_turn_context_packs_loop_state(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """B-077 gate: prologue returns LoopState + tokens; epilogue is safe to call."""
+    provider = MockProvider(responses=[LLMResponse(content="ok")])
+    loop = AgentLoop(AgentConfig(provider, empty_registry, AgentSettings()))
+    tokens = TurnTokens()
+
+    state, effective_provider, _approval_cb, emit_llm_status = await loop._build_turn_context(
+        user=test_user,
+        message="Hello prologue",
+        system_prompt="You are a test agent.",
+        approval_callback=None,
+        on_llm_stage=None,
+        tools_enabled=True,
+        few_shots=None,
+        channel="test",
+        run_id="prologue-run",
+        depth_mode=None,
+        session_id=None,
+        tokens=tokens,
+    )
+
+    assert state.stats.run_id == "prologue-run"
+    assert state.mem_key == test_user.memory_key()
+    assert state.t0 > 0
+    assert state.loop_warning_count == 0
+    assert state.empty_response_retries == 0
+    assert state.xml_repair_attempted is False
+    assert state.base_tools_schema is not None or state.tools_schema is None
+    assert state.tools_schema == state.base_tools_schema
+    assert effective_provider is provider
+    assert callable(emit_llm_status)
+    assert tokens.active_request_counted is True
+
+    loop._finalize_turn(tokens)
 
 
 @pytest.mark.asyncio

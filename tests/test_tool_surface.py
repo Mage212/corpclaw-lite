@@ -116,6 +116,44 @@ def test_filter_reading_drops_write() -> None:
     assert "custom_mcp" in names
 
 
+def test_office_reading_schema_excludes_mutating() -> None:
+    """Phase 1 gate: READING has analyze tools, never write/exec (H2 lock-in)."""
+    base = _schema(
+        "read_file",
+        "search_files",
+        "list_files",
+        "table_query",
+        "pdf_reader",
+        "chart_generate",
+        "excel_workbook",
+        "write_file",
+        "edit_file",
+        "exec_script",
+        "normalize_excel",
+        "convert_format",
+    )
+    filtered = apply_phase_filter(base, ToolSurfacePhase.READING, profile="office", enabled=True)
+    assert filtered is not None
+    names = {schema_tool_name(e) for e in filtered}
+    for allowed in (
+        "read_file",
+        "search_files",
+        "table_query",
+        "pdf_reader",
+        "chart_generate",
+        "excel_workbook",
+    ):
+        assert allowed in names, allowed
+    for blocked in (
+        "write_file",
+        "edit_file",
+        "exec_script",
+        "normalize_excel",
+        "convert_format",
+    ):
+        assert blocked not in names, blocked
+
+
 def test_office_analyze_query_defaults_to_reading_with_analyze_tools() -> None:
     phase = detect_tool_surface_phase(
         user_message="проанализируй sales.csv и построй график",
