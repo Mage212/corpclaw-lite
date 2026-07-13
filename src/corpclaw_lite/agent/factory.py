@@ -14,7 +14,9 @@ Container isolation (container.enabled=true, default):
 
 Dev mode (container.enabled=false):
     - All tools run directly on the host (no isolation)
-    - Useful for local development without Docker
+    - Requires CORPCLAW_ALLOW_HOST_TOOLS=1 (DC-016 / B-097)
+    - Multi-user surfaces (telegram/web) additionally require
+      CORPCLAW_ENFORCE_PROD_CONTAINER=false
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ from typing import TYPE_CHECKING, Any
 from corpclaw_lite.agent.loop import AgentConfig, AgentLoop
 from corpclaw_lite.exceptions import StartupConfigurationError
 from corpclaw_lite.paths import PROJECT_ROOT
+from corpclaw_lite.security.host_tools_gate import HostToolsSurface, assert_host_tools_allowed
 from corpclaw_lite.users.manager import UserManager
 
 __all__ = [
@@ -476,6 +479,7 @@ def build_agent_stack(
     settings: Settings | None = None,
     *,
     router_override: Provider | None = None,
+    host_tools_surface: HostToolsSurface = "dev",
 ) -> AgentStack:
     """Build and return the complete agent stack from config + env.
 
@@ -487,6 +491,9 @@ def build_agent_stack(
             from settings via ``_build_router``. Used by the eval harness and
             other callers that need a programmatically overridden router
             (D-056 PR3) without mutating YAML.
+        host_tools_surface: DC-016 gate surface. ``"dev"`` enforces Level 1
+            (CORPCLAW_ALLOW_HOST_TOOLS) when containers are off; ``"multiuser"``
+            also enforces Level 2 for telegram/web.
     """
     from corpclaw_lite.config.loader import load_settings
     from corpclaw_lite.config.providers import ProviderRegistry
@@ -525,7 +532,7 @@ def build_agent_stack(
                 "but Docker daemon is not available.",
                 hint=(
                     "Start Docker, or set container.enabled=false in config/settings.yaml "
-                    "for local development without isolation."
+                    "with CORPCLAW_ALLOW_HOST_TOOLS=1 for local development without isolation."
                 ),
             )
         from corpclaw_lite.security.ipc_auth import IPCAuth
@@ -557,11 +564,21 @@ def build_agent_stack(
             workspace_base,
         )
     else:
+        # DC-016 / B-097: refuse silent host-tools unless explicitly opted in.
+        assert_host_tools_allowed(
+            container_enabled=False,
+            surface=host_tools_surface,
+        )
         container_ipc = None
+        # Still set workspace_base so DC-017 contextvar can isolate per-user paths.
+        workspace_base = (PROJECT_ROOT / container_cfg.workspace_base).resolve()
         _register_local_tools(registry)
         logger.warning(
             "Container isolation DISABLED (container.enabled=false) — "
-            "file/script tools run on host. Dev mode only!"
+            "file/script tools run on host. Dev mode only! "
+            "(surface=%s, workspace_base=%s)",
+            host_tools_surface,
+            workspace_base,
         )
 
     # Build a separate registry with ALL tools for subagent filtering.

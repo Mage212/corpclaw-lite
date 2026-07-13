@@ -55,7 +55,13 @@ class ExecScriptTool(Tool):
             timeout_val = DEFAULT_TIMEOUT
         timeout_val = max(1, min(timeout_val, MAX_TIMEOUT))
 
-        workspace = Path.cwd().resolve()
+        # DC-017: prefer per-run workspace contextvar over process cwd so
+        # multi-user host-mode does not share a single working directory.
+        # Absolute-path shell still bypasses path validation — full isolation
+        # requires container mode (DC-016).
+        from corpclaw_lite.agent.workspace_context import get_workspace_root
+
+        workspace = (get_workspace_root() or Path.cwd()).resolve()
 
         try:
             proc_kwargs: dict[str, Any] = {

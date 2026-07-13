@@ -157,11 +157,12 @@ data/
 | **Model + Sampling Profiles** | Ортогональные `ModelProfile` (свойства модели) + `SamplingProfile` (свойства задачи/фазы) с per-call `RequestOptions` override (D-056) |
 | **PhasePolicy** | Per-фазное управление thinking — research gathering off, aggregation on; closing mode off |
 | **Workflow-finalize Guard** | Каскад nudge → restrict → auto-finalize — research-субагенты всегда возвращают отчёт, работа не теряется при исчерпании бюджета |
-| **Raw LLM Capture** | Опциональное логирование сырых request/response в `logs/llm_payloads.jsonl` с field-level allowlist + scrubbing секретов — для диагностики и будущего сбора датасета для дообучения |
+| **Raw LLM Capture** | Opt-in логирование сырых request/response в `logs/llm_payloads.jsonl` (по умолчанию **выкл.**, DC-037) с field-level allowlist + scrubbing секретов — для диагностики и датасета дообучения |
 | **XML Tool Calling** | Fallback-парсер для локальных LLM без нативного function calling |
 | **Сжатие контекста** | 3-уровневое сжатие для ограниченных контекстных окон |
 | **Smart Approvals** | LLM-оценка риска опасных операций |
-| **Docker-песочница** | Пользовательские контейнеры с лимитами ресурсов и запретом сети по умолчанию |
+| **Docker-песочница** | Пользовательские контейнеры с лимитами ресурсов и deny-all сетью; host-tools только с явным env opt-in (DC-016) |
+| **Workspace isolation** | Per-user `workspaces/user_<id>/` через contextvar для path-validated тулзов даже без контейнера (DC-017) |
 | **ToolGuard** | 31 YAML-правило безопасности с уровнями CRITICAL/HIGH/MEDIUM/INFO |
 | **Субагенты** | Изолированные ReAct-циклы со специализированными инструментами (экономия 60-80% контекста) |
 | **Скиллы** | Markdown-инструкции с TF-IDF семантическим матчем + горячая перезагрузка |
@@ -264,7 +265,10 @@ plugins/my_plugin/
 | `document-agent` | read/write/edit_file, normalize_excel, list_files | Создание и редактирование документов |
 | `execution-agent` | exec_script, write_file, read_file | Выполнение скриптов и команд |
 | `research-agent` | research_search, research_fetch_source, research_read_source, research_store_fact, research_list_facts, research_finalize, web_fetch, web_search | Веб-исследование, проверка источников и финализация ответа |
-| `data-agent` | table_query, chart_generate, convert_format, pdf_reader, diff_text, excel_workbook, read/write_file, list_files, search_files, send_file | Анализ данных, SQL, графики, Excel и конвертация |
+| `data-agent` | table_query, chart_generate, convert_format, pdf_reader, diff_text, excel_workbook, read/write_file, list_files, search_files | Анализ данных, SQL, графики, Excel и конвертация |
+
+> `send_file` доступен только основному агенту: субагент создаёт файл, main
+> доставляет его пользователю (two-step create→send, см. `BEHAVIOR.md`).
 
 ### MCP-серверы (`config/mcp_servers.yaml`)
 
@@ -353,6 +357,21 @@ npm run dev
 > Если `container.enabled=true`, для веб-канала также нужен `CORPCLAW_IPC_SECRET`, как и для
 > Telegram. Файловые инструменты агента выполняются в контейнере, а операции веб-диспетчера
 > дополнительно проверяют границы личного workspace на стороне хоста.
+
+### Изоляция контейнера (defaults и dev)
+
+| Режим | Конфиг | Env |
+|-------|--------|-----|
+| **Прод (по умолчанию)** | `container.enabled: true` | Docker + `CORPCLAW_IPC_SECRET` |
+| **Dev без Docker** | `container.enabled: false` | `CORPCLAW_ALLOW_HOST_TOOLS=1` |
+| **Telegram/Web без Docker** | `container.enabled: false` | `CORPCLAW_ALLOW_HOST_TOOLS=1` **и** `CORPCLAW_ENFORCE_PROD_CONTAINER=false` |
+
+Без opt-in старт падает с `StartupConfigurationError` (DC-016). Host-tools не для multi-user прода.
+
+**Closed-contour defaults (v0.2.3):**
+- `logging.capture_enabled: false` — захват сырых LLM-пейлоадов только opt-in.
+- Департамент `default` = **office-without-web** (офисные субагенты, без web/research).
+- File-тулзы резолвят пути в `workspaces/user_<id>/` даже при выключенных контейнерах (DC-017).
 
 ---
 

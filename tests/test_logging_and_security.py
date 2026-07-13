@@ -98,8 +98,8 @@ class TestCredentialScrubber:
         from corpclaw_lite.security.credential_scrubber import CredentialScrubber
 
         scrubber = CredentialScrubber()
-        # ghp_ followed by exactly 36 chars
-        pat = "ghp_" + "B" * 36
+        # DC-020: ghp_ with 20+ alnum chars (synced with tool_guard_rules)
+        pat = "ghp_" + "B" * 24
         record = self._make_record(f"Token: {pat}")
         scrubber.filter(record)
         assert pat not in record.getMessage()
