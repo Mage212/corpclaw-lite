@@ -246,8 +246,6 @@ class AgentSettings(BaseModel):
     max_wall_time_ms: int = 300000
     soft_deadline_ratio: float = 0.85
     max_history: int = 20
-    consolidation_threshold: int = 30
-    consolidation_enabled: bool = True
     approval_mode: Literal["manual", "smart", "off"] = "manual"
     compression: CompressionSettings = CompressionSettings()
     llm_timeout_seconds: int = 120

@@ -200,11 +200,11 @@ class AgentRequestService:
     async def compress_user_context(
         self, user: User, session_id: int | None = None
     ) -> tuple[bool, str]:
-        """On-demand compression of the active chat's context.
+        """On-demand compression of a chat's full LLM context (B-105).
 
-        Thin wrapper over ``AgentLoop.compress_now``; the caller (orchestrator)
-        holds the single-in-flight lock so this never races an active run.
-        ``session_id`` threads the per-chat context-store sync (B-063 S2-audit).
+        Thin wrapper over ``AgentLoop.compress_now``; requires ``session_id`` and
+        a configured ChatContextStore. The caller (orchestrator) holds the
+        single-in-flight lock so this never races an active run.
         Returns ``(ok, message)``.
         """
         # B-067: verify ownership at the service layer (not just in the

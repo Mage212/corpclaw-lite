@@ -56,7 +56,6 @@ if TYPE_CHECKING:
     from corpclaw_lite.extensions.subagents.registry import SubagentRegistry
     from corpclaw_lite.extensions.tools.registry import ToolRegistry
     from corpclaw_lite.llm.base import Provider
-    from corpclaw_lite.memory.consolidation import MemoryConsolidator
     from corpclaw_lite.memory.file_changes import FileChangeDAO
     from corpclaw_lite.memory.sqlite import SQLiteMemory
     from corpclaw_lite.security.tool_guard import ToolGuard
@@ -344,11 +343,14 @@ def _build_memory_stack(
     provider: Provider,
     registry: ToolRegistry,
     full_tool_registry: ToolRegistry | None = None,
-) -> tuple[SQLiteMemory, MemoryConsolidator | None, ContextCompressor | None]:
-    """Build memory, consolidation, compression."""
+) -> tuple[SQLiteMemory, ContextCompressor | None]:
+    """Build memory (facts + tools) and optional context compressor.
+
+    B-105: ``MemoryConsolidator`` removed — mid-session transcript compression
+    is solely ``ContextCompressor`` + ``ChatContextStore`` (``_compress_chat``).
+    """
     from corpclaw_lite.agent.compressor import ContextCompressor
     from corpclaw_lite.extensions.tools.builtin.memory import MemoryRecallTool, MemoryStoreTool
-    from corpclaw_lite.memory.consolidation import MemoryConsolidator
     from corpclaw_lite.memory.sqlite import SQLiteMemory
 
     memory = SQLiteMemory()
@@ -362,16 +364,6 @@ def _build_memory_stack(
         full_tool_registry.register(store_tool)
         full_tool_registry.register(recall_tool)
 
-    consolidator = None
-    if agent_settings.consolidation_enabled:
-        consolidator = MemoryConsolidator(
-            provider=provider,
-            threshold=agent_settings.consolidation_threshold,
-        )
-        logger.info(
-            "Memory consolidation enabled (threshold=%d)", agent_settings.consolidation_threshold
-        )
-
     compressor = None
     if agent_settings.compression.enabled:
         compressor = ContextCompressor(provider, agent_settings.compression)
@@ -379,7 +371,7 @@ def _build_memory_stack(
             "Context compression enabled (threshold_ratio=%.2f)",
             agent_settings.compression.threshold_ratio,
         )
-    return memory, consolidator, compressor
+    return memory, compressor
 
 
 # B-040: office tools wrapped with file-change tracking.
@@ -620,7 +612,7 @@ def build_agent_stack(
         skill_registry=skill_registry,
         full_tool_registry=full_tool_reg,
     )
-    memory, consolidator, compressor = _build_memory_stack(
+    memory, compressor = _build_memory_stack(
         agent_settings, provider, registry, full_tool_registry=full_tool_reg
     )
     file_change_dao, snapshot_store, file_state = _wrap_office_tools_with_file_tracking(
@@ -685,7 +677,6 @@ def build_agent_stack(
             memory=memory,
             tool_guard=guard,
             permission_checker=permission_checker,
-            consolidator=consolidator,
             compressor=compressor,
             default_system_prompt=system_prompt,
             workspace_base=workspace_base,
