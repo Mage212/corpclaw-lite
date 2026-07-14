@@ -919,8 +919,8 @@ user-message; time-range grouping (Сегодня / Вчера / Предыду�
 Think=thinking-on) или force `deep_research` через contextvar (Research). `AgentLoop.run(depth_mode)`
 резолвит профиль по режиму.
 
-**Compress-any-chat (B-063):** WS compress handler с ownership-check (`get_session(user.memory_key(),
-session_id)` — защита от IDOR) → `compress_now(session_id)` → `_compress_from_context_store`.
+**Compress-any-chat (B-063 / B-105):** WS compress handler с ownership-check
+(`get_session` — IDOR) → `compress_now(session_id)` → `_compress_chat` (store-first).
 
 **Frontend:** React/Vite отдельной production-сборкой (`frontend/web/dist`); Vite dev server
 проксирует `/api` и `/ws` на backend `:8090`. Локальные аккаунты с паролем и HttpOnly session cookie;
