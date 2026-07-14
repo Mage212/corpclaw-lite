@@ -415,6 +415,19 @@ class AgentLoop:
                     parts.append(tone_text)
         return "\n\n".join(parts)
 
+    def _base_system_prompt_text(self) -> str:
+        """SOUL/COMPANY/BEHAVIOR base — live via bootstrap when wired (mtime/overlay).
+
+        Prefers live ``BootstrapLoader.get_system_prompt()`` (hot-reload +
+        calibrated overrides). Falls back to the factory snapshot when bootstrap
+        is missing, empty, or not wired (subagents / sparse tests).
+        """
+        if self._bootstrap is not None:
+            live = self._bootstrap.get_system_prompt() or ""
+            if live:
+                return live
+        return self._default_system_prompt or ""
+
     async def assemble_system_prompt(self, user: User, *, skill_block: str = "") -> str | None:
         """B-111: static system prompt for preview / callers (no per-turn facts/files).
 
@@ -423,8 +436,9 @@ class AgentLoop:
         Context`` block inside ``run()`` — not duplicated here.
         """
         parts: list[str] = []
-        if self._default_system_prompt:
-            parts.append(self._default_system_prompt)
+        base = self._base_system_prompt_text()
+        if base:
+            parts.append(base)
         user_layers = await self._assemble_user_layers(user)
         if user_layers:
             parts.append(user_layers)
@@ -1197,9 +1211,7 @@ class AgentLoop:
                         final = _LOOP_FALLBACK
                         state.stats.status = "loop"
                         state.stats.error = "model_echoed_loop_guard"
-                    # _save_turn writes to both SQLiteMemory (skipped if no memory)
-                    # and the per-chat state.context store (B-063 S1). Called regardless
-                    # of self._memory so state.context-store persistence always runs.
+                    # B-103: _save_turn → ChatContextStore only (no SQLiteMemory transcript).
                     await self._save_turn(
                         state.mem_key,
                         final,
@@ -1557,13 +1569,14 @@ class AgentLoop:
                 full_history = []
 
         # B-111: assemble base prompt. Main agent (bootstrap/user_manager wired)
-        # is self-sufficient: default SOUL + user layers + caller extras (skills).
+        # is self-sufficient: live SOUL + user layers + caller extras (skills).
         # Subagents leave bootstrap/user_manager None and pass a full system_prompt.
         assemble_user = self._bootstrap is not None or self._user_manager is not None
         if assemble_user:
             base_parts: list[str] = []
-            if self._default_system_prompt:
-                base_parts.append(self._default_system_prompt)
+            base = self._base_system_prompt_text()
+            if base:
+                base_parts.append(base)
             user_layers = await self._assemble_user_layers(user)
             if user_layers:
                 base_parts.append(user_layers)

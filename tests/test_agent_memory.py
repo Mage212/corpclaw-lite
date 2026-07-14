@@ -147,3 +147,43 @@ async def test_facts_still_use_sqlite_memory(tmp_path: Path) -> None:
     assert any(f["key"] == "role" and f["value"] == "engineer" for f in facts)
     assert not hasattr(mem, "add_message")
     assert not hasattr(mem, "get_history")
+
+
+@pytest.mark.asyncio
+async def test_base_system_prompt_reads_bootstrap_live(tmp_path: Path) -> None:
+    """B-111 audit: SOUL base comes from bootstrap each call (mtime/overlay), not
+    a factory-frozen default_system_prompt snapshot."""
+    from unittest.mock import AsyncMock
+
+    from corpclaw_lite.config.bootstrap import BootstrapLoader
+    from corpclaw_lite.extensions.tools.registry import ToolRegistry
+    from corpclaw_lite.llm.base import LLMResponse, Provider
+
+    bootstrap_dir = tmp_path / "bootstrap"
+    bootstrap_dir.mkdir()
+    soul = bootstrap_dir / "SOUL.md"
+    soul.write_text("SOUL v1", encoding="utf-8")
+    bootstrap = BootstrapLoader(bootstrap_dir)
+
+    provider = AsyncMock(spec=Provider)
+    provider.chat.return_value = LLMResponse(content="ok", tool_calls=[])
+    loop = AgentLoop(
+        AgentConfig(
+            provider=provider,
+            registry=ToolRegistry(),
+            settings=AgentSettings(max_steps=2, max_tool_calls=2, max_wall_time_ms=5000),
+            default_system_prompt="STALE SNAPSHOT",
+            bootstrap=bootstrap,
+        )
+    )
+
+    user = User(id=1, name="U", department="engineering")
+    # Live text, not the frozen snapshot.
+    assert loop._base_system_prompt_text() == "SOUL v1"
+    preview = await loop.assemble_system_prompt(user)
+    assert preview is not None
+    assert "SOUL v1" in preview
+    assert "STALE SNAPSHOT" not in preview
+
+    soul.write_text("SOUL v2", encoding="utf-8")
+    assert loop._base_system_prompt_text() == "SOUL v2"

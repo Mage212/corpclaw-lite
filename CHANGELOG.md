@@ -6,6 +6,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **B-111 audit:** main-agent SOUL base is re-read via `BootstrapLoader.get_system_prompt()`
+  each turn (mtime/overlay/calibration), not frozen from factory `default_system_prompt`.
+
 ## [0.2.7] — 2026-07-14
 
 **Patch** `0.2.6 → 0.2.7`. **Sprint 2B complete** — memory/prompt unify
