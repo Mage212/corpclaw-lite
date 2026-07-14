@@ -104,7 +104,6 @@ if TYPE_CHECKING:
     from corpclaw_lite.config.settings import DepthModeSettings
     from corpclaw_lite.departments.permissions import PermissionChecker
     from corpclaw_lite.llm.presets import PresetRegistry
-    from corpclaw_lite.memory.consolidation import MemoryConsolidator
     from corpclaw_lite.memory.file_changes import FileChangeDAO
     from corpclaw_lite.security.tool_guard import ToolGuard
 
@@ -276,7 +275,6 @@ class AgentConfig:
     tool_guard: ToolGuard | None = None
     memory: SQLiteMemory | None = None
     approval_callback: Callable[[str, str], Awaitable[bool]] | None = None
-    consolidator: MemoryConsolidator | None = None
     compressor: ContextCompressor | None = None
     default_system_prompt: str | None = None
     workspace_base: Path | None = None
@@ -321,7 +319,6 @@ class AgentLoop:
         self._tool_guard = config.tool_guard
         self._memory = config.memory
         self._approval_callback = config.approval_callback
-        self._consolidator = config.consolidator
         self._compressor = config.compressor
         self._default_system_prompt = config.default_system_prompt
         self._workspace_base = config.workspace_base
@@ -381,15 +378,11 @@ class AgentLoop:
         return self._compressor
 
     async def compress_now(self, user: User, session_id: int | None = None) -> tuple[bool, str]:
-        """On-demand compression of a chat's LLM context (B-063 S3).
+        """On-demand compression of a chat's LLM context (B-105 / B-063 S3).
 
-        When ``session_id`` is provided AND a chat-context-store is configured,
-        compresses the FULL LLM context (tool_calls + reasoning) from the
-        per-chat store — works for ANY chat, not just the active one.
-
-        When ``session_id`` is None (telegram/CLI/legacy, or no store),
-        compresses the active chat's in-memory history (role+content only) and
-        writes back to SQLiteMemory.
+        Requires ``session_id`` and a configured ``chat_context_store``. Compresses
+        the full LLM schema (tool_calls + tool-role + reasoning) and writes back
+        via ``replace_context``. SQLiteMemory.messages is not used (D-078).
 
         The caller holds the single-in-flight lock so this never races a run().
 
@@ -397,19 +390,16 @@ class AgentLoop:
         """
         if self._compressor is None:
             return False, "Компрессия контекста недоступна."
+        if session_id is None or self._chat_context_store is None:
+            return False, "Компрессия доступна только для сессии с ChatContextStore."
+        return await self._compress_chat(user, session_id)
 
-        # B-063 S3: prefer the full-context path from the per-chat store.
-        if session_id is not None and self._chat_context_store is not None:
-            return await self._compress_from_context_store(user, session_id)
-        return await self._compress_from_memory(user)
-
-    async def _compress_from_context_store(self, user: User, session_id: int) -> tuple[bool, str]:
-        """Compress a chat's full LLM context from the per-chat store (S3).
+    async def _compress_chat(self, user: User, session_id: int) -> tuple[bool, str]:
+        """Sole compress path: full LLM context from ChatContextStore (B-105).
 
         Loads the full message schema (tool_calls/tool-role/reasoning), compresses,
-        and writes back to the store via ``replace_context``. Does NOT touch
-        SQLiteMemory — the store is the source of truth for restored chats, and
-        the chat may not be the active one (its memory shadow is irrelevant).
+        writes back via ``replace_context``, and invalidates the user KV-cache so
+        the next turn does not reuse a stale prefix.
         """
         store = self._chat_context_store
         compressor = self._compressor
@@ -440,6 +430,12 @@ class AgentLoop:
             logger.warning("[session=%s] compress: context-store write-back failed", session_id)
             return False, "Не удалось сохранить сжатый контекст."
 
+        if isinstance(self._provider, LLMRouter):
+            try:
+                await self._provider.mark_user_cache_reset(user.memory_key())
+            except Exception:
+                logger.debug("[user=%s] compress: cache reset skipped", user.id)
+
         logger.info(
             "[user=%s session=%s] compress: %d → %d messages (context-store)",
             user.id,
@@ -448,61 +444,6 @@ class AgentLoop:
             len(compressed),
         )
         return True, f"Контекст сжат: {len(messages)} → {len(compressed)} сообщений."
-
-    async def _compress_from_memory(self, user: User) -> tuple[bool, str]:
-        """Compress the active chat's in-memory history (legacy/telegram path).
-
-        Loads from SQLiteMemory (role+content only), compresses, writes back to
-        memory (clear + re-add), and invalidates the KV-cache.
-        """
-        if self._memory is None:
-            return False, "Память недоступна."
-        compressor = self._compressor
-        if compressor is None:
-            return False, "Компрессия контекста недоступна."
-        mem_key = user.memory_key()
-        try:
-            history = await self._memory.get_history(mem_key, limit=self._settings.max_history)
-        except StorageError:
-            logger.error("[user=%s] compress: failed to load history", user.id)
-            return False, "Не удалось загрузить историю чата."
-        if len(history) < 5:
-            return False, "Слишком мало сообщений для сжатия."
-
-        try:
-            compressed = await compressor.compress(history, mem_key=mem_key)
-        except Exception:
-            logger.exception("[user=%s] compress: compression failed", user.id)
-            return False, "Ошибка при сжатии контекста."
-
-        if len(compressed) >= len(history):
-            return True, "Контекст уже достаточно компактный — сжатие не требуется."
-
-        try:
-            await self._memory.clear(mem_key)
-            for msg in compressed:
-                role = str(msg.get("role", "user"))
-                content = msg.get("content", "")
-                if isinstance(content, list):
-                    content = json.dumps(content, ensure_ascii=False)
-                await self._memory.add_message(mem_key, role, str(content))
-        except StorageError:
-            logger.error("[user=%s] compress: failed to persist", user.id)
-            return False, "Не удалось сохранить сжатый контекст."
-
-        if isinstance(self._provider, LLMRouter):
-            try:
-                await self._provider.mark_user_cache_reset(mem_key)
-            except Exception:
-                logger.debug("[user=%s] compress: cache reset skipped", user.id)
-
-        logger.info(
-            "[user=%s] compress: %d → %d messages (memory)",
-            user.id,
-            len(history),
-            len(compressed),
-        )
-        return True, f"Контекст сжат: {len(history)} → {len(compressed)} сообщений."
 
     async def _call_llm_provider(
         self,
@@ -1210,8 +1151,6 @@ class AgentLoop:
                         state.stats.tools_used,
                         response.reasoning,
                     )
-                    if self._memory and self._consolidator:
-                        await self._consolidator.maybe_consolidate(self._memory, state.mem_key)
                     state.stats.duration_ms = (time.monotonic() - state.t0) * 1000
                     logger.debug(
                         "[user=%s] final_answer | len=%d | iterations=%d | duration_ms=%.0f",
@@ -1356,10 +1295,6 @@ class AgentLoop:
 
                         if is_terminal:
                             await self._save_turn(state.mem_key, result, state.stats.tools_used)
-                            if self._memory and self._consolidator:
-                                await self._consolidator.maybe_consolidate(
-                                    self._memory, state.mem_key
-                                )
                             state.stats.duration_ms = (time.monotonic() - state.t0) * 1000
                             logger.debug(
                                 "[user=%s] terminal_tool=%s | returning result directly",

@@ -183,14 +183,14 @@ def test_compressor_enabled_by_default() -> None:
     assert stack.loop._compressor is not None
 
 
-def test_consolidator_enabled_by_default() -> None:
-    """MemoryConsolidator should be wired when consolidation_enabled=True (default)."""
+def test_consolidator_removed_after_b105() -> None:
+    """B-105: MemoryConsolidator is gone; AgentLoop has no consolidator field."""
     from corpclaw_lite.agent.factory import build_agent_stack
 
     with patch.dict(os.environ, _PROVIDER_ENV, clear=False):
         stack = build_agent_stack()
 
-    assert stack.loop._consolidator is not None
+    assert not hasattr(stack.loop, "_consolidator")
 
 
 def test_tool_guard_loaded() -> None:

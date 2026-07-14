@@ -25,6 +25,16 @@ Version stays **0.2.6** until Sprint 2B completes (single patch **0.2.7** on las
 - `restore_user_context` no longer shadows into memory (ownership + presence only).
 - Telegram image turns persist to context store (not memory messages).
 
+#### 2B.3
+
+- **B-105 compress unify.** Sole on-demand path: `_compress_chat` via
+  `ChatContextStore` (requires `session_id`). Removed `_compress_from_memory`
+  and entire `MemoryConsolidator` (`memory/consolidation.py`).
+- Dropped `AgentConfig.consolidator`, `consolidation_enabled` /
+  `consolidation_threshold` settings, and post-turn `maybe_consolidate` hooks.
+- Mid-run auto-compress still uses in-memory `ContextCompressor` on the active
+  turn context; on-demand compress is store-only (full tool trajectory).
+
 ## [0.2.6] — 2026-07-14
 
 **Patch** `0.2.5 → 0.2.6`. **Sprint 2A complete** — Loop refactor (B-078 adaptations +
