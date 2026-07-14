@@ -72,6 +72,7 @@ class TelegramChannel(Channel):
         onboarding_engine: Any | None = None,
         image_handler: Callable[..., Any] | None = None,
         cache_reset_callback: Callable[[str], Awaitable[None]] | None = None,
+        session_reset_callback: Callable[[User], Awaitable[None]] | None = None,
         setup_handler: Callable[[int], Awaitable[str]] | None = None,
         access_checker: Callable[[int, str], Awaitable[bool]] | None = None,
         user_resolver: Callable[[int], Awaitable[User | None]] | None = None,
@@ -91,6 +92,8 @@ class TelegramChannel(Channel):
                            so the raw vision-model response reaches the user unmodified.
             cache_reset_callback: Optional async callback invoked by /new after
                                   memory is cleared, so LLM cache state can be invalidated.
+            session_reset_callback: Optional async callback (B-102) to end the Telegram
+                                  virtual chat session after /new (does not touch web).
             setup_handler: Optional async callback invoked by /setup under orchestrator locks.
             access_checker: Optional async callback used before commands, uploads and callbacks.
             tg_settings: Telegram configuration (fallback IPs, timeouts, retry limits).
@@ -104,6 +107,7 @@ class TelegramChannel(Channel):
         self._memory = memory
         self._onboarding_engine = onboarding_engine
         self._cache_reset_callback = cache_reset_callback
+        self._session_reset_callback = session_reset_callback
         self._setup_handler = setup_handler
         self._access_checker = access_checker
         self._user_resolver = user_resolver
@@ -595,6 +599,8 @@ class TelegramChannel(Channel):
         user = await self._resolve_user(tid)
         if self._memory:
             await self._memory.clear(user.memory_key())
+        if self._session_reset_callback is not None:
+            await self._session_reset_callback(user)
         if self._cache_reset_callback is not None:
             await self._cache_reset_callback(user.memory_key())
         await update.effective_chat.send_message("🔄 Сессия сброшена. Можете начать заново.")

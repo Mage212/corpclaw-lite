@@ -6,6 +6,18 @@
 
 ## [Unreleased]
 
+### Sprint 2B — Memory / prompt unify — in progress
+
+Version stays **0.2.6** until Sprint 2B completes (single patch **0.2.7** on last PR).
+
+#### 2B.1
+
+- **B-102 Telegram virtual-session.** `WebChatStore` sessions are
+  **channel-scoped** (`channel=web|telegram`); unique open session is
+  `(user_id, channel)`. Telegram orchestrator passes `session_id` into
+  `AgentLoop.run`; `/new` resets only the Telegram virtual session (not web).
+- Dual-write to `SQLiteMemory.messages` still present until **2B.2**.
+
 ## [0.2.6] — 2026-07-14
 
 **Patch** `0.2.5 → 0.2.6`. **Sprint 2A complete** — Loop refactor (B-078 adaptations +
