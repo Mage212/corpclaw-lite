@@ -1,7 +1,7 @@
 # CorpClaw Lite — Архитектура проекта
 
 > Версия документа: 2026-07-13
-> Версия проекта: 0.2.6 — Phase 2A complete (adaptations B-078 + EventSink B-079)
+> Версия проекта: 0.2.6 — Phase 2A complete; Sprint 2B.1 channel-scoped sessions
 
 ---
 

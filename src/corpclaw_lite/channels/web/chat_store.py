@@ -13,6 +13,8 @@ from corpclaw_lite.utils.async_helpers import run_in_thread
 from corpclaw_lite.utils.db import db_connect
 
 __all__ = [
+    "CHANNEL_TELEGRAM",
+    "CHANNEL_WEB",
     "ChatSessionSummary",
     "WebChatFile",
     "WebChatMessage",
@@ -25,6 +27,13 @@ logger = logging.getLogger(__name__)
 _MAX_PERSISTED_CONTENT_CHARS = 200_000
 _DEFAULT_HISTORY_LIMIT = 100
 _DEFAULT_ACTIVE_MAX_MESSAGES = 2000
+
+# B-102: channel-scoped virtual sessions share web_chat_sessions without
+# fighting the web sidebar's one-open-session model. Unique open session is
+# per (user_id, channel), not per user alone.
+CHANNEL_WEB = "web"
+CHANNEL_TELEGRAM = "telegram"
+_KNOWN_CHANNELS = frozenset({CHANNEL_WEB, CHANNEL_TELEGRAM})
 
 
 def _empty_metadata() -> dict[str, Any]:
@@ -116,13 +125,6 @@ class WebChatStore:
                 )
                 conn.execute(
                     """
-                    CREATE UNIQUE INDEX IF NOT EXISTS idx_web_chat_sessions_active
-                    ON web_chat_sessions(user_id)
-                    WHERE ended_at IS NULL
-                    """
-                )
-                conn.execute(
-                    """
                     CREATE INDEX IF NOT EXISTS idx_web_chat_sessions_user
                     ON web_chat_sessions(user_id, id)
                     """
@@ -169,6 +171,8 @@ class WebChatStore:
                     ("title", "TEXT"),
                     ("updated_at", "DATETIME"),
                     ("folder_id", "INTEGER"),
+                    # B-102: channel-scoped sessions (web | telegram).
+                    ("channel", f"TEXT NOT NULL DEFAULT '{CHANNEL_WEB}'"),
                 ]:
                     # B-074/L9: swallow only the idempotent "duplicate column"
                     # case; re-raise + warn on any other OperationalError (disk
@@ -181,6 +185,31 @@ class WebChatStore:
                             continue
                         logger.warning("Web chat migration failed for column %s: %s", col, e)
                         raise
+                # B-102: replace user-global unique open-session index with
+                # per-(user_id, channel) so telegram virtual sessions never end
+                # or block web chats. Close duplicate open rows per channel first
+                # so CREATE UNIQUE INDEX does not fail on pre-existing data.
+                conn.execute("DROP INDEX IF EXISTS idx_web_chat_sessions_active")
+                conn.execute(
+                    """
+                    UPDATE web_chat_sessions
+                    SET ended_at = CURRENT_TIMESTAMP,
+                        reset_reason = COALESCE(reset_reason, 'channel_unique_migration')
+                    WHERE ended_at IS NULL
+                      AND id NOT IN (
+                        SELECT MAX(id) FROM web_chat_sessions
+                        WHERE ended_at IS NULL
+                        GROUP BY user_id, channel
+                      )
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_web_chat_sessions_active_channel
+                    ON web_chat_sessions(user_id, channel)
+                    WHERE ended_at IS NULL
+                    """
+                )
         except Exception as e:
             logger.critical("Failed to initialize web chat store: %s", e)
             raise StorageError(f"Web chat store initialization failed: {e}") from e
@@ -231,22 +260,43 @@ class WebChatStore:
         )
 
     @staticmethod
-    def _sync_ensure_active_session_id(conn: sqlite3.Connection, user_id: str) -> int:
-        conn.execute(
-            "INSERT OR IGNORE INTO web_chat_sessions (user_id) VALUES (?)",
-            (str(user_id),),
-        )
+    def _normalize_channel(channel: str) -> str:
+        ch = (channel or CHANNEL_WEB).strip().lower()
+        return ch if ch in _KNOWN_CHANNELS else CHANNEL_WEB
+
+    @staticmethod
+    def _sync_ensure_active_session_id(
+        conn: sqlite3.Connection,
+        user_id: str,
+        *,
+        channel: str = CHANNEL_WEB,
+    ) -> int:
+        """Return open session id for (user_id, channel), creating one if needed.
+
+        Does **not** end sessions of other channels (B-102).
+        """
+        channel = WebChatStore._normalize_channel(channel)
         row = conn.execute(
             """
             SELECT id FROM web_chat_sessions
-            WHERE user_id = ? AND ended_at IS NULL
+            WHERE user_id = ? AND channel = ? AND ended_at IS NULL
             ORDER BY id DESC
             LIMIT 1
             """,
-            (str(user_id),),
+            (str(user_id), channel),
         ).fetchone()
+        if row is not None:
+            return int(row[0])
+        conn.execute(
+            """
+            INSERT INTO web_chat_sessions (user_id, channel, section)
+            VALUES (?, ?, ?)
+            """,
+            (str(user_id), channel, "chat" if channel == CHANNEL_WEB else channel),
+        )
+        row = conn.execute("SELECT last_insert_rowid()").fetchone()
         if row is None:
-            raise StorageError(f"Failed to create active web chat session for user {user_id}")
+            raise StorageError(f"Failed to create active {channel} session for user {user_id}")
         return int(row[0])
 
     @staticmethod
@@ -307,33 +357,49 @@ class WebChatStore:
         )
         return int(cursor.rowcount or 0)
 
-    def _sync_ensure_active_session(self, user_id: str) -> int:
+    def _sync_ensure_active_session(self, user_id: str, channel: str = CHANNEL_WEB) -> int:
         try:
             with db_connect(self.db_path) as conn:
-                return self._sync_ensure_active_session_id(conn, user_id)
+                return self._sync_ensure_active_session_id(conn, user_id, channel=channel)
         except StorageError:
             raise
         except Exception as e:
             raise StorageError(f"Failed to ensure web chat session for user {user_id}: {e}") from e
 
-    async def ensure_active_session(self, user_id: str) -> int:
-        """Return the current active web transcript session for a user."""
-        return await run_in_thread(self._sync_ensure_active_session, str(user_id))
+    async def ensure_active_session(self, user_id: str, *, channel: str = CHANNEL_WEB) -> int:
+        """Return the open session for ``(user_id, channel)``, creating if needed.
 
-    def _sync_reset_session(self, user_id: str, reason: str) -> int:
+        Default channel is web (sidebar transcript). Telegram uses
+        :meth:`ensure_channel_session` with ``channel=telegram`` (B-102).
+        """
+        return await run_in_thread(self._sync_ensure_active_session, str(user_id), channel)
+
+    async def ensure_channel_session(self, user_id: str, *, channel: str) -> int:
+        """B-102: open (or create) virtual session for a non-web channel."""
+        return await self.ensure_active_session(user_id, channel=channel)
+
+    def _sync_reset_session(self, user_id: str, reason: str, *, channel: str = CHANNEL_WEB) -> int:
+        channel = self._normalize_channel(channel)
         try:
             with db_connect(self.db_path) as conn:
                 conn.execute(
                     """
                     UPDATE web_chat_sessions
                     SET ended_at = CURRENT_TIMESTAMP, reset_reason = ?
-                    WHERE user_id = ? AND ended_at IS NULL
+                    WHERE user_id = ? AND channel = ? AND ended_at IS NULL
                     """,
-                    (reason, str(user_id)),
+                    (reason, str(user_id), channel),
                 )
                 conn.execute(
-                    "INSERT INTO web_chat_sessions (user_id) VALUES (?)",
-                    (str(user_id),),
+                    """
+                    INSERT INTO web_chat_sessions (user_id, channel, section)
+                    VALUES (?, ?, ?)
+                    """,
+                    (
+                        str(user_id),
+                        channel,
+                        "chat" if channel == CHANNEL_WEB else channel,
+                    ),
                 )
                 row = conn.execute("SELECT last_insert_rowid()").fetchone()
                 if row is None:
@@ -342,9 +408,17 @@ class WebChatStore:
         except Exception as e:
             raise StorageError(f"Failed to reset web chat session for user {user_id}: {e}") from e
 
-    async def reset_session(self, user_id: str, reason: str = "/new") -> int:
-        """Archive the current web transcript session and create a new one."""
-        return await run_in_thread(self._sync_reset_session, str(user_id), reason)
+    async def reset_session(
+        self, user_id: str, reason: str = "/new", *, channel: str = CHANNEL_WEB
+    ) -> int:
+        """Archive the open session for ``channel`` and create a new one."""
+        return await run_in_thread(self._sync_reset_session, str(user_id), reason, channel=channel)
+
+    async def reset_channel_session(
+        self, user_id: str, *, channel: str, reason: str = "channel_reset"
+    ) -> int:
+        """B-102: end virtual channel session and open a fresh one (e.g. Telegram /new)."""
+        return await self.reset_session(user_id, reason, channel=channel)
 
     def _sync_append_message(
         self,
@@ -521,24 +595,30 @@ class WebChatStore:
         """Return a single chat session if owned by the user, else None."""
         return await run_in_thread(self._sync_get_session, str(user_id), int(session_id))
 
-    def _sync_create_session(self, user_id: str, section: str) -> int:
+    def _sync_create_session(
+        self, user_id: str, section: str, *, channel: str = CHANNEL_WEB
+    ) -> int:
         if section not in {"chat", "work"}:
             section = "chat"
+        channel = self._normalize_channel(channel)
         try:
             with db_connect(self.db_path) as conn:
-                # Close the currently-active session (if any) so the new one is
-                # the single active session per the unique-index invariant.
+                # Close open session for this channel only (B-102: never touch
+                # other channels' open sessions).
                 conn.execute(
                     """
                     UPDATE web_chat_sessions
                     SET ended_at = CURRENT_TIMESTAMP, reset_reason = 'new_chat'
-                    WHERE user_id = ? AND ended_at IS NULL
+                    WHERE user_id = ? AND channel = ? AND ended_at IS NULL
                     """,
-                    (str(user_id),),
+                    (str(user_id), channel),
                 )
                 conn.execute(
-                    "INSERT INTO web_chat_sessions (user_id, section) VALUES (?, ?)",
-                    (str(user_id), section),
+                    """
+                    INSERT INTO web_chat_sessions (user_id, section, channel)
+                    VALUES (?, ?, ?)
+                    """,
+                    (str(user_id), section, channel),
                 )
                 row = conn.execute("SELECT last_insert_rowid()").fetchone()
                 if row is None:
@@ -566,14 +646,16 @@ class WebChatStore:
                 ).fetchone()
                 if owned is None:
                     return None
-                # Close the current active session (could be the same row; harmless).
+                # Close other open sessions on the *same channel* only (B-102).
                 conn.execute(
                     """
                     UPDATE web_chat_sessions
                     SET ended_at = CURRENT_TIMESTAMP, reset_reason = 'switched'
-                    WHERE user_id = ? AND ended_at IS NULL AND id != ?
+                    WHERE user_id = ? AND channel = (
+                        SELECT channel FROM web_chat_sessions WHERE id = ?
+                    ) AND ended_at IS NULL AND id != ?
                     """,
-                    (str(user_id), int(session_id)),
+                    (str(user_id), int(session_id), int(session_id)),
                 )
                 # Reopen the requested session as active.
                 conn.execute(

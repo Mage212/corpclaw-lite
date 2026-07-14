@@ -233,6 +233,7 @@ class TelegramBotOrchestrator:
             setup_handler=self.handle_setup,
             access_checker=self.check_channel_access,
             user_resolver=self._resolve_user_by_telegram_id,
+            session_reset_callback=self._reset_telegram_session,
             tg_settings=tg_settings,
         )
 
@@ -626,6 +627,16 @@ class TelegramBotOrchestrator:
             async def approval_cb(action: str, details: str) -> bool:
                 return await channel.request_approval(user, action, details)
 
+            # B-102: virtual per-user Telegram session → ChatContextStore path.
+            session_id: int | None = None
+            if stack.chat_store is not None:
+                from corpclaw_lite.channels.web.chat_store import CHANNEL_TELEGRAM
+
+                session_id = await stack.chat_store.ensure_channel_session(
+                    user.memory_key(),
+                    channel=CHANNEL_TELEGRAM,
+                )
+
             reply, run_stats = await agent_loop.run(
                 user,
                 message,
@@ -640,6 +651,7 @@ class TelegramBotOrchestrator:
                 tools_enabled=(mode == "execute"),
                 few_shots=stack.few_shots,
                 channel="telegram",
+                session_id=session_id,
             )
         except Exception as e:
             logger.error("AgentLoop error for user %d: %s", tid, e)
@@ -844,6 +856,21 @@ class TelegramBotOrchestrator:
         provider = self._stack.loop.provider
         if isinstance(provider, LLMRouter):
             await provider.mark_user_cache_reset(telegram_id)
+
+    async def _reset_telegram_session(self, user: User) -> None:
+        """B-102: end Telegram virtual session and open a fresh one (/new).
+
+        Does not touch web channel sessions for the same user.
+        """
+        if self._stack is None or self._stack.chat_store is None:
+            return
+        from corpclaw_lite.channels.web.chat_store import CHANNEL_TELEGRAM
+
+        await self._stack.chat_store.reset_channel_session(
+            user.memory_key(),
+            channel=CHANNEL_TELEGRAM,
+            reason="telegram_/new",
+        )
 
     async def _rate_limit_cleanup_loop(self) -> None:
         """Periodic rate limiter cleanup."""
