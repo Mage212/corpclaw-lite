@@ -152,10 +152,10 @@ no tool_calls? → Response → Save to Memory
 - `provider: Provider` — LLM провайдер/router
 - `registry: ToolRegistry` — доступные инструменты
 - `settings: AgentSettings` — конфигурация (max_steps=30, max_tool_calls=60, max_wall_time_ms=300000)
-- `permission_checker`, `tool_guard`, `memory`, `consolidator`, `compressor`, `approval_callback`
-- `chat_context_store: ChatContextStore | None` — full LLM-context persistence per web-чат (B-063;
-  `None` для CLI/Telegram). `run(session_id)` пишет в него user/tool_calls/tool-result/answer,
-  восстанавливает на activate, сжимает через `compress_now`
+- `permission_checker`, `tool_guard`, `memory` (facts-only), `compressor`, `approval_callback`
+- `chat_context_store: ChatContextStore | None` — sole LLM transcript when `session_id` set
+  (web + Telegram virtual session after 2B; `None`/no session_id → CLI/subagent in-memory only).
+  `run(session_id)` writes user/tool_calls/tool-result/answer; compress via `_compress_chat`
 
 **RunStats** (dataclass) — метрики выполнения:
 - `iterations`, `tools_used`, `duration_ms`
@@ -231,11 +231,11 @@ base_tools_schema
 2. **Tools**: Container mode → `IPCToolProxy` (7 filesystem tools); Dev mode → прямая регистрация
 3. **Security**: ToolGuard + PermissionChecker
 4. **Extensions**: subagents, host-side tools, skills, plugins
-5. **Memory**: SQLiteMemory + MemoryConsolidator + ContextCompressor
-6. **System Prompt**: BootstrapLoader из `config/bootstrap/*.md` + calibrated overrides
+5. **Memory**: SQLiteMemory (facts-only) + ContextCompressor; ChatContextStore for transcript
+6. **System Prompt**: BootstrapLoader + user-context assembly inside AgentLoop (B-111)
 7. **Few-shots**: Из `config/calibrated/few_shots.yaml`
 
-**AgentStack** содержит: `loop`, `user_manager`, `tool_registry`, `mcp_manager`, `container_manager`, `few_shots`, `subagent_registry`, `skill_registry`, `plugin_registry`, `skill_matcher`, `chat_context_store` (B-063; `ChatContextStore` шарит `db_path` с `SQLiteMemory`).
+**AgentStack** содержит: `loop`, `user_manager`, `tool_registry`, `mcp_manager`, `container_manager`, `few_shots`, `subagent_registry`, `skill_registry`, `plugin_registry`, `skill_matcher`, `chat_context_store`, `chat_store` (session ownership; `ChatContextStore` шарит `db_path` с `SQLiteMemory`).
 
 ### Context Builder (`agent/context.py`)
 
@@ -249,48 +249,37 @@ base_tools_schema
 | 4 | Add history (user/assistant only) + current message | Drop orphaned tool messages |
 
 `build_from_full_history(user, message, full_history, ...)` (B-063) — реконструирует полный
-LLM-facing контекст из `ChatContextStore` (а не из text-only `SQLiteMemory`): восстанавливает
-`tool_calls`/`tool_call_id`/`name`/`reasoning` через `_tool_calls_from_dicts` + `add_tool_result`,
-применяет те же 4 фазы (phase-1 system-merge, phase-2 leading assistant+tool strip с сохранением
-tool_calls — рендерятся как `[Tool call: name(args)]` в system prompt, chat-template-безопасно),
-инъекцию few-shots и system-merge. Используется restore-on-activate и compress-any-chat.
+LLM-facing контекст из `ChatContextStore`: восстанавливает `tool_calls`/`tool_call_id`/`name`/
+`reasoning`, phase-1/2 system-merge + leading strip (tool_calls → текст в system prompt),
+few-shots. Используется session-bound `run(session_id)` и compress paths.
 
-### Per-chat LLM-context persistence (B-063)
+### Per-chat LLM-context persistence (B-063 + Sprint 2B / D-078)
 
-**Проблема:** `web_chat_messages` хранит только user-visible транскрипт (role/content/tone).
-Полный LLM-facing контекст (`tool_calls`, `reasoning_content`, порядок сообщений) жил только
-in-memory для активного чата → restore при переключении не возвращал точное LLM-состояние,
-compress работал только с активным чатом.
+**Модель после 0.2.7** (sole store + facts-only memory):
 
-**Решение — двухслойная гибридная персистентность** (0.2.2):
+| Слой | Таблица / API | Что хранит | Роль |
+|------|----------------|------------|------|
+| `ChatContextStore` | `web_chat_context` | полный LLM-facing контекст | sole transcript при `session_id` |
+| `SQLiteMemory` | `memory_facts` | key/value facts | cross-chat personalization only |
+| `WebChatStore` | `web_chat_messages` | UI role/content/tone | не LLM replay |
 
-| Слой | Таблица | Что хранит | Роль |
-|------|---------|------------|------|
-| `SQLiteMemory` | `messages` | text-only транскрипт | fallback |
-| `ChatContextStore` | `web_chat_context` | полный LLM-facing контекст | приоритет при наличии |
+`ChatContextStore`: `role/content/tool_calls/tool_call_id/name/reasoning/seq`,
+`UNIQUE(session_id, seq)`, `FK … ON DELETE CASCADE` к `web_chat_sessions`.
+Sessions channel-scoped (`channel=web|telegram`, B-102).
 
-`ChatContextStore` (`channels/web/chat_context_store.py`): `role/content/tool_calls/
-tool_call_id/name/reasoning/seq`, `UNIQUE(session_id, seq)` (retry на collision), `FK … ON DELETE
-CASCADE` к `web_chat_sessions`. Шарит `db_path` с `SQLiteMemory`.
+**Isolation:** `agent/context_target.py` — `session_id`/`user_id` в `ContextVar`.
 
-**Isolation под shared singleton AgentLoop:** `agent/context_target.py` хранит `session_id`/
-`user_id` в `ContextVar` (task-scoped, как `depth_mode.py`), а не в атрибутах инстанса — иначе
-конкурентные `run()` на одном `AgentLoop` перетирали бы session_id друг друга. `set_context_target`
-возвращает токены, `reset_context_target(tokens)` — в `finally`.
+**Persist:** user → assistant tool_calls → tool-result → final answer. Terminal tools skip
+tool-role. **Нет dual-write** в SQLiteMemory messages (API удалён, B-106).
 
-**Поток persist** (`AgentLoop.run(session_id)`) — 5 точек: user-message → assistant tool_calls →
-tool-result (parallel `gather` + sequential) → финальный answer. Terminal-инструменты
-(`read_image`, `dispatch_subagent`) **skip** tool-role persist (результат уже идёт как
-assistant-content — иначе double-content в restored history).
+**Load:** `list_context` only when session bound; CLI/subagent empty history (B-104).
 
-**Restore-on-activate** (`channels/service.py → restore_user_context`): clear+re-add в
-`SQLiteMemory` (text-only fallback, non-fatal try/except) + `AgentLoop.run()` предпочитает
-`ChatContextStore.list_context` → `build_from_full_history`, когда store непуст для сессии.
+**Restore-on-activate:** ownership + presence check only (no memory shadow).
 
-**Compress-any-chat** (`AgentLoop.compress_now(session_id)`): бранчуется в
-`_compress_from_context_store` (грузит полную схему из store, сжимает, `replace_context`) или
-`_compress_from_memory` (legacy, только активный чат). Ownership-check (`get_session(user.memory_key(),
-session_id)`) перед compress — защита от IDOR.
+**Compress:** on-demand `compress_now(session_id)` → `_compress_chat` / store-first
+`_compress_store_transcript` (`list_context` → compress → `replace_context`). Mid-run
+auto-compress (B-124) uses the same store-first helper. Ownership-check before service
+compress (IDOR).
 
 **`db_connect` FK pragma:** `utils/db.py` теперь глобально включает `PRAGMA foreign_keys=ON` →
 все `ON DELETE CASCADE` (`web_chat_context→web_chat_sessions`,
@@ -1003,22 +992,16 @@ Host → verify(response) → result
 - Автоматическая schema migration
 - JSON десериализация
 
-### Per-chat LLM-context store (`channels/web/chat_context_store.py`) — B-063
+### Per-chat LLM-context store (`channels/web/chat_context_store.py`) — B-063 / 2B
 
-Полный LLM-facing контекст per web-чат (см. §1 «Per-chat LLM-context persistence»):
-таблица `web_chat_context` (`role/content/tool_calls/tool_call_id/name/reasoning/seq`,
-`UNIQUE(session_id, seq)`, `FK CASCADE` к `web_chat_sessions`). Параллельный слой к text-only
-`SQLiteMemory.messages` — приоритетный источник для restore-on-activate и compress-any-chat.
-Методы: `append_context` (с retry на seq-collision), `list_context`, `clear_context`,
-`replace_context`, `has_context`.
+Sole LLM-facing transcript per session (web + Telegram virtual session).
+Таблица `web_chat_context` (`role/content/tool_calls/tool_call_id/name/reasoning/seq`,
+`UNIQUE(session_id, seq)`, `FK CASCADE`). Методы: `append_context`, `list_context`,
+`clear_context`, `replace_context`, `has_context`.
 
-### Memory Consolidation (`memory/consolidation.py`)
-
-LLM-based сжатие истории:
-- Триггер при превышении threshold (50 сообщений по умолчанию)
-- Первая половина → compact summary (3-5 bullet points)
-- Cooldown (предотвращает повторную консолидацию)
-- Safety guardrails: не консолидирует active workflows
+**SQLiteMemory** (после B-106): только `memory_facts` + `vacuum`. Таблица `messages` и
+`MemoryConsolidator` удалены (D-078). Transcript compression = `ContextCompressor` +
+`ChatContextStore` only.
 
 ---
 

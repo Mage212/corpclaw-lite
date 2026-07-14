@@ -11,6 +11,12 @@
 - **B-111 audit:** main-agent SOUL base is re-read via `BootstrapLoader.get_system_prompt()`
   each turn (mtime/overlay/calibration), not frozen from factory `default_system_prompt`.
 
+### Docs
+
+- **B-125 post-2B memory model.** AGENTS.md / CLAUDE.md / ARCHITECTURE.md: sole
+  `ChatContextStore` transcript, facts-only `SQLiteMemory`, no consolidator /
+  dual-write / `_compress_from_memory` language.
+
 ## [0.2.7] — 2026-07-14
 
 **Patch** `0.2.6 → 0.2.7`. **Sprint 2B complete** — memory/prompt unify

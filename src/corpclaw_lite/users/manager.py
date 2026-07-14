@@ -57,8 +57,9 @@ _PASSWORD_MAX_LENGTH = 256
 
 class UserManager:
     """
-    Manages user storage in SQLite.
-    Users are stored in the same DB as memory (data/memory.db by default).
+    Manages user storage in SQLite (default path: data/users.db).
+
+    Cross-chat agent facts live in SQLiteMemory (memory.db / memory_facts), not here.
     """
 
     def __init__(
