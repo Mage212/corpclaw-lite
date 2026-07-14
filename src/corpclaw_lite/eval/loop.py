@@ -175,7 +175,6 @@ class EvalLoop:
     ) -> PassReport:
         """Build a stack with the requested guard state and run the corpus."""
         from corpclaw_lite.agent.factory import build_agent_stack
-        from corpclaw_lite.config.bootstrap import BootstrapLoader
         from corpclaw_lite.config.loader import load_settings
         from corpclaw_lite.users.models import User
 
@@ -200,9 +199,7 @@ class EvalLoop:
             name="Eval Runner",
             department="engineering",
         )
-        bootstrap = BootstrapLoader(PROJECT_ROOT / "config" / "bootstrap")
-        system_prompt = bootstrap.get_system_prompt() or ""
-
+        # B-111: AgentLoop assembles base + user layers; do not pass a second SOUL.
         workspace = self._workspace_base / label
         workspace.mkdir(parents=True, exist_ok=True)
         # Clear any leftover files from a previous run of this pass.
@@ -213,7 +210,7 @@ class EvalLoop:
         runner = EvalRunner(
             agent_loop=agent_loop,
             user=eval_user,
-            system_prompt=system_prompt,
+            system_prompt=None,
             workspace_dir=workspace,
             corpus_dir=self._corpus_dir,
             few_shots=stack.few_shots,

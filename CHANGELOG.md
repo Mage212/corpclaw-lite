@@ -6,45 +6,51 @@
 
 ## [Unreleased]
 
-### Sprint 2B — Memory / prompt unify — in progress
+## [0.2.7] — 2026-07-14
 
-Version stays **0.2.6** until Sprint 2B completes (single patch **0.2.7** on last PR).
+**Patch** `0.2.6 → 0.2.7`. **Sprint 2B complete** — memory/prompt unify
+(B-102…B-106 + B-111).
 
-#### 2B.1
+### Changed — Sprint 2B
 
-- **B-102 Telegram virtual-session.** `WebChatStore` sessions are
-  **channel-scoped** (`channel=web|telegram`); unique open session is
-  `(user_id, channel)`. Telegram orchestrator passes `session_id` into
-  `AgentLoop.run`; `/new` resets only the Telegram virtual session (not web).
+#### 2B.1 — B-102 Telegram virtual-session
 
-#### 2B.2
+- `WebChatStore` sessions are **channel-scoped** (`channel=web|telegram`);
+  unique open session is `(user_id, channel)`. Telegram passes `session_id`
+  into `AgentLoop.run`; `/new` resets only the Telegram virtual session.
 
-- **B-103 / B-104 loop context unify.** Transcript load/persist only via
-  `ChatContextStore` when `session_id` is set; no dual-write to
-  `SQLiteMemory.messages`. CLI/subagent: empty history, no store writes.
-- `restore_user_context` no longer shadows into memory (ownership + presence only).
-- Telegram image turns persist to context store (not memory messages).
+#### 2B.2 — B-103 / B-104 loop context unify
 
-#### 2B.3
+- Transcript load/persist only via `ChatContextStore` when `session_id` is set;
+  no dual-write to `SQLiteMemory.messages`. CLI/subagent: empty history.
+- `restore_user_context` ownership + presence only (no memory shadow).
+- Telegram image turns persist to context store.
 
-- **B-105 compress unify.** Sole on-demand path: `_compress_chat` via
-  `ChatContextStore` (requires `session_id`). Removed `_compress_from_memory`
-  and entire `MemoryConsolidator` (`memory/consolidation.py`).
-- Dropped `AgentConfig.consolidator`, `consolidation_enabled` /
-  `consolidation_threshold` settings, and post-turn `maybe_consolidate` hooks.
-- Mid-run auto-compress still uses in-memory `ContextCompressor` on the active
-  turn context; on-demand compress is store-only (full tool trajectory).
+#### 2B.3 — B-105 compress unify
 
-#### 2B.4
+- Sole on-demand path: `_compress_chat` via `ChatContextStore` (`session_id`
+  required). Removed `_compress_from_memory` and entire `MemoryConsolidator`.
+- Dropped consolidator settings and post-turn `maybe_consolidate` hooks.
 
-- **B-106 SQLiteMemory facts-only.** Removed messages API
-  (`add_message` / `get_history` / `clear` / `count_messages` /
-  `replace_oldest` / …) and dropped legacy `messages` table on init.
-  Remaining surface: `store_fact` / `recall_facts` / `clear_facts` / `vacuum`.
-- Session reset (web/telegram) no longer clears SQLiteMemory — transcript is
-  archived via `WebChatStore` + CASCADE on `ChatContextStore`; facts stay
-  cross-chat. Eval/calibration isolation uses `clear_facts` only.
-- Class name `SQLiteMemory` kept for import stability (rename optional later).
+#### 2B.4 — B-106 SQLiteMemory facts-only
+
+- Removed messages API and legacy `messages` table on init.
+- Remaining surface: `store_fact` / `recall_facts` / `clear_facts` / `vacuum`.
+- Session reset does not clear facts; eval/calibration use `clear_facts` only.
+
+#### 2B.5 — B-111 unify prompt assembly + close Sprint 2B
+
+- **Path A/B merge:** `AgentLoop` self-assembles user-context layers (dept +
+  onboarding `.md` + personal instructions + tone) when `bootstrap` /
+  `user_manager` are wired. Channels pass only skill-block extras as
+  `system_prompt`.
+- Removed duplicate Path A line `You are talking to {name} from {dept}` —
+  sole identity block is `Current User Context` (name/department + facts +
+  recent files).
+- `AgentRequestService.build_system_prompt` delegates to
+  `loop.assemble_system_prompt` (web preview).
+- Headless-ready: direct `run()` gets onboarding `.md` without service Path A
+  (prerequisite for DC-027 memory worker).
 
 ## [0.2.6] — 2026-07-14
 

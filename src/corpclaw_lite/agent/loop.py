@@ -100,12 +100,14 @@ if TYPE_CHECKING:
     from corpclaw_lite.agent.phase_policy import PhasePolicy
     from corpclaw_lite.calibration.trajectory import TrajectoryRecorder
     from corpclaw_lite.channels.web.chat_context_store import ChatContextStore
+    from corpclaw_lite.config.bootstrap import BootstrapLoader
     from corpclaw_lite.config.providers import ProviderRegistry
     from corpclaw_lite.config.settings import DepthModeSettings
     from corpclaw_lite.departments.permissions import PermissionChecker
     from corpclaw_lite.llm.presets import PresetRegistry
     from corpclaw_lite.memory.file_changes import FileChangeDAO
     from corpclaw_lite.security.tool_guard import ToolGuard
+    from corpclaw_lite.users.manager import UserManager
 
 logger = logging.getLogger(__name__)
 
@@ -305,6 +307,11 @@ class AgentConfig:
     # B-107: tool-surface profile — "main" | "office" | "execution" | "none".
     # Hard phase-filter applies to "office" (and optionally main soft-hint only).
     tool_surface_profile: str = "main"
+    # B-111 / DC-029: when set, run() self-assembles user-context layers
+    # (dept + onboarding .md + personal instructions + tone) so headless callers
+    # get the same prompt as channel Path A. Subagents leave both None.
+    bootstrap: BootstrapLoader | None = None
+    user_manager: UserManager | None = None
 
 
 class AgentLoop:
@@ -337,6 +344,9 @@ class AgentLoop:
         # B-063 S1: full LLM-context persistence per chat.
         self._chat_context_store = config.chat_context_store
         self._tool_surface_profile = config.tool_surface_profile
+        # B-111: user-context assembly deps (main agent only).
+        self._bootstrap = config.bootstrap
+        self._user_manager = config.user_manager
         # Cache marker sets as frozensets for the hot path.
         self._phase_aggregation_markers = frozenset(self._settings.phase_policy.aggregation_markers)
         self._phase_gathering_tools = frozenset(self._settings.phase_policy.gathering_tools)
@@ -376,6 +386,51 @@ class AgentLoop:
     def compressor(self) -> ContextCompressor | None:
         """Access the context compressor (if configured)."""
         return self._compressor
+
+    async def _assemble_user_layers(self, user: User) -> str:
+        """B-111: dept + onboarding .md + personal instructions + tone.
+
+        Does not include SOUL base, skills, facts, or recent-files (those are
+        composed separately). Empty string when neither bootstrap nor
+        user_manager is wired (subagents).
+        """
+        parts: list[str] = []
+        if self._bootstrap is not None:
+            dept = self._bootstrap.get_department_prompt(user.department)
+            if dept:
+                parts.append(dept)
+            user_md = self._bootstrap.get_user_prompt(user.id, user.telegram_id)
+            if user_md:
+                parts.append(user_md)
+        if self._user_manager is not None:
+            from corpclaw_lite.users.manager import tone_directive
+
+            agent_ctx = await self._user_manager.async_get_agent_context(user.id)
+            if agent_ctx:
+                instructions = (agent_ctx.get("instructions") or "").strip()
+                if instructions:
+                    parts.append(instructions)
+                tone_text = tone_directive(agent_ctx.get("tone", "default"))
+                if tone_text:
+                    parts.append(tone_text)
+        return "\n\n".join(parts)
+
+    async def assemble_system_prompt(self, user: User, *, skill_block: str = "") -> str | None:
+        """B-111: static system prompt for preview / callers (no per-turn facts/files).
+
+        Layers: default base (SOUL…) + user layers + optional skill block.
+        Identity (name/department) is only in the per-turn ``Current User
+        Context`` block inside ``run()`` — not duplicated here.
+        """
+        parts: list[str] = []
+        if self._default_system_prompt:
+            parts.append(self._default_system_prompt)
+        user_layers = await self._assemble_user_layers(user)
+        if user_layers:
+            parts.append(user_layers)
+        if skill_block:
+            parts.append(skill_block)
+        return "\n\n".join(parts) if parts else None
 
     async def compress_now(self, user: User, session_id: int | None = None) -> tuple[bool, str]:
         """On-demand compression of a chat's LLM context (B-105 / B-063 S3).
@@ -1501,8 +1556,23 @@ class AgentLoop:
                 logger.warning("[session=%s] context-store load failed", session_id, exc_info=True)
                 full_history = []
 
-        # Prepend dynamic user context to the system prompt
-        base_prompt = system_prompt or self._default_system_prompt or ""
+        # B-111: assemble base prompt. Main agent (bootstrap/user_manager wired)
+        # is self-sufficient: default SOUL + user layers + caller extras (skills).
+        # Subagents leave bootstrap/user_manager None and pass a full system_prompt.
+        assemble_user = self._bootstrap is not None or self._user_manager is not None
+        if assemble_user:
+            base_parts: list[str] = []
+            if self._default_system_prompt:
+                base_parts.append(self._default_system_prompt)
+            user_layers = await self._assemble_user_layers(user)
+            if user_layers:
+                base_parts.append(user_layers)
+            # system_prompt kwarg = optional extras (skill block from channels).
+            if system_prompt:
+                base_parts.append(system_prompt)
+            base_prompt = "\n\n".join(base_parts)
+        else:
+            base_prompt = system_prompt or self._default_system_prompt or ""
 
         # Load user facts from memory (onboarding + manually stored via memory_store)
         user_facts_block = ""
@@ -1535,6 +1605,7 @@ class AgentLoop:
                 lines = [f"- {c.file_path} ({c.tool_name})" for c in recent_changes]
                 recent_files_block = "\n\n## Recently Touched Files\n" + "\n".join(lines)
 
+        # Single identity block (Path B). Path A "You are talking to…" removed (B-111).
         dynamic_prompt = (
             f"Current User Context:\n"
             f"- Name: {user.name}\n"

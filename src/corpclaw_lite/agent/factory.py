@@ -438,8 +438,11 @@ def _wrap_office_tools_with_file_tracking(
     return dao, snapshot_store, file_state
 
 
-def _build_system_prompt(settings: Settings, project_root: Path) -> str | None:
-    """Load bootstrap system prompt."""
+def _build_bootstrap(settings: Settings, project_root: Path) -> tuple[Any, str | None]:
+    """Load multi-dir bootstrap loader + base SOUL system prompt (B-111).
+
+    Returns ``(BootstrapLoader, system_prompt_text)``.
+    """
     from corpclaw_lite.config.bootstrap import BootstrapLoader
     from corpclaw_lite.extensions.paths import resolve_dirs as _resolve_dirs
 
@@ -454,7 +457,7 @@ def _build_system_prompt(settings: Settings, project_root: Path) -> str | None:
         )
     else:
         logger.warning("No bootstrap/*.md files found — using minimal default system prompt")
-    return system_prompt
+    return bootstrap, system_prompt
 
 
 def _load_calibrated_tool_overrides(*registries: ToolRegistry) -> None:
@@ -642,7 +645,7 @@ def build_agent_stack(
             ", ".join(str(p) for p in mcp_paths),
         )
 
-    system_prompt = _build_system_prompt(full_settings, PROJECT_ROOT)
+    bootstrap_loader, system_prompt = _build_bootstrap(full_settings, PROJECT_ROOT)
 
     # Load calibrated few-shots (if any) for injection into every run()
     few_shots: list[dict[str, Any]] | None = None
@@ -669,6 +672,9 @@ def build_agent_stack(
     # by AgentRequestService to verify session ownership at the service layer.
     chat_store = WebChatStore(memory.db_path)
 
+    # B-111: create UserManager before the loop so run() can load agent_context.
+    user_manager = UserManager()
+
     loop = AgentLoop(
         AgentConfig(
             provider=provider,
@@ -686,6 +692,8 @@ def build_agent_stack(
             provider_registry=depth_provider_registry,
             depth_modes=agent_settings.depth_modes,
             chat_context_store=chat_context_store,
+            bootstrap=bootstrap_loader,
+            user_manager=user_manager,
         )
     )
 
@@ -704,8 +712,6 @@ def build_agent_stack(
                         depth_name,
                         model_key,
                     )
-
-    user_manager = UserManager()
 
     return AgentStack(
         loop=loop,

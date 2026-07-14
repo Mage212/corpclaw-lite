@@ -14,7 +14,6 @@ from corpclaw_lite.extensions.tools.builtin._path_utils import user_workspace_pa
 from corpclaw_lite.llm.queue import LLMQueueStatus
 from corpclaw_lite.logging.agent_logger import AgentLogger
 from corpclaw_lite.paths import PROJECT_ROOT
-from corpclaw_lite.users.manager import tone_directive
 from corpclaw_lite.users.models import User
 
 logger = logging.getLogger(__name__)
@@ -114,7 +113,8 @@ class AgentRequestService:
         if not isinstance(stack, AgentStack):
             raise TypeError("stack must be AgentStack")
         self._stack = stack
-        self._bootstrap = bootstrap or BootstrapLoader(PROJECT_ROOT / "config" / "bootstrap")
+        # bootstrap retained for constructor back-compat; prompt assembly is on the loop (B-111).
+        _ = bootstrap or BootstrapLoader(PROJECT_ROOT / "config" / "bootstrap")
         self._workspace_base = (workspace_base or PROJECT_ROOT / "workspaces").resolve()
         self._activity_logger = activity_logger
         self._llm_provider_name = llm_provider_name
@@ -226,40 +226,13 @@ class AgentRequestService:
         return await self._stack.loop.compress_now(user, session_id=session_id)
 
     async def build_system_prompt(self, user: User) -> str | None:
-        """Assemble the base system prompt exactly as ``run()`` does.
+        """Static system prompt for web preview (B-111).
 
-        Mirrors the 5-part prompt assembly (base + department + onboarding user +
-        personal instructions + response tone + user context) that ``run()``
-        feeds to the agent loop, minus the dynamic per-message additions done
-        later inside ``run()`` (skill matching) and ``AgentLoop.run()``
-        (current-user context wrapper). Used by the web preview handler so the
-        preview reflects the real prompt instead of a hand-copied approximation.
-
-        Returns ``None`` when every part is empty (same sentinel ``run()`` uses
-        before appending the skill block).
+        Delegates to ``AgentLoop.assemble_system_prompt`` so preview matches the
+        layers ``run()`` uses (base + dept + onboarding + instructions + tone).
+        Per-turn facts/recent-files are not included (they need an active run).
         """
-        stack = self._stack
-        base_prompt = self._bootstrap.get_system_prompt()
-        dept_prompt = self._bootstrap.get_department_prompt(user.department)
-        user_prompt = self._bootstrap.get_user_prompt(user.id, user.telegram_id)
-        agent_ctx = await stack.user_manager.async_get_agent_context(user.id)
-        personal_instructions = agent_ctx.get("instructions", "") if agent_ctx else ""
-        tone = agent_ctx.get("tone", "default") if agent_ctx else "default"
-        tone_text = tone_directive(tone)
-        user_ctx = f"You are talking to {user.name} from the {user.department} department."
-        parts = [
-            p
-            for p in [
-                base_prompt,
-                dept_prompt,
-                user_prompt,
-                personal_instructions,
-                tone_text,
-                user_ctx,
-            ]
-            if p
-        ]
-        return "\n\n".join(parts) if parts else None
+        return await self._stack.loop.assemble_system_prompt(user)
 
     async def run(
         self,
@@ -272,7 +245,11 @@ class AgentRequestService:
         depth_mode: str | None = None,
         session_id: int | None = None,
     ) -> AgentRequestResult:
-        """Run an agent request with shared prompt, skill, container and logging setup."""
+        """Run an agent request with shared skill matching, container and logging.
+
+        B-111: user-context prompt layers are assembled inside ``AgentLoop.run``;
+        this service only matches skills and passes the skill block as extras.
+        """
         callbacks = callbacks or AgentRequestCallbacks()
         stack = self._stack
         agent_loop = stack.loop
@@ -285,11 +262,6 @@ class AgentRequestService:
             except ContainerManagerError:
                 logger.exception("Container failed for user %s", user.memory_key())
                 raise
-
-        # Etap 5 (+ L2): the base system prompt (base + department + onboarding +
-        # personal instructions + response tone + user context) is assembled in one
-        # shared method so the web preview handler reflects the exact same prompt.
-        system_prompt = await self.build_system_prompt(user)
 
         skill_registry = stack.skill_registry
         plugin_registry = stack.plugin_registry
@@ -310,8 +282,8 @@ class AgentRequestService:
         from corpclaw_lite.agent.prompt import build_skill_block
 
         skill_block = build_skill_block(matched_skills, [])
-        if skill_block:
-            system_prompt = (system_prompt or "") + skill_block
+        # B-111: only skills as system_prompt extras — loop owns user-context.
+        system_prompt = skill_block if skill_block else None
 
         try:
             reply, run_stats = await agent_loop.run(
