@@ -1,7 +1,7 @@
 # CorpClaw Lite — Архитектура проекта
 
 > Версия документа: 2026-07-13
-> Версия проекта: 0.2.5 — Phase 2A in progress (adaptations package; version bump at end of 2A)
+> Версия проекта: 0.2.6 — Phase 2A complete (adaptations B-078 + EventSink B-079)
 
 ---
 
@@ -178,24 +178,26 @@ results = await asyncio.gather(*[execute_one(tc) for tc in tool_calls])
 - Budget exceeded
 - Loop detected (2x warning)
 
-### AgentLoop structure (B-077 / B-078 partial)
+### AgentLoop structure (B-077 / B-078 / B-079, v0.2.6)
 
 ```
-run()
+run(event_sink=… | on_* kwargs → CallbackEventSink)
   → _build_turn_context  # prologue: history, prompt, LoopState, contextvars
   → while ReAct
        adaptations.apply_tool_surface / apply_closing_mode / inject_tool_soft_hint
        adaptations.apply_workflow_mandate  # before dedup (B-047)
+       event_sink.emit(ToolStart / LlmStage / Queue / Subagent…)
   → except budget
-       adaptations.auto_finalize_cascade   # B-073, deps: call_llm + execute_tool_call
+       adaptations.auto_finalize_cascade   # B-073
   → finally _finalize_turn  # epilogue: TurnTokens reset
 ```
 
 - `LoopState` / `TurnTokens` — `agent/loop_state.py` (B-076 + B-077).
-- **Adaptations package** (`agent/adaptations/`, B-078):
-  `tool_surface.py`, `closing.py`, `mandate.py`, `finalize.py` — free functions,
-  unit-tested.
-- Next: **2A.3** EventSink (B-079). Version bump when 2A complete.
+- **Adaptations** (`agent/adaptations/`, B-078): `tool_surface`, `closing`,
+  `mandate`, `finalize` — free functions, unit-tested.
+- **EventSink** (`agent/events.py`, B-079): status path; kwargs back-compat via
+  `CallbackEventSink`.
+- Next: Sprint **2B** memory/prompt unify (B-102…106, B-111).
 
 ### Tools schema pipeline (B-107 / B-047 / B-046, v0.2.4+)
 
