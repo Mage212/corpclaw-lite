@@ -463,56 +463,164 @@ class AgentLoop:
             return False, "Компрессия доступна только для сессии с ChatContextStore."
         return await self._compress_chat(user, session_id)
 
-    async def _compress_chat(self, user: User, session_id: int) -> tuple[bool, str]:
-        """Sole compress path: full LLM context from ChatContextStore (B-105).
+    async def _compress_store_transcript(
+        self,
+        *,
+        session_id: int,
+        user_id: str,
+        actual_tokens: int | None = None,
+    ) -> tuple[list[dict[str, Any]] | None, int, str]:
+        """Store-first compress + optional ``replace_context`` (B-105 / B-124).
 
-        Loads the full message schema (tool_calls/tool-role/reasoning), compresses,
-        writes back via ``replace_context``, and invalidates the user KV-cache so
-        the next turn does not reuse a stale prefix.
+        Always compresses the **durable** transcript from ``list_context``, never
+        the in-memory builder view (which may strip history into system_prompt or
+        inject few-shots).
+
+        Returns ``(messages, before_count, status)`` where status is one of:
+        ``rewritten``, ``noop``, ``too_few``, ``load_failed``, ``compress_failed``,
+        ``write_failed``, ``unavailable``. On ``rewritten`` / ``noop``, ``messages``
+        is the post-compress list; otherwise ``messages`` is None.
         """
         store = self._chat_context_store
         compressor = self._compressor
-        if store is None or compressor is None:  # caller guards, but satisfy type checker
-            return False, "Компрессия контекста недоступна."
+        if store is None or compressor is None:
+            return None, 0, "unavailable"
         try:
             messages = await store.list_context(session_id)
         except Exception:
             logger.warning("[session=%s] compress: context-store load failed", session_id)
-            return False, "Не удалось загрузить историю чата."
-        if len(messages) < 5:
-            return False, "Слишком мало сообщений для сжатия."
-
+            return None, 0, "load_failed"
+        before = len(messages)
+        if before < 5:
+            return None, before, "too_few"
         try:
-            compressed = await compressor.compress(messages, mem_key=f"{user.id}:{session_id}")
+            compressed = await compressor.compress(
+                messages,
+                mem_key=f"{user_id}:{session_id}",
+                actual_tokens=actual_tokens,
+            )
         except Exception:
             logger.exception("[session=%s] compress: compression failed", session_id)
-            return False, "Ошибка при сжатии контекста."
-
-        if len(compressed) >= len(messages):
-            return True, "Контекст уже достаточно компактный — сжатие не требуется."
-
+            return None, before, "compress_failed"
+        if len(compressed) >= before:
+            return compressed, before, "noop"
         try:
             await store.replace_context(
-                session_id=session_id, user_id=str(user.id), messages=compressed
+                session_id=session_id, user_id=str(user_id), messages=compressed
             )
         except Exception:
             logger.warning("[session=%s] compress: context-store write-back failed", session_id)
-            return False, "Не удалось сохранить сжатый контекст."
-
+            return None, before, "write_failed"
         if isinstance(self._provider, LLMRouter):
             try:
-                await self._provider.mark_user_cache_reset(user.memory_key())
+                await self._provider.mark_user_cache_reset(str(user_id))
             except Exception:
-                logger.debug("[user=%s] compress: cache reset skipped", user.id)
-
+                logger.debug("[user=%s] compress: cache reset skipped", user_id)
         logger.info(
             "[user=%s session=%s] compress: %d → %d messages (context-store)",
-            user.id,
+            user_id,
             session_id,
-            len(messages),
+            before,
             len(compressed),
         )
-        return True, f"Контекст сжат: {len(messages)} → {len(compressed)} сообщений."
+        return compressed, before, "rewritten"
+
+    async def _compress_chat(self, user: User, session_id: int) -> tuple[bool, str]:
+        """Sole on-demand compress path: full LLM context from ChatContextStore (B-105)."""
+        compressed, before, status = await self._compress_store_transcript(
+            session_id=session_id,
+            user_id=str(user.id),
+        )
+        if status == "unavailable":
+            return False, "Компрессия контекста недоступна."
+        if status == "load_failed":
+            return False, "Не удалось загрузить историю чата."
+        if status == "too_few":
+            return False, "Слишком мало сообщений для сжатия."
+        if status == "compress_failed":
+            return False, "Ошибка при сжатии контекста."
+        if status == "write_failed":
+            return False, "Не удалось сохранить сжатый контекст."
+        if status == "noop":
+            return True, "Контекст уже достаточно компактный — сжатие не требуется."
+        # rewritten
+        assert compressed is not None
+        return True, f"Контекст сжат: {before} → {len(compressed)} сообщений."
+
+    async def _maybe_compress_mid_run(self, state: LoopState) -> None:
+        """B-124: mid-run auto-compress with store-first durability when session-bound.
+
+        Prune runs whenever compression is enabled (even without a compressor —
+        same as pre-B-124). LLM compress trigger uses the in-memory window;
+        durable rewrite always compresses ``ChatContextStore`` (never the
+        builder view). No session → in-memory only (CLI/subagent).
+        """
+        compression_cfg = self._settings.compression
+        if not compression_cfg.enabled:
+            return
+        # Cheap prune is independent of ContextCompressor (Hermes pattern).
+        if state.context.message_count > compression_cfg.prune_min_messages:
+            state.context.prune_old_tool_results(protect_tail=6)
+
+        compressor = self._compressor
+        if compressor is None:
+            return
+        if not compressor.should_compress(
+            state.context.messages,
+            actual_tokens=state.last_actual_total_tokens,
+        ):
+            return
+
+        session_id = get_context_session_id()
+        user_id = get_context_user_id()
+        actual = state.last_actual_total_tokens
+
+        if session_id is not None and user_id is not None and self._chat_context_store is not None:
+            compressed, before, status = await self._compress_store_transcript(
+                session_id=session_id,
+                user_id=user_id,
+                actual_tokens=actual,
+            )
+            if status == "rewritten" and compressed is not None:
+                # Align this turn's window with durable truth (system_prompt unchanged).
+                state.context.messages = compressed
+                state.last_actual_total_tokens = None
+                log_event(
+                    "context_compressed",
+                    state.stats.run_id,
+                    session_id=session_id,
+                    before=before,
+                    after=len(compressed),
+                    path="store",
+                )
+                return
+            if status in ("noop", "too_few", "load_failed", "compress_failed", "write_failed"):
+                # Store path did not rewrite. Fall back to in-memory compress so this
+                # turn can still shrink the LLM window (non-durable).
+                pass
+            else:
+                return
+
+        # No session, or store path skipped/failed: in-memory only (legacy CLI path).
+        try:
+            before_mem = len(state.context.messages)
+            state.context.messages = await compressor.compress(
+                state.context.messages,
+                state.mem_key,
+                actual_tokens=actual,
+            )
+            state.last_actual_total_tokens = None
+            if len(state.context.messages) < before_mem:
+                log_event(
+                    "context_compressed",
+                    state.stats.run_id,
+                    session_id=session_id,
+                    before=before_mem,
+                    after=len(state.context.messages),
+                    path="memory",
+                )
+        except Exception:
+            logger.exception("[user=%s] mid-run in-memory compress failed", state.mem_key)
 
     async def _call_llm_provider(
         self,
@@ -859,22 +967,8 @@ class AgentLoop:
                     soft_deadline_ratio=self._settings.soft_deadline_ratio,
                 )
 
-                compression_cfg = self._settings.compression
-                if compression_cfg.enabled and state.context.message_count > (
-                    compression_cfg.prune_min_messages
-                ):
-                    state.context.prune_old_tool_results(protect_tail=6)
-
-                if self._compressor and self._compressor.should_compress(
-                    state.context.messages,
-                    actual_tokens=state.last_actual_total_tokens,
-                ):
-                    state.context.messages = await self._compressor.compress(
-                        state.context.messages,
-                        state.mem_key,
-                        actual_tokens=state.last_actual_total_tokens,
-                    )
-                    state.last_actual_total_tokens = None
+                # B-124: prune + optional compress; store-first when session-bound.
+                await self._maybe_compress_mid_run(state)
 
                 llm_t0 = time.monotonic()
                 try:
