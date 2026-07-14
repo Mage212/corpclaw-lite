@@ -591,10 +591,30 @@ def test_tone_directive_unknown_returns_empty() -> None:
 
 
 def _build_service(tmp_path: Path) -> tuple[AgentRequestService, UserManager]:
-    """Minimal AgentRequestService with a real UserManager + empty bootstrap."""
+    """Minimal AgentRequestService with a real UserManager + loop prompt assembly (B-111)."""
+    from unittest.mock import AsyncMock
+
+    from corpclaw_lite.agent.loop import AgentConfig, AgentLoop
+    from corpclaw_lite.config.settings import AgentSettings
+    from corpclaw_lite.extensions.tools.registry import ToolRegistry
+    from corpclaw_lite.llm.base import LLMResponse, Provider
+
     user_manager = UserManager(db_path=str(tmp_path / "users.db"))
+    bootstrap = BootstrapLoader(tmp_path / "bootstrap")
+    provider = AsyncMock(spec=Provider)
+    provider.chat.return_value = LLMResponse(content="ok", tool_calls=[])
+    loop = AgentLoop(
+        AgentConfig(
+            provider=provider,
+            registry=ToolRegistry(),
+            settings=AgentSettings(),
+            default_system_prompt="BASE SOUL",
+            bootstrap=bootstrap,
+            user_manager=user_manager,
+        )
+    )
     stack = AgentStack(
-        loop=object(),  # type: ignore[arg-type]
+        loop=loop,
         user_manager=user_manager,
         tool_registry=None,  # type: ignore[arg-type]
         full_tool_registry=None,
@@ -606,7 +626,7 @@ def _build_service(tmp_path: Path) -> tuple[AgentRequestService, UserManager]:
     )
     service = AgentRequestService(
         stack=stack,
-        bootstrap=BootstrapLoader(tmp_path / "bootstrap"),
+        bootstrap=bootstrap,
         workspace_base=tmp_path / "workspaces",
     )
     return service, user_manager
@@ -614,7 +634,7 @@ def _build_service(tmp_path: Path) -> tuple[AgentRequestService, UserManager]:
 
 @pytest.mark.asyncio
 async def test_build_system_prompt_injects_instructions_and_tone(tmp_path: Path) -> None:
-    """Saved agent-context instructions + tone both reach the assembled prompt."""
+    """B-111: saved agent-context instructions + tone via loop.assemble_system_prompt."""
     service, user_manager = _build_service(tmp_path)
     user = User(id=3, name="Vadim", department="engineering")
 
@@ -622,46 +642,57 @@ async def test_build_system_prompt_injects_instructions_and_tone(tmp_path: Path)
     prompt = await service.build_system_prompt(user)
 
     assert prompt is not None
+    assert "BASE SOUL" in prompt
     assert "Always cite sources." in prompt
-    assert "You are talking to Vadim from the engineering department." in prompt
-    # M1: the concise directive is injected (previously dead field).
     assert "Be concise" in prompt
+    # Path A "You are talking to…" removed — identity is only in run() Current User Context.
+    assert "You are talking to" not in prompt
 
 
 @pytest.mark.asyncio
 async def test_build_system_prompt_without_agent_context_is_not_none(tmp_path: Path) -> None:
-    """With no saved agent context, the user-context line still yields a prompt."""
+    """With no agent context, base SOUL still yields a preview prompt."""
     service, _ = _build_service(tmp_path)
     user = User(id=4, name="Anna", department="marketing")
 
     prompt = await service.build_system_prompt(user)
 
-    # No base/bootstrap files exist, so only the synthesized user_ctx part remains.
     assert prompt is not None
-    assert "You are talking to Anna from the marketing department." in prompt
+    assert "BASE SOUL" in prompt
 
 
 @pytest.mark.asyncio
 async def test_tone_directive_reaches_agent_loop_via_service_run(tmp_path: Path) -> None:
-    """End-to-end: run() passes the tone directive to the loop's system_prompt.
+    """B-111: tone is assembled inside AgentLoop (not service system_prompt kwarg)."""
+    from unittest.mock import AsyncMock
 
-    A SpyLoop captures the system_prompt kwarg; we assert the concise directive
-    survives the full run() path (bootstrap + agent-context load + tone mapping).
-    """
+    from corpclaw_lite.agent.loop import AgentConfig, AgentLoop
+    from corpclaw_lite.config.settings import AgentSettings
+    from corpclaw_lite.extensions.tools.registry import ToolRegistry
+    from corpclaw_lite.llm.base import LLMResponse, Provider
 
-    class SpyLoop:
-        captured_system_prompt: str | None = None
+    captured_systems: list[str] = []
 
-        async def run(self, *_args: Any, **kwargs: Any) -> tuple[str, Any]:
-            from corpclaw_lite.agent.loop import RunStats
+    class SpyProvider(AsyncMock):
+        async def chat(self, messages, tools=None, system=None, **kwargs):  # type: ignore[no-untyped-def]
+            if system:
+                captured_systems.append(system)
+            return LLMResponse(content="ok", tool_calls=[])
 
-            SpyLoop.captured_system_prompt = kwargs.get("system_prompt")
-            return "ok", RunStats()
-
-    spy = SpyLoop()
     user_manager = UserManager(db_path=str(tmp_path / "users.db"))
+    provider = SpyProvider(spec=Provider)
+    loop = AgentLoop(
+        AgentConfig(
+            provider=provider,
+            registry=ToolRegistry(),
+            settings=AgentSettings(max_steps=2, max_tool_calls=2, max_wall_time_ms=5000),
+            default_system_prompt="BASE SOUL",
+            bootstrap=BootstrapLoader(tmp_path / "bootstrap"),
+            user_manager=user_manager,
+        )
+    )
     stack = AgentStack(
-        loop=spy,  # type: ignore[arg-type]
+        loop=loop,
         user_manager=user_manager,
         tool_registry=None,  # type: ignore[arg-type]
         full_tool_registry=None,
@@ -681,11 +712,12 @@ async def test_tone_directive_reaches_agent_loop_via_service_run(tmp_path: Path)
 
     await service.run(user=user, message="hi", mode="chat", channel="web")
 
-    captured = SpyLoop.captured_system_prompt
-    assert captured is not None
-    assert "Be precise." in captured
-    # M1 regression: tone directive is present (was missing before the fix).
-    assert "Be thorough" in captured
+    assert captured_systems, "provider.chat must receive a system prompt"
+    joined = "\n".join(captured_systems)
+    assert "Be precise." in joined
+    assert "Be thorough" in joined
+    assert "Current User Context:" in joined
+    assert "Vadim" in joined
 
 
 @pytest.mark.asyncio

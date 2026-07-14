@@ -110,21 +110,23 @@ class CalibrationLoop:
             department="engineering",
         )
 
-        # Get system prompt
+        # B-111: AgentLoop assembles base + user layers at run-time.
+        # system_prompt below is only for the cloud analyzer's "current prompt" context.
         from corpclaw_lite.config.bootstrap import BootstrapLoader
 
-        bootstrap = BootstrapLoader(self._project_root / "config" / "bootstrap")
-        system_prompt = bootstrap.get_system_prompt() or ""
+        system_prompt = (
+            BootstrapLoader(self._project_root / "config" / "bootstrap").get_system_prompt() or ""
+        )
 
         # Prepare workspace
         workspace = self._project_root / ".calibration_workspace"
         workspace.mkdir(exist_ok=True)
 
-        # Baseline run
+        # Baseline run (system_prompt=None → loop default + user layers)
         runner = CalibrationRunner(
             agent_loop,
             cal_user,
-            system_prompt,
+            None,
             workspace,
             skill_matcher=_cal_stack.skill_matcher,
             skill_registry=_cal_stack.skill_registry,
@@ -249,9 +251,11 @@ class CalibrationLoop:
             new_loop = _new_stack.loop
             new_registry = _new_stack.tool_registry
 
-            # Reload bootstrap with calibrated overrides
-            new_bootstrap = BootstrapLoader(self._project_root / "config" / "bootstrap")
-            new_system_prompt = new_bootstrap.get_system_prompt() or ""
+            # Reload bootstrap snapshot for analyzer context (not passed into run).
+            new_system_prompt = (
+                BootstrapLoader(self._project_root / "config" / "bootstrap").get_system_prompt()
+                or ""
+            )
 
             # Load and apply tool overrides
             overrides = editor.load_tool_overrides()
@@ -265,7 +269,7 @@ class CalibrationLoop:
             new_runner = CalibrationRunner(
                 new_loop,
                 cal_user,
-                new_system_prompt,
+                None,
                 workspace,
                 few_shots=calibrated_few_shots,
                 skill_matcher=_new_stack.skill_matcher,

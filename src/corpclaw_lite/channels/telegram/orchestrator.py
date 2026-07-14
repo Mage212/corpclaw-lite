@@ -451,7 +451,7 @@ class TelegramBotOrchestrator:
         prechecked_access: bool = False,
     ) -> None:
         """Main message handler — replaces nested _handle_and_reply."""
-        stack, channel, rate_limiter, bootstrap = self._require_started()
+        stack, channel, rate_limiter, _bootstrap = self._require_started()
 
         tid = int(telegram_id)
         user_manager = stack.user_manager
@@ -593,14 +593,8 @@ class TelegramBotOrchestrator:
         # Agent execution
         run_stats = None
         try:
-            base_prompt = bootstrap.get_system_prompt()
-            dept_prompt = bootstrap.get_department_prompt(user.department)
-            user_prompt = bootstrap.get_user_prompt(user.id, user.telegram_id)
-            user_ctx = f"You are talking to {user.name} from the {user.department} department."
-            parts_list = [p for p in [base_prompt, dept_prompt, user_prompt, user_ctx] if p]
-            system_prompt: str | None = "\n\n".join(parts_list) if parts_list else None
-
-            # Inject only relevant skill instructions into system prompt
+            # B-111: user-context (dept/onboarding/tone/…) assembled inside AgentLoop.
+            # Channel only matches skills and passes them as system_prompt extras.
             skill_registry = stack.skill_registry
             plugin_registry = stack.plugin_registry
             allowed_skills = (
@@ -621,8 +615,7 @@ class TelegramBotOrchestrator:
             else:
                 matched_skills = main_scoped
             skill_block = build_skill_block(matched_skills, [])
-            if skill_block:
-                system_prompt = (system_prompt or "") + skill_block
+            system_prompt: str | None = skill_block if skill_block else None
 
             async def approval_cb(action: str, details: str) -> bool:
                 return await channel.request_approval(user, action, details)

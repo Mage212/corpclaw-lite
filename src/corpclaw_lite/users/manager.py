@@ -26,8 +26,8 @@ logger = logging.getLogger(__name__)
 # Response-tone directives injected into the system prompt per the user's
 # ``user_agent_context.tone`` setting (Etap 5). ``"default"`` has no directive —
 # the base SOUL.md tone line applies unchanged. ``tone_directive()`` is the
-# single point consumed by both ``AgentRequestService`` (run) and the web
-# preview handler, so the tone setting can never silently go unused.
+# single point consumed by ``AgentLoop`` (B-111) for both run-time assembly and
+# web preview, so the tone setting can never silently go unused.
 _TONE_DIRECTIVES: dict[str, str] = {
     "concise": (
         "Be concise: give short, direct answers. Skip preamble, hedging, and "

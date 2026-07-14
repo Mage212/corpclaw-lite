@@ -399,7 +399,6 @@ def cmd_chat(telegram_id: int, *, setup_mode: bool = False) -> None:
 
         from corpclaw_lite.agent.factory import build_agent_stack
         from corpclaw_lite.channels.cli import CLIChannel
-        from corpclaw_lite.config.bootstrap import BootstrapLoader
         from corpclaw_lite.runtime.shutdown import install_signal_handlers
         from corpclaw_lite.users.manager import UserManager
 
@@ -413,9 +412,6 @@ def cmd_chat(telegram_id: int, *, setup_mode: bool = False) -> None:
         skill_registry = stack.skill_registry
         plugin_registry = stack.plugin_registry
         skill_matcher = stack.skill_matcher
-        bootstrap = BootstrapLoader(Path("config/bootstrap"))
-        system_prompt = bootstrap.get_system_prompt() or None
-
         # Load user from DB — same flow as Telegram bot
         standalone_manager = UserManager()
         user = standalone_manager.get_by_telegram_id(telegram_id)
@@ -476,15 +472,8 @@ def cmd_chat(telegram_id: int, *, setup_mode: bool = False) -> None:
             user = standalone_manager.get_by_telegram_id(telegram_id) or user
             print(f"\n✅ Настройка завершена, {user.name}!\n")
 
-        # Per-user prompt (static, set once)
+        # B-111: SOUL/dept/onboarding assembled inside AgentLoop; CLI only injects skills.
         from corpclaw_lite.agent.prompt import build_skill_block
-
-        user_prompt = bootstrap.get_user_prompt(user.id, user.telegram_id)
-        if user_prompt:
-            system_prompt = (system_prompt or "") + "\n\n" + user_prompt
-
-        # Base system prompt without skills — skills are injected per-message
-        base_system_prompt = system_prompt
 
         # Connect MCP servers (no hot-reload — CLI session is short-lived)
         if mcp_manager is not None:
@@ -546,9 +535,7 @@ def cmd_chat(telegram_id: int, *, setup_mode: bool = False) -> None:
                     else:
                         matched_skills = main_scoped
                     skill_block = build_skill_block(matched_skills, [])
-                    system_prompt = base_system_prompt
-                    if skill_block:
-                        system_prompt = (system_prompt or "") + skill_block
+                    system_prompt = skill_block if skill_block else None
 
                     async def approval_cb(action: str, details: str) -> bool:
                         return await channel.request_approval(user, action, details)
