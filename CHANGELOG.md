@@ -11,15 +11,23 @@
 Version bump and full 2A release notes ship when **2A.1 + 2A.2 + 2A.3** are done
 (single patch after EventSink). Until then: stay on **0.2.5**.
 
-#### 2A.1 (merged when this lands)
+#### 2A.1
 
 - **B-078 (partial): adaptations package.** Pure move of:
   - `apply_tool_surface` / `inject_tool_soft_hint` → `adaptations/tool_surface.py`
   - `apply_closing_mode` → `adaptations/closing.py` (B-046)
   - `apply_workflow_mandate` → `adaptations/mandate.py` (B-047)
 - Call order unchanged (base → phase → mandate re-apply → closing → soft-hint;
-  mandate before dedup). Cascade still on loop (**2A.2**). EventSink (**2A.3**).
+  mandate before dedup).
 - Isolated unit tests: `test_adaptations_{tool_surface,closing,mandate}.py`.
+
+#### 2A.2
+
+- **B-078 cascade:** `auto_finalize_cascade` → `adaptations/finalize.py` (B-073 never
+  re-raise; stage B emergency LLM + stage C programmatic terminal).
+- Explicit deps (`call_llm`, `execute_tool_call`, registry/provider) — no full
+  `AgentLoop` import. Unit tests: `test_adaptations_finalize.py`.
+- EventSink still pending (**2A.3**).
 
 ## [0.2.5] — 2026-07-13
 
