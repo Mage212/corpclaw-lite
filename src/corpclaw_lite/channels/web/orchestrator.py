@@ -22,6 +22,7 @@ from corpclaw_lite.channels.service import AgentRequestCallbacks, AgentRequestSe
 from corpclaw_lite.channels.status import (
     INITIAL_STATUS_TEXT,
     READY_STATUS_TEXT,
+    build_system_load_payload,
     format_llm_queue_status,
     format_llm_stage_status,
     format_subagent_llm_queue_status,
@@ -84,6 +85,8 @@ _INLINE_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 _FRONTEND_DIST = PROJECT_ROOT / "frontend" / "web" / "dist"
 # Auto-naming: first user message truncated to this many chars (no LLM call).
 _CHAT_TITLE_MAX_CHARS = 25
+# DC-008 ambient system_load: soft poll for idle viewers.
+_SYSTEM_LOAD_POLL_INTERVAL_SECONDS = 20.0
 
 
 def _derive_chat_title(text: str) -> str | None:
@@ -152,6 +155,7 @@ class WebChannelOrchestrator:
         self._chat_store: WebChatStore | None = None
         self._cleanup_task: asyncio.Task[None] | None = None
         self._container_prune_task: asyncio.Task[None] | None = None
+        self._system_load_poll_task: asyncio.Task[None] | None = None
         # Etap 4: hot-reload watchers (started in start(), stopped in stop()).
         self._skill_reloader: SkillHotReloader | None = None
         self._subagent_reloader: SubagentHotReloader | None = None
@@ -161,6 +165,9 @@ class WebChannelOrchestrator:
         # B-070: retain strong references to fire-and-forget broadcast tasks
         # (status ticks, chat_list_changed) so they are not GC'd mid-execution.
         self._broadcast_tasks: set[asyncio.Task[None]] = set()
+        # DC-008: last fan-out snapshot for rate-limit / change detection.
+        self._last_system_load_payload: dict[str, object] | None = None
+        self._last_system_load_broadcast_at: float = 0.0
         self._started = False
 
     async def start(self) -> None:
@@ -254,6 +261,7 @@ class WebChannelOrchestrator:
         await site.start()
         install_signal_handlers(self._shutdown_event)
         self._cleanup_task = asyncio.create_task(self._session_cleanup_loop())
+        self._system_load_poll_task = asyncio.create_task(self._system_load_poll_loop())
         # Background idle-container pruner (prevents container accumulation in
         # server mode — prune_idle was previously CLI-only).
         if self._stack is not None and self._stack.container_manager is not None:
@@ -274,6 +282,8 @@ class WebChannelOrchestrator:
             self._cleanup_task.cancel()
         if self._container_prune_task is not None:
             self._container_prune_task.cancel()
+        if self._system_load_poll_task is not None:
+            self._system_load_poll_task.cancel()
         # Etap 4: stop hot-reload watchers.
         for reloader in (
             self._skill_reloader,
@@ -776,7 +786,7 @@ class WebChannelOrchestrator:
     async def _reset_context_for_user(self, user: User) -> tuple[bool, str, dict[str, object]]:
         if self._service is None:
             raise web.HTTPServiceUnavailable()
-        if not await self._service.try_start_user_request(user.id):
+        if not await self._try_start_user_request(user.id):
             return (
                 False,
                 "Предыдущая задача ещё выполняется. Дождитесь ответа перед сбросом контекста.",
@@ -792,7 +802,7 @@ class WebChannelOrchestrator:
             logger.info("Web user %s reset session", user.id)
             return True, "Сессия сброшена. Можно начать заново.", usage
         finally:
-            await self._service.finish_user_request(user.id)
+            await self._finish_user_request(user.id)
 
     async def _compress_active_context(
         self, user: User, *, session_id: int | None = None
@@ -1029,6 +1039,111 @@ class WebChannelOrchestrator:
                 sockets.discard(ws)
         if not sockets:
             self._clients.pop(user_id, None)
+
+    async def _broadcast_to_all(self, payload: dict[str, object]) -> None:
+        """Fan-out a payload to every connected web client (all users)."""
+        for user_id in list(self._clients.keys()):
+            await self._broadcast_to_user(user_id, payload)
+
+    def _llm_queue_counts(self) -> tuple[int, int, int]:
+        """Return ``(active_count, max_concurrent, waiting_count)`` for ambient load."""
+        max_concurrent = int(self._settings.llm.max_concurrent_requests)
+        active_count = 0
+        waiting_count = 0
+        stack = self._stack
+        if stack is None:
+            return active_count, max_concurrent, waiting_count
+        provider = getattr(stack.loop, "provider", None)
+        queue = getattr(provider, "queue", None) if provider is not None else None
+        if queue is None:
+            return active_count, max_concurrent, waiting_count
+        try:
+            active_count = int(queue.active_count)
+            waiting_count = int(queue.queue_length)
+            max_concurrent = int(queue.max_concurrent)
+        except Exception as e:
+            logger.debug("Failed to read LLM queue counts: %s", e)
+        return active_count, max_concurrent, waiting_count
+
+    async def _build_system_load(self) -> dict[str, object]:
+        """Build count-only ``system_load`` payload (DC-008 / D-088)."""
+        active_count, max_concurrent, waiting_count = self._llm_queue_counts()
+        active_users = 0
+        if self._service is not None:
+            active_users = await self._service.active_user_count()
+        payload = build_system_load_payload(
+            active_count=active_count,
+            max_concurrent=max_concurrent,
+            waiting_count=waiting_count,
+            active_users=active_users,
+        )
+        return payload
+
+    def _schedule_system_load_broadcast(self, *, force: bool = False) -> None:
+        """Schedule ambient system_load fan-out (rate-limited unless *force*)."""
+        task = asyncio.create_task(self._broadcast_system_load(force=force))
+        self._broadcast_tasks.add(task)
+        task.add_done_callback(self._broadcast_tasks.discard)
+
+    async def _broadcast_system_load(self, *, force: bool = False) -> None:
+        """Broadcast ``system_load`` to all connected clients when counts change.
+
+        *force* (soft-poll): always push a fresh ``updated_at`` so idle clients
+        do not look permanently stale. Change-driven calls skip identical counts.
+        """
+        if not self._clients:
+            return
+        try:
+            payload = await self._build_system_load()
+        except Exception as e:
+            logger.debug("system_load build failed: %s", e)
+            return
+        now = time.monotonic()
+        keys = (
+            "active_count",
+            "max_concurrent",
+            "waiting_count",
+            "active_users",
+            "load_level",
+        )
+        comparable = {k: payload[k] for k in keys}
+        last = self._last_system_load_payload
+        last_cmp = {k: last[k] for k in keys if k in last} if last is not None else None
+        # Change-driven: skip identical counts. Soft-poll (force) always pushes
+        # a fresh updated_at for idle viewers.
+        if not force and last_cmp == comparable:
+            return
+        self._last_system_load_payload = dict(payload)
+        self._last_system_load_broadcast_at = now
+        await self._broadcast_to_all(payload)
+
+    async def _system_load_poll_loop(self) -> None:
+        """Soft-poll system_load so idle viewers stay in sync."""
+        while True:
+            try:
+                await asyncio.sleep(_SYSTEM_LOAD_POLL_INTERVAL_SECONDS)
+                if self._clients:
+                    await self._broadcast_system_load(force=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.debug("system_load poll failed: %s", e)
+
+    async def _try_start_user_request(self, user_id: int) -> bool:
+        """Acquire in-flight gate and refresh ambient system_load on success."""
+        if self._service is None:
+            return False
+        ok = await self._service.try_start_user_request(user_id)
+        if ok:
+            self._schedule_system_load_broadcast()
+        return ok
+
+    async def _finish_user_request(self, user_id: int) -> None:
+        """Release in-flight gate and refresh ambient system_load."""
+        if self._service is None:
+            return
+        await self._service.finish_user_request(user_id)
+        self._schedule_system_load_broadcast()
 
     def _create_download_grant(
         self,
@@ -1297,7 +1412,7 @@ class WebChannelOrchestrator:
         if section not in {"chat", "work"}:
             section = "chat"
         # A new chat implies a clean agent context. Block while a run is in-flight.
-        if not await self._service.try_start_user_request(user.id):
+        if not await self._try_start_user_request(user.id):
             return web.json_response(
                 {"error": "Дождитесь завершения активного чата перед созданием нового."},
                 status=409,
@@ -1307,7 +1422,7 @@ class WebChannelOrchestrator:
             session_id = await self._chat_store.create_session(user.memory_key(), section=section)
             summary = await self._chat_store.get_session(user.memory_key(), session_id)
         finally:
-            await self._service.finish_user_request(user.id)
+            await self._finish_user_request(user.id)
         if summary is None:
             raise web.HTTPInternalServerError(text="Failed to create chat session")
         self._context_usage.pop(user.id, None)
@@ -1332,7 +1447,7 @@ class WebChannelOrchestrator:
             )
         # Switching the active chat resets agent context (memory is single-thread
         # per user). Block while a run is in-flight.
-        if not await self._service.try_start_user_request(user.id):
+        if not await self._try_start_user_request(user.id):
             return web.json_response(
                 {"error": "Дождитесь завершения активного чата перед переключением."},
                 status=409,
@@ -1349,7 +1464,7 @@ class WebChannelOrchestrator:
             if not restored:
                 await self._service.reset_user_context(user)
         finally:
-            await self._service.finish_user_request(user.id)
+            await self._finish_user_request(user.id)
         if new_id is None:
             raise web.HTTPNotFound(text="Chat not found.")
         activated = await self._chat_store.get_session(user.memory_key(), new_id)
@@ -1414,7 +1529,7 @@ class WebChannelOrchestrator:
             raise web.HTTPBadRequest(text="Invalid chat id.") from e
         # Take the single-in-flight lock for consistency with create/activate —
         # all chat mutations that can interact with an active run serialize here.
-        if not await self._service.try_start_user_request(user.id):
+        if not await self._try_start_user_request(user.id):
             return web.json_response(
                 {"error": "Дождитесь завершения активного чата перед удалением."}, status=409
             )
@@ -1449,7 +1564,7 @@ class WebChannelOrchestrator:
                     },
                 )
         finally:
-            await self._service.finish_user_request(user.id)
+            await self._finish_user_request(user.id)
         await self._broadcast_to_user(user.id, {"type": "chat_list_changed"})
         return web.json_response(
             {"ok": True, "session_id": session_id, "replacement_session_id": replacement_session_id}
@@ -1519,6 +1634,11 @@ class WebChannelOrchestrator:
                 "usage": await self._context_usage_for_user(user),
             }
         )
+        # DC-008: ambient GPU/system load for the always-on top bar (counts only).
+        try:
+            await send(await self._build_system_load())
+        except Exception as e:
+            logger.debug("system_load on connect failed: %s", e)
         active_state = self._active_request_state.get(user.id)
         if active_state is not None:
             await send({"type": "request_state", **active_state})
@@ -1573,6 +1693,8 @@ class WebChannelOrchestrator:
                 key="llm_slot",
                 label=format_llm_queue_status(status),
             )
+            # Ambient bar for all viewers (counts only; no personal position).
+            self._schedule_system_load_broadcast()
 
         def send_subagent_llm_status(*, request_id: str, subagent_name: str, stage: str) -> None:
             label = format_subagent_llm_stage_status(subagent_name, stage)
@@ -1601,6 +1723,7 @@ class WebChannelOrchestrator:
                 key=f"{subagent_name}:llm_slot",
                 label=format_subagent_llm_queue_status(subagent_name, status),
             )
+            self._schedule_system_load_broadcast()
 
         async def approval_cb(action: str, details: str) -> bool:
             approval_id = secrets.token_urlsafe(12)
@@ -1672,7 +1795,7 @@ class WebChannelOrchestrator:
             if not await self._rate_limiter.check(user.id):
                 await send({"type": "error", "message": "Слишком много сообщений."})
                 return
-            if not await self._service.try_start_user_request(user.id):
+            if not await self._try_start_user_request(user.id):
                 await send({"type": "error", "message": "Предыдущая задача ещё выполняется."})
                 return
             request_acquired = True
@@ -1865,7 +1988,7 @@ class WebChannelOrchestrator:
             finally:
                 self._active_request_state.pop(user.id, None)
                 if request_acquired:
-                    await self._service.finish_user_request(user.id)
+                    await self._finish_user_request(user.id)
 
         try:
             async for msg in ws:
@@ -1968,7 +2091,7 @@ class WebChannelOrchestrator:
                     if self._service is None:
                         await send({"type": "error", "message": "Сервис ещё не готов."})
                         continue
-                    if not await self._service.try_start_user_request(user.id):
+                    if not await self._try_start_user_request(user.id):
                         await send(
                             {
                                 "type": "error",
@@ -1992,7 +2115,7 @@ class WebChannelOrchestrator:
                             user, session_id=target_session
                         )
                     finally:
-                        await self._service.finish_user_request(user.id)
+                        await self._finish_user_request(user.id)
                     payload_out = {
                         "type": "compress_done" if ok else "error",
                         "message": message,

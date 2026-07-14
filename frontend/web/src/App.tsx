@@ -15,6 +15,7 @@ import {
   renameChat as apiRenameChat
 } from "./api";
 import { ChatPanel } from "./chat/ChatPanel";
+import { SystemLoadBar } from "./chat/SystemLoadBar";
 import { useWebChatSession } from "./chat/useWebChatSession";
 import { FileExplorer } from "./files/FileExplorer";
 import { useResizablePanels } from "./hooks/useResizablePanels";
@@ -31,7 +32,8 @@ import type {
   PreviewOverlayMode,
   PreviewPayload,
   SessionPayload,
-  SidebarSection
+  SidebarSection,
+  SystemLoad
 } from "./types";
 
 export function App() {
@@ -133,6 +135,7 @@ function Workspace({
   const [previewMode, setPreviewMode] = useState<PreviewOverlayMode>("side");
 
   const [contextUsage, setContextUsage] = useState<ContextUsage | null>(null);
+  const [systemLoad, setSystemLoad] = useState<SystemLoad | null>(null);
   const [resetSignal, setResetSignal] = useState(0);
 
   // Etap 2: multi-chat. chatId=null = follow the active chat (loaded on connect).
@@ -198,7 +201,8 @@ function Workspace({
     onActivateViewedChat: handleActivateViewedChat,
     onChatActivated: () => setChatId(null),
     onChatRenamed: refreshChats,
-    onChatListChanged: refreshChats
+    onChatListChanged: refreshChats,
+    onSystemLoad: setSystemLoad
   });
 
   useEffect(() => {
@@ -365,6 +369,7 @@ function Workspace({
             </button>
           </div>
         </header>
+        <SystemLoadBar load={systemLoad} connected={chatSession.connected} />
 
         <div className="main-pane">
           <div className={`view-pane ${view === "chat" ? "" : "view-hidden"}`}>
