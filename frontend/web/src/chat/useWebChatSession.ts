@@ -1,8 +1,7 @@
 import type { Dispatch, SetStateAction } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createWebSocketTicket } from "../api";
-import { parseServerWsEvent } from "../contracts";
-import type { ServerWsEvent } from "../contracts";
+import { parseServerWsEvent, type ServerWsEvent } from "../contracts";
 import type {
   AgentMode,
   ApprovalRequest,
@@ -332,7 +331,14 @@ export function useWebChatSession({
             console.warn("Ignored invalid WebSocket JSON", error);
             return;
           }
-          const wsEvent = parseServerWsEvent(parsed);
+          let wsEvent: ServerWsEvent | null = null;
+          try {
+            wsEvent = parseServerWsEvent(parsed);
+          } catch (error) {
+            // requiredNumber/etc. throw on malformed payloads; never break the socket handler
+            console.warn("Ignored malformed WebSocket event", parsed, error);
+            return;
+          }
           if (wsEvent === null) {
             console.warn("Ignored unknown WebSocket event", parsed);
             return;

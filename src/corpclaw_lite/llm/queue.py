@@ -137,6 +137,10 @@ class LLMRequestQueue:
         self._slot_affinity = slot_affinity or SlotAffinityConfig()
         self._slots: dict[int, _SlotState] = {}
         self._slot_affinity_provider_warnings: set[str] = set()
+        # Optional ambient load hook (e.g. web system_load broadcast). Invoked
+        # after successful acquire / release so observers see active_count change
+        # even when no waiting-position notify ran.
+        self._on_load_changed: Callable[[], None] | None = None
         if self._strategy == "slot_affinity" and self._slot_affinity.enabled:
             for slot_id in self._slot_affinity.sticky_slot_ids:
                 self._slots[slot_id] = _SlotState(slot_id=slot_id, kind="sticky")
@@ -150,6 +154,19 @@ class LLMRequestQueue:
             max_concurrent,
             self._strategy,
         )
+
+    def set_on_load_changed(self, callback: Callable[[], None] | None) -> None:
+        """Register a zero-arg callback for ambient load observers (acquire/release)."""
+        self._on_load_changed = callback
+
+    def _emit_load_changed(self) -> None:
+        callback = self._on_load_changed
+        if callback is None:
+            return
+        try:
+            callback()
+        except Exception as e:
+            logger.debug("[queue] on_load_changed failed: %s", e)
 
     async def acquire(
         self,
@@ -273,6 +290,7 @@ class LLMRequestQueue:
                 active_count=active_count,
                 max_concurrent=self._max_concurrent,
             )
+            self._emit_load_changed()
             raise
         if notify_task is not None:
             await self._cancel_notify_task(notify_task)
@@ -324,6 +342,7 @@ class LLMRequestQueue:
             task_kind,
             load_class,
         )
+        self._emit_load_changed()
         return entry
 
     async def _notify_waiting_status_loop(
@@ -538,6 +557,7 @@ class LLMRequestQueue:
             elapsed_seconds,
             self._avg_request_seconds,
         )
+        self._emit_load_changed()
 
     def get_position(self, user_id: str) -> int | None:
         """Return 0-based queue position for *user_id*, or ``None`` if not queued."""
