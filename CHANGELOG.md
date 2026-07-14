@@ -10,6 +10,11 @@
 
 - **B-111 audit:** main-agent SOUL base is re-read via `BootstrapLoader.get_system_prompt()`
   each turn (mtime/overlay/calibration), not frozen from factory `default_system_prompt`.
+- **B-124 mid-run compress store-first.** Auto-compress during a multi-iter turn
+  rewrites `ChatContextStore` (compress durable `list_context`, then
+  `replace_context`) instead of only shrinking in-memory `state.context.messages`.
+  Trigger still uses the live window; no-session (CLI/subagent) stays memory-only.
+  Shared helper `_compress_store_transcript` powers on-demand `_compress_chat` too.
 
 ### Docs
 
