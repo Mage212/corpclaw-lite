@@ -54,6 +54,10 @@ def compute_load_level(
     - saturated: full capacity and a non-empty wait queue
     - busy: everything else (full but no wait, or partial use with waiters)
     """
+    # Degenerate capacity (misconfig / disabled): treat as idle when nothing
+    # is running or waiting; otherwise busy (never claim "idle" with waiters).
+    if max_concurrent <= 0:
+        return "idle" if waiting_count == 0 and active_count <= 0 else "busy"
     if waiting_count == 0 and active_count < max_concurrent:
         return "idle"
     if waiting_count > 0 and active_count >= max_concurrent:

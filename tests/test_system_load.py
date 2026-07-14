@@ -14,6 +14,12 @@ def test_compute_load_level_idle() -> None:
     assert compute_load_level(active_count=2, max_concurrent=4, waiting_count=0) == "idle"
 
 
+def test_compute_load_level_zero_capacity() -> None:
+    """Misconfigured max_concurrent=0 must not look saturated when empty."""
+    assert compute_load_level(active_count=0, max_concurrent=0, waiting_count=0) == "idle"
+    assert compute_load_level(active_count=0, max_concurrent=0, waiting_count=1) == "busy"
+
+
 def test_compute_load_level_busy() -> None:
     # Full capacity but nobody waiting yet
     assert compute_load_level(active_count=4, max_concurrent=4, waiting_count=0) == "busy"

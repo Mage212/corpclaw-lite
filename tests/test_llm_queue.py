@@ -23,6 +23,17 @@ class TestQueueBasic:
         assert q.active_count == 0
 
     @pytest.mark.asyncio
+    async def test_on_load_changed_fires_on_acquire_and_release(self) -> None:
+        """DC-008 ambient bar needs load hooks even when no waiter notify runs."""
+        q = LLMRequestQueue(max_concurrent=2)
+        events: list[str] = []
+        q.set_on_load_changed(lambda: events.append(f"a={q.active_count}"))
+        entry = await q.acquire("user1")
+        assert events == ["a=1"]
+        await q.release(entry, 1.0)
+        assert events == ["a=1", "a=0"]
+
+    @pytest.mark.asyncio
     async def test_acquire_fills_to_capacity(self) -> None:
         q = LLMRequestQueue(max_concurrent=2)
         await q.acquire("u1")

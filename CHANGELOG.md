@@ -14,6 +14,9 @@
   connected web clients on connect, workflow start/finish, LLM queue wait
   updates, and a soft poll (~20s). Always-on `SystemLoadBar` under the web
   topbar (idle/busy/saturated tones). No personal/PII fields (D-088).
+- **DC-008 review fixes.** Queue `on_load_changed` fires on acquire/release so
+  ambient bar tracks `active_count` even without waiters; zero-capacity
+  load_level edge case; FE guards malformed WS payloads in the chat handler.
 
 ### Fixed
 

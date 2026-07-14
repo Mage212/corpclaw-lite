@@ -262,6 +262,9 @@ class WebChannelOrchestrator:
         install_signal_handlers(self._shutdown_event)
         self._cleanup_task = asyncio.create_task(self._session_cleanup_loop())
         self._system_load_poll_task = asyncio.create_task(self._system_load_poll_loop())
+        # DC-008: refresh ambient bar when LLM slots are acquired/released even
+        # if nobody is waiting (no on_status path).
+        self._wire_queue_load_observer()
         # Background idle-container pruner (prevents container accumulation in
         # server mode — prune_idle was previously CLI-only).
         if self._stack is not None and self._stack.container_manager is not None:
@@ -1079,8 +1082,22 @@ class WebChannelOrchestrator:
         )
         return payload
 
+    def _wire_queue_load_observer(self) -> None:
+        """Attach queue acquire/release → system_load broadcast (if queue exists)."""
+        stack = self._stack
+        if stack is None:
+            return
+        provider = getattr(stack.loop, "provider", None)
+        queue = getattr(provider, "queue", None) if provider is not None else None
+        if queue is None or not hasattr(queue, "set_on_load_changed"):
+            return
+        try:
+            queue.set_on_load_changed(lambda: self._schedule_system_load_broadcast())
+        except Exception as e:
+            logger.debug("Failed to wire queue load observer: %s", e)
+
     def _schedule_system_load_broadcast(self, *, force: bool = False) -> None:
-        """Schedule ambient system_load fan-out (rate-limited unless *force*)."""
+        """Schedule ambient system_load fan-out (change-driven unless *force*)."""
         task = asyncio.create_task(self._broadcast_system_load(force=force))
         self._broadcast_tasks.add(task)
         task.add_done_callback(self._broadcast_tasks.discard)
