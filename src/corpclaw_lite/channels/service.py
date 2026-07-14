@@ -142,11 +142,13 @@ class AgentRequestService:
             self._active_user_requests.discard(user_id)
 
     async def reset_user_context(self, user: User) -> None:
-        """Clear conversation memory and invalidate LLM cache state for a user."""
-        memory = self._stack.loop.memory
-        if memory is not None:
-            await memory.clear(user.memory_key())
+        """Invalidate LLM KV-cache after a session reset (B-106).
 
+        Transcript lives in ``ChatContextStore`` / ``WebChatStore`` — callers
+        archive the chat session separately (CASCADE clears context rows).
+        ``SQLiteMemory`` is facts-only and is intentionally not cleared here
+        (facts are cross-chat personalization).
+        """
         from corpclaw_lite.llm.router import LLMRouter
 
         provider = self._stack.loop.provider
@@ -156,9 +158,8 @@ class AgentRequestService:
     async def restore_user_context(self, user: User, session_id: int) -> bool:
         """Validate session ownership and that context-store has transcript (B-104).
 
-        After 2B.2 the store is the sole LLM transcript source — ``AgentLoop.run``
-        loads full tool_calls/tool-role via ``list_context``; no shadow copy into
-        SQLiteMemory.messages. This method only:
+        The store is the sole LLM transcript source — ``AgentLoop.run`` loads full
+        tool_calls/tool-role via ``list_context``. This method only:
         1. IDOR-checks ownership (B-067)
         2. Confirms the store has messages for ``session_id``
         3. Invalidates slot KV-cache for the user

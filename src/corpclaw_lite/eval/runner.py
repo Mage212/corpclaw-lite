@@ -20,7 +20,7 @@ import os
 import shutil
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from corpclaw_lite.calibration.trajectory import Trajectory, TrajectoryRecorder
 from corpclaw_lite.eval.scenarios import EvalScenario, ScenarioTurn
@@ -38,8 +38,6 @@ __all__ = [
 ]
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable
-
     from corpclaw_lite.agent.loop import AgentLoop
     from corpclaw_lite.eval.judge import LLMJudge
     from corpclaw_lite.users.models import User
@@ -163,16 +161,11 @@ class EvalRunner:
                     results.append(self._crash_score(scenario, e))
                 finally:
                     self._cleanup_workspace(scenario)
-                    if self._agent_loop.memory:
-                        await self._agent_loop.memory.clear(str(self._user.id))
-                        # B-060: also clear stored memory_facts so a scenario's
-                        # memory_store calls do not leak into the next scenario
-                        # (memory.clear() only wipes the conversation, not facts).
-                        clear_facts = getattr(self._agent_loop.memory, "clear_facts", None)
-                        if callable(clear_facts):
-                            await cast("Callable[[str], Awaitable[None]]", clear_facts)(
-                                str(self._user.id)
-                            )
+                    memory = self._agent_loop.memory
+                    if memory is not None:
+                        # B-106: SQLiteMemory is facts-only; clear between scenarios
+                        # so memory_store in s1 cannot leak into s2's recall.
+                        await memory.clear_facts(str(self._user.id))
 
                 if on_progress is not None:
                     on_progress(scenario.id, results[-1].passed, idx + 1, len(scenarios))

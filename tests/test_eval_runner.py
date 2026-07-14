@@ -21,11 +21,7 @@ from corpclaw_lite.users.models import User
 
 class _FakeMemory:
     def __init__(self) -> None:
-        self.cleared: list[str] = []
         self.facts_cleared: list[str] = []
-
-    async def clear(self, user_id: str) -> None:
-        self.cleared.append(user_id)
 
     async def clear_facts(self, user_id: str) -> None:
         self.facts_cleared.append(user_id)
@@ -350,25 +346,8 @@ async def test_memory_cleared_between_scenarios(tmp_path: Path) -> None:
         EvalScenario(id="s2", category="c", turns=[ScenarioTurn(user_message="m2")]),
     ]
     await runner.run_all(scenarios)
-    # Both conversation (clear) and stored facts (clear_facts) are wiped between
-    # scenarios so a memory_store in s1 cannot leak into s2's recall.
-    assert loop.memory.cleared == ["99", "99"]
+    # B-106: facts-only isolation between scenarios (memory_store must not leak).
     assert loop.memory.facts_cleared == ["99", "99"]
-
-
-@pytest.mark.asyncio
-async def test_clear_facts_skipped_when_memory_lacks_it(tmp_path: Path) -> None:
-    """A memory backend without clear_facts (e.g. a minimal mock) must not crash
-    the runner — the hasattr guard skips the call gracefully."""
-    loop = _FakeAgentLoop(answers=["a"], tools_per_call=[[]])
-    # Remove clear_facts to simulate a backend that doesn't implement it.
-    delattr(loop.memory, "facts_cleared")
-    del type(loop.memory).clear_facts  # type: ignore[attr-defined]
-    runner = EvalRunner(loop, _user(), "sys", tmp_path)
-    scenarios = [EvalScenario(id="s1", category="c", turns=[ScenarioTurn(user_message="m")])]
-    # Should not raise.
-    await runner.run_all(scenarios)
-    assert loop.memory.cleared == ["99"]
 
 
 @pytest.mark.asyncio

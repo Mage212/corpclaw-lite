@@ -1,11 +1,9 @@
 # pyright: reportUnknownMemberType=false, reportUnknownVariableType=false, reportAttributeAccessIssue=false
 from __future__ import annotations
 
-import json
 import logging
 import sqlite3
 from functools import partial
-from typing import Any
 
 import anyio
 
@@ -23,7 +21,14 @@ _DATA_DIR = DATA_DIR
 
 
 class SQLiteMemory:
-    """Persistent storage for agent conversation history and facts using SQLite.
+    """Cross-chat structured facts store (user_id-keyed), backed by SQLite.
+
+    B-106 / D-078: transcript history lives exclusively in ``ChatContextStore``.
+    This class no longer owns a ``messages`` table — only ``memory_facts``
+    (used by memory_store/recall tools, onboarding finalizer, and loop fact recall).
+
+    Class name ``SQLiteMemory`` is kept for import stability; a rename to
+    ``MemoryFactsStore`` is optional follow-up, not part of this slim-down.
 
     All public methods are async and delegate blocking SQLite I/O to a thread pool
     via ``anyio.to_thread.run_sync`` to avoid blocking the event loop.
@@ -34,28 +39,14 @@ class SQLiteMemory:
         self._init_db()
 
     def _init_db(self) -> None:
-        """Create the necessary tables if they don't exist."""
+        """Create facts tables; drop legacy messages table if present (B-106)."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             with db_connect(self.db_path) as conn:
                 conn.execute("PRAGMA journal_mode=WAL")
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS messages (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        user_id TEXT NOT NULL,
-                        role TEXT NOT NULL,
-                        content TEXT NOT NULL,
-                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-                    )
-                    """
-                )
-                conn.execute(
-                    """
-                    CREATE INDEX IF NOT EXISTS idx_messages_user
-                    ON messages(user_id, timestamp)
-                    """
-                )
+                # B-106: transcript is ChatContextStore-only. Drop legacy table so
+                # old text-only history cannot be read by accident (clean start, D-078).
+                conn.execute("DROP TABLE IF EXISTS messages")
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS memory_facts (
@@ -74,172 +65,9 @@ class SQLiteMemory:
                     ON memory_facts(user_id)
                     """
                 )
-                # Migration: add reasoning column if not present
-                try:
-                    conn.execute("ALTER TABLE messages ADD COLUMN reasoning TEXT")
-                    logger.debug("Added 'reasoning' column to messages table")
-                except sqlite3.OperationalError as e:
-                    # B-074/L9: swallow only the idempotent "duplicate column";
-                    # re-raise + warn on disk I/O / lock so the outer handler
-                    # surfaces it rather than silently skipping the migration.
-                    if "duplicate column" not in str(e).lower():
-                        logger.warning("Memory migration failed (reasoning column): %s", e)
-                        raise
         except Exception as e:
             logger.critical("Failed to initialize SQLite Memory: %s", e)
             raise StorageError(f"Database initialization failed: {e}") from e
-
-    # ── Messages ─────────────────────────────────────────────────────────────
-
-    def _sync_add_message(
-        self, user_id: str, role: str, content_str: str, reasoning: str | None
-    ) -> None:
-        try:
-            with db_connect(self.db_path) as conn:
-                conn.execute(
-                    "INSERT INTO messages (user_id, role, content, reasoning) VALUES (?, ?, ?, ?)",
-                    (str(user_id), role, content_str, reasoning),
-                )
-        except Exception as e:
-            raise StorageError(f"Failed to insert message for user {user_id}: {e}") from e
-
-    async def add_message(
-        self,
-        user_id: str,
-        role: str,
-        content: str | dict[str, Any],
-        reasoning: str | None = None,
-    ) -> None:
-        """Add a message to the memory store.
-
-        Args:
-            user_id: User identifier.
-            role: Message role (user, assistant, system).
-            content: Message content (string or JSON-serializable dict).
-            reasoning: Optional model reasoning/chain-of-thought (stored for
-                audit and future context injection, not returned by get_history).
-        """
-        content_str = json.dumps(content) if isinstance(content, dict) else str(content)
-        await anyio.to_thread.run_sync(
-            partial(self._sync_add_message, user_id, role, content_str, reasoning)
-        )
-
-    def _sync_get_history(self, user_id: str, limit: int) -> list[dict[str, Any]]:
-        try:
-            with db_connect(self.db_path) as conn:
-                conn.row_factory = sqlite3.Row
-                cursor = conn.execute(
-                    """
-                    SELECT role, content FROM messages
-                    WHERE user_id = ?
-                    ORDER BY timestamp DESC
-                    LIMIT ?
-                    """,
-                    (str(user_id), limit),
-                )
-                rows = cursor.fetchall()
-
-                history: list[dict[str, Any]] = []
-                for r in reversed(rows):
-                    role = r["role"]
-                    content_str = r["content"]
-                    history.append({"role": role, "content": content_str})
-                return history
-        except Exception as e:
-            raise StorageError(f"Failed to fetch history for user {user_id}: {e}") from e
-
-    async def get_history(self, user_id: str, limit: int = 20) -> list[dict[str, Any]]:
-        """Retrieve recent conversation history for a user."""
-        return await anyio.to_thread.run_sync(partial(self._sync_get_history, user_id, limit))
-
-    def _sync_clear(self, user_id: str) -> None:
-        try:
-            with db_connect(self.db_path) as conn:
-                conn.execute("DELETE FROM messages WHERE user_id = ?", (str(user_id),))
-        except Exception as e:
-            raise StorageError(f"Failed to clear memory for user {user_id}: {e}") from e
-
-    async def clear(self, user_id: str) -> None:
-        """Clear the history for a user."""
-        await anyio.to_thread.run_sync(partial(self._sync_clear, user_id))
-
-    def _sync_count_messages(self, user_id: str) -> int:
-        try:
-            with db_connect(self.db_path) as conn:
-                cursor = conn.execute(
-                    "SELECT COUNT(*) FROM messages WHERE user_id = ?",
-                    (str(user_id),),
-                )
-                row = cursor.fetchone()
-                return int(row[0]) if row else 0
-        except Exception as e:
-            raise StorageError(f"Failed to count messages for user {user_id}: {e}") from e
-
-    async def count_messages(self, user_id: str) -> int:
-        """Return the total number of messages for a user."""
-        return await anyio.to_thread.run_sync(partial(self._sync_count_messages, user_id))
-
-    def _sync_get_oldest_message_ids(self, user_id: str, count: int) -> list[int]:
-        try:
-            with db_connect(self.db_path) as conn:
-                cursor = conn.execute(
-                    """
-                    SELECT id FROM messages
-                    WHERE user_id = ?
-                    ORDER BY timestamp ASC
-                    LIMIT ?
-                    """,
-                    (str(user_id), count),
-                )
-                return [row[0] for row in cursor.fetchall()]
-        except Exception as e:
-            raise StorageError(f"Failed to get oldest message IDs for user {user_id}: {e}") from e
-
-    async def get_oldest_message_ids(self, user_id: str, count: int) -> list[int]:
-        """Return IDs of the N oldest messages for a user."""
-        return await anyio.to_thread.run_sync(
-            partial(self._sync_get_oldest_message_ids, user_id, count)
-        )
-
-    def _sync_replace_oldest(self, user_id: str, count: int, summary: str) -> None:
-        """Replace the N oldest messages with a summary in a single atomic transaction."""
-        try:
-            with db_connect(self.db_path) as conn:
-                # SELECT + DELETE + INSERT in one connection = atomic
-                cursor = conn.execute(
-                    """
-                    SELECT id FROM messages
-                    WHERE user_id = ?
-                    ORDER BY timestamp ASC
-                    LIMIT ?
-                    """,
-                    (str(user_id), count),
-                )
-                ids = [row[0] for row in cursor.fetchall()]
-                if not ids:
-                    return
-                placeholders = ",".join("?" for _ in ids)
-                conn.execute(
-                    f"DELETE FROM messages WHERE id IN ({placeholders})",  # noqa: S608
-                    ids,
-                )
-                conn.execute(
-                    "INSERT INTO messages (user_id, role, content) VALUES (?, ?, ?)",
-                    (str(user_id), "assistant", f"[Conversation summary]: {summary}"),
-                )
-        except Exception as e:
-            raise StorageError(f"Failed to consolidate messages for user {user_id}: {e}") from e
-
-    async def replace_oldest(self, user_id: str, count: int, summary: str) -> None:
-        """Delete the N oldest messages and insert a consolidation summary.
-
-        Runs in a single transaction to avoid data loss.
-
-        Note: VACUUM is no longer triggered automatically here — it takes an exclusive
-        database lock that stalls all readers/writers. Call ``vacuum()`` explicitly
-        (e.g. from a maintenance/CLI path) when reclaiming disk space is required.
-        """
-        await anyio.to_thread.run_sync(partial(self._sync_replace_oldest, user_id, count, summary))
 
     # ── Vacuum ──────────────────────────────────────────────────────────────
 

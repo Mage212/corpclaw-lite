@@ -310,71 +310,24 @@ def test_llm_response_reasoning_field() -> None:
     assert resp2.reasoning == "I thought about it"
 
 
-# ── Memory reasoning storage ─────────────────────────────────────────────────
+# ── Memory facts store (B-106) ───────────────────────────────────────────────
 
 
 @pytest.mark.anyio()
-async def test_reasoning_stored_in_memory(tmp_path: Path) -> None:
-    """add_message stores reasoning in the database."""
-    import sqlite3
-
-    from corpclaw_lite.memory.sqlite import SQLiteMemory
-
-    db_path = tmp_path / "test_memory.db"
-
-    # Patch data dir for test
-    import corpclaw_lite.memory.sqlite as mem_module
-
-    original_data_dir = mem_module._DATA_DIR
-    mem_module._DATA_DIR = tmp_path
-    try:
-        memory = SQLiteMemory(db_path=db_path.name)
-        await memory.add_message(
-            "user1",
-            "assistant",
-            "The answer is 4.",
-            reasoning="Step 1: 2+2=4",
-        )
-
-        # Verify reasoning is in the database
-        with sqlite3.connect(str(memory.db_path)) as conn:
-            row = conn.execute(
-                "SELECT content, reasoning FROM messages WHERE user_id = ?", ("user1",)
-            ).fetchone()
-        assert row is not None
-        assert row[0] == "The answer is 4."
-        assert row[1] == "Step 1: 2+2=4"
-
-        # get_history does NOT return reasoning
-        history = await memory.get_history("user1")
-        assert len(history) == 1
-        assert history[0]["content"] == "The answer is 4."
-        assert "reasoning" not in history[0]
-    finally:
-        mem_module._DATA_DIR = original_data_dir
-
-
-@pytest.mark.anyio()
-async def test_add_message_without_reasoning(tmp_path: Path) -> None:
-    """add_message works without reasoning (backward compatible)."""
-    import sqlite3
-
+async def test_sqlite_memory_facts_only(tmp_path: Path) -> None:
+    """B-106: SQLiteMemory stores cross-chat facts, not message transcripts."""
     import corpclaw_lite.memory.sqlite as mem_module
     from corpclaw_lite.memory.sqlite import SQLiteMemory
 
     original_data_dir = mem_module._DATA_DIR
     mem_module._DATA_DIR = tmp_path
     try:
-        memory = SQLiteMemory(db_path="test_compat.db")
-        await memory.add_message("user1", "user", "hello")
-
-        with sqlite3.connect(str(memory.db_path)) as conn:
-            row = conn.execute(
-                "SELECT content, reasoning FROM messages WHERE user_id = ?", ("user1",)
-            ).fetchone()
-        assert row is not None
-        assert row[0] == "hello"
-        assert row[1] is None
+        memory = SQLiteMemory(db_path="test_facts.db")
+        await memory.store_fact("user1", "pref", "short")
+        facts = await memory.recall_facts("user1")
+        assert facts == [{"key": "pref", "value": "short"}]
+        assert not hasattr(memory, "add_message")
+        assert not hasattr(memory, "get_history")
     finally:
         mem_module._DATA_DIR = original_data_dir
 

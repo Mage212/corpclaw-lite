@@ -84,14 +84,14 @@ class TelegramChannel(Channel):
             message_handler: Callback async function(telegram_id, message, mode) -> str
             workspace_base: Base directory for per-user workspaces
             tool_registry: For /help command — lists available tools
-            memory: For /new command — clears user history
+            memory: Optional facts store (B-106); transcript reset no longer uses it.
             onboarding_engine: OnboardingEngine instance for /setup command
             image_handler: Optional async function(telegram_id, image_path, caption) for
                            direct image processing that bypasses the agent loop. When set,
                            uploaded images are routed here instead of through message_handler
                            so the raw vision-model response reaches the user unmodified.
-            cache_reset_callback: Optional async callback invoked by /new after
-                                  memory is cleared, so LLM cache state can be invalidated.
+            cache_reset_callback: Optional async callback invoked by /new so LLM cache
+                                  state can be invalidated after session reset.
             session_reset_callback: Optional async callback (B-102) to end the Telegram
                                   virtual chat session after /new (does not touch web).
             setup_handler: Optional async callback invoked by /setup under orchestrator locks.
@@ -590,15 +590,15 @@ class TelegramChannel(Channel):
         await update.effective_chat.send_message(text)
 
     async def _handle_new(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Reset conversation history."""
+        """Reset conversation history (B-102 virtual session + B-106 facts-only memory)."""
         if not update.effective_user or not update.effective_chat:
             return
         if not await self._check_access(update, "new"):
             return
         tid = update.effective_user.id
         user = await self._resolve_user(tid)
-        if self._memory:
-            await self._memory.clear(user.memory_key())
+        # Transcript: archive Telegram virtual session (CASCADE clears ChatContextStore).
+        # Facts on SQLiteMemory are cross-chat and intentionally preserved.
         if self._session_reset_callback is not None:
             await self._session_reset_callback(user)
         if self._cache_reset_callback is not None:

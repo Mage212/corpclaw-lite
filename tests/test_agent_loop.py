@@ -2543,12 +2543,8 @@ async def test_compress_now_syncs_context_store(
     ws = WebChatStore(db)
     store = ChatContextStore(db)
     session_id = await ws.create_session(user_id=str(test_user.id), section="work")
-    # Seed memory with 6 messages (>5 floor) so compress actually runs.
     memory = SQLiteMemory(db_path=str(db))
-    for i in range(6):
-        await memory.add_message(test_user.memory_key(), "user", f"q{i}")
-        await memory.add_message(test_user.memory_key(), "assistant", f"a{i}")
-    # Seed the context store with the same 12 messages (uncompressed).
+    # Seed the context store with 12 messages (uncompressed, >5 floor).
     for i in range(6):
         await store.append_context(
             session_id=session_id, user_id=str(test_user.id), role="user", content=f"q{i}"
@@ -2654,10 +2650,10 @@ async def test_run_restores_full_context_from_store(
 
 
 @pytest.mark.asyncio
-async def test_run_ignores_memory_when_session_store_empty(
+async def test_run_ignores_facts_as_transcript_when_session_store_empty(
     test_user: User, empty_registry: ToolRegistry, tmp_path: Path
 ) -> None:
-    """B-104: session-bound run does not fall back to SQLiteMemory.get_history."""
+    """B-104/B-106: session-bound run loads only ChatContextStore (facts are not transcript)."""
     from corpclaw_lite.channels.web.chat_context_store import ChatContextStore
     from corpclaw_lite.channels.web.chat_store import WebChatStore
     from corpclaw_lite.memory.sqlite import SQLiteMemory
@@ -2666,10 +2662,9 @@ async def test_run_ignores_memory_when_session_store_empty(
     ws = WebChatStore(db)
     store = ChatContextStore(db)
     session_id = await ws.create_session(user_id=str(test_user.id), section="chat")
-    # Seed MEMORY only — must NOT appear in model context after 2B.2.
+    # Seed FACTS only — must NOT appear as conversation turns in model context.
     memory = SQLiteMemory(db_path=str(db))
-    await memory.add_message(test_user.memory_key(), "user", "old question")
-    await memory.add_message(test_user.memory_key(), "assistant", "old answer")
+    await memory.store_fact(test_user.memory_key(), "old", "old answer")
 
     captured: list[dict[str, Any]] = []
 
@@ -2734,8 +2729,8 @@ async def test_compress_from_context_store_full_schema(
             {"id": "c1", "type": "function", "function": {"name": "echo", "arguments": "{}"}}
         ],
     )
-    # Seed memory with DIFFERENT content so we can verify it's NOT touched.
-    await memory.add_message(test_user.memory_key(), "user", "MEMORY-NOT-TOUCHED")
+    # Seed a fact so we can verify compress does not touch SQLiteMemory facts.
+    await memory.store_fact(test_user.memory_key(), "note", "FACT-NOT-TOUCHED")
 
     class StubCompressor:
         async def compress(self, messages, **_):
@@ -2764,9 +2759,9 @@ async def test_compress_from_context_store_full_schema(
     assert len(ctx) == 2
     assert ctx[0]["content"] == "[Summary] compressed"
 
-    # SQLiteMemory should be UNTOUCHED (still has MEMORY-NOT-TOUCHED).
-    mem_history = await memory.get_history(test_user.memory_key(), limit=50)
-    assert any(m["content"] == "MEMORY-NOT-TOUCHED" for m in mem_history)
+    # Facts store should be UNTOUCHED.
+    facts = await memory.recall_facts(test_user.memory_key())
+    assert any(f["value"] == "FACT-NOT-TOUCHED" for f in facts)
 
 
 @pytest.mark.asyncio
@@ -2911,8 +2906,7 @@ def test_build_from_full_history_preserves_tool_calls_in_leading_strip(
 async def test_restore_then_run_composition(
     test_user: User, empty_registry: ToolRegistry, tmp_path: Path
 ) -> None:
-    """Integration: restore writes text to memory, then run() loads full schema
-    from the context store (NOT from the memory shadow)."""
+    """Integration: run() loads full schema from ChatContextStore (B-106 facts-only memory)."""
     from corpclaw_lite.channels.web.chat_context_store import ChatContextStore
     from corpclaw_lite.channels.web.chat_store import WebChatStore
     from corpclaw_lite.memory.sqlite import SQLiteMemory
@@ -2947,15 +2941,9 @@ async def test_restore_then_run_composition(
         session_id=session_id, user_id=str(test_user.id), role="assistant", content="All done."
     )
 
-    # Simulate restore: writes text-only to memory.
-    mem_messages = await store.list_context(session_id)
-    await memory.clear(test_user.memory_key())
-    for msg in mem_messages:
-        role = str(msg.get("role", "user"))
-        if role in ("user", "assistant", "system"):
-            await memory.add_message(test_user.memory_key(), role, str(msg.get("content", "")))
+    # Facts are orthogonal — seed one to prove they are not used as transcript.
+    await memory.store_fact(test_user.memory_key(), "pref", "terse")
 
-    # Now run() — should load from the STORE (full schema), not memory.
     captured: list[dict[str, Any]] = []
 
     class SpyProvider(MockProvider):
@@ -2973,5 +2961,5 @@ async def test_restore_then_run_composition(
     await loop.run(test_user, "follow up", session_id=session_id, channel="web")
 
     roles = [m["role"] for m in captured]
-    assert "tool" in roles, "store path not used — memory shadow took over"
+    assert "tool" in roles, "store path not used"
     assert any(m.get("tool_calls") for m in captured), "tool_calls missing"

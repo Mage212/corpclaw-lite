@@ -21,10 +21,10 @@ from corpclaw_lite.eval.scenarios import EvalScenario, ScenarioTurn
 
 class _FakeMemory:
     def __init__(self) -> None:
-        self.cleared: list[str] = []
+        self.facts_cleared: list[str] = []
 
-    async def clear(self, user_id: str) -> None:
-        self.cleared.append(user_id)
+    async def clear_facts(self, user_id: str) -> None:
+        self.facts_cleared.append(user_id)
 
 
 class _FakeStats:

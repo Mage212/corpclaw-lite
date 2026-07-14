@@ -523,12 +523,14 @@ async def test_agent_request_service_converts_llm_connection_error(
 
 @pytest.mark.asyncio
 async def test_agent_request_service_resets_user_context(tmp_path: Path) -> None:
-    class FakeMemory:
-        def __init__(self) -> None:
-            self.cleared: list[str] = []
+    """B-106: reset invalidates KV-cache only; does not clear facts."""
 
+    class FakeMemory:
         async def clear(self, user_id: str) -> None:
-            self.cleared.append(user_id)
+            raise AssertionError("messages clear() is removed — must not be called")
+
+        async def clear_facts(self, user_id: str) -> None:
+            raise AssertionError("reset must not clear cross-chat facts")
 
     class FakeLoop:
         def __init__(self) -> None:
@@ -554,9 +556,8 @@ async def test_agent_request_service_resets_user_context(tmp_path: Path) -> None
     )
     user = User(id=7, name="Vadim", department="engineering")
 
+    # Completes without touching FakeMemory (provider is not LLMRouter → no cache call).
     await service.reset_user_context(user)
-
-    assert loop.memory.cleared == [user.memory_key()]
 
 
 # --- M1 + L2: response-tone directive + shared system-prompt assembly --------
@@ -1655,8 +1656,7 @@ def test_chat_store_migration_idempotent_on_already_migrated(tmp_path: Path) -> 
 
 @pytest.mark.asyncio
 async def test_restore_user_context_validates_store_has_messages(tmp_path: Path) -> None:
-    """B-104: restore_user_context returns True when the context-store has data;
-    no longer shadows messages into SQLiteMemory (store is sole transcript)."""
+    """B-104/B-106: restore_user_context returns True when the context-store has data."""
     from corpclaw_lite.extensions.tools.registry import ToolRegistry
     from corpclaw_lite.memory.sqlite import SQLiteMemory
 
@@ -1685,15 +1685,15 @@ async def test_restore_user_context_validates_store_has_messages(tmp_path: Path)
     service = AgentRequestService(stack=stack, bootstrap=None, workspace_base=tmp_path / "ws")  # type: ignore[arg-type]
     user = User(id=7, name="Vadim", department="engineering")
 
-    await memory.add_message(user.memory_key(), "user", "STALE")
+    # Facts remain independent of restore (cross-chat personalization).
+    await memory.store_fact(user.memory_key(), "role", "engineer")
     restored = await service.restore_user_context(user, session_id)
 
     assert restored is True
-    # Memory transcript is intentionally not rewritten (B-104).
-    history = await memory.get_history(user.memory_key(), limit=50)
-    contents = [m["content"] for m in history]
-    assert "STALE" in contents
-    assert "hi" not in contents
+    facts = await memory.recall_facts(user.memory_key())
+    assert any(f["key"] == "role" for f in facts)
+    ctx = await store.list_context(session_id)
+    assert any(m.get("content") == "hi" for m in ctx)
 
 
 @pytest.mark.asyncio
@@ -1766,9 +1766,9 @@ async def test_restore_user_context_rejects_foreign_session(tmp_path: Path) -> N
 
     restored = await service.restore_user_context(attacker, victim_session)
     assert restored is False
-    # Memory must be untouched (not cleared, no victim content leaked).
-    history = await memory.get_history(attacker.memory_key(), limit=50)
-    assert all("victim secret" not in m.get("content", "") for m in history)
+    # Attacker's facts must stay empty (no side effects / no leak).
+    facts = await memory.recall_facts(attacker.memory_key())
+    assert facts == []
 
 
 @pytest.mark.asyncio
@@ -1810,7 +1810,7 @@ async def test_compress_user_context_rejects_foreign_session(tmp_path: Path) -> 
 
 @pytest.mark.asyncio
 async def test_restore_user_context_succeeds_without_memory_shadow(tmp_path: Path) -> None:
-    """B-104: restore does not require working memory.add_message (store-only)."""
+    """B-104/B-106: restore does not require message methods on SQLiteMemory."""
     from corpclaw_lite.extensions.tools.registry import ToolRegistry
     from corpclaw_lite.memory.sqlite import SQLiteMemory
 

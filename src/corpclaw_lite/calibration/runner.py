@@ -139,9 +139,11 @@ class CalibrationRunner:
                 # Cleanup workspace
                 self._cleanup_workspace(scenario)
 
-                # Clear memory between scenarios for isolation
-                if self._agent_loop.memory:
-                    await self._agent_loop.memory.clear(str(self._user.id))
+                # Clear cross-chat facts between scenarios for isolation (B-106).
+                # Transcript is session-scoped (ChatContextStore) or empty for CLI-like runs.
+                memory = self._agent_loop.memory
+                if memory is not None:
+                    await memory.clear_facts(str(self._user.id))
 
             if on_progress is not None:
                 result = results[-1]

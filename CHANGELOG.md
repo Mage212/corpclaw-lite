@@ -35,6 +35,17 @@ Version stays **0.2.6** until Sprint 2B completes (single patch **0.2.7** on las
 - Mid-run auto-compress still uses in-memory `ContextCompressor` on the active
   turn context; on-demand compress is store-only (full tool trajectory).
 
+#### 2B.4
+
+- **B-106 SQLiteMemory facts-only.** Removed messages API
+  (`add_message` / `get_history` / `clear` / `count_messages` /
+  `replace_oldest` / …) and dropped legacy `messages` table on init.
+  Remaining surface: `store_fact` / `recall_facts` / `clear_facts` / `vacuum`.
+- Session reset (web/telegram) no longer clears SQLiteMemory — transcript is
+  archived via `WebChatStore` + CASCADE on `ChatContextStore`; facts stay
+  cross-chat. Eval/calibration isolation uses `clear_facts` only.
+- Class name `SQLiteMemory` kept for import stability (rename optional later).
+
 ## [0.2.6] — 2026-07-14
 
 **Patch** `0.2.5 → 0.2.6`. **Sprint 2A complete** — Loop refactor (B-078 adaptations +
