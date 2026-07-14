@@ -140,8 +140,10 @@ async def test_tool_marker_saved_in_context_store(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_facts_still_use_sqlite_memory(tmp_path: Path) -> None:
-    """Facts API remains on SQLiteMemory (not removed until 2B.4)."""
+    """B-106: SQLiteMemory is facts-only (messages API removed)."""
     mem = SQLiteMemory(str(tmp_path / "facts.db"))
     await mem.store_fact("u1", "role", "engineer")
     facts = await mem.recall_facts("u1", limit=5)
     assert any(f["key"] == "role" and f["value"] == "engineer" for f in facts)
+    assert not hasattr(mem, "add_message")
+    assert not hasattr(mem, "get_history")

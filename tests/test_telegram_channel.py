@@ -160,13 +160,20 @@ class TestTelegramChannel:
 
     @pytest.mark.asyncio
     async def test_handle_new(self, channel: TelegramChannel) -> None:
+        """B-106: /new resets virtual session + cache, not SQLiteMemory messages."""
         update = MagicMock()
         update.effective_user.id = 123
         update.effective_chat.send_message = AsyncMock()
         channel._memory = AsyncMock()
+        session_reset = AsyncMock()
+        cache_reset = AsyncMock()
+        channel._session_reset_callback = session_reset
+        channel._cache_reset_callback = cache_reset
 
         await channel._handle_new(update, MagicMock())
-        channel._memory.clear.assert_awaited_once_with("123")
+        session_reset.assert_awaited_once()
+        cache_reset.assert_awaited_once_with("123")
+        channel._memory.clear.assert_not_called()
         update.effective_chat.send_message.assert_awaited_once()
 
     @pytest.mark.asyncio

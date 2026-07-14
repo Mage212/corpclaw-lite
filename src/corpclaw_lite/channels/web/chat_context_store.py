@@ -7,9 +7,8 @@ role/content **plus** structured ``tool_calls``, ``tool_call_id``, ``name`` and
 
 It intentionally lives next to, but separately from:
 
-- ``SQLiteMemory.messages`` — the agent's per-user in-memory context (role/content
-  + an audit ``reasoning`` column; no tool_calls/tool_call_id). Switching chats
-  clears that table, so it cannot serve as per-chat durable storage.
+- ``SQLiteMemory`` (B-106 facts-only) — cross-chat key/value personalization;
+  not a transcript store.
 - ``WebChatStore.web_chat_messages`` — the user-visible transcript
   (role/content/tone + aggregate stats). It has no reasoning/tool_calls columns
   and is append-only/never compacted; it is for UI history, not LLM replay.
@@ -17,7 +16,7 @@ It intentionally lives next to, but separately from:
 ``web_chat_context`` is the model-facing mirror: a faithful, ordered,
 compactable snapshot of what the model saw, keyed by ``(session_id, seq)``.
 
-All three stores share ``data/memory.db`` (WAL); they never JOIN each other.
+Stores share ``data/memory.db`` (WAL); they never JOIN each other.
 """
 
 from __future__ import annotations

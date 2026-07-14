@@ -645,7 +645,7 @@ class _FakeMemory:
     def __init__(self) -> None:
         self.cleared_keys: list[str] = []
 
-    async def clear(self, key: str) -> None:
+    async def clear_facts(self, key: str) -> None:
         self.cleared_keys.append(key)
 
 
