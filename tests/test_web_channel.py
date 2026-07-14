@@ -1654,9 +1654,9 @@ def test_chat_store_migration_idempotent_on_already_migrated(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_restore_user_context_loads_into_memory(tmp_path: Path) -> None:
-    """restore_user_context clears memory and re-adds the chat's context-store
-    messages (text only; tool-role skipped — reconstructed at run() time)."""
+async def test_restore_user_context_validates_store_has_messages(tmp_path: Path) -> None:
+    """B-104: restore_user_context returns True when the context-store has data;
+    no longer shadows messages into SQLiteMemory (store is sole transcript)."""
     from corpclaw_lite.extensions.tools.registry import ToolRegistry
     from corpclaw_lite.memory.sqlite import SQLiteMemory
 
@@ -1664,28 +1664,9 @@ async def test_restore_user_context_loads_into_memory(tmp_path: Path) -> None:
     store = ChatContextStore(tmp_path / "m.db")
     ws = WebChatStore(tmp_path / "m.db")
     session_id = await ws.create_session(user_id="7", section="chat")
-    # Seed the context store with a full turn (user/assistant+tool_calls/tool/assistant).
     await store.append_context(session_id=session_id, user_id="7", role="user", content="hi")
-    await store.append_context(
-        session_id=session_id,
-        user_id="7",
-        role="assistant",
-        content="",
-        tool_calls=[
-            {"id": "c1", "type": "function", "function": {"name": "echo", "arguments": "{}"}}
-        ],
-    )
-    await store.append_context(
-        session_id=session_id,
-        user_id="7",
-        role="tool",
-        content="echo:hi",
-        tool_call_id="c1",
-        name="echo",
-    )
     await store.append_context(session_id=session_id, user_id="7", role="assistant", content="done")
 
-    # Stub loop: restore_user_context only needs .memory and .provider.
     class _StubLoop:
         def __init__(self, mem):
             self.memory = mem
@@ -1695,6 +1676,7 @@ async def test_restore_user_context_loads_into_memory(tmp_path: Path) -> None:
         loop=_StubLoop(memory),  # type: ignore[arg-type]
         user_manager=UserManager(db_path=str(tmp_path / "u.db")),
         chat_context_store=store,
+        chat_store=ws,
         tool_registry=ToolRegistry(),  # type: ignore[arg-type]
         full_tool_registry=None,
         mcp_manager=None,
@@ -1703,18 +1685,15 @@ async def test_restore_user_context_loads_into_memory(tmp_path: Path) -> None:
     service = AgentRequestService(stack=stack, bootstrap=None, workspace_base=tmp_path / "ws")  # type: ignore[arg-type]
     user = User(id=7, name="Vadim", department="engineering")
 
-    # Pre-seed memory with something else, so we can confirm it's cleared.
     await memory.add_message(user.memory_key(), "user", "STALE")
     restored = await service.restore_user_context(user, session_id)
 
     assert restored is True
+    # Memory transcript is intentionally not rewritten (B-104).
     history = await memory.get_history(user.memory_key(), limit=50)
-    # tool-role is skipped in memory (text-only); user + assistant text present.
     contents = [m["content"] for m in history]
-    assert "hi" in contents
-    assert "done" in contents
-    assert "STALE" not in contents  # cleared
-    assert "echo:hi" not in contents  # tool-role skipped
+    assert "STALE" in contents
+    assert "hi" not in contents
 
 
 @pytest.mark.asyncio
@@ -1830,10 +1809,8 @@ async def test_compress_user_context_rejects_foreign_session(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_restore_user_context_handles_memory_failure(tmp_path: Path) -> None:
-    """B4 fix: restore_user_context wraps clear+add in try/except. If memory
-    sync fails mid-loop, the restore returns True (non-fatal — the context store
-    is the source of truth)."""
+async def test_restore_user_context_succeeds_without_memory_shadow(tmp_path: Path) -> None:
+    """B-104: restore does not require working memory.add_message (store-only)."""
     from corpclaw_lite.extensions.tools.registry import ToolRegistry
     from corpclaw_lite.memory.sqlite import SQLiteMemory
 
@@ -1848,19 +1825,6 @@ async def test_restore_user_context_handles_memory_failure(tmp_path: Path) -> No
 
     memory = SQLiteMemory(db_path=str(db))
 
-    # Patch add_message to raise after the first call (simulates mid-loop failure).
-    original_add = memory.add_message
-    call_count = 0
-
-    async def failing_add(*args, **kwargs):
-        nonlocal call_count
-        call_count += 1
-        if call_count > 1:
-            raise RuntimeError("simulated storage failure")
-        return await original_add(*args, **kwargs)
-
-    memory.add_message = failing_add  # type: ignore[assignment]
-
     class _StubLoop:
         def __init__(self, mem):
             self.memory = mem
@@ -1870,6 +1834,7 @@ async def test_restore_user_context_handles_memory_failure(tmp_path: Path) -> No
         loop=_StubLoop(memory),  # type: ignore[arg-type]
         user_manager=UserManager(db_path=str(tmp_path / "u.db")),
         chat_context_store=store,
+        chat_store=ws,
         tool_registry=ToolRegistry(),  # type: ignore[arg-type]
         full_tool_registry=None,
         mcp_manager=None,
@@ -1882,6 +1847,5 @@ async def test_restore_user_context_handles_memory_failure(tmp_path: Path) -> No
     )
     user = User(id=7, name="Vadim", department="engineering")
 
-    # Should return True despite the memory failure (non-fatal).
     restored = await service.restore_user_context(user, session_id)
     assert restored is True

@@ -154,27 +154,21 @@ class AgentRequestService:
             await provider.mark_user_cache_reset(user.memory_key())
 
     async def restore_user_context(self, user: User, session_id: int) -> bool:
-        """Load a chat's full LLM context into memory (B-063 S2: activate=load).
+        """Validate session ownership and that context-store has transcript (B-104).
 
-        Clears memory and re-adds the per-chat context-store messages as
-        role/content (text only). The full tool_calls/tool-role structure is
-        reconstructed at ``AgentLoop.run()`` time directly from the context
-        store, NOT from memory (memory is a text-only fallback for non-web
-        channels and the get_history path).
+        After 2B.2 the store is the sole LLM transcript source — ``AgentLoop.run``
+        loads full tool_calls/tool-role via ``list_context``; no shadow copy into
+        SQLiteMemory.messages. This method only:
+        1. IDOR-checks ownership (B-067)
+        2. Confirms the store has messages for ``session_id``
+        3. Invalidates slot KV-cache for the user
 
-        Returns True if context was loaded; False if the store was empty or no
-        store is configured (caller falls back to ``reset_user_context``).
+        Returns True if context is available; False if empty / missing / unauthorized
+        (caller falls back to ``reset_user_context``).
         """
         store = self._stack.chat_context_store
         if store is None:
             return False
-        # B-067: verify the caller owns the session before reading its full
-        # LLM transcript. The orchestrator already checks this, but
-        # restore_user_context is a public method — pushing the check down here
-        # closes the IDOR-by-read gap for any future caller that forgets it.
-        # When no WebChatStore is wired (e.g. CLI/Telegram channels without a
-        # web transcript), the check is skipped: those channels are not exposed
-        # to session_id-based access.
         chat_store = self._stack.chat_store
         if chat_store is not None:
             session = await chat_store.get_session(user.memory_key(), session_id)
@@ -196,29 +190,6 @@ class AgentRequestService:
             return False
         if not messages:
             return False
-        memory = self._stack.loop.memory
-        if memory is not None:
-            # B-063 final-fix B4: wrap clear+add in try/except — the context
-            # store is the source of truth; memory is a text-only fallback. If
-            # the memory sync fails mid-loop, the store still has the full
-            # context and run() will load from it directly.
-            try:
-                await memory.clear(user.memory_key())
-                for msg in messages:
-                    role = str(msg.get("role", "user"))
-                    # Memory is text-only; skip tool-role (reconstructed at
-                    # run() time from the context store, not memory).
-                    if role in ("user", "assistant", "system"):
-                        await memory.add_message(
-                            user.memory_key(), role, str(msg.get("content", ""))
-                        )
-            except Exception:
-                logger.warning(
-                    "[session=%s] restore_user_context: memory sync failed "
-                    "(non-fatal; context store is source of truth)",
-                    session_id,
-                    exc_info=True,
-                )
         from corpclaw_lite.llm.router import LLMRouter
 
         provider = self._stack.loop.provider

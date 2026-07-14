@@ -800,17 +800,27 @@ class TelegramBotOrchestrator:
             await self._finish_user_request(user.id)
             raise
 
-        # Persist in agent memory — non-critical, don't block user response
-        mem = stack.loop.memory
-        if mem is not None:
-            mem_key = user.memory_key()
-            user_msg = f"[Пользователь отправил изображение: {image_path.name}] {prompt}"
+        # B-103: persist image turn to ChatContextStore (telegram virtual session).
+        user_msg = f"[Пользователь отправил изображение: {image_path.name}] {prompt}"
+        if stack.chat_store is not None and stack.chat_context_store is not None:
             try:
-                await mem.add_message(mem_key, "user", user_msg)
-                await mem.add_message(mem_key, "assistant", result)
+                from corpclaw_lite.channels.web.chat_store import CHANNEL_TELEGRAM
+
+                session_id = await stack.chat_store.ensure_channel_session(
+                    user.memory_key(),
+                    channel=CHANNEL_TELEGRAM,
+                )
+                uid = str(user.id)
+                await stack.chat_context_store.append_context(
+                    session_id=session_id, user_id=uid, role="user", content=user_msg
+                )
+                await stack.chat_context_store.append_context(
+                    session_id=session_id, user_id=uid, role="assistant", content=result
+                )
             except Exception:
                 logger.error(
-                    "Failed to persist image interaction in memory for user %s", telegram_id
+                    "Failed to persist image interaction in context store for user %s",
+                    telegram_id,
                 )
 
         try:
