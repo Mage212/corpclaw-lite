@@ -6,28 +6,43 @@
 
 ## [Unreleased]
 
-### Sprint 2A — Loop refactor (B-078 / B-079) — in progress
+## [0.2.6] — 2026-07-14
 
-Version bump and full 2A release notes ship when **2A.1 + 2A.2 + 2A.3** are done
-(single patch after EventSink). Until then: stay on **0.2.5**.
+**Patch** `0.2.5 → 0.2.6`. **Sprint 2A complete** — Loop refactor (B-078 adaptations +
+B-079 EventSink). Behavior-neutral pure moves; next = Sprint 2B (memory/prompt).
 
-#### 2A.1
+### Changed — Sprint 2A
 
-- **B-078 (partial): adaptations package.** Pure move of:
-  - `apply_tool_surface` / `inject_tool_soft_hint` → `adaptations/tool_surface.py`
-  - `apply_closing_mode` → `adaptations/closing.py` (B-046)
-  - `apply_workflow_mandate` → `adaptations/mandate.py` (B-047)
-- Call order unchanged (base → phase → mandate re-apply → closing → soft-hint;
-  mandate before dedup).
-- Isolated unit tests: `test_adaptations_{tool_surface,closing,mandate}.py`.
+#### 2A.1 — Schema adaptations package (B-078)
 
-#### 2A.2
+- Free functions under `agent/adaptations/`:
+  - `tool_surface.py` — `apply_tool_surface`, `inject_tool_soft_hint`
+  - `closing.py` — `apply_closing_mode` (B-046)
+  - `mandate.py` — `apply_workflow_mandate` (B-047)
+- Call order unchanged: base → phase → mandate re-apply → closing → soft-hint;
+  mandate **before** dedup.
+- Unit tests: `test_adaptations_{tool_surface,closing,mandate}.py`.
 
-- **B-078 cascade:** `auto_finalize_cascade` → `adaptations/finalize.py` (B-073 never
-  re-raise; stage B emergency LLM + stage C programmatic terminal).
-- Explicit deps (`call_llm`, `execute_tool_call`, registry/provider) — no full
-  `AgentLoop` import. Unit tests: `test_adaptations_finalize.py`.
-- EventSink still pending (**2A.3**).
+#### 2A.2 — Auto-finalize cascade (B-078)
+
+- `auto_finalize_cascade` → `adaptations/finalize.py` (B-073 never re-raise;
+  stage B emergency LLM + stage C programmatic terminal).
+- Explicit deps (`call_llm`, `execute_tool_call`, registry/provider).
+- Unit tests: `test_adaptations_finalize.py`.
+
+#### 2A.3 — EventSink (B-079)
+
+- `agent/events.py`: `AgentEvent` union, `EventSink` protocol, `CallbackEventSink`,
+  `NullEventSink`, registry subagent adapters.
+- `AgentLoop.run(event_sink=...)` plus legacy `on_*` kwargs → `CallbackEventSink`
+  (web/telegram unchanged).
+- Tool start/batch, LLM stage/queue, subagent status funnel through `sink.emit`.
+- Unit tests: `test_event_sink.py`.
+
+### Handoff → Sprint 2B
+
+- Memory dual-write unify (B-102…106), prompt Path A/B unify (B-111).
+- Invariants preserved: B-046×2, B-047 before dedup, B-066 budget on retries, B-073.
 
 ## [0.2.5] — 2026-07-13
 

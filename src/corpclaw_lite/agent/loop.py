@@ -33,6 +33,15 @@ from corpclaw_lite.agent.depth_mode import (
     resolve_depth_sampling,
     set_call_depth_mode,
 )
+from corpclaw_lite.agent.events import (
+    EventSink,
+    LlmQueueStatusEvent,
+    LlmStageEvent,
+    ToolBatchStartEvent,
+    ToolStartEvent,
+    callback_event_sink_from_kwargs,
+    sink_to_registry_callbacks,
+)
 from corpclaw_lite.agent.guards import (
     BudgetExceededError,
     PlanningTextGuard,
@@ -746,6 +755,7 @@ class AgentLoop:
         run_id: str | None = None,
         depth_mode: DepthMode | None = None,
         session_id: int | None = None,
+        event_sink: EventSink | None = None,
     ) -> tuple[str, RunStats]:
         """Run the ReAct loop until a final answer is given or limits are reached.
 
@@ -753,14 +763,35 @@ class AgentLoop:
             few_shots: Calibrated few-shot examples injected before history.
                 Loaded from ``config/calibrated/few_shots.yaml`` by AgentStack
                 and passed through here into ContextBuilder.
+            event_sink: Optional status sink (B-079). When None, a
+                :class:`~corpclaw_lite.agent.events.CallbackEventSink` is built
+                from the legacy ``on_*`` kwargs (back-compat for channels).
 
         Returns:
             (reply, stats) — the agent's final answer and execution metrics.
 
         B-077: prologue (``_build_turn_context``) packs ``LoopState`` + contextvars;
         epilogue (``_finalize_turn``) resets tokens. ReAct body is behavior-neutral.
+        B-079: status callbacks funnel through ``EventSink``.
         """
         tokens = TurnTokens()
+        sink: EventSink = event_sink or callback_event_sink_from_kwargs(
+            on_tool_start=on_tool_start,
+            on_tool_batch_start=on_tool_batch_start,
+            on_llm_stage=on_llm_stage,
+            on_llm_queue_status=on_llm_queue_status,
+            on_subagent_tool_start=on_subagent_tool_start,
+            on_subagent_tool_batch_start=on_subagent_tool_batch_start,
+            on_subagent_llm_stage=on_subagent_llm_stage,
+            on_subagent_llm_queue_status=on_subagent_llm_queue_status,
+        )
+
+        def _on_llm_stage_for_call(stage: str) -> None:
+            sink.emit(LlmStageEvent(stage=stage))
+
+        def _on_llm_queue_for_call(status: LLMQueueStatus) -> None:
+            sink.emit(LlmQueueStatusEvent(status=status))
+
         # Prologue outside the ReAct try so ``state`` is always bound for except/
         # fallback; epilogue still runs if prologue fails mid-bind.
         try:
@@ -774,7 +805,7 @@ class AgentLoop:
                 message=message,
                 system_prompt=system_prompt,
                 approval_callback=approval_callback,
-                on_llm_stage=on_llm_stage,
+                event_sink=sink,
                 tools_enabled=tools_enabled,
                 few_shots=few_shots,
                 channel=channel,
@@ -960,13 +991,13 @@ class AgentLoop:
                                             system=state.context.system_prompt or None,
                                             run_id=state.stats.run_id,
                                             iteration=state.stats.iterations,
-                                            on_llm_stage=on_llm_stage,
+                                            on_llm_stage=_on_llm_stage_for_call,
                                             stats=state.stats,
                                         ),
                                         timeout=self._settings.llm_timeout_seconds,
                                     )
                                 ),
-                                on_queue_status=on_llm_queue_status,
+                                on_queue_status=_on_llm_queue_for_call,
                                 notify_position=_queue_notify_position(self._settings),
                                 notify_interval_seconds=_queue_notify_interval_seconds(
                                     self._settings
@@ -984,7 +1015,7 @@ class AgentLoop:
                                 tools=state.tools_schema,
                                 system=state.context.system_prompt or None,
                                 on_acquired=on_queued_provider_acquired,
-                                on_queue_status=on_llm_queue_status,
+                                on_queue_status=_on_llm_queue_for_call,
                                 notify_position=_queue_notify_position(self._settings),
                                 notify_interval_seconds=_queue_notify_interval_seconds(
                                     self._settings
@@ -998,7 +1029,7 @@ class AgentLoop:
                                             system=state.context.system_prompt or None,
                                             run_id=state.stats.run_id,
                                             iteration=state.stats.iterations,
-                                            on_llm_stage=on_llm_stage,
+                                            on_llm_stage=_on_llm_stage_for_call,
                                             stats=state.stats,
                                         ),
                                         timeout=self._settings.llm_timeout_seconds,
@@ -1020,7 +1051,7 @@ class AgentLoop:
                                     system=state.context.system_prompt or None,
                                     run_id=state.stats.run_id,
                                     iteration=state.stats.iterations,
-                                    on_llm_stage=on_llm_stage,
+                                    on_llm_stage=_on_llm_stage_for_call,
                                     stats=state.stats,
                                 ),
                                 timeout=self._settings.llm_timeout_seconds,
@@ -1246,12 +1277,7 @@ class AgentLoop:
                         response.tool_calls,
                         user,
                         _approval_cb,
-                        on_tool_start,
-                        on_tool_batch_start,
-                        on_subagent_tool_start,
-                        on_subagent_tool_batch_start,
-                        on_subagent_llm_stage,
-                        on_subagent_llm_queue_status,
+                        sink,
                         trajectory_recorder,
                         state.stats,
                         state.task_run,
@@ -1306,11 +1332,7 @@ class AgentLoop:
                             tc,
                             user,
                             _approval_cb,
-                            on_tool_start,
-                            on_subagent_tool_start,
-                            on_subagent_tool_batch_start,
-                            on_subagent_llm_stage,
-                            on_subagent_llm_queue_status,
+                            sink,
                             trajectory_recorder,
                             state.stats,
                             state.task_run,
@@ -1406,7 +1428,7 @@ class AgentLoop:
 
                 async def _cascade_execute(tc: ToolCall, u: User, st: RunStats) -> str:
                     return await self._execute_single_tool(
-                        tc, u, None, None, None, None, None, None, None, st, None
+                        tc, u, None, sink, None, st, None, emit_tool_start=False
                     )
 
                 salvage = await auto_finalize_cascade(
@@ -1487,7 +1509,7 @@ class AgentLoop:
         message: str,
         system_prompt: str | None,
         approval_callback: Callable[[str, str], Awaitable[bool]] | None,
-        on_llm_stage: Callable[[str], None] | None,
+        event_sink: EventSink,
         tools_enabled: bool,
         few_shots: list[dict[str, Any]] | None,
         channel: str | None,
@@ -1521,8 +1543,8 @@ class AgentLoop:
             effective_provider = self._apply_depth_override(self._provider, depth_mode)
 
         def emit_llm_status(stage: str) -> None:
-            if self._settings.llm_stream_status_updates and on_llm_stage is not None:
-                on_llm_stage(stage)
+            if self._settings.llm_stream_status_updates:
+                event_sink.emit(LlmStageEvent(stage=stage))
 
         logger.debug(
             "[user=%s] run() start | msg=%r",
@@ -1899,33 +1921,24 @@ class AgentLoop:
         tool_calls: list[ToolCall],
         user: User,
         approval_callback: Callable[[str, str], Awaitable[bool]] | None,
-        on_tool_start: Callable[[str], None] | None,
-        on_tool_batch_start: Callable[[list[str]], None] | None,
-        on_subagent_tool_start: Callable[[str, str], None] | None,
-        on_subagent_tool_batch_start: Callable[[str, list[str]], None] | None,
-        on_subagent_llm_stage: Callable[[str, str], None] | None,
-        on_subagent_llm_queue_status: Callable[[str, LLMQueueStatus], None] | None,
+        event_sink: EventSink,
         trajectory_recorder: TrajectoryRecorder | None = None,
         stats: RunStats | None = None,
         task_run: TaskRun | None = None,
     ) -> list[str]:
         """Execute multiple tools in parallel and return results."""
-        if on_tool_batch_start is not None:
-            on_tool_batch_start([tc.name for tc in tool_calls])
+        event_sink.emit(ToolBatchStartEvent(names=tuple(tc.name for tc in tool_calls)))
 
         async def execute_one(tc: ToolCall) -> str:
             return await self._execute_single_tool(
                 tc,
                 user,
                 approval_callback,
-                None,
-                on_subagent_tool_start,
-                on_subagent_tool_batch_start,
-                on_subagent_llm_stage,
-                on_subagent_llm_queue_status,
+                event_sink,
                 trajectory_recorder,
                 stats,
                 task_run,
+                emit_tool_start=False,
             )
 
         results = await asyncio.gather(*[execute_one(tc) for tc in tool_calls])
@@ -1936,14 +1949,12 @@ class AgentLoop:
         tc: ToolCall,
         user: User,
         approval_callback: Callable[[str, str], Awaitable[bool]] | None,
-        on_tool_start: Callable[[str], None] | None,
-        on_subagent_tool_start: Callable[[str, str], None] | None = None,
-        on_subagent_tool_batch_start: Callable[[str, list[str]], None] | None = None,
-        on_subagent_llm_stage: Callable[[str, str], None] | None = None,
-        on_subagent_llm_queue_status: Callable[[str, LLMQueueStatus], None] | None = None,
+        event_sink: EventSink | None = None,
         trajectory_recorder: TrajectoryRecorder | None = None,
         stats: RunStats | None = None,
         task_run: TaskRun | None = None,
+        *,
+        emit_tool_start: bool = True,
     ) -> str:
         """Execute a single tool with all checks."""
         run_id = stats.run_id if stats else "unknown"
@@ -2032,9 +2043,10 @@ class AgentLoop:
                     risk_level=risk,
                 )
 
-            if on_tool_start:
-                on_tool_start(tc.name)
+            if emit_tool_start and event_sink is not None:
+                event_sink.emit(ToolStartEvent(name=tc.name))
 
+            _sub_cbs = sink_to_registry_callbacks(event_sink) if event_sink is not None else {}
             result = await self._registry.execute(
                 tc.name,
                 tc.arguments,
@@ -2042,11 +2054,8 @@ class AgentLoop:
                 run_id=run_id,
                 permission_checker=self._permission_checker,
                 enforce_tool_allowlist=self._enforce_tool_permissions,
-                on_subagent_tool_start=on_subagent_tool_start,
-                on_subagent_tool_batch_start=on_subagent_tool_batch_start,
-                on_subagent_llm_stage=on_subagent_llm_stage,
-                on_subagent_llm_queue_status=on_subagent_llm_queue_status,
                 parent_trajectory_recorder=trajectory_recorder,
+                **_sub_cbs,
             )
             status = "error" if result.startswith("Error") else "ok"
             if status == "error":
@@ -2087,6 +2096,9 @@ class AgentLoop:
                     status="approved" if approved else "denied",
                 )
                 if approved:
+                    _sub_cbs_appr = (
+                        sink_to_registry_callbacks(event_sink) if event_sink is not None else {}
+                    )
                     result = await self._registry.execute(
                         tc.name,
                         tc.arguments,
@@ -2094,10 +2106,7 @@ class AgentLoop:
                         run_id=run_id,
                         permission_checker=self._permission_checker,
                         enforce_tool_allowlist=self._enforce_tool_permissions,
-                        on_subagent_tool_start=on_subagent_tool_start,
-                        on_subagent_tool_batch_start=on_subagent_tool_batch_start,
-                        on_subagent_llm_stage=on_subagent_llm_stage,
-                        on_subagent_llm_queue_status=on_subagent_llm_queue_status,
+                        **_sub_cbs_appr,
                     )
                     status = "ok"
                 else:

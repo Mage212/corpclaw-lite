@@ -84,12 +84,14 @@ async def test_build_turn_context_packs_loop_state(
     loop = AgentLoop(AgentConfig(provider, empty_registry, AgentSettings()))
     tokens = TurnTokens()
 
+    from corpclaw_lite.agent.events import NullEventSink
+
     state, effective_provider, _approval_cb, emit_llm_status = await loop._build_turn_context(
         user=test_user,
         message="Hello prologue",
         system_prompt="You are a test agent.",
         approval_callback=None,
-        on_llm_stage=None,
+        event_sink=NullEventSink(),
         tools_enabled=True,
         few_shots=None,
         channel="test",
@@ -656,20 +658,25 @@ async def test_subagent_status_callbacks_passed_to_tool_runtime_context(
     loop = AgentLoop(AgentConfig(provider, empty_registry, AgentSettings()))
     started_tools: list[str] = []
 
+    sub_starts: list[tuple[str, str]] = []
+    sub_batches: list[tuple[str, list[str]]] = []
+    sub_stages: list[tuple[str, str]] = []
+    sub_queues: list[str] = []
+
     def on_subagent_tool_start(subagent_name: str, tool_name: str) -> None:
-        _ = subagent_name, tool_name
+        sub_starts.append((subagent_name, tool_name))
 
     def on_subagent_tool_batch_start(subagent_name: str, tool_names: list[str]) -> None:
-        _ = subagent_name, tool_names
+        sub_batches.append((subagent_name, tool_names))
 
     def on_subagent_llm_stage(subagent_name: str, stage: str) -> None:
-        _ = subagent_name, stage
+        sub_stages.append((subagent_name, stage))
 
     def on_subagent_llm_queue_status(
         subagent_name: str,
         status: LLMQueueStatus,
     ) -> None:
-        _ = subagent_name, status
+        sub_queues.append(subagent_name)
 
     result, stats = await loop.run(
         test_user,
@@ -684,10 +691,37 @@ async def test_subagent_status_callbacks_passed_to_tool_runtime_context(
     assert result == "Done."
     assert started_tools == ["dispatch_subagent"]
     assert stats.tools_used == ["dispatch_subagent"]
-    assert captured_kwargs["on_subagent_tool_start"] is on_subagent_tool_start
-    assert captured_kwargs["on_subagent_tool_batch_start"] is on_subagent_tool_batch_start
-    assert captured_kwargs["on_subagent_llm_stage"] is on_subagent_llm_stage
-    assert captured_kwargs["on_subagent_llm_queue_status"] is on_subagent_llm_queue_status
+    # B-079: registry gets adapters that forward to EventSink (not the raw kwargs).
+    for key in (
+        "on_subagent_tool_start",
+        "on_subagent_tool_batch_start",
+        "on_subagent_llm_stage",
+        "on_subagent_llm_queue_status",
+    ):
+        assert key in captured_kwargs
+        assert callable(captured_kwargs[key])
+    # Functional path: adapters invoke user callbacks.
+    captured_kwargs["on_subagent_tool_start"]("worker", "read_file")
+    captured_kwargs["on_subagent_tool_batch_start"]("worker", ["a", "b"])
+    captured_kwargs["on_subagent_llm_stage"]("worker", "model_waiting")
+    captured_kwargs["on_subagent_llm_queue_status"](
+        "worker",
+        LLMQueueStatus(
+            user_id="u",
+            task_kind="default",
+            load_class="interactive",
+            position=0,
+            estimated_wait_seconds=0.0,
+            waiting_count=0,
+            active_count=1,
+            max_concurrent=4,
+            wait_seconds=0.0,
+        ),
+    )
+    assert sub_starts == [("worker", "read_file")]
+    assert sub_batches == [("worker", ["a", "b"])]
+    assert sub_stages == [("worker", "model_waiting")]
+    assert sub_queues == ["worker"]
 
 
 @pytest.mark.asyncio
