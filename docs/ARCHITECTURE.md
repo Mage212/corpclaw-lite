@@ -186,14 +186,16 @@ run()
   → while ReAct
        adaptations.apply_tool_surface / apply_closing_mode / inject_tool_soft_hint
        adaptations.apply_workflow_mandate  # before dedup (B-047)
-  → except budget        # _auto_finalize_cascade (still on loop; → 2A.2)
+  → except budget
+       adaptations.auto_finalize_cascade   # B-073, deps: call_llm + execute_tool_call
   → finally _finalize_turn  # epilogue: TurnTokens reset
 ```
 
 - `LoopState` / `TurnTokens` — `agent/loop_state.py` (B-076 + B-077).
-- **Adaptations package** (`agent/adaptations/`, B-078 partial / 0.2.6):
-  `tool_surface.py`, `closing.py`, `mandate.py` — free functions, unit-tested.
-- Next: 2A.2 cascade → `adaptations/finalize.py`; 2A.3 EventSink (B-079).
+- **Adaptations package** (`agent/adaptations/`, B-078):
+  `tool_surface.py`, `closing.py`, `mandate.py`, `finalize.py` — free functions,
+  unit-tested.
+- Next: **2A.3** EventSink (B-079). Version bump when 2A complete.
 
 ### Tools schema pipeline (B-107 / B-047 / B-046, v0.2.4+)
 

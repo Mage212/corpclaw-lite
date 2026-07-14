@@ -17,6 +17,7 @@ from corpclaw_lite.agent.adaptations import (
     apply_closing_mode,
     apply_tool_surface,
     apply_workflow_mandate,
+    auto_finalize_cascade,
     inject_tool_soft_hint,
 )
 from corpclaw_lite.agent.context import ContextBuilder
@@ -130,18 +131,6 @@ _XML_TOOL_CALL_FALLBACK = (
     "I could not safely parse the model's tool-call output, so I stopped instead of "
     "showing raw internal tool-call markup."
 )
-# Auto-finalize cascade: injected when the budget is fully exhausted and the
-# terminal tool was never called. This is the last chance to salvage the work
-# done across all iterations — one LLM call (B), then a programmatic finalize
-# fallback (C) if the model still does not cooperate.
-_AUTO_FINALIZE_EMERGENCY_PROMPT = (
-    "You have run out of iterations and MUST finalize now. Do not call any tool "
-    "except {terminal}. Synthesize a complete report from all the evidence and "
-    "facts you have gathered so far. Call {terminal} with the full Markdown "
-    "report as the 'answer' argument. If your evidence is incomplete, say so "
-    "honestly in a limitations section — but you MUST finalize now."
-)
-
 # B-047 ext / B-077: empty-response retry (was locals inside run()).
 _EMPTY_RESPONSE_MAX_RETRIES = 3
 _EMPTY_RESPONSE_PROMPT = (
@@ -1414,8 +1403,25 @@ class AgentLoop:
             # instead of returning a generic "state.budget exceeded" message.
             # B = one emergency LLM call; C = programmatic finalize fallback.
             if self._terminal_tool and not state.mandate.terminal_called(state.stats.tools_used):
-                salvage = await self._auto_finalize_cascade(
-                    state.context, state.stats, user, self._terminal_tool, e
+
+                async def _cascade_execute(tc: ToolCall, u: User, st: RunStats) -> str:
+                    return await self._execute_single_tool(
+                        tc, u, None, None, None, None, None, None, None, st, None
+                    )
+
+                salvage = await auto_finalize_cascade(
+                    state.context,
+                    state.stats,
+                    user,
+                    self._terminal_tool,
+                    e,
+                    registry=self._registry,
+                    provider=self._provider,
+                    llm_timeout_seconds=self._settings.llm_timeout_seconds,
+                    notify_position=_queue_notify_position(self._settings),
+                    notify_interval_seconds=_queue_notify_interval_seconds(self._settings),
+                    call_llm=self._call_llm_provider,
+                    execute_tool_call=_cascade_execute,
                 )
                 if salvage is not None:
                     state.stats.status = "ok"
@@ -1839,192 +1845,6 @@ class AgentLoop:
             if tool is None or not getattr(tool, "parallel_safe", True):
                 return False
         return True
-
-    async def _auto_finalize_cascade(
-        self,
-        context: ContextBuilder,
-        stats: RunStats,
-        user: User,
-        terminal_tool: str,
-        error: BudgetExceededError,
-    ) -> str | None:
-        """Salvage accumulated work when a workflow subagent exhausts its budget
-        without calling the mandatory terminal tool.
-
-        Two-stage cascade (each stage is a safety net for the previous):
-          B — one LLM "synthesize now" call with schema=[terminal_tool] only and
-              an emergency prompt. If the model calls the terminal tool, execute
-              it and return its result.
-          C — if B returns text (no tool call) or fails, programmatically call
-              the terminal tool with the model's text (or empty) as the answer.
-
-        Returns the finalized result string, or None if both stages fail (caller
-        falls back to the generic budget-exceeded message). Only for subagents
-        with a configured terminal_tool; the main agent never enters this path.
-        """
-        emergency = _AUTO_FINALIZE_EMERGENCY_PROMPT.format(terminal=terminal_tool)
-        context.add_user_message(emergency)
-
-        # Build a schema containing ONLY the terminal tool — the model has no
-        # other choice but to finalize (or return plain text → C handles it).
-        terminal_schema = [
-            s
-            for s in self._registry.to_schemas()
-            if str(s.get("function", {}).get("name", "")) == terminal_tool
-        ]
-        if not terminal_schema:
-            logger.warning(
-                "[user=%s] auto-finalize: terminal tool '%s' not in registry",
-                user.id,
-                terminal_tool,
-            )
-            return None
-
-        # ── Stage B: one emergency LLM call ─────────────────────────────────
-        try:
-            log_event(
-                "auto_finalize_llm_call",
-                stats.run_id,
-                terminal_tool=terminal_tool,
-                budget_error=str(error),
-            )
-            if isinstance(self._provider, LLMRouter) and self._provider.has_queue:
-                # Route through the queue so this LLM call is slot-bounded and
-                # accounted for (previously it bypassed the queue via
-                # _resolve_target_provider, adding un-bounded load when many
-                # subagents exhaust their budget at once). The budget is already
-                # exhausted here, so there is no pause/resume; on_acquired=None.
-                # task_kind="default"/load_class="interactive" are hardcoded in
-                # call_default_with_slot → sticky-eligible (user slot).
-                response = await self._provider.call_default_with_slot(
-                    user_id=str(user.id),
-                    run_id=stats.run_id,
-                    messages=context.messages,
-                    tools=terminal_schema,
-                    system=context.system_prompt or None,
-                    on_acquired=None,
-                    call=lambda target_provider: asyncio.wait_for(
-                        self._call_llm_provider(
-                            target_provider,
-                            messages=context.messages,
-                            tools=terminal_schema,
-                            system=context.system_prompt or None,
-                            run_id=stats.run_id,
-                            iteration=stats.iterations + 1,
-                            on_llm_stage=None,
-                            stats=None,
-                        ),
-                        timeout=self._settings.llm_timeout_seconds,
-                    ),
-                    on_queue_status=None,
-                    notify_position=_queue_notify_position(self._settings),
-                    notify_interval_seconds=_queue_notify_interval_seconds(self._settings),
-                )
-            else:
-                # Fallback: no queue (bare QueuedProvider or non-router) — raw call.
-                response = await asyncio.wait_for(
-                    self._call_llm_provider(
-                        self._resolve_target_provider(),
-                        messages=context.messages,
-                        tools=terminal_schema,
-                        system=context.system_prompt or None,
-                        run_id=stats.run_id,
-                        iteration=stats.iterations + 1,
-                        on_llm_stage=None,
-                        stats=None,
-                    ),
-                    timeout=self._settings.llm_timeout_seconds,
-                )
-        except TimeoutError:
-            # B-073: stage-B emergency call timed out (local LLM hang). Fall
-            # through to programmatic finalize (stage C) instead of blocking
-            # indefinitely past the budget. Parity with the main-loop timeout
-            # telemetry (llm_timeouts health counter).
-            health.increment("llm_timeouts")
-            logger.warning(
-                "[user=%s] auto-finalize stage B LLM call timed out"
-                " (%.1fs); falling back to programmatic finalize",
-                user.id,
-                self._settings.llm_timeout_seconds,
-            )
-            response = None
-        except Exception:
-            logger.warning(
-                "[user=%s] auto-finalize stage B (LLM call) failed; "
-                "falling back to programmatic finalize",
-                user.id,
-                exc_info=True,
-            )
-            response = None
-
-        # If B produced a terminal tool call, execute it directly.
-        if response and response.tool_calls:
-            tc = response.tool_calls[0]
-            if tc.name == terminal_tool:
-                try:
-                    result = await self._execute_single_tool(
-                        tc, user, None, None, None, None, None, None, None, stats, None
-                    )
-                    logger.info(
-                        "[user=%s] auto-finalize stage B: model called %s, result_len=%d",
-                        user.id,
-                        terminal_tool,
-                        len(result),
-                    )
-                    return result
-                except Exception:
-                    logger.warning(
-                        "[user=%s] auto-finalize stage B: terminal tool execute "
-                        "failed; falling back to programmatic",
-                        user.id,
-                        exc_info=True,
-                    )
-
-        # ── Stage C: programmatic finalize ──────────────────────────────────
-        emergency_answer = (response.content if response and response.content else "") or ""
-        tool = self._registry.get(terminal_tool)
-        if tool is None:
-            logger.warning(
-                "[user=%s] auto-finalize: terminal tool '%s' not found in registry",
-                user.id,
-                terminal_tool,
-            )
-            return None
-        try:
-            log_event(
-                "auto_finalize_programmatic",
-                stats.run_id,
-                terminal_tool=terminal_tool,
-                emergency_answer_len=len(emergency_answer),
-            )
-            result = await tool.execute(user=user, answer=emergency_answer)
-            logger.info(
-                "[user=%s] auto-finalize stage C: programmatic %s, result_len=%d",
-                user.id,
-                terminal_tool,
-                len(result),
-            )
-            return result
-        except Exception:
-            logger.warning(
-                "[user=%s] auto-finalize stage C: programmatic finalize failed",
-                user.id,
-                exc_info=True,
-            )
-            return None
-
-    def _resolve_target_provider(self) -> Provider:
-        """Resolve the raw provider for a direct (non-queued) LLM call.
-
-        Used by auto-finalize where budget is already exhausted — no queue
-        accounting needed, just the inner provider.
-        """
-        provider = self._provider
-        if isinstance(provider, LLMRouter):
-            return provider.default or provider
-        if isinstance(provider, QueuedProvider):
-            return provider._provider  # type: ignore[attr-defined]
-        return provider
 
     def _apply_depth_override(self, router: LLMRouter, depth: DepthMode) -> Provider:
         """Build a depth-mode override router (Etap 3).
