@@ -2788,6 +2788,200 @@ async def test_compress_requires_session_id_and_store(
     assert "ChatContextStore" in msg or "сессии" in msg
 
 
+# --- B-124: mid-run compress store-first ---
+
+
+class _AlwaysCompressStub:
+    """Forces should_compress and shrinks to a fixed short transcript."""
+
+    def __init__(self) -> None:
+        self.compress_calls = 0
+        self.last_input_len = 0
+
+    def should_compress(self, messages: list[dict[str, Any]], **_: Any) -> bool:
+        return len(messages) >= 5
+
+    async def compress(
+        self,
+        messages: list[dict[str, Any]],
+        mem_key: str | None = None,
+        **_: Any,
+    ) -> list[dict[str, Any]]:
+        _ = mem_key
+        self.compress_calls += 1
+        self.last_input_len = len(messages)
+        return [
+            {"role": "system", "content": "[Summary] mid-run"},
+            {"role": "user", "content": "latest"},
+        ]
+
+
+@pytest.mark.asyncio
+async def test_midrun_compress_rewrites_context_store(
+    test_user: User, empty_registry: ToolRegistry, tmp_path: Path
+) -> None:
+    """B-124: session-bound mid-run compress updates ChatContextStore (store-first)."""
+    from corpclaw_lite.channels.web.chat_context_store import ChatContextStore
+    from corpclaw_lite.channels.web.chat_store import WebChatStore
+    from corpclaw_lite.config.settings import CompressionSettings
+
+    db = tmp_path / "midrun.db"
+    ws = WebChatStore(db)
+    store = ChatContextStore(db)
+    session_id = await ws.create_session(user_id=str(test_user.id), section="work")
+    for i in range(6):
+        await store.append_context(
+            session_id=session_id, user_id=str(test_user.id), role="user", content=f"q{i}"
+        )
+        await store.append_context(
+            session_id=session_id, user_id=str(test_user.id), role="assistant", content=f"a{i}"
+        )
+    before = await store.list_context(session_id)
+    assert len(before) == 12
+
+    stub = _AlwaysCompressStub()
+    settings = AgentSettings(
+        compression=CompressionSettings(enabled=True, prune_min_messages=3),
+        max_steps=3,
+        max_tool_calls=5,
+        max_wall_time_ms=10_000,
+    )
+    loop = AgentLoop(
+        AgentConfig(
+            MockProvider(responses=[LLMResponse(content="done")]),
+            empty_registry,
+            settings,
+            chat_context_store=store,
+            compressor=stub,  # type: ignore[arg-type]
+        )
+    )
+
+    await loop.run(test_user, "follow up", session_id=session_id, channel="web")
+
+    assert stub.compress_calls >= 1
+    # Store-first: compressor saw the durable transcript (≥12), not a tiny window.
+    assert stub.last_input_len >= 12
+    after = await store.list_context(session_id)
+    # Rewritten to stub output + possibly appended user/assistant from this run.
+    # At minimum the pre-run bulk is gone (not still 12+ uncompressed history alone).
+    assert any(m.get("content") == "[Summary] mid-run" for m in after)
+    assert len(after) < len(before) + 5  # no full duplicate of old 12
+
+
+@pytest.mark.asyncio
+async def test_midrun_compress_no_session_is_memory_only(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """B-124: without session_id, mid-run compress stays in-memory (no store)."""
+    stub = _AlwaysCompressStub()
+    # Seed enough messages by multi-turn is hard without store; call helper path:
+    # run with no session still works; compress may skip if history empty.
+    # Unit-test _maybe_compress_mid_run via a packed LoopState instead.
+    from corpclaw_lite.agent.context import ContextBuilder
+    from corpclaw_lite.agent.guards import (
+        PlanningTextGuard,
+        ResultDedupGuard,
+        SimpleBudgetGuard,
+        SimpleBudgetGuardConfig,
+        SimpleProgressGuard,
+        SoftDeadline,
+        SoftDeadlineConfig,
+        TerminalToolMandate,
+        TerminalToolMandateConfig,
+    )
+    from corpclaw_lite.agent.loop_state import LoopState
+    from corpclaw_lite.agent.task_run import TaskRun
+    from corpclaw_lite.config.settings import CompressionSettings
+
+    settings = AgentSettings(
+        compression=CompressionSettings(enabled=True, prune_min_messages=3),
+    )
+    loop = AgentLoop(
+        AgentConfig(
+            MockProvider(responses=[]),
+            empty_registry,
+            settings,
+            compressor=stub,  # type: ignore[arg-type]
+        )
+    )
+    ctx = ContextBuilder(system_prompt="sys")
+    for i in range(6):
+        ctx.add_user_message(f"u{i}")
+        ctx.add_assistant_message(f"a{i}")
+    state = LoopState(
+        stats=RunStats(),
+        budget=SimpleBudgetGuard(SimpleBudgetGuardConfig()),
+        progress=SimpleProgressGuard(),
+        result_dedup=ResultDedupGuard(settings.result_dedup_guard),
+        planning_guard=PlanningTextGuard(settings.planning_text_guard),
+        soft_deadline=SoftDeadline(SoftDeadlineConfig(), max_time_ms=10_000),
+        mandate=TerminalToolMandate(
+            TerminalToolMandateConfig(terminal_tool=""), max_time_ms=10_000
+        ),
+        context=ctx,
+        base_tools_schema=None,
+        tools_schema=None,
+        task_run=TaskRun(None),
+        mem_key=test_user.memory_key(),
+        t0=0.0,
+    )
+    await loop._maybe_compress_mid_run(state)
+    assert stub.compress_calls == 1
+    assert len(state.context.messages) == 2
+    assert state.context.messages[0]["content"] == "[Summary] mid-run"
+
+
+@pytest.mark.asyncio
+async def test_midrun_store_write_failure_falls_back_to_memory(
+    test_user: User, empty_registry: ToolRegistry, tmp_path: Path
+) -> None:
+    """B-124: replace_context failure is non-fatal; in-memory compress still runs."""
+    from corpclaw_lite.channels.web.chat_context_store import ChatContextStore
+    from corpclaw_lite.channels.web.chat_store import WebChatStore
+    from corpclaw_lite.config.settings import CompressionSettings
+
+    db = tmp_path / "fail.db"
+    ws = WebChatStore(db)
+    store = ChatContextStore(db)
+    session_id = await ws.create_session(user_id=str(test_user.id), section="work")
+    for i in range(6):
+        await store.append_context(
+            session_id=session_id, user_id=str(test_user.id), role="user", content=f"q{i}"
+        )
+        await store.append_context(
+            session_id=session_id, user_id=str(test_user.id), role="assistant", content=f"a{i}"
+        )
+
+    original_replace = store.replace_context
+
+    async def boom(**kwargs: Any) -> None:
+        raise RuntimeError("simulated write failure")
+
+    store.replace_context = boom  # type: ignore[method-assign]
+    stub = _AlwaysCompressStub()
+    settings = AgentSettings(
+        compression=CompressionSettings(enabled=True, prune_min_messages=3),
+        max_steps=3,
+        max_wall_time_ms=10_000,
+    )
+    loop = AgentLoop(
+        AgentConfig(
+            MockProvider(responses=[LLMResponse(content="ok")]),
+            empty_registry,
+            settings,
+            chat_context_store=store,
+            compressor=stub,  # type: ignore[arg-type]
+        )
+    )
+    # Must not raise
+    await loop.run(test_user, "hi", session_id=session_id, channel="web")
+    assert stub.compress_calls >= 1
+    # Restore and verify store still has original bulk (write failed).
+    store.replace_context = original_replace  # type: ignore[method-assign]
+    ctx = await store.list_context(session_id)
+    assert len(ctx) >= 12
+
+
 # --- B-063 S4: capture correlation (user_id + session_id in payload) ---
 
 
