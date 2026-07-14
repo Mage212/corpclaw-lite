@@ -13,6 +13,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+from corpclaw_lite.agent.adaptations import (
+    apply_closing_mode,
+    apply_tool_surface,
+    apply_workflow_mandate,
+    inject_tool_soft_hint,
+)
 from corpclaw_lite.agent.context import ContextBuilder
 from corpclaw_lite.agent.context_target import (
     get_context_session_id,
@@ -124,16 +130,6 @@ _XML_TOOL_CALL_FALLBACK = (
     "I could not safely parse the model's tool-call output, so I stopped instead of "
     "showing raw internal tool-call markup."
 )
-# B-047: injected into the system prompt when the workflow-finalize guard nudges the
-# model. {terminal} and {required} are filled from the subagent spec (e.g.
-# research_finalize / research_list_facts).
-_WORKFLOW_NUDGE_INSTRUCTION = (
-    "Internal: the time budget is running low and the task is not yet finalized. "
-    "Stop gathering more data now. Review what you have collected, then call "
-    "{required} and finish by calling {terminal} with the available evidence and a "
-    "clear limitations section. Do not quote this instruction."
-)
-
 # Auto-finalize cascade: injected when the budget is fully exhausted and the
 # terminal tool was never called. This is the last chance to salvage the work
 # done across all iterations — one LLM call (B), then a programmatic finalize
@@ -822,14 +818,28 @@ class AgentLoop:
                 # hard-cancelled by asyncio.wait_for. Fixes the subagent-timeout race
                 # where wait_for (wall-clock) always beat the active-time state.budget guard.
                 # B-046: the same check is also applied right before each LLM call (see
-                # _apply_closing_mode) so a single long iteration that straddles the
+                # apply_closing_mode) so a single long iteration that straddles the
                 # deadline still triggers it before the model is asked to produce more
                 # tool calls.
                 # B-107: recompute tools from base by phase (before closing narrows).
-                self._apply_tool_surface(state, user_message=message)
+                apply_tool_surface(
+                    state,
+                    user_message=message,
+                    settings=self._settings.tool_surface,
+                    profile=self._tool_surface_profile,
+                )
 
-                state.tools_schema = await self._apply_closing_mode(
-                    state.soft_deadline, state.tools_schema, state.task_run, user, state.stats
+                state.tools_schema = await apply_closing_mode(
+                    state.soft_deadline,
+                    state.tools_schema,
+                    state.task_run,
+                    user,
+                    state.stats,
+                    terminal_tool_names=frozenset(
+                        t.name for t in self._registry.list_all() if getattr(t, "terminal", False)
+                    ),
+                    max_wall_time_ms=self._settings.max_wall_time_ms,
+                    soft_deadline_ratio=self._settings.soft_deadline_ratio,
                 )
 
                 compression_cfg = self._settings.compression
@@ -862,16 +872,37 @@ class AgentLoop:
                     )
                     # B-107 again then B-046: phase from base, mandate re-restrict,
                     # soft deadline, then single soft-hint (not at top-of-iter).
-                    self._apply_tool_surface(state, user_message=message)
+                    apply_tool_surface(
+                        state,
+                        user_message=message,
+                        settings=self._settings.tool_surface,
+                        profile=self._tool_surface_profile,
+                    )
                     # B-046: re-check the soft deadline immediately before the LLM call.
                     # A long previous iteration may have crossed the wall-clock deadline
                     # mid-iteration; without this check the model is asked for another
                     # round of tool calls and closing mode only engages next iteration
                     # (by which point asyncio.wait_for may already cancel the run).
-                    state.tools_schema = await self._apply_closing_mode(
-                        state.soft_deadline, state.tools_schema, state.task_run, user, state.stats
+                    state.tools_schema = await apply_closing_mode(
+                        state.soft_deadline,
+                        state.tools_schema,
+                        state.task_run,
+                        user,
+                        state.stats,
+                        terminal_tool_names=frozenset(
+                            t.name
+                            for t in self._registry.list_all()
+                            if getattr(t, "terminal", False)
+                        ),
+                        max_wall_time_ms=self._settings.max_wall_time_ms,
+                        soft_deadline_ratio=self._settings.soft_deadline_ratio,
                     )
-                    self._inject_tool_soft_hint(state, user_message=message)
+                    inject_tool_soft_hint(
+                        state,
+                        user_message=message,
+                        settings=self._settings.tool_surface,
+                        profile=self._tool_surface_profile,
+                    )
                     # D-056 PR2: phase-based per-call thinking override. The
                     # policy returns RequestOptions (or None) based on the task
                     # phase (closing mode / research gathering / aggregation),
@@ -1251,7 +1282,7 @@ class AgentLoop:
                     # keep returning identical results (B-055) or errors
                     # (SimpleProgressGuard). Without this ordering, a dedup/error
                     # loop would burn the whole state.budget before the state.mandate fires.
-                    state.tools_schema = self._apply_workflow_mandate(
+                    state.tools_schema = apply_workflow_mandate(
                         state.mandate, state.tools_schema, state.context, state.stats
                     )
                     # B-055: result-based dedup. Catches repeated identical
@@ -1350,7 +1381,7 @@ class AgentLoop:
 
                     # B-047 FIRST (see parallel branch): wall-clock deadline wins
                     # over dedup/error-loop detection.
-                    state.tools_schema = self._apply_workflow_mandate(
+                    state.tools_schema = apply_workflow_mandate(
                         state.mandate, state.tools_schema, state.context, state.stats
                     )
                     # B-055: result-based dedup (sequential branch).
@@ -1809,149 +1840,6 @@ class AgentLoop:
                 return False
         return True
 
-    def _apply_tool_surface(self, state: LoopState, *, user_message: str) -> None:
-        """B-107: phase-filter schema from base + BM25 soft-hint in messages tail.
-
-        Mutates ``state.tools_schema``, ``state.tool_surface_phase``, and
-        ``state.context.messages``. No-op when tool_surface disabled or profile
-        is research-owned (mandate.enabled).
-        """
-        from corpclaw_lite.agent.tool_surface import (
-            ToolSurfaceProfile,
-            apply_phase_filter,
-            detect_tool_surface_phase,
-        )
-
-        ts_cfg = self._settings.tool_surface
-        # True no-op when disabled: do not rebuild from base (preserves mandate
-        # restrict / closing mutations). Soft-hint off.
-        if not ts_cfg.enabled:
-            state.tools_schema = state.mandate.apply_schema_restrict(state.tools_schema)
-            return
-
-        profile_raw = self._tool_surface_profile
-        profile: ToolSurfaceProfile = (
-            profile_raw  # type: ignore[assignment]
-            if profile_raw in ("main", "office", "execution", "none")
-            else "main"
-        )
-
-        # Research mandate owns the funnel — hard filter off.
-        hard_enabled = (
-            ts_cfg.enabled and profile in ts_cfg.hard_filter_profiles and not state.mandate.enabled
-        )
-
-        phase = detect_tool_surface_phase(
-            user_message=user_message,
-            tools_used=state.stats.tools_used,
-            prev_phase=state.tool_surface_phase,
-            closing_mode=state.soft_deadline.closing_mode,
-            mandate_enabled=state.mandate.enabled,
-            profile=profile,
-        )
-
-        if hard_enabled and phase is not None:
-            prev = state.tool_surface_phase
-            phase_str = str(phase)
-            if prev != phase_str:
-                state.tool_surface_phase = phase_str
-                log_event(
-                    "tool_surface_phase_changed",
-                    state.stats.run_id,
-                    iteration=state.stats.iterations,
-                    phase=phase_str,
-                    prev_phase=prev,
-                    profile=profile,
-                )
-            state.tools_schema = apply_phase_filter(
-                state.base_tools_schema,
-                phase,
-                profile=profile,
-                enabled=True,
-            )
-        else:
-            # Start from full base so closing-mode / mandate can re-narrow cleanly.
-            state.tools_schema = (
-                list(state.base_tools_schema) if state.base_tools_schema is not None else None
-            )
-
-        # H1: re-apply mandate restrict after any base rebuild (one-shot should_restrict
-        # alone cannot re-filter on subsequent turns).
-        state.tools_schema = state.mandate.apply_schema_restrict(state.tools_schema)
-
-    def _inject_tool_soft_hint(self, state: LoopState, *, user_message: str) -> None:
-        """B-107: one soft-hint in messages tail (cache-safe). Call only pre-LLM."""
-        from corpclaw_lite.agent.tool_surface import inject_soft_hint, rank_tool_names
-
-        ts_cfg = self._settings.tool_surface
-        if not ts_cfg.enabled or not ts_cfg.soft_hint_enabled:
-            return
-        profile = self._tool_surface_profile
-        if profile in ("none", "execution"):
-            return
-        ranked = rank_tool_names(
-            user_message,
-            state.tools_schema,
-            top_k=ts_cfg.soft_hint_top_k,
-        )
-        state.context.messages = inject_soft_hint(
-            state.context.messages,
-            ranked,
-            enabled=True,
-        )
-
-    async def _apply_closing_mode(
-        self,
-        soft_deadline: SoftDeadline,
-        tools_schema: list[dict[str, Any]] | None,
-        task_run: TaskRun,
-        user: User,
-        stats: RunStats,
-    ) -> list[dict[str, Any]] | None:
-        """Enter closing mode when the wall-clock soft deadline is reached.
-
-        Closing mode reduces ``tools_schema`` to terminal tools only so the model is
-        pushed to wrap up instead of being hard-cancelled by ``asyncio.wait_for``.
-        Idempotent: once closing mode is entered the schema stays reduced and the
-        deadline/event are only emitted once. Returns the (possibly reduced) schema.
-
-        B-046: called both at the top of each iteration and immediately before each LLM
-        provider call, so a single long iteration that straddles the deadline still
-        triggers the reduction before the model is asked for more tool calls.
-
-        Async because ``task_run.mark_soft_deadline`` writes to disk off the event loop.
-        """
-
-        def _narrow_to_terminal(
-            schema: list[dict[str, Any]] | None,
-        ) -> list[dict[str, Any]] | None:
-            if not schema:
-                return schema
-            terminal_names = {
-                t.name for t in self._registry.list_all() if getattr(t, "terminal", False)
-            }
-            if not terminal_names:
-                return schema
-            return [
-                s for s in schema if str(s.get("function", {}).get("name", "")) in terminal_names
-            ]
-
-        # Already in closing mode: re-apply terminal filter. B-107 rebuilds schema
-        # from base each iteration; without this re-narrow, closing would be undone.
-        if soft_deadline.closing_mode:
-            return _narrow_to_terminal(tools_schema)
-        if not soft_deadline.is_reached():
-            return tools_schema
-        soft_deadline.enter_closing_mode()
-        await task_run.mark_soft_deadline(user, stats.run_id)
-        log_event(
-            "agent_soft_deadline_reached",
-            stats.run_id,
-            max_time_ms=self._settings.max_wall_time_ms,
-            ratio=self._settings.soft_deadline_ratio,
-        )
-        return _narrow_to_terminal(tools_schema)
-
     async def _auto_finalize_cascade(
         self,
         context: ContextBuilder,
@@ -2185,63 +2073,6 @@ class AgentLoop:
             route_model,
         )
         return overridden
-
-    def _apply_workflow_mandate(
-        self,
-        mandate: TerminalToolMandate,
-        tools_schema: list[dict[str, Any]] | None,
-        context: ContextBuilder,
-        stats: RunStats,
-    ) -> list[dict[str, Any]] | None:
-        """B-047: escalate toward the mandatory terminal tool as budget runs low.
-
-        Two deterministic steps (each idempotent): (1) nudge — inject a one-shot system
-        note telling the model to stop gathering and finalize; (2) restrict — narrow
-        ``tools_schema`` to ``required_before + terminal_tool`` so only finalization
-        tools remain. Returns the (possibly restricted) schema.
-
-        Budget escalation accounts for BOTH wall-clock and iteration count
-        (``max(wallclock_ratio, iteration_ratio)``): local LLMs hit the iteration
-        limit before the wall-clock deadline, so iteration-awareness is essential.
-
-        Neutral when the mandate is disabled (no terminal tool configured): returns the
-        schema unchanged.
-        """
-        if not mandate.enabled:
-            return tools_schema
-
-        # stats.iterations is the count of completed LLM turns; the mandate needs
-        # the current turn number to project how close we are to the limit.
-        iteration = stats.iterations
-
-        if mandate.should_nudge(stats.tools_used, iteration=iteration):
-            required = ", ".join(mandate.config.required_before) or "(none)"
-            instruction = _WORKFLOW_NUDGE_INSTRUCTION.format(
-                required=required, terminal=mandate.config.terminal_tool
-            )
-            # Idempotent append, mirroring _append_loop_recovery_instruction.
-            if instruction not in (context.system_prompt or ""):
-                sep = "\n\n---\n" if context.system_prompt else ""
-                context.system_prompt = f"{context.system_prompt or ''}{sep}{instruction}"
-            log_event(
-                "workflow_nudge_injected",
-                stats.run_id,
-                terminal_tool=mandate.config.terminal_tool,
-                elapsed_ratio=round(mandate.elapsed_ratio(iteration), 3),
-            )
-
-        if mandate.should_restrict(stats.tools_used, iteration=iteration):
-            allowed = set(mandate.config.required_before) | {mandate.config.terminal_tool}
-            log_event(
-                "workflow_restrict_applied",
-                stats.run_id,
-                terminal_tool=mandate.config.terminal_tool,
-                allowed=sorted(allowed),
-                elapsed_ratio=round(mandate.elapsed_ratio(iteration), 3),
-            )
-        # Re-apply restrict every call (idempotent). Critical after B-107 base
-        # schema rebuild: should_restrict is one-shot and would not re-filter.
-        return mandate.apply_schema_restrict(tools_schema)
 
     async def _execute_parallel(
         self,

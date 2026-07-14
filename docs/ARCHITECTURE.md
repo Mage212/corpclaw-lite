@@ -1,7 +1,7 @@
 # CorpClaw Lite — Архитектура проекта
 
 > Версия документа: 2026-07-13
-> Версия проекта: 0.2.5 — Phase 1 complete (B-076 / B-107 / B-077)
+> Версия проекта: 0.2.6 — Phase 2A.1 adaptations package (B-078 partial)
 
 ---
 
@@ -178,19 +178,22 @@ results = await asyncio.gather(*[execute_one(tc) for tc in tool_calls])
 - Budget exceeded
 - Loop detected (2x warning)
 
-### AgentLoop structure (B-077 / DC-001 Phase 2, v0.2.5)
+### AgentLoop structure (B-077 / B-078, v0.2.6)
 
 ```
 run()
   → _build_turn_context  # prologue: history, prompt, LoopState, contextvars
-  → while ReAct          # adaptations stay as methods (_apply_*, cascade)
-  → except budget        # auto-finalize cascade when terminal tool pending
-  → finally _finalize_turn  # epilogue: health + contextvar reset (TurnTokens)
+  → while ReAct
+       adaptations.apply_tool_surface / apply_closing_mode / inject_tool_soft_hint
+       adaptations.apply_workflow_mandate  # before dedup (B-047)
+  → except budget        # _auto_finalize_cascade (still on loop; → 2A.2)
+  → finally _finalize_turn  # epilogue: TurnTokens reset
 ```
 
 - `LoopState` / `TurnTokens` — `agent/loop_state.py` (B-076 + B-077).
-- Next (roadmap Фаза 2 / B-078): move `_apply_*` into `agent/adaptations/` with
-  isolated unit tests; B-079 event-sink. Do not start until 0.2.5 is green.
+- **Adaptations package** (`agent/adaptations/`, B-078 partial / 0.2.6):
+  `tool_surface.py`, `closing.py`, `mandate.py` — free functions, unit-tested.
+- Next: 2A.2 cascade → `adaptations/finalize.py`; 2A.3 EventSink (B-079).
 
 ### Tools schema pipeline (B-107 / B-047 / B-046, v0.2.4+)
 
