@@ -194,15 +194,73 @@ a {
   min-height: 0;
   position: relative; /* anchors the absolute preview overlay */
   display: grid;
-  /* Three children in order: topbar (auto), main-pane (grows, shrinks to fit),
-     bottom-drawer peek-bar (auto). The minmax(0,1fr) on row 2 is what lets the
-     chat panel fill the viewport instead of the page growing to content height. */
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  /* Four children: topbar, system-load-bar, main-pane (grows), bottom-drawer. */
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
 }
 
 /* When the bottom drawer is open, its track gets a fixed height. */
 .main-area.drawer-open {
-  grid-template-rows: auto minmax(0, 1fr) var(--drawer-height);
+  grid-template-rows: auto auto minmax(0, 1fr) var(--drawer-height);
+}
+
+/* DC-008 ambient system load (always-on, counts only). */
+.system-load-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 14px;
+  font-size: 12px;
+  line-height: 1.3;
+  color: var(--muted, #6b7280);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border, rgba(0, 0, 0, 0.06));
+  min-height: 28px;
+}
+
+.system-load-bar .system-load-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  color: var(--muted, #6b7280);
+  flex-shrink: 0;
+}
+
+.system-load-bar .system-load-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text, #111827);
+}
+
+.system-load-bar .system-load-offline {
+  margin-left: auto;
+  color: var(--muted, #6b7280);
+  font-size: 11px;
+}
+
+.system-load-bar.warning {
+  color: #92400e;
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.system-load-bar.warning .system-load-value {
+  color: #92400e;
+}
+
+.system-load-bar.danger {
+  color: #991b1b;
+  background: rgba(239, 68, 68, 0.1);
+}
+
+.system-load-bar.danger .system-load-value {
+  color: #991b1b;
+  font-weight: 600;
+}
+
+.system-load-bar.offline {
+  opacity: 0.72;
 }
 
 /* Legacy grid-column assignments removed; .file-explorer/.preview-drawer are now

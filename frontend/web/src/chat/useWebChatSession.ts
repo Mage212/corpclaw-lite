@@ -10,7 +10,8 @@ import type {
   ContextUsage,
   DepthMode,
   RunTimelineEvent,
-  StatusLine
+  StatusLine,
+  SystemLoad
 } from "../types";
 
 const emptyStatus: StatusLine = {
@@ -138,6 +139,8 @@ type UseWebChatSessionOptions = {
   onChatRenamed?: (() => void) | undefined;
   /** Fired when the server signals the chat list changed (create/activate/rename). */
   onChatListChanged?: (() => void) | undefined;
+  /** Ambient GPU/system load (DC-008). Counts only; not request timeline. */
+  onSystemLoad?: ((load: SystemLoad) => void) | undefined;
 };
 
 export type WebChatSession = {
@@ -173,7 +176,8 @@ export function useWebChatSession({
   onActivateViewedChat,
   onChatActivated,
   onChatRenamed,
-  onChatListChanged
+  onChatListChanged,
+  onSystemLoad
 }: UseWebChatSessionOptions): WebChatSession {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [status, setStatus] = useState<StatusLine>(emptyStatus);
@@ -350,7 +354,8 @@ export function useWebChatSession({
             setReadOnly,
             setCompressing,
             onChatRenamed,
-            onChatListChanged
+            onChatListChanged,
+            onSystemLoad
           });
         };
       })
@@ -381,7 +386,16 @@ export function useWebChatSession({
         wsRef.current = null;
       }
     };
-  }, [addMessage, addRunEvent, csrf, onContextUsage, onWorkspaceChanged]);
+  }, [
+    addMessage,
+    addRunEvent,
+    csrf,
+    onContextUsage,
+    onWorkspaceChanged,
+    onChatRenamed,
+    onChatListChanged,
+    onSystemLoad
+  ]);
 
   useEffect(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -447,6 +461,8 @@ type WsEventHandlers = {
   setCompressing: Dispatch<SetStateAction<boolean>>;
   /** Fired when a chat was renamed or the chat list changed (refresh sidebar). */
   onChatRenamed: (() => void) | undefined;
+  /** Ambient system load (top bar); never mixed into request timeline. */
+  onSystemLoad: ((load: SystemLoad) => void) | undefined;
   onChatListChanged: (() => void) | undefined;
 };
 
@@ -470,7 +486,8 @@ function handleWsEvent(event: ServerWsEvent, handlers: WsEventHandlers) {
     setReadOnly,
     setCompressing,
     onChatRenamed,
-    onChatListChanged
+    onChatListChanged,
+    onSystemLoad
   } = handlers;
   if (event.type === "chat_history") {
     setMessages(event.messages);
@@ -719,5 +736,14 @@ function handleWsEvent(event: ServerWsEvent, handlers: WsEventHandlers) {
     onChatListChanged?.();
   } else if (event.type === "chat_list_changed") {
     onChatListChanged?.();
+  } else if (event.type === "system_load") {
+    onSystemLoad?.({
+      active_count: event.active_count,
+      max_concurrent: event.max_concurrent,
+      waiting_count: event.waiting_count,
+      active_users: event.active_users,
+      load_level: event.load_level,
+      updated_at: event.updated_at
+    });
   }
 }

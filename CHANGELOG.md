@@ -6,6 +6,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- **DC-008 system_load (backend + UI).** WebSocket event `system_load` with
+  count-only ambient GPU/user load (`active_count`, `max_concurrent`,
+  `waiting_count`, `active_users`, `load_level`, `updated_at`). Broadcast to all
+  connected web clients on connect, workflow start/finish, LLM queue wait
+  updates, and a soft poll (~20s). Always-on `SystemLoadBar` under the web
+  topbar (idle/busy/saturated tones). No personal/PII fields (D-088).
+
 ### Fixed
 
 - **B-111 audit:** main-agent SOUL base is re-read via `BootstrapLoader.get_system_prompt()`

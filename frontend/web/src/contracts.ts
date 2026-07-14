@@ -11,6 +11,8 @@ import type {
   PanelLayoutState,
   PreviewPayload,
   SessionPayload,
+  SystemLoad,
+  SystemLoadLevel,
   TreeNode,
   User,
   WebSocketTicketPayload,
@@ -51,7 +53,8 @@ export type ServerWsEvent =
   | { type: "depth_mode"; depth_mode: DepthMode }
   | { type: "chat_renamed"; session_id: number; title: string }
   | { type: "chat_activated"; session_id: number; section: string; mode: AgentMode }
-  | { type: "chat_list_changed" };
+  | { type: "chat_list_changed" }
+  | ({ type: "system_load" } & SystemLoad);
 
 type JsonRecord = Record<string, unknown>;
 
@@ -701,6 +704,20 @@ export function parseServerWsEvent(value: unknown): ServerWsEvent | null {
     }
     case "chat_list_changed":
       return { type: "chat_list_changed" };
+    case "system_load": {
+      const levelRaw = stringValue(value.load_level, "idle");
+      const load_level: SystemLoadLevel =
+        levelRaw === "busy" || levelRaw === "saturated" ? levelRaw : "idle";
+      return {
+        type: "system_load",
+        active_count: requiredNumber(value, "active_count", "system_load"),
+        max_concurrent: requiredNumber(value, "max_concurrent", "system_load"),
+        waiting_count: requiredNumber(value, "waiting_count", "system_load"),
+        active_users: requiredNumber(value, "active_users", "system_load"),
+        load_level,
+        updated_at: requiredNumber(value, "updated_at", "system_load")
+      };
+    }
     default:
       return null;
   }

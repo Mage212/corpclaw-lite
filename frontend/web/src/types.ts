@@ -70,6 +70,18 @@ export type StatusLine = {
   tone: "idle" | "running" | "warning" | "error" | "done";
 };
 
+/** Ambient GPU/system load (DC-008 / D-088). Counts only — no personal data. */
+export type SystemLoadLevel = "idle" | "busy" | "saturated";
+
+export type SystemLoad = {
+  active_count: number;
+  max_concurrent: number;
+  waiting_count: number;
+  active_users: number;
+  load_level: SystemLoadLevel;
+  updated_at: number;
+};
+
 export type ApprovalRequest = {
   approval_id: string;
   action: string;

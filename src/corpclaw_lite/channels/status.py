@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
+import time
+from typing import Any, Literal
+
 from corpclaw_lite.llm.queue import LLMQueueStatus
+
+LoadLevel = Literal["idle", "busy", "saturated"]
 
 __all__ = [
     "INITIAL_STATUS_TEXT",
     "LLM_STAGE_STATUS_MAP",
     "READY_STATUS_TEXT",
     "TOOL_STATUS_MAP",
+    "LoadLevel",
+    "build_system_load_payload",
+    "compute_load_level",
     "format_llm_stage_status",
     "format_llm_queue_status",
     "format_subagent_llm_stage_status",
@@ -18,6 +26,65 @@ __all__ = [
     "format_tool_batch_status",
     "format_tool_status",
 ]
+
+# WS ``system_load`` allowlist (DC-008 / D-088) — counts only, no PII.
+SYSTEM_LOAD_PAYLOAD_KEYS: frozenset[str] = frozenset(
+    {
+        "type",
+        "active_count",
+        "max_concurrent",
+        "waiting_count",
+        "active_users",
+        "load_level",
+        "updated_at",
+    }
+)
+
+
+def compute_load_level(
+    *,
+    active_count: int,
+    max_concurrent: int,
+    waiting_count: int,
+) -> LoadLevel:
+    """Return ambient GPU load level for the system-load top bar.
+
+    Rules (server-side, deterministic):
+    - idle: nothing waiting and capacity remains
+    - saturated: full capacity and a non-empty wait queue
+    - busy: everything else (full but no wait, or partial use with waiters)
+    """
+    if waiting_count == 0 and active_count < max_concurrent:
+        return "idle"
+    if waiting_count > 0 and active_count >= max_concurrent:
+        return "saturated"
+    return "busy"
+
+
+def build_system_load_payload(
+    *,
+    active_count: int,
+    max_concurrent: int,
+    waiting_count: int,
+    active_users: int,
+    updated_at: int | None = None,
+) -> dict[str, Any]:
+    """Build a count-only ``system_load`` WebSocket payload (no personal data)."""
+    payload: dict[str, Any] = {
+        "type": "system_load",
+        "active_count": int(active_count),
+        "max_concurrent": int(max_concurrent),
+        "waiting_count": int(waiting_count),
+        "active_users": int(active_users),
+        "load_level": compute_load_level(
+            active_count=active_count,
+            max_concurrent=max_concurrent,
+            waiting_count=waiting_count,
+        ),
+        "updated_at": int(updated_at if updated_at is not None else time.time() * 1000),
+    }
+    return payload
+
 
 INITIAL_STATUS_TEXT = "⏳ В обработке..."
 READY_STATUS_TEXT = "✅ Готово..."

@@ -141,6 +141,11 @@ class AgentRequestService:
         async with self._active_user_requests_lock:
             self._active_user_requests.discard(user_id)
 
+    async def active_user_count(self) -> int:
+        """Number of users with an in-flight workflow (not LLM slot count)."""
+        async with self._active_user_requests_lock:
+            return len(self._active_user_requests)
+
     async def reset_user_context(self, user: User) -> None:
         """Invalidate LLM KV-cache after a session reset (B-106).
 
