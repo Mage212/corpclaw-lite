@@ -1,7 +1,7 @@
 # CorpClaw Lite — Архитектура проекта
 
 > Версия документа: 2026-07-13
-> Версия проекта: 0.2.6 — Phase 2A.1 adaptations package (B-078 partial)
+> Версия проекта: 0.2.5 — Phase 2A in progress (adaptations package; version bump at end of 2A)
 
 ---
 
@@ -178,7 +178,7 @@ results = await asyncio.gather(*[execute_one(tc) for tc in tool_calls])
 - Budget exceeded
 - Loop detected (2x warning)
 
-### AgentLoop structure (B-077 / B-078, v0.2.6)
+### AgentLoop structure (B-077 / B-078 partial)
 
 ```
 run()

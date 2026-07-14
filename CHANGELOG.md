@@ -6,20 +6,19 @@
 
 ## [Unreleased]
 
-## [0.2.6] — 2026-07-14
+### Sprint 2A — Loop refactor (B-078 / B-079) — in progress
 
-**Patch** `0.2.5 → 0.2.6`. Sprint **2A.1** (B-078 light): schema adaptations moved
-out of `AgentLoop` into `agent/adaptations/`. Behavior-neutral.
+Version bump and full 2A release notes ship when **2A.1 + 2A.2 + 2A.3** are done
+(single patch after EventSink). Until then: stay on **0.2.5**.
 
-### Changed
+#### 2A.1 (merged when this lands)
 
 - **B-078 (partial): adaptations package.** Pure move of:
   - `apply_tool_surface` / `inject_tool_soft_hint` → `adaptations/tool_surface.py`
   - `apply_closing_mode` → `adaptations/closing.py` (B-046)
   - `apply_workflow_mandate` → `adaptations/mandate.py` (B-047)
-- `AgentLoop.run` keeps call order (base → phase → mandate re-apply → closing →
-  soft-hint; mandate before dedup). Cascade (`_auto_finalize_cascade`) still on
-  the loop — **2A.2**. EventSink — **2A.3**.
+- Call order unchanged (base → phase → mandate re-apply → closing → soft-hint;
+  mandate before dedup). Cascade still on loop (**2A.2**). EventSink (**2A.3**).
 - Isolated unit tests: `test_adaptations_{tool_surface,closing,mandate}.py`.
 
 ## [0.2.5] — 2026-07-13
