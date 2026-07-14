@@ -352,18 +352,21 @@ async def test_agent_loop_budget_exceeded_returns_string(
 
 
 @pytest.mark.asyncio
-async def test_history_order(test_user: User, empty_registry: ToolRegistry) -> None:
-    """History messages must appear BEFORE the current user message in context."""
-    from unittest.mock import MagicMock
+async def test_history_order(test_user: User, empty_registry: ToolRegistry, tmp_path: Path) -> None:
+    """B-104: history from ChatContextStore appears BEFORE the current user message."""
+    from corpclaw_lite.channels.web.chat_context_store import ChatContextStore
+    from corpclaw_lite.channels.web.chat_store import WebChatStore
 
-    from corpclaw_lite.memory.sqlite import SQLiteMemory
-
-    # Mock memory returning 2 history entries
-    memory = MagicMock(spec=SQLiteMemory)
-    memory.get_history.return_value = [
-        {"role": "user", "content": "old question"},
-        {"role": "assistant", "content": "old answer"},
-    ]
+    db = tmp_path / "hist.db"
+    ws = WebChatStore(db)
+    store = ChatContextStore(db)
+    session_id = await ws.create_session(user_id=str(test_user.id), section="chat")
+    await store.append_context(
+        session_id=session_id, user_id=str(test_user.id), role="user", content="old question"
+    )
+    await store.append_context(
+        session_id=session_id, user_id=str(test_user.id), role="assistant", content="old answer"
+    )
 
     captured_messages: list[list[dict]] = []
 
@@ -373,14 +376,19 @@ async def test_history_order(test_user: User, empty_registry: ToolRegistry) -> N
             return LLMResponse(content="done")
 
     provider = CapturingProvider(responses=[])
-    loop = AgentLoop(AgentConfig(provider, empty_registry, AgentSettings(), memory=memory))
-    await loop.run(test_user, "new question")
+    loop = AgentLoop(
+        AgentConfig(
+            provider,
+            empty_registry,
+            AgentSettings(),
+            chat_context_store=store,
+        )
+    )
+    await loop.run(test_user, "new question", session_id=session_id)
 
     msgs = captured_messages[0]
-    # Find positions
     roles = [(m.get("role"), m.get("content")) for m in msgs]
     user_contents = [c for r, c in roles if r == "user"]
-    # "old question" must come before "new question"
     assert user_contents.index("old question") < user_contents.index("new question")
 
 
@@ -2283,8 +2291,8 @@ async def test_agent_loop_persists_full_context_with_session_id(
     await loop.run(test_user, "call echo", session_id=session_id, channel="test")
 
     ctx = await store.list_context(session_id)
-    # Expected order: user / assistant(tool_calls) / tool(result) / assistant(final)
-    assert len(ctx) == 4
+    # Expected: user / assistant(tool_calls) / tool / assistant(final) / system tools note
+    assert len(ctx) == 5
     assert ctx[0]["role"] == "user"
     assert ctx[0]["content"] == "call echo"
     assert ctx[1]["role"] == "assistant"
@@ -2296,6 +2304,8 @@ async def test_agent_loop_persists_full_context_with_session_id(
     assert ctx[2]["name"] == "echo"
     assert ctx[3]["role"] == "assistant"
     assert ctx[3]["content"] == "Done!"
+    assert ctx[4]["role"] == "system"
+    assert "echo" in str(ctx[4]["content"])
 
 
 @pytest.mark.asyncio
@@ -2635,11 +2645,10 @@ async def test_run_restores_full_context_from_store(
 
 
 @pytest.mark.asyncio
-async def test_run_falls_back_to_memory_when_store_empty(
+async def test_run_ignores_memory_when_session_store_empty(
     test_user: User, empty_registry: ToolRegistry, tmp_path: Path
 ) -> None:
-    """B-063 S2: when session_id is set but the context-store is empty, run()
-    falls back to the SQLiteMemory history path (build_initial)."""
+    """B-104: session-bound run does not fall back to SQLiteMemory.get_history."""
     from corpclaw_lite.channels.web.chat_context_store import ChatContextStore
     from corpclaw_lite.channels.web.chat_store import WebChatStore
     from corpclaw_lite.memory.sqlite import SQLiteMemory
@@ -2648,7 +2657,7 @@ async def test_run_falls_back_to_memory_when_store_empty(
     ws = WebChatStore(db)
     store = ChatContextStore(db)
     session_id = await ws.create_session(user_id=str(test_user.id), section="chat")
-    # Seed MEMORY (not the context store) — the fallback source.
+    # Seed MEMORY only — must NOT appear in model context after 2B.2.
     memory = SQLiteMemory(db_path=str(db))
     await memory.add_message(test_user.memory_key(), "user", "old question")
     await memory.add_message(test_user.memory_key(), "assistant", "old answer")
@@ -2669,11 +2678,10 @@ async def test_run_falls_back_to_memory_when_store_empty(
 
     await loop.run(test_user, "follow up", session_id=session_id, channel="web")
 
-    # Fallback path: text history present, but NO tool-role messages (those come
-    # only from the full-context path).
     roles = [m["role"] for m in captured]
     assert "tool" not in roles
-    assert any(m.get("content") == "old answer" for m in captured)
+    assert not any(m.get("content") == "old answer" for m in captured)
+    assert any(m.get("content") == "follow up" for m in captured)
 
 
 # --- B-063 S3: compress-any-chat (compress from context-store) ---
@@ -2869,10 +2877,11 @@ async def test_terminal_tool_no_double_persist(
     await loop.run(test_user, "echo", session_id=session_id, channel="web")
 
     ctx = await store.list_context(session_id)
-    # user, assistant(tool_calls), assistant(final) — NO tool-role (terminal skip).
-    assert len(ctx) == 3
+    # user, assistant(tool_calls), assistant(final), system tools note — NO tool-role.
+    assert len(ctx) == 4
     assert all(m["role"] != "tool" for m in ctx)
     assert ctx[2]["content"] == "DIRECT:hi"
+    assert ctx[3]["role"] == "system"
 
 
 def test_build_from_full_history_preserves_tool_calls_in_leading_strip(

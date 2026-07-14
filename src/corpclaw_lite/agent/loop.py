@@ -172,19 +172,6 @@ def _trace_payload_enabled() -> bool:
     return bool(trace_logger and trace_logger.trace_level in ("debug_preview", "full"))
 
 
-def _format_tool_marker(tools_used: list[str]) -> str:
-    """Compact marker for the reasoning column (audit only, not shown to model)."""
-    if not tools_used:
-        return "[Called tools: none]"
-    seen: set[str] = set()
-    unique: list[str] = []
-    for t in tools_used:
-        if t not in seen:
-            seen.add(t)
-            unique.append(t)
-    return f"[Called tools: {', '.join(unique)}]"
-
-
 def _queue_notify_position(settings: AgentSettings) -> bool:
     """Return queue position notification setting with AgentSettings fallback."""
     settings_obj: Any = settings
@@ -1568,28 +1555,16 @@ class AgentLoop:
 
         mem_key = user.memory_key()
 
-        # Load history BEFORE building context so it precedes the current message
-        history: list[dict[str, Any]] = []
-        if self._memory:
-            try:
-                history = await self._memory.get_history(mem_key, limit=self._settings.max_history)
-            except StorageError:
-                logger.error("[user=%s] Failed to load history", user.id)
-
-        # B-063 S2: prefer the FULL LLM context (tool_calls/tool-role) from the
-        # per-chat store when a session_id is bound and the store has data. Falls
-        # back to the SQLiteMemory history above (role+content only) for old chats
-        # or non-web channels. The full-history path reconstructs tool_calls and
-        # tool-role messages that get_history/build_initial would drop.
+        # B-104 / 2B.2: load LLM transcript only from ChatContextStore when a
+        # session is bound (web + telegram virtual session). No SQLiteMemory
+        # get_history fallback — dual path removed. CLI/subagent: empty history.
         full_history: list[dict[str, Any]] | None = None
         if self._chat_context_store is not None and session_id is not None:
             try:
                 full_history = await self._chat_context_store.list_context(session_id)
-                if not full_history:
-                    full_history = None
             except Exception:
                 logger.warning("[session=%s] context-store load failed", session_id, exc_info=True)
-                full_history = None
+                full_history = []
 
         # Prepend dynamic user context to the system prompt
         base_prompt = system_prompt or self._default_system_prompt or ""
@@ -1634,7 +1609,7 @@ class AgentLoop:
         )
 
         if full_history is not None:
-            # B-063 S2: full-context path — reconstructs tool_calls + tool-role.
+            # Session-bound path — full tool_calls / tool-role schema (B-063 / B-104).
             context = ContextBuilder.build_from_full_history(
                 user,
                 message,
@@ -1643,16 +1618,17 @@ class AgentLoop:
                 few_shots=few_shots,
             )
         else:
+            # CLI / subagent: no persistent transcript (B-104).
             context = ContextBuilder.build_initial(
                 user,
                 message,
-                history=history,
+                history=[],
                 system_prompt_override=dynamic_prompt,
                 few_shots=few_shots,
             )
 
-        if self._memory:
-            await self._save_memory(mem_key, "user", message)
+        # B-103: transcript persist is only ChatContextStore (after contextvars
+        # bind below). No dual-write to SQLiteMemory.messages.
 
         # Budget is ALWAYS from settings. Department-specific iteration/tool-call
         # limits were removed — they silently overrode settings.max_steps, causing
@@ -1714,7 +1690,7 @@ class AgentLoop:
         log_event(
             "context_built",
             state.stats.run_id,
-            history_count=len(history),
+            history_count=len(full_history or []),
             facts_count=facts_count,
             recent_files_count=recent_files_count,
             tools_available_count=len(state.tools_schema or []),
@@ -1764,15 +1740,6 @@ class AgentLoop:
         if tokens.workspace is not None:
             reset_workspace_root(tokens.workspace)
 
-    async def _save_memory(self, mem_key: str, role: str, content: str, **kwargs: Any) -> None:
-        """Persist a message to memory, swallowing StorageError."""
-        if not self._memory:
-            return
-        try:
-            await self._memory.add_message(mem_key, role, content, **kwargs)
-        except StorageError:
-            logger.error("[user=%s] Failed to save %s message", mem_key, role)
-
     async def _persist_context_msg(
         self,
         *,
@@ -1783,11 +1750,11 @@ class AgentLoop:
         name: str | None = None,
         reasoning: str | None = None,
     ) -> None:
-        """Append one LLM-facing message to the per-chat context store (B-063 S1).
+        """Append one LLM-facing message to ChatContextStore (B-063 / B-103).
 
+        Sole transcript persist path after 2B.2 — no dual-write to SQLiteMemory.
         Non-fatal: a persist failure is logged at DEBUG but does NOT abort the run.
-        No-op when no store is configured or when ``session_id`` is None
-        (telegram/CLI/subagents — they have no web chat session concept).
+        No-op when no store is configured or when ``session_id`` is None (CLI/subagents).
         """
         session_id = get_context_session_id()
         user_id = get_context_user_id()
@@ -1818,29 +1785,18 @@ class AgentLoop:
         tools_used: list[str],
         response_reasoning: str | None = None,
     ) -> None:
-        """Save assistant response + factual execution record as system message.
+        """Persist final assistant turn + tool-marker system note to context store.
 
-        The execution record is saved as a ``system`` role message right after
-        the assistant message.  On next run it appears in the message list as a
-        system message, giving the model hard evidence of what was *actually*
-        executed — so it can detect its own false claims.
+        ``mem_key`` is retained for API stability (call sites) but is not used for
+        transcript write after B-103 — facts stay on SQLiteMemory separately.
         """
-        # 1. Save assistant text (reasoning column for audit)
-        reasoning_marker = _format_tool_marker(tools_used)
-        reasoning_parts: list[str] = []
-        if response_reasoning:
-            reasoning_parts.append(response_reasoning)
-        reasoning_parts.append(reasoning_marker)
-        await self._save_memory(mem_key, "assistant", content, reasoning="\n".join(reasoning_parts))
-        # B-063 S1: persist the final assistant answer to the per-chat context
-        # store. Only the raw model reasoning (no synthetic tool-marker) — the
-        # context store mirrors what the model actually produced, not the audit
-        # annotation SQLiteMemory adds.
+        _ = mem_key
+        # Final assistant answer (raw model reasoning only — no synthetic tool marker).
         await self._persist_context_msg(
             role="assistant", content=content, reasoning=response_reasoning
         )
 
-        # 2. Save factual execution record (visible to model as system message)
+        # Factual execution record for the next model turn (system role in store).
         if tools_used:
             seen: set[str] = set()
             unique: list[str] = []
@@ -1851,7 +1807,7 @@ class AgentLoop:
             record = f"Tools called in this turn: {', '.join(unique)}"
         else:
             record = "Tools called in this turn: none"
-        await self._save_memory(mem_key, "system", record)
+        await self._persist_context_msg(role="system", content=record)
 
     def _can_parallelize(self, tool_calls: list[ToolCall]) -> bool:
         """Check if all tools in batch can be safely executed in parallel.
