@@ -16,6 +16,12 @@
   Trigger still uses the live window; no-session (CLI/subagent) stays memory-only.
   Shared helper `_compress_store_transcript` powers on-demand `_compress_chat` too.
 
+### Docs
+
+- **B-125 post-2B memory model.** AGENTS.md / CLAUDE.md / ARCHITECTURE.md: sole
+  `ChatContextStore` transcript, facts-only `SQLiteMemory`, no consolidator /
+  dual-write / `_compress_from_memory` language.
+
 ## [0.2.7] — 2026-07-14
 
 **Patch** `0.2.6 → 0.2.7`. **Sprint 2B complete** — memory/prompt unify
