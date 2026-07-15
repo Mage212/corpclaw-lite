@@ -431,6 +431,11 @@ class SchedulerSettings(BaseModel):
     pending_ttl_days: int = 14
     # Relative paths resolve against project DATA_DIR / PROJECT_ROOT in service wire
     db_path: str = "data/scheduler.db"
+    # H1: claim lease TTL — stale claims reclaimable after this many seconds
+    claim_ttl_seconds: float = 900.0
+    # H5: hard caps on propose/accept text fields
+    max_task_text_chars: int = 16_000
+    max_schedule_text_chars: int = 500
 
 
 class Settings(BaseSettings):

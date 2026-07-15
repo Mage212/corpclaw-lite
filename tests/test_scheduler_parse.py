@@ -50,7 +50,9 @@ def test_compute_next_interval() -> None:
 
     spec = ScheduleSpec(kind="interval", minutes=60)
     first = compute_next_run(spec, last_run_at=None, now=now, tz="UTC")
-    assert first == now
+    assert first is not None
+    # H4: first fire is now + period, not immediately due
+    assert (first - now).total_seconds() == 3600
     second = compute_next_run(spec, last_run_at=now, now=now, tz="UTC")
     assert second is not None
     assert (second - now).total_seconds() == 3600

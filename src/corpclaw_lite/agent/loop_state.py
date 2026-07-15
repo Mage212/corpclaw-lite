@@ -93,3 +93,5 @@ class LoopState:
     loop_warning_count: int = 0
     xml_repair_attempted: bool = False
     empty_response_retries: int = 0
+    # B-118 H2: channel for this run (e.g. "system" headless) — execute-time denylist.
+    channel: str | None = None

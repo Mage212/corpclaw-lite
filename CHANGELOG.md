@@ -6,6 +6,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **B-118 hardening (H1–H5).** Scheduler claim-before-run (`claimed_at` /
+  `claim_token`, TTL reclaim) so crash/restart and multi-process `run-now` do
+  not double-fire; execute-time deny of `schedule_*` on `channel=system`;
+  atomic pending insert (limit + live dedup); interval first fire is
+  `now + period` (not immediate); task/schedule text caps; removed unused
+  `_dispatch(force=…)`.
+
 ### Added
 
 - **B-118 / DC-030 SchedulerService + agent-on-schedule.** Separate
