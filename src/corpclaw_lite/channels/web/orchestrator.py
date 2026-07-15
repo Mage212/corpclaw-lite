@@ -180,6 +180,8 @@ class WebChannelOrchestrator:
         self._chat_store: WebChatStore | None = None
         # B-120 / DC-032: proactive delivery (system session + WS push).
         self._user_notifier: Any | None = None
+        # B-118 / DC-030: web-owned scheduler poll (agent-on-schedule).
+        self._scheduler: Any | None = None
         self._cleanup_task: asyncio.Task[None] | None = None
         self._container_prune_task: asyncio.Task[None] | None = None
         self._system_load_poll_task: asyncio.Task[None] | None = None
@@ -256,6 +258,38 @@ class WebChannelOrchestrator:
         self._user_notifier = UserNotifier(notify_store)
         self._user_notifier.register_web_broadcast(self._broadcast_to_user)
         self._service.set_user_notifier(self._user_notifier)
+
+        # B-118: scheduler backbone (poll owner = web process).
+        from corpclaw_lite.extensions.tools.builtin.schedule import (
+            ScheduleCancelTool,
+            ScheduleListTool,
+            SchedulePauseTool,
+            ScheduleProposeTool,
+            ScheduleResumeTool,
+        )
+        from corpclaw_lite.scheduler.service import SchedulerService
+        from corpclaw_lite.scheduler.store import SchedulerStore
+
+        sched_settings = self._settings.scheduler
+        db_path = Path(sched_settings.db_path)
+        if not db_path.is_absolute():
+            db_path = (PROJECT_ROOT / db_path).resolve()
+        self._scheduler = SchedulerService(
+            store=SchedulerStore(db_path),
+            user_manager=stack.user_manager,
+            agent_service=self._service,
+            notifier=self._user_notifier,
+            settings=sched_settings,
+        )
+        for tool in (
+            ScheduleProposeTool(self._scheduler),
+            ScheduleListTool(self._scheduler),
+            ScheduleCancelTool(self._scheduler),
+            SchedulePauseTool(self._scheduler),
+            ScheduleResumeTool(self._scheduler),
+        ):
+            stack.tool_registry.register(tool, allow_replace=True)
+        self._scheduler.start()
 
         stack.tool_registry.register(
             SendFileTool(self._send_file_callback, workspace_base=workspace_base),
@@ -335,6 +369,8 @@ class WebChannelOrchestrator:
         await self._shutdown_event.wait()
 
     async def stop(self) -> None:
+        if self._scheduler is not None:
+            self._scheduler.stop()
         if self._cleanup_task is not None:
             self._cleanup_task.cancel()
         if self._container_prune_task is not None:

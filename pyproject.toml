@@ -25,6 +25,7 @@ dependencies = [
     "matplotlib>=3.9.0",
     "pypdf>=4.0.0",
     "ddgs>=9.14.4",
+    "croniter>=6.2.4",
 ]
 
 [project.scripts]

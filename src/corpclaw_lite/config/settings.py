@@ -24,6 +24,7 @@ __all__ = [
     "QueueSettings",
     "ResearchSettings",
     "RoutingRule",
+    "SchedulerSettings",
     "Settings",
     "SkillsSettings",
     "SlotAffinitySettings",
@@ -419,6 +420,19 @@ class LoggingSettings(BaseModel):
     capture_dir: str = "logs"
 
 
+class SchedulerSettings(BaseModel):
+    """B-118 / DC-030: agent-on-schedule backbone (web-owned poll)."""
+
+    enabled: bool = True
+    poll_seconds: float = 30.0
+    # pending + active combined hard cap per user
+    max_tasks_per_user: int = 3
+    timezone: str = "Europe/Moscow"
+    pending_ttl_days: int = 14
+    # Relative paths resolve against project DATA_DIR / PROJECT_ROOT in service wire
+    db_path: str = "data/scheduler.db"
+
+
 class Settings(BaseSettings):
     """Main application settings."""
 
@@ -432,5 +446,6 @@ class Settings(BaseSettings):
     skills: SkillsSettings = SkillsSettings()
     extensions: ExtensionsSettings = ExtensionsSettings()
     logging: LoggingSettings = LoggingSettings()
+    scheduler: SchedulerSettings = SchedulerSettings()
 
     model_config = {"env_nested_delimiter": "__"}

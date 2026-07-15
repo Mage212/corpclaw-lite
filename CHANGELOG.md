@@ -8,6 +8,12 @@
 
 ### Added
 
+- **B-118 / DC-030 SchedulerService + agent-on-schedule.** Separate
+  `data/scheduler.db`, consent-first proposals (`schedule_propose` → pending),
+  human `schedule accept/dismiss` (CLI), max **3** pending+active tasks per
+  user, web-owned poll (~30s) → `run_headless(source=scheduled)` with current
+  datetime injected into the prompt. Busy users skip+retry; headless cannot
+  use `schedule_*` tools. Telegram does not own the poll loop.
 - **B-120 / DC-032 proactive-send (UserNotifier).** Deliver a message without an
   inbound chat turn: always persist to the durable per-user **system** session
   (B-119), then best-effort push to process-local sinks — WebSocket

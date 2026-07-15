@@ -11,7 +11,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from corpclaw_lite.agent.adaptations import (
     apply_closing_mode,
@@ -101,6 +101,18 @@ __all__ = [
     "AgentLoop",
     "RunStats",
 ]
+
+
+def _tool_schema_name(schema: dict[str, Any]) -> str:
+    """Extract OpenAI-style or flat tool name from a schema dict."""
+    fn_obj: object = schema.get("function")
+    if isinstance(fn_obj, dict):
+        # Avoid iterating untyped dict items under strict pyright.
+        raw_name: object = cast(dict[str, object], fn_obj).get("name")
+        return raw_name if isinstance(raw_name, str) else ""
+    raw_top: object = schema.get("name")
+    return raw_top if isinstance(raw_top, str) else ""
+
 
 if TYPE_CHECKING:
     from corpclaw_lite.agent.compressor import ContextCompressor
@@ -1823,6 +1835,14 @@ class AgentLoop:
                 )
             else:
                 tools_schema = self._registry.to_schemas()
+            # B-118: headless/system runs must not schedule further jobs (no recursion).
+            if channel == "system":
+                filtered: list[dict[str, Any]] = []
+                for schema in tools_schema:
+                    name = _tool_schema_name(schema)
+                    if not name.startswith("schedule_"):
+                        filtered.append(schema)
+                tools_schema = filtered
         # B-076/B-077: pack run-scoped mutable state into an explicit bag.
         # base_tools_schema is the immutable source of truth for schema refilters.
         state = LoopState(
