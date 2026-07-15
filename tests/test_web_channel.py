@@ -17,7 +17,11 @@ from aiohttp import hdrs, web
 from aiohttp.test_utils import make_mocked_request
 
 from corpclaw_lite.agent.factory import AgentStack
-from corpclaw_lite.channels.service import AgentRequestService, is_llm_transport_error
+from corpclaw_lite.channels.service import (
+    AgentRequestService,
+    RunningRequest,
+    is_llm_transport_error,
+)
 from corpclaw_lite.channels.web.chat_context_store import ChatContextStore
 from corpclaw_lite.channels.web.chat_store import WebChatFile, WebChatStore
 from corpclaw_lite.channels.web.files import (
@@ -65,6 +69,9 @@ class FakeWorkspaceService:
 
     def get_user_workspace(self, _user: User) -> Path:
         return self.workspace
+
+    async def get_running_request(self, _user_id: int) -> RunningRequest | None:
+        return None
 
 
 def web_request(
@@ -427,6 +434,109 @@ async def test_estimate_context_rejects_image(tmp_path: Path) -> None:
             )
         )
     assert "text" in str(exc_info.value.text).lower()
+
+
+@pytest.mark.asyncio
+async def test_attach_context_text_pending(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "note.txt").write_text("attach me please", encoding="utf-8")
+    user = User(id=3, name="Vadim", department="engineering")
+    settings = Settings()
+    settings.agent.compression.max_context_tokens = 50_000
+    orchestrator = WebChannelOrchestrator(settings)
+    orchestrator._service = FakeWorkspaceService(workspace)  # type: ignore[assignment]
+    orchestrator._tokenizer_client = TokenizerClient(mode="heuristic")
+    store = WebChatStore(tmp_path / "memory.db")
+    orchestrator._chat_store = store
+    session_id = await store.ensure_active_session(user.memory_key())
+
+    response = await orchestrator._handle_attach_context(
+        web_json_request(
+            "POST",
+            "/api/files/attach-context",
+            user,
+            {"path": "note.txt", "session_id": session_id, "baseline_tokens": 0},
+        )
+    )
+    body = json.loads(response.text or "{}")
+    assert response.status == 200
+    assert body["decision"] in {"allow", "warn"}
+    assert body["pending_count"] == 1
+    assert body["path"] == "note.txt"
+
+    pending = await orchestrator._handle_pending_context(
+        web_request("GET", f"/api/files/pending-context?session_id={session_id}", user)
+    )
+    pending_body = json.loads(pending.text or "{}")
+    assert pending_body["pending_count"] == 1
+
+    # Compose path used on send
+    items = orchestrator._pending_attachments.pop_all(user.id, session_id)
+    from corpclaw_lite.agent.inline_attach import compose_inline_attachments
+
+    composed = compose_inline_attachments(items, "what is in the file?")
+    assert "attach me please" in composed
+    assert "what is in the file?" in composed
+
+
+@pytest.mark.asyncio
+async def test_attach_context_busy_rejects(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "note.txt").write_text("x", encoding="utf-8")
+    user = User(id=4, name="Vadim", department="engineering")
+
+    class BusyService(FakeWorkspaceService):
+        async def get_running_request(self, _user_id: int) -> RunningRequest:
+            return RunningRequest(session_id=9, title="Отчёт")
+
+    orchestrator = WebChannelOrchestrator(Settings())
+    orchestrator._service = BusyService(workspace)  # type: ignore[assignment]
+    orchestrator._tokenizer_client = TokenizerClient(mode="heuristic")
+    response = await orchestrator._handle_attach_context(
+        web_json_request(
+            "POST",
+            "/api/files/attach-context",
+            user,
+            {"path": "note.txt", "session_id": 1, "baseline_tokens": 0},
+        )
+    )
+    assert response.status == 409
+
+
+@pytest.mark.asyncio
+async def test_detach_context_all(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "a.txt").write_text("a", encoding="utf-8")
+    user = User(id=5, name="Vadim", department="engineering")
+    settings = Settings()
+    settings.agent.compression.max_context_tokens = 50_000
+    orchestrator = WebChannelOrchestrator(settings)
+    orchestrator._service = FakeWorkspaceService(workspace)  # type: ignore[assignment]
+    orchestrator._tokenizer_client = TokenizerClient(mode="heuristic")
+    store = WebChatStore(tmp_path / "mem2.db")
+    orchestrator._chat_store = store
+    session_id = await store.ensure_active_session(user.memory_key())
+    await orchestrator._handle_attach_context(
+        web_json_request(
+            "POST",
+            "/api/files/attach-context",
+            user,
+            {"path": "a.txt", "session_id": session_id, "baseline_tokens": 0},
+        )
+    )
+    response = await orchestrator._handle_detach_context(
+        web_json_request(
+            "POST",
+            "/api/files/detach-context",
+            user,
+            {"all": True, "session_id": session_id},
+        )
+    )
+    body = json.loads(response.text or "{}")
+    assert body["pending_count"] == 0
 
 
 @pytest.mark.asyncio

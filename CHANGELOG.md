@@ -8,6 +8,12 @@
 
 ### Added
 
+- **B-094 Inline attachment (DC-013).** Pending workspace-file attach into the
+  next user message: materialize text/image/spreadsheet/pdf, budget-gate on
+  attach, optional chunked text, compose message-local blocks (D-087). HTTP
+  `POST /api/files/attach-context`, `detach-context`, `GET pending-context`.
+  UI transcript stores short text + `metadata.attachments` for future chips
+  (B-096). No Pin / FileExplorer menu yet.
 - **B-093 Budget-gate (DC-013).** Pre-flight context budget check for
   add-to-context: `evaluate_budget` / `estimate_content_budget` (thresholds
   0.85 warn / 0.95 block / 0.5 offer_chunked; BLOCK disables chunked). HTTP
