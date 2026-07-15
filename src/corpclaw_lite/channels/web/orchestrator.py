@@ -18,7 +18,15 @@ from aiohttp.helpers import content_disposition_header
 
 from corpclaw_lite.agent.budget_gate import estimate_content_budget
 from corpclaw_lite.agent.factory import build_agent_stack
+from corpclaw_lite.agent.inline_attach import (
+    MaterializeError,
+    attachment_metadata_list,
+    compose_inline_attachments,
+    materialize_attachment,
+    ui_placeholder_for_attachments,
+)
 from corpclaw_lite.agent.loop import RunStats
+from corpclaw_lite.agent.vision import VisionProcessor
 from corpclaw_lite.channels.service import (
     AgentRequestCallbacks,
     AgentRequestService,
@@ -60,6 +68,7 @@ from corpclaw_lite.channels.web.files import (
     save_upload_stream,
     search_files,
 )
+from corpclaw_lite.channels.web.pending_attachments import PendingAttachmentsStore
 from corpclaw_lite.config.bootstrap import BootstrapLoader
 from corpclaw_lite.config.settings import Settings, WebChannelSettings
 from corpclaw_lite.exceptions import LLMBackendUnavailableError
@@ -89,6 +98,7 @@ _DOWNLOAD_GRANT_TTL_SECONDS = 24 * 60 * 60
 # default idle_timeout (600s) so a container is reaped within ~2 cycles.
 _CONTAINER_PRUNE_INTERVAL_SECONDS = 300
 _INLINE_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+_VISION_ATTACH_PROMPT = "Describe this image for the agent context. Be concise but complete."
 _FRONTEND_DIST = PROJECT_ROOT / "frontend" / "web" / "dist"
 # Auto-naming: first user message truncated to this many chars (no LLM call).
 _CHAT_TITLE_MAX_CHARS = 25
@@ -177,6 +187,10 @@ class WebChannelOrchestrator:
         self._last_system_load_broadcast_at: float = 0.0
         # B-093: reusable token estimate client (lazy; inject in tests).
         self._tokenizer_client: TokenizerClient | None = None
+        # B-094: pending inline attachments + vision describe cache.
+        self._pending_attachments = PendingAttachmentsStore()
+        self._vision_processor: VisionProcessor | None = None
+        self._vision_cache: dict[str, str] = {}
         self._started = False
 
     async def start(self) -> None:
@@ -360,6 +374,9 @@ class WebChannelOrchestrator:
         app.router.add_get("/api/files/search", self._handle_search_files)
         app.router.add_get("/api/files/preview", self._handle_preview_file)
         app.router.add_post("/api/files/estimate-context", self._handle_estimate_context)
+        app.router.add_post("/api/files/attach-context", self._handle_attach_context)
+        app.router.add_post("/api/files/detach-context", self._handle_detach_context)
+        app.router.add_get("/api/files/pending-context", self._handle_pending_context)
         app.router.add_post("/api/files/upload", self._handle_upload)
         app.router.add_post("/api/files/mkdir", self._handle_mkdir)
         app.router.add_post("/api/files/rename", self._handle_rename)
@@ -812,6 +829,8 @@ class WebChannelOrchestrator:
             await self._service.reset_user_context(user)
             if self._chat_store is not None:
                 await self._chat_store.reset_session(user.memory_key(), reason="/new")
+            # B-094: drop pending attaches for this user (session may rotate).
+            self._pending_attachments.clear_user(user.id)
             usage = self._context_usage_payload()
             self._context_usage[user.id] = usage
             self._active_request_state.pop(user.id, None)
@@ -985,6 +1004,136 @@ class WebChannelOrchestrator:
         except Exception:
             logger.exception("Failed to build TokenizerClient; using heuristic mode")
             return TokenizerClient(mode="heuristic")
+
+    def _get_vision_processor(self) -> VisionProcessor | None:
+        if self._vision_processor is not None:
+            return self._vision_processor
+        if self._stack is None:
+            return None
+        try:
+            self._vision_processor = VisionProcessor(self._stack.loop.provider)
+        except Exception:
+            logger.exception("Failed to build VisionProcessor for attach")
+            return None
+        return self._vision_processor
+
+    async def _resolve_attach_session_id(self, user: User, payload: dict[str, object]) -> int:
+        raw = payload.get("session_id")
+        if raw is not None:
+            try:
+                session_id = int(raw)  # type: ignore[arg-type]
+            except (TypeError, ValueError) as e:
+                raise web.HTTPBadRequest(text="session_id must be an integer") from e
+            if session_id <= 0:
+                raise web.HTTPBadRequest(text="session_id must be positive")
+            return session_id
+        if self._chat_store is None:
+            raise web.HTTPServiceUnavailable(text="Chat store unavailable")
+        return await self._chat_store.ensure_active_session(user.memory_key())
+
+    def _pending_public(self, user_id: int, session_id: int) -> dict[str, object]:
+        items = self._pending_attachments.list(user_id, session_id)
+        return {
+            "pending_count": len(items),
+            "attachments": attachment_metadata_list(items),
+        }
+
+    async def _handle_attach_context(self, request: web.Request) -> web.Response:
+        """B-094: materialize workspace file into pending next-message context."""
+        user = self._require_user(request)
+        if self._service is not None:
+            running = await self._service.get_running_request(user.id)
+            if running is not None:
+                busy = await self._busy_reject_payload(
+                    user.id, "Дождитесь завершения перед добавлением файла в контекст."
+                )
+                return self._http_busy_response(busy)
+
+        payload = await self._json_payload(request)
+        raw_path = payload.get("path")
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            raise web.HTTPBadRequest(text="path is required")
+        path = raw_path.strip()
+        session_id = await self._resolve_attach_session_id(user, payload)
+        baseline = await self._baseline_tokens_for_estimate(user, payload)
+        limit = max(1, int(self._settings.agent.compression.max_context_tokens))
+
+        chunked_raw = payload.get("chunked")
+        chunked: bool | None
+        if chunked_raw is None:
+            chunked = None
+        elif isinstance(chunked_raw, bool):
+            chunked = chunked_raw
+        else:
+            raise web.HTTPBadRequest(text="chunked must be a boolean or null")
+
+        vision = self._get_vision_processor()
+
+        async def describe_image(image_path: Path) -> str:
+            if vision is None:
+                return "Error: Vision is unavailable for image attach"
+            return await vision.describe(image_path, _VISION_ATTACH_PROMPT, user)
+
+        try:
+            attachment, gate = await materialize_attachment(
+                workspace=self._workspace_for(user),
+                raw_path=path,
+                baseline=baseline,
+                limit=limit,
+                tokenizer=self._get_tokenizer_client(),
+                chunked=chunked,
+                describe_image=describe_image if vision is not None else None,
+                vision_cache=self._vision_cache,
+            )
+            pending = self._pending_attachments.add(user.id, session_id, attachment)
+        except MaterializeError as e:
+            if e.status == 404:
+                raise web.HTTPNotFound(text=str(e)) from e
+            if e.status == 413:
+                raise web.HTTPRequestEntityTooLarge(max_size=0, actual_size=0, text=str(e)) from e
+            raise web.HTTPBadRequest(text=str(e)) from e
+        except ValueError as e:
+            raise web.HTTPBadRequest(text=str(e)) from e
+        except PermissionError as e:
+            raise web.HTTPForbidden(text=str(e)) from e
+
+        body: dict[str, object] = {
+            **attachment.to_public_dict(),
+            "decision": gate.decision.value,
+            "offer_chunked": gate.offer_chunked,
+            "reason": gate.reason,
+            "session_id": session_id,
+            "pending_count": len(pending),
+            "attachments": attachment_metadata_list(pending),
+        }
+        return web.json_response(body)
+
+    async def _handle_detach_context(self, request: web.Request) -> web.Response:
+        user = self._require_user(request)
+        payload = await self._json_payload(request)
+        session_id = await self._resolve_attach_session_id(user, payload)
+        clear_all = payload.get("all") is True
+        if clear_all:
+            self._pending_attachments.clear(user.id, session_id)
+        else:
+            raw_path = payload.get("path")
+            if not isinstance(raw_path, str) or not raw_path.strip():
+                raise web.HTTPBadRequest(text="path is required (or all=true)")
+            self._pending_attachments.remove(user.id, session_id, raw_path.strip())
+        body = self._pending_public(user.id, session_id)
+        body["session_id"] = session_id
+        return web.json_response(body)
+
+    async def _handle_pending_context(self, request: web.Request) -> web.Response:
+        user = self._require_user(request)
+        raw_session = request.query.get("session_id")
+        payload: dict[str, object] = {}
+        if raw_session is not None:
+            payload["session_id"] = raw_session
+        session_id = await self._resolve_attach_session_id(user, payload)
+        body = self._pending_public(user.id, session_id)
+        body["session_id"] = session_id
+        return web.json_response(body)
 
     async def _handle_upload(self, request: web.Request) -> web.Response:
         user = self._require_user(request)
@@ -1754,6 +1903,7 @@ class WebChannelOrchestrator:
             ok = await self._chat_store.delete_session(user.memory_key(), session_id)
             if not ok:
                 raise web.HTTPNotFound(text="Chat not found.")
+            self._pending_attachments.clear(user.id, session_id)
             # The active chat was deleted → the invariant "one active chat per
             # user" (partial-unique-index idx_web_chat_sessions_active) would
             # otherwise be left unsatisfied, and the agent would have nowhere to
@@ -2041,13 +2191,34 @@ class WebChannelOrchestrator:
                 return
             request_acquired = True
             try:
+                # B-094: pop pending inline attachments for this session and compose
+                # them into the LLM-facing message (UI keeps short text + metadata).
+                pending = []
+                if run_session_id is not None:
+                    pending = self._pending_attachments.pop_all(user.id, run_session_id)
+                composed = compose_inline_attachments(pending, text)
+                if not composed.strip():
+                    # Restore pending if we reject empty send (no text and no attach).
+                    if run_session_id is not None:
+                        for item in pending:
+                            self._pending_attachments.add(user.id, run_session_id, item)
+                    await send({"type": "error", "message": "Пустое сообщение."})
+                    return
+                ui_text = ui_placeholder_for_attachments(pending, text)
+                ui_metadata: dict[str, Any] | None = None
+                if pending:
+                    ui_metadata = {"attachments": attachment_metadata_list(pending)}
                 user_message = await persist_and_broadcast(
-                    role="user", content=text, request_id=request_id
+                    role="user",
+                    content=ui_text,
+                    request_id=request_id,
+                    metadata=ui_metadata,
                 )
                 # Etap 2: auto-name the chat from the first user message if untitled.
                 # Truncation only (no LLM) — cheap and deterministic for local models.
+                title_source = text.strip() or (pending[0].label if pending else "")
                 if user_message is not None and self._chat_store is not None:
-                    title = _derive_chat_title(text)
+                    title = _derive_chat_title(title_source)
                     if title is not None:
                         updated = await self._chat_store.set_session_title(
                             user.memory_key(), user_message.session_id, title
@@ -2089,7 +2260,7 @@ class WebChannelOrchestrator:
                         effective_mode = "execute" if active_session.section == "work" else "chat"
                 result = await self._service.run(
                     user=user,
-                    message=text,
+                    message=composed,
                     mode=effective_mode,
                     depth_mode=depth_mode,
                     web_access=web_access if effective_mode == "execute" else True,
