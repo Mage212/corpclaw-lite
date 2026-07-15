@@ -1212,11 +1212,7 @@ class WebChannelOrchestrator:
         """Build structured busy reject (HTTP/WS) with optional running session (B-090)."""
         running: RunningRequest | None = None
         if self._service is not None:
-            getter = getattr(self._service, "get_running_request", None)
-            if callable(getter):
-                running = await getter(user_id)
-            else:
-                running = None
+            running = await self._service.get_running_request(user_id)
         if running is not None and running.session_id is not None:
             label = f"«{running.title}»" if running.title else f"#{running.session_id}"
             message = f"Сейчас выполняется чат {label}. {action_hint}"
