@@ -966,11 +966,13 @@ class WebChannelOrchestrator:
             registry = ProviderRegistry.from_env()
             base_url: str | None = None
             api_key: str | None = None
+            model: str | None = None
             for rule in self._settings.llm.routing:
                 conn = registry.get(rule.provider)
                 if conn is not None and conn.base_url:
                     base_url = conn.base_url
                     api_key = conn.api_key
+                    model = rule.model
                     break
             if base_url is None:
                 for name in registry.list_all():
@@ -979,7 +981,7 @@ class WebChannelOrchestrator:
                         base_url = conn.base_url
                         api_key = conn.api_key
                         break
-            return TokenizerClient(base_url=base_url, api_key=api_key, mode="auto")
+            return TokenizerClient(base_url=base_url, api_key=api_key, model=model, mode="auto")
         except Exception:
             logger.exception("Failed to build TokenizerClient; using heuristic mode")
             return TokenizerClient(mode="heuristic")

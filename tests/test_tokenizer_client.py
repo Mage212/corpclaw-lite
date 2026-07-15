@@ -87,6 +87,27 @@ async def test_tokenize_success() -> None:
 
 
 @pytest.mark.asyncio
+async def test_tokenize_includes_model_in_body() -> None:
+    seen: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+
+        seen.append(json.loads(request.content.decode()))
+        return httpx.Response(200, json={"tokens": [1, 2]})
+
+    client = TokenizerClient(
+        base_url="http://host:8080",
+        model="gpt-oss-20b-UD-Q4_K_XL",
+        mode="tokenize",
+        transport=httpx.MockTransport(handler),
+    )
+    result = await client.estimate("hi")
+    assert result.n_tokens == 2
+    assert seen == [{"content": "hi", "model": "gpt-oss-20b-UD-Q4_K_XL"}]
+
+
+@pytest.mark.asyncio
 async def test_tokenize_strips_v1_from_url() -> None:
     seen: list[str] = []
 

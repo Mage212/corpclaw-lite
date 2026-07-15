@@ -24,6 +24,7 @@ async def test_live_tokenize_roundtrip(
     client = TokenizerClient(
         base_url=live_config.base_url,
         api_key=live_config.api_key,
+        model=live_config.model,
         mode="tokenize",
         timeout_seconds=30.0,
     )
