@@ -8,6 +8,11 @@
 
 ### Added
 
+- **B-140 web UI «Задачи».** Sidebar entry + `ScheduleView`: list
+  pending/active/paused/history, Accept / Edit+Accept / Dismiss / Pause /
+  Resume against B-141 REST. Not a Chat/Work tab. Pending badge on nav;
+  system notify text points to «Откройте Задачи» (B-143-lite, no in-chat
+  card yet).
 - **B-141 schedule REST API.** HTTP lifecycle for consent-first tasks:
   `GET /api/schedule`, `GET /api/schedule/{id}`,
   `POST …/accept|dismiss|pause|resume` (CSRF + session). Thin wrap over
