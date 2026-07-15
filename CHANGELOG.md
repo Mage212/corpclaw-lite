@@ -8,6 +8,11 @@
 
 ### Added
 
+- **B-092 TokenizerClient (DC-013).** Offline-safe token estimate for upcoming
+  add-to-context budget gate: llama.cpp native `POST /tokenize` when reachable,
+  byte-length heuristic fallback with `approximate` flag, in-process content-hash
+  LRU cache. Does **not** use LLM queue/slots. Live smoke:
+  `tests/live_llm/test_tokenize.py` (opt-in).
 - **B-091 web access toggle (DC-012, B+).** Work UI «Веб» toggles main-agent
   `web_fetch` (default ON). Cache-safe (D-087): tail hint `[Web access] OFF` +
   execute deny; does **not** rewrite SOUL/tools schema. Does **not** register

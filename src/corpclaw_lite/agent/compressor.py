@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from corpclaw_lite.agent.constants import PLACEHOLDER
 from corpclaw_lite.config.settings import CompressionSettings
+from corpclaw_lite.llm.tokenizer_client import estimate_tokens_heuristic
 
 __all__ = [
     "ContextCompressor",
@@ -328,16 +329,8 @@ Summary:"""
 
     @staticmethod
     def _bytes_to_tokens(text: str) -> int:
-        """Estimate token count for a string.
-
-        - Mostly ASCII (English): len_bytes / 4 ≈ tokens (accurate for BPE)
-        - Non-ASCII heavy (Cyrillic/CJK): len_bytes / 2 (conservative — prevents
-          underestimation that causes unexpected context limit hits)
-        """
-        encoded = text.encode("utf-8")
-        # ratio > 1.3 means significant non-ASCII content
-        divisor = 2 if len(encoded) > len(text) * 1.3 else 4
-        return len(encoded) // max(divisor, 1)
+        """Estimate token count for a string (shared B-092 heuristic)."""
+        return estimate_tokens_heuristic(text)
 
     def _estimate_tokens(self, messages: list[dict[str, Any]]) -> int:
         """Rough token estimate using utf-8 byte count heuristic."""
