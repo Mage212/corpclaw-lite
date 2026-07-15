@@ -79,6 +79,8 @@ class ScheduledTask:
     created_at: str = ""
     updated_at: str = ""
     accepted_at: str | None = None
+    claimed_at: str | None = None
+    claim_token: str | None = None
     extra: dict[str, Any] = field(default_factory=lambda: {})
 
     def to_dict(self) -> dict[str, Any]:
@@ -101,4 +103,6 @@ class ScheduledTask:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "accepted_at": self.accepted_at,
+            "claimed_at": self.claimed_at,
+            "claim_token": self.claim_token,
         }

@@ -16,7 +16,7 @@ from corpclaw_lite.scheduler.parse import (
     parse_schedule,
 )
 from corpclaw_lite.scheduler.prompt import build_headless_prompt
-from corpclaw_lite.scheduler.store import SchedulerStore
+from corpclaw_lite.scheduler.store import InsertConflict, SchedulerStore
 
 if TYPE_CHECKING:
     from corpclaw_lite.channels.service import AgentRequestService
@@ -112,11 +112,17 @@ class SchedulerService:
             except asyncio.CancelledError:
                 raise
 
+    def _stale_before(self, now: datetime) -> str:
+        ttl = max(60.0, float(self._settings.claim_ttl_seconds))
+        return _iso(now - timedelta(seconds=ttl))
+
     async def tick(self) -> None:
         """One poll cycle: expire pending, run due tasks."""
         await self._expire_pending()
         now = _utcnow()
-        due = await self._store.list_due(_iso(now), limit=20)
+        due = await self._store.list_due(
+            _iso(now), stale_before_iso=self._stale_before(now), limit=20
+        )
         for task in due:
             try:
                 await self._dispatch(task, now=now)
@@ -125,6 +131,8 @@ class SchedulerService:
                 task.error_count += 1
                 task.last_status = "error"
                 task.last_run_at = _iso(now)
+                task.claimed_at = None
+                task.claim_token = None
                 # Defer 1 min to avoid tight error loop
                 task.next_run_at = _iso(now + timedelta(minutes=1))
                 await self._store.update(task)
@@ -155,22 +163,16 @@ class SchedulerService:
             raise SchedulerError("task_text is required")
         if not sched_s:
             raise SchedulerError("schedule_text is required")
+        max_task = int(self._settings.max_task_text_chars)
+        max_sched = int(self._settings.max_schedule_text_chars)
+        if len(task_s) > max_task:
+            raise SchedulerError(f"task_text exceeds {max_task} characters")
+        if len(sched_s) > max_sched:
+            raise SchedulerError(f"schedule_text exceeds {max_sched} characters")
 
         key = dedup_key or make_dedup_key(
             user_id=user.id, title=title_s, task_text=task_s, schedule_text=sched_s
         )
-        if await self._store.has_dismissed_dedup(user.id, key):
-            raise SchedulerError(
-                "This proposal was dismissed earlier (same fingerprint). "
-                "Change the wording or schedule to propose again."
-            )
-
-        max_n = int(self._settings.max_tasks_per_user)
-        count = await self._store.count_active(user.id)
-        if count >= max_n:
-            raise SchedulerError(
-                f"Limit reached: at most {max_n} pending+active tasks per user (currently {count})."
-            )
 
         tz = self._settings.timezone
         try:
@@ -191,7 +193,12 @@ class SchedulerService:
             dedup_key=key,
             next_run_at=None,
         )
-        await self._store.insert(task)
+        try:
+            await self._store.insert_pending_if_allowed(
+                task, max_n=int(self._settings.max_tasks_per_user)
+            )
+        except InsertConflict as exc:
+            raise SchedulerError(str(exc)) from exc
 
         if notify and self._notifier is not None:
             msg = self._format_propose_message(task)
@@ -245,9 +252,17 @@ class SchedulerService:
         if title is not None and title.strip():
             task.title = title.strip()[:120]
         if task_text is not None and task_text.strip():
-            task.task_text = task_text.strip()
+            text = task_text.strip()
+            max_task = int(self._settings.max_task_text_chars)
+            if len(text) > max_task:
+                raise SchedulerError(f"task_text exceeds {max_task} characters")
+            task.task_text = text
         if schedule_text is not None and schedule_text.strip():
-            task.schedule_text = schedule_text.strip()
+            sched = schedule_text.strip()
+            max_sched = int(self._settings.max_schedule_text_chars)
+            if len(sched) > max_sched:
+                raise SchedulerError(f"schedule_text exceeds {max_sched} characters")
+            task.schedule_text = sched
 
         try:
             task.schedule = parse_schedule(task.schedule_text, now=_utcnow(), tz=task.timezone)
@@ -334,7 +349,23 @@ class SchedulerService:
         task = await self._require(user, task_id)
         if task.status not in {"active", "paused"}:
             raise SchedulerError("run-now only for active/paused tasks")
-        return await self._dispatch(task, now=_utcnow(), force=True)
+        # Ensure claim path can match next_run_at (paused may have future next_run).
+        if task.status == "paused":
+            task.status = "active"
+            task.enabled = True
+            if task.next_run_at is None:
+                task.next_run_at = _iso(_utcnow())
+            await self._store.update(task)
+        elif task.next_run_at is None or task.next_run_at > _iso(_utcnow()):
+            # Force due so claim can match current next_run after bump.
+            task.next_run_at = _iso(_utcnow())
+            task.enabled = True
+            await self._store.update(task)
+            # re-load for claim concurrency key
+            refreshed = await self._store.get(task.id, user_id=user.id)
+            if refreshed is not None:
+                task = refreshed
+        return await self._dispatch(task, now=_utcnow())
 
     async def _require(self, user: User, task_id: str) -> ScheduledTask:
         task = await self._store.get(task_id, user_id=user.id)
@@ -347,15 +378,30 @@ class SchedulerService:
         task: ScheduledTask,
         *,
         now: datetime,
-        force: bool = False,
     ) -> dict[str, Any]:
         if self._agent_service is None:
             raise SchedulerError("agent_service is not configured")
+        if task.next_run_at is None:
+            return {"status": "not_claimed", "reason": "no_next_run", "task_id": task.id}
+
+        claim_token = uuid.uuid4().hex
+        now_iso = _iso(now)
+        claimed = await self._store.claim_task(
+            task.id,
+            expected_next_run_at=task.next_run_at,
+            now_iso=now_iso,
+            claim_token=claim_token,
+            stale_before_iso=self._stale_before(now),
+        )
+        if not claimed:
+            return {"status": "not_claimed", "task_id": task.id}
 
         user = self._user_manager.get_by_id(task.user_id)
         if user is None:
             task.last_status = "error"
             task.error_count += 1
+            task.claimed_at = None
+            task.claim_token = None
             task.next_run_at = _iso(now + timedelta(minutes=5))
             await self._store.update(task)
             return {"status": "error", "reason": "user_not_found"}
@@ -374,17 +420,29 @@ class SchedulerService:
             tz=task.timezone,
         )
 
-        result = await self._agent_service.run_headless(
-            user=user,
-            task=prompt,
-            source="scheduled",
-        )
+        try:
+            result = await self._agent_service.run_headless(
+                user=user,
+                task=prompt,
+                source="scheduled",
+            )
+        except Exception:
+            task.error_count += 1
+            task.last_status = "error"
+            task.last_run_at = _iso(now)
+            task.claimed_at = None
+            task.claim_token = None
+            task.next_run_at = _iso(now + timedelta(minutes=1))
+            await self._store.update(task)
+            raise
 
         if result.status == "skipped":
             # Defer 1 minute to avoid tight busy loop (plan).
             task.last_status = "skipped_busy"
             task.last_run_at = _iso(now)
             task.next_run_at = _iso(now + timedelta(minutes=1))
+            task.claimed_at = None
+            task.claim_token = None
             await self._store.update(task)
             await self._store.append_run_log(
                 task_id=task.id,
@@ -401,6 +459,8 @@ class SchedulerService:
         task.run_count += 1
         task.last_run_at = _iso(now)
         task.last_status = "ok"
+        task.claimed_at = None
+        task.claim_token = None
         reply = result.reply or ""
         run_id = result.stats.run_id if result.stats is not None else None
 

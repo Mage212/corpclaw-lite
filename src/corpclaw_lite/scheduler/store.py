@@ -17,6 +17,7 @@ from corpclaw_lite.utils.db import db_connect
 
 __all__ = [
     "ACTIVE_COUNT_STATUSES",
+    "InsertConflict",
     "SchedulerStore",
 ]
 
@@ -66,6 +67,20 @@ CREATE TABLE IF NOT EXISTS schedule_run_log (
 CREATE INDEX IF NOT EXISTS idx_sched_run_task ON schedule_run_log(task_id);
 """
 
+# Additive columns for DBs created before H1 claim fields.
+_CLAIM_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("claimed_at", "TEXT"),
+    ("claim_token", "TEXT"),
+)
+
+
+class InsertConflict(Exception):
+    """Raised when limit or dedup blocks a pending insert."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
 
 def _utcnow_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat()
@@ -100,7 +115,19 @@ def _row_to_task(row: sqlite3.Row) -> ScheduledTask:
         created_at=str(row["created_at"] or ""),
         updated_at=str(row["updated_at"] or ""),
         accepted_at=row["accepted_at"],
+        claimed_at=_row_get(row, "claimed_at"),
+        claim_token=_row_get(row, "claim_token"),
     )
+
+
+def _row_get(row: sqlite3.Row, key: str) -> str | None:
+    try:
+        val = row[key]
+    except (IndexError, KeyError):
+        return None
+    if val is None:
+        return None
+    return str(val)
 
 
 class SchedulerStore:
@@ -115,6 +142,12 @@ class SchedulerStore:
         try:
             with db_connect(self.db_path) as conn:
                 conn.executescript(_SCHEMA)
+                cols = {
+                    str(r[1]) for r in conn.execute("PRAGMA table_info(scheduled_tasks)").fetchall()
+                }
+                for name, col_type in _CLAIM_COLUMNS:
+                    if name not in cols:
+                        conn.execute(f"ALTER TABLE scheduled_tasks ADD COLUMN {name} {col_type}")
         except Exception as e:
             raise StorageError(f"Failed to init scheduler schema: {e}") from e
 
@@ -247,7 +280,8 @@ class SchedulerStore:
                     title = ?, task_text = ?, schedule_text = ?, schedule_spec = ?,
                     timezone = ?, status = ?, enabled = ?, dedup_key = ?,
                     next_run_at = ?, last_run_at = ?, last_status = ?,
-                    run_count = ?, error_count = ?, updated_at = ?, accepted_at = ?
+                    run_count = ?, error_count = ?, updated_at = ?, accepted_at = ?,
+                    claimed_at = ?, claim_token = ?
                 WHERE id = ? AND user_id = ?
                 """,
                 (
@@ -266,6 +300,8 @@ class SchedulerStore:
                     task.error_count,
                     task.updated_at,
                     task.accepted_at,
+                    task.claimed_at,
+                    task.claim_token,
                     task.id,
                     task.user_id,
                 ),
@@ -277,7 +313,10 @@ class SchedulerStore:
     async def update(self, task: ScheduledTask) -> ScheduledTask:
         return await run_in_thread(self._sync_update, task)
 
-    def _sync_list_due(self, now_iso: str, limit: int = 20) -> list[ScheduledTask]:
+    def _sync_list_due(
+        self, now_iso: str, stale_before_iso: str, limit: int = 20
+    ) -> list[ScheduledTask]:
+        """Due tasks: next_run <= now and not claimed (or claim older than stale_before)."""
         with db_connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
@@ -285,15 +324,150 @@ class SchedulerStore:
                 SELECT * FROM scheduled_tasks
                 WHERE status = 'active' AND enabled = 1
                   AND next_run_at IS NOT NULL AND next_run_at <= ?
+                  AND (claimed_at IS NULL OR claimed_at < ?)
                 ORDER BY next_run_at ASC
                 LIMIT ?
                 """,
-                (now_iso, int(limit)),
+                (now_iso, stale_before_iso, int(limit)),
             ).fetchall()
             return [_row_to_task(r) for r in rows]
 
-    async def list_due(self, now_iso: str, *, limit: int = 20) -> list[ScheduledTask]:
-        return await run_in_thread(self._sync_list_due, now_iso, int(limit))
+    async def list_due(
+        self, now_iso: str, *, stale_before_iso: str, limit: int = 20
+    ) -> list[ScheduledTask]:
+        return await run_in_thread(self._sync_list_due, now_iso, stale_before_iso, int(limit))
+
+    def _sync_claim_task(
+        self,
+        task_id: str,
+        expected_next_run_at: str,
+        now_iso: str,
+        claim_token: str,
+        stale_before_iso: str,
+    ) -> bool:
+        """Optimistic claim. Returns True if this caller owns the run."""
+        with db_connect(self.db_path) as conn:
+            cur = conn.execute(
+                """
+                UPDATE scheduled_tasks
+                SET claimed_at = ?, claim_token = ?, updated_at = ?
+                WHERE id = ?
+                  AND status = 'active'
+                  AND enabled = 1
+                  AND next_run_at = ?
+                  AND (claimed_at IS NULL OR claimed_at < ?)
+                """,
+                (
+                    now_iso,
+                    claim_token,
+                    now_iso,
+                    task_id,
+                    expected_next_run_at,
+                    stale_before_iso,
+                ),
+            )
+            return int(cur.rowcount) == 1
+
+    async def claim_task(
+        self,
+        task_id: str,
+        *,
+        expected_next_run_at: str,
+        now_iso: str,
+        claim_token: str,
+        stale_before_iso: str,
+    ) -> bool:
+        return await run_in_thread(
+            self._sync_claim_task,
+            task_id,
+            expected_next_run_at,
+            now_iso,
+            claim_token,
+            stale_before_iso,
+        )
+
+    def _sync_insert_pending_if_allowed(self, task: ScheduledTask, max_n: int) -> ScheduledTask:
+        """Atomic limit + dedup check + insert under one connection."""
+        now = _utcnow_iso()
+        task.created_at = task.created_at or now
+        task.updated_at = now
+        with db_connect(self.db_path) as conn:
+            if task.dedup_key:
+                dismissed = conn.execute(
+                    """
+                    SELECT 1 FROM scheduled_tasks
+                    WHERE user_id = ? AND dedup_key = ? AND status = 'dismissed'
+                    LIMIT 1
+                    """,
+                    (int(task.user_id), task.dedup_key),
+                ).fetchone()
+                if dismissed is not None:
+                    raise InsertConflict(
+                        "This proposal was dismissed earlier (same fingerprint). "
+                        "Change the wording or schedule to propose again."
+                    )
+                live = conn.execute(
+                    """
+                    SELECT 1 FROM scheduled_tasks
+                    WHERE user_id = ? AND dedup_key = ?
+                      AND status IN ('pending', 'active', 'paused')
+                    LIMIT 1
+                    """,
+                    (int(task.user_id), task.dedup_key),
+                ).fetchone()
+                if live is not None:
+                    raise InsertConflict(
+                        "A task with the same fingerprint is already pending/active/paused."
+                    )
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS c FROM scheduled_tasks
+                WHERE user_id = ? AND status IN ('pending', 'active')
+                """,
+                (int(task.user_id),),
+            ).fetchone()
+            count = int(row[0]) if row else 0
+            if count >= int(max_n):
+                raise InsertConflict(
+                    f"Limit reached: at most {max_n} pending+active tasks per user "
+                    f"(currently {count})."
+                )
+            conn.execute(
+                """
+                INSERT INTO scheduled_tasks (
+                    id, user_id, title, task_text, schedule_text, schedule_spec,
+                    timezone, status, enabled, dedup_key, next_run_at, last_run_at,
+                    last_status, run_count, error_count, created_at, updated_at,
+                    accepted_at, claimed_at, claim_token
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task.id,
+                    task.user_id,
+                    task.title,
+                    task.task_text,
+                    task.schedule_text,
+                    json.dumps(task.schedule.to_json(), ensure_ascii=False),
+                    task.timezone,
+                    task.status,
+                    1 if task.enabled else 0,
+                    task.dedup_key,
+                    task.next_run_at,
+                    task.last_run_at,
+                    task.last_status,
+                    task.run_count,
+                    task.error_count,
+                    task.created_at,
+                    task.updated_at,
+                    task.accepted_at,
+                    task.claimed_at,
+                    task.claim_token,
+                ),
+            )
+        return task
+
+    async def insert_pending_if_allowed(self, task: ScheduledTask, *, max_n: int) -> ScheduledTask:
+        return await run_in_thread(self._sync_insert_pending_if_allowed, task, int(max_n))
 
     def _sync_append_run_log(
         self,

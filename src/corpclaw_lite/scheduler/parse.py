@@ -157,10 +157,8 @@ def compute_next_run(
         if minutes <= 0:
             return None
         if last_run_at is None:
-            # First run: treat like "every N from now" → next is now (due immediately
-            # after accept) only if we want; product: first fire at accept+interval
-            # is surprising. Fire first at now (due on next tick after accept).
-            return now_utc
+            # First fire after accept: now + period (not immediately due).
+            return now_utc + timedelta(minutes=minutes)
         return _as_utc(last_run_at) + timedelta(minutes=minutes)
 
     if schedule.kind == "cron":

@@ -254,6 +254,9 @@ scheduler:
   timezone: "Europe/Moscow"
   pending_ttl_days: 14
   db_path: "data/scheduler.db"
+  claim_ttl_seconds: 900
+  max_task_text_chars: 16000
+  max_schedule_text_chars: 500
 
 logging:
   level: "DEBUG"

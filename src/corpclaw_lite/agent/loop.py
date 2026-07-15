@@ -1398,6 +1398,7 @@ class AgentLoop:
                         trajectory_recorder,
                         state.stats,
                         state.task_run,
+                        channel=state.channel,
                     )
                     # Add ALL results first to keep state.context valid (no orphaned tool_calls)
                     action_results: list[tuple[str, str]] = []
@@ -1453,6 +1454,7 @@ class AgentLoop:
                             trajectory_recorder,
                             state.stats,
                             state.task_run,
+                            channel=state.channel,
                         )
                         state.context.add_tool_result(tc.id, tc.name, result)
                         # Terminal tool: return result directly (no LLM re-paraphrase).
@@ -1541,7 +1543,15 @@ class AgentLoop:
 
                 async def _cascade_execute(tc: ToolCall, u: User, st: RunStats) -> str:
                     return await self._execute_single_tool(
-                        tc, u, None, sink, None, st, None, emit_tool_start=False
+                        tc,
+                        u,
+                        None,
+                        sink,
+                        None,
+                        st,
+                        None,
+                        emit_tool_start=False,
+                        channel=state.channel,
                     )
 
                 salvage = await auto_finalize_cascade(
@@ -1864,6 +1874,7 @@ class AgentLoop:
             task_run=task_run,
             mem_key=mem_key,
             t0=t0,
+            channel=channel,
         )
         health.increment("requests")
         health.increment("active_requests")
@@ -2066,6 +2077,8 @@ class AgentLoop:
         trajectory_recorder: TrajectoryRecorder | None = None,
         stats: RunStats | None = None,
         task_run: TaskRun | None = None,
+        *,
+        channel: str | None = None,
     ) -> list[str]:
         """Execute multiple tools in parallel and return results."""
         event_sink.emit(ToolBatchStartEvent(names=tuple(tc.name for tc in tool_calls)))
@@ -2080,6 +2093,7 @@ class AgentLoop:
                 stats,
                 task_run,
                 emit_tool_start=False,
+                channel=channel,
             )
 
         results = await asyncio.gather(*[execute_one(tc) for tc in tool_calls])
@@ -2096,6 +2110,7 @@ class AgentLoop:
         task_run: TaskRun | None = None,
         *,
         emit_tool_start: bool = True,
+        channel: str | None = None,
     ) -> str:
         """Execute a single tool with all checks."""
         run_id = stats.run_id if stats else "unknown"
@@ -2108,6 +2123,18 @@ class AgentLoop:
             args_preview=_json_preview(tc.arguments),
             args_hash=_payload_hash(tc.arguments),
         )
+        # B-118 H2: schedule tools never run in headless/system channel (even if invented).
+        if channel == "system" and tc.name.startswith("schedule_"):
+            result = "Error: schedule tools are not available in headless/system runs."
+            log_event(
+                "tool_call_finished",
+                run_id,
+                tool=tc.name,
+                tool_call_id=tc.id,
+                status="denied_system_channel",
+                duration_ms=round((time.monotonic() - tool_t0) * 1000, 1),
+            )
+            return result
         permission_tool = self._registry.get(tc.name)
         permission_denied = False
         if self._permission_checker:
