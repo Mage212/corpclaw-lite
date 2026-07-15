@@ -248,6 +248,21 @@ class FileChangeDAO:
         "ORDER BY created_at DESC LIMIT ?"
     )
 
+    _LIST_RECENT_STATUS_SQL = (
+        "SELECT id, run_id, user_id, tool_name, file_path, op, status, "
+        "before_hash, after_hash, backup_path, size_bytes, created_at, "
+        "reverted_at, sort_order "
+        "FROM agent_file_changes WHERE user_id = ? AND status = ? "
+        "ORDER BY created_at DESC LIMIT ?"
+    )
+
+    _GET_CHANGE_SQL = (
+        "SELECT id, run_id, user_id, tool_name, file_path, op, status, "
+        "before_hash, after_hash, backup_path, size_bytes, created_at, "
+        "reverted_at, sort_order "
+        "FROM agent_file_changes WHERE id = ?"
+    )
+
     def _sync_list_for_run(self, run_id: str) -> list[FileChange]:
         with db_connect(self.db_path) as conn:
             rows = conn.execute(self._LIST_FOR_RUN_SQL, (run_id,)).fetchall()
@@ -256,13 +271,40 @@ class FileChangeDAO:
     async def list_for_run(self, run_id: str) -> list[FileChange]:
         return await run_in_thread(self._sync_list_for_run, run_id)
 
-    def _sync_list_recent_for_user(self, user_id: str, limit: int) -> list[FileChange]:
+    def _sync_list_recent_for_user(
+        self, user_id: str, limit: int, status: str | None
+    ) -> list[FileChange]:
         with db_connect(self.db_path) as conn:
-            rows = conn.execute(self._LIST_RECENT_SQL, (user_id, limit)).fetchall()
+            if status is not None:
+                rows = conn.execute(
+                    self._LIST_RECENT_STATUS_SQL, (user_id, status, limit)
+                ).fetchall()
+            else:
+                rows = conn.execute(self._LIST_RECENT_SQL, (user_id, limit)).fetchall()
         return [self._row_to_change(r) for r in rows]
 
-    async def list_recent_for_user(self, user_id: str, *, limit: int = 3) -> list[FileChange]:
-        return await run_in_thread(self._sync_list_recent_for_user, user_id, limit)
+    async def list_recent_for_user(
+        self,
+        user_id: str,
+        *,
+        limit: int = 3,
+        status: str | None = None,
+    ) -> list[FileChange]:
+        """List recent changes for a user.
+
+        When *status* is set (e.g. ``\"open\"``), only rows with that status are
+        returned (B-117 review UI).
+        """
+        return await run_in_thread(self._sync_list_recent_for_user, user_id, limit, status)
+
+    def _sync_get_change(self, change_id: str) -> FileChange | None:
+        with db_connect(self.db_path) as conn:
+            row = conn.execute(self._GET_CHANGE_SQL, (change_id,)).fetchone()
+        return self._row_to_change(row) if row is not None else None
+
+    async def get_change(self, change_id: str) -> FileChange | None:
+        """Return one change by id, or None if missing (B-117)."""
+        return await run_in_thread(self._sync_get_change, change_id)
 
     # ─── revert ──────────────────────────────────────────────────────────────
 

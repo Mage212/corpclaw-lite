@@ -86,6 +86,9 @@ class AgentStack:
     chat_store: WebChatStore | None = None
     # B-095: durable pinned files for re-inject each turn.
     pinned_context_store: Any | None = None
+    # B-117: file change journal + on-disk backups for review/revert UX.
+    file_change_dao: Any | None = None
+    file_snapshot_store: Any | None = None
 
 
 def _build_router(settings: Settings | None = None) -> Provider:
@@ -726,6 +729,8 @@ def build_agent_stack(
         chat_context_store=chat_context_store,
         chat_store=chat_store,
         pinned_context_store=pinned_context_store,
+        file_change_dao=file_change_dao,
+        file_snapshot_store=snapshot_store,
         tool_registry=registry,
         full_tool_registry=full_tool_reg,
         mcp_manager=mcp_manager,

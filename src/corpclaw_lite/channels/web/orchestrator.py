@@ -18,6 +18,8 @@ from aiohttp.helpers import content_disposition_header
 
 from corpclaw_lite.agent.budget_gate import estimate_content_budget
 from corpclaw_lite.agent.factory import build_agent_stack
+from corpclaw_lite.agent.file_review import FileReviewError, FileReviewService
+from corpclaw_lite.agent.file_snapshots import FileSnapshotStore
 from corpclaw_lite.agent.inline_attach import (
     MaterializeError,
     attachment_metadata_list,
@@ -86,6 +88,7 @@ from corpclaw_lite.extensions.subagents.watcher import SubagentHotReloader
 from corpclaw_lite.extensions.tools.builtin.send_file import SendFileTool
 from corpclaw_lite.llm.tokenizer_client import TokenizerClient
 from corpclaw_lite.logging.agent_logger import AgentLogger, setup_logging
+from corpclaw_lite.memory.file_changes import FileChangeDAO
 from corpclaw_lite.paths import PROJECT_ROOT
 from corpclaw_lite.runtime.shutdown import install_signal_handlers
 from corpclaw_lite.users.models import User
@@ -196,6 +199,8 @@ class WebChannelOrchestrator:
         self._pending_attachments = PendingAttachmentsStore()
         # B-095: durable pins (wired from stack in start(); optional inject for tests).
         self._pinned_store: PinnedContextStore | None = None
+        # B-117: review/revert over file journal + snapshots.
+        self._file_review: FileReviewService | None = None
         self._vision_processor: VisionProcessor | None = None
         self._vision_cache: dict[str, str] = {}
         self._started = False
@@ -219,6 +224,14 @@ class WebChannelOrchestrator:
         pinned = getattr(stack, "pinned_context_store", None)
         self._pinned_store = pinned if isinstance(pinned, PinnedContextStore) else None
         workspace_base = (PROJECT_ROOT / self._web_settings.workspace_base).resolve()
+        dao = getattr(stack, "file_change_dao", None)
+        snap = getattr(stack, "file_snapshot_store", None)
+        if isinstance(dao, FileChangeDAO) and isinstance(snap, FileSnapshotStore):
+            self._file_review = FileReviewService(
+                dao=dao, snapshot_store=snap, workspace_base=workspace_base
+            )
+        else:
+            self._file_review = None
         llm_provider_name, llm_base_url = _default_llm_endpoint(self._settings)
         self._service = AgentRequestService(
             stack=stack,
@@ -389,6 +402,12 @@ class WebChannelOrchestrator:
         app.router.add_post("/api/files/pin-context", self._handle_pin_context)
         app.router.add_post("/api/files/unpin-context", self._handle_unpin_context)
         app.router.add_get("/api/files/pins", self._handle_list_pins)
+        # B-117: agent file change review / revert
+        app.router.add_get("/api/files/changes", self._handle_list_file_changes)
+        app.router.add_get("/api/files/changes/{change_id}/diff", self._handle_file_change_diff)
+        app.router.add_post(
+            "/api/files/changes/{change_id}/revert", self._handle_file_change_revert
+        )
         app.router.add_post("/api/files/upload", self._handle_upload)
         app.router.add_post("/api/files/mkdir", self._handle_mkdir)
         app.router.add_post("/api/files/rename", self._handle_rename)
@@ -1360,6 +1379,72 @@ class WebChannelOrchestrator:
         body = self._pin_budget_payload(pin_tokens=sum(p.tokens for p in pins), pins=pins)
         body["session_id"] = session_id
         return web.json_response(body)
+
+    async def _handle_list_file_changes(self, request: web.Request) -> web.Response:
+        """B-117: list recent agent file mutations for this user."""
+        user = self._require_user(request)
+        if self._file_review is None:
+            raise web.HTTPServiceUnavailable(text="File review unavailable")
+        limit_raw = request.query.get("limit", "50")
+        try:
+            limit = int(limit_raw)
+        except (TypeError, ValueError) as e:
+            raise web.HTTPBadRequest(text="limit must be an integer") from e
+        status_raw = request.query.get("status", "open")
+        status: str | None
+        if status_raw in ("", "all"):
+            status = None
+        elif status_raw in ("open", "reverted"):
+            status = status_raw
+        else:
+            raise web.HTTPBadRequest(text="status must be open, reverted, or all")
+        changes = await self._file_review.list_changes(user, limit=limit, status=status)
+        return web.json_response({"changes": [c.to_dict() for c in changes]})
+
+    async def _handle_file_change_diff(self, request: web.Request) -> web.Response:
+        """B-117: unified text diff or binary stub for one change."""
+        user = self._require_user(request)
+        if self._file_review is None:
+            raise web.HTTPServiceUnavailable(text="File review unavailable")
+        change_id = request.match_info.get("change_id", "").strip()
+        if not change_id:
+            raise web.HTTPBadRequest(text="change_id is required")
+        try:
+            payload = await self._file_review.build_diff(user, change_id)
+        except FileReviewError as e:
+            if e.status == 404:
+                raise web.HTTPNotFound(text=str(e)) from e
+            if e.status == 403:
+                raise web.HTTPForbidden(text=str(e)) from e
+            raise web.HTTPBadRequest(text=str(e)) from e
+        return web.json_response(payload.to_dict())
+
+    async def _handle_file_change_revert(self, request: web.Request) -> web.Response:
+        """B-117: restore backup (or delete create) + mark_reverted."""
+        user = self._require_user(request)
+        if self._file_review is None:
+            raise web.HTTPServiceUnavailable(text="File review unavailable")
+        if self._service is not None:
+            running = await self._service.get_running_request(user.id)
+            if running is not None:
+                busy = await self._busy_reject_payload(
+                    user.id, "Дождитесь завершения перед откатом файла."
+                )
+                return self._http_busy_response(busy)
+        change_id = request.match_info.get("change_id", "").strip()
+        if not change_id:
+            raise web.HTTPBadRequest(text="change_id is required")
+        try:
+            result = await self._file_review.revert_change(user, change_id)
+        except FileReviewError as e:
+            if e.status == 404:
+                raise web.HTTPNotFound(text=str(e)) from e
+            if e.status == 403:
+                raise web.HTTPForbidden(text=str(e)) from e
+            if e.status == 500:
+                raise web.HTTPInternalServerError(text=str(e)) from e
+            raise web.HTTPBadRequest(text=str(e)) from e
+        return web.json_response(result.to_dict())
 
     async def _handle_upload(self, request: web.Request) -> web.Response:
         user = self._require_user(request)

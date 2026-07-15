@@ -243,6 +243,40 @@ export type PinsPayload = {
   reason?: string;
 };
 
+/** B-117: one agent file mutation from the change journal. */
+export type AgentFileChange = {
+  change_id: string;
+  run_id: string;
+  path: string;
+  op: string;
+  tool_name: string;
+  status: string;
+  size_bytes: number;
+  created_at: number;
+  has_backup: boolean;
+};
+
+export type AgentFileChangesPayload = {
+  changes: AgentFileChange[];
+};
+
+export type AgentFileDiffPayload = {
+  change_id: string;
+  path: string;
+  kind: string;
+  unified_diff?: string;
+  truncated?: boolean;
+  before_hash?: string;
+  after_hash?: string;
+  message?: string;
+};
+
+export type AgentFileRevertPayload = {
+  ok: boolean;
+  change_id: string;
+  action: string;
+};
+
 /**
  * Persisted workspace layout dimensions.
  *
