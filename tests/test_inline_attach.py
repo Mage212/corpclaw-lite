@@ -161,6 +161,40 @@ async def test_materialize_chunked(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_materialize_h2_chunk_before_block(tmp_path: Path) -> None:
+    """Full content would BLOCK, but auto-chunk should still ALLOW (H2)."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    # ~8000 heuristic tokens (ascii /4)
+    (workspace / "huge.txt").write_text("x" * 32_000, encoding="utf-8")
+    tokenizer = TokenizerClient(mode="heuristic")
+
+    # full projected = 5000+8000 = 13000 > 0.95*10000 → would BLOCK without H2
+    attachment, gate = await materialize_attachment(
+        workspace=workspace,
+        raw_path="huge.txt",
+        baseline=5000,
+        limit=10_000,
+        tokenizer=tokenizer,
+        chunked=None,
+    )
+    assert attachment.mode == "chunked"
+    assert gate.decision is BudgetDecision.ALLOW
+    assert "truncated" in attachment.content.lower()
+
+    # Forced full-only still BLOCKS
+    with pytest.raises(MaterializeError, match="Не поместится|контекст"):
+        await materialize_attachment(
+            workspace=workspace,
+            raw_path="huge.txt",
+            baseline=5000,
+            limit=10_000,
+            tokenizer=tokenizer,
+            chunked=False,
+        )
+
+
+@pytest.mark.asyncio
 async def test_materialize_image_with_mock_vision(tmp_path: Path) -> None:
     workspace = tmp_path / "ws"
     workspace.mkdir()

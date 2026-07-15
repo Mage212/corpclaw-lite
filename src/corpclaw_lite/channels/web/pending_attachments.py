@@ -28,6 +28,16 @@ class PendingAttachmentsStore:
     def count(self, user_id: int, session_id: int) -> int:
         return len(self._items.get((user_id, session_id), []))
 
+    def total_tokens(self, user_id: int, session_id: int) -> int:
+        """Sum of estimated tokens of pending attachments (for cumulative budget)."""
+        return sum(item.tokens for item in self.list(user_id, session_id))
+
+    def find(self, user_id: int, session_id: int, path: str) -> InlineAttachment | None:
+        for item in self.list(user_id, session_id):
+            if item.path == path:
+                return item
+        return None
+
     def add(self, user_id: int, session_id: int, item: InlineAttachment) -> list[InlineAttachment]:
         key = (user_id, session_id)
         current = list(self._items.get(key, []))

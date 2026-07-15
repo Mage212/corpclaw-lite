@@ -1018,6 +1018,8 @@ class WebChannelOrchestrator:
         return self._vision_processor
 
     async def _resolve_attach_session_id(self, user: User, payload: dict[str, object]) -> int:
+        if self._chat_store is None:
+            raise web.HTTPServiceUnavailable(text="Chat store unavailable")
         raw = payload.get("session_id")
         if raw is not None:
             try:
@@ -1026,9 +1028,11 @@ class WebChannelOrchestrator:
                 raise web.HTTPBadRequest(text="session_id must be an integer") from e
             if session_id <= 0:
                 raise web.HTTPBadRequest(text="session_id must be positive")
+            # M4: ownership — same filter as compress (get_session is user-scoped).
+            summary = await self._chat_store.get_session(user.memory_key(), session_id)
+            if summary is None:
+                raise web.HTTPNotFound(text="Chat not found.")
             return session_id
-        if self._chat_store is None:
-            raise web.HTTPServiceUnavailable(text="Chat store unavailable")
         return await self._chat_store.ensure_active_session(user.memory_key())
 
     def _pending_public(self, user_id: int, session_id: int) -> dict[str, object]:
@@ -1055,7 +1059,13 @@ class WebChannelOrchestrator:
             raise web.HTTPBadRequest(text="path is required")
         path = raw_path.strip()
         session_id = await self._resolve_attach_session_id(user, payload)
-        baseline = await self._baseline_tokens_for_estimate(user, payload)
+        base = await self._baseline_tokens_for_estimate(user, payload)
+        # H1: include already-pending tokens so multi-attach cannot overflow on send.
+        pending_tokens = self._pending_attachments.total_tokens(user.id, session_id)
+        existing = self._pending_attachments.find(user.id, session_id, path)
+        if existing is not None:
+            pending_tokens = max(0, pending_tokens - existing.tokens)
+        effective_baseline = base + pending_tokens
         limit = max(1, int(self._settings.agent.compression.max_context_tokens))
 
         chunked_raw = payload.get("chunked")
@@ -1078,7 +1088,7 @@ class WebChannelOrchestrator:
             attachment, gate = await materialize_attachment(
                 workspace=self._workspace_for(user),
                 raw_path=path,
-                baseline=baseline,
+                baseline=effective_baseline,
                 limit=limit,
                 tokenizer=self._get_tokenizer_client(),
                 chunked=chunked,
@@ -1103,6 +1113,7 @@ class WebChannelOrchestrator:
             "offer_chunked": gate.offer_chunked,
             "reason": gate.reason,
             "session_id": session_id,
+            "effective_baseline_tokens": effective_baseline,
             "pending_count": len(pending),
             "attachments": attachment_metadata_list(pending),
         }

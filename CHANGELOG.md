@@ -6,6 +6,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **B-094 budget hardening.** Attach baseline is cumulative (`usage + Σ pending`
+  tokens; same-path re-attach does not double-count). Text that would full-BLOCK
+  is auto-chunked before failing (unless `chunked=false`). Attach/detach/pending
+  require session ownership via `get_session` (404 if missing).
+
 ### Added
 
 - **B-094 Inline attachment (DC-013).** Pending workspace-file attach into the

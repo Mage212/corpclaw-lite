@@ -175,16 +175,30 @@ async def materialize_attachment(
         vision_cache=vision_cache,
     )
 
-    gate = await estimate_content_budget(
+    gate_full = await estimate_content_budget(
         raw_content, baseline=baseline, limit=limit, tokenizer=tokenizer
     )
-    if gate.decision is BudgetDecision.BLOCK:
-        raise MaterializeError(gate.reason, status=400)
 
     mode: AttachMode = "full"
     content = raw_content
-    use_chunked = chunked is True or (chunked is None and gate.offer_chunked)
-    if use_chunked and kind == "text":
+    gate = gate_full
+
+    if gate_full.decision is not BudgetDecision.BLOCK:
+        # Full content fits (ALLOW/WARN). Optionally still chunk if offered/forced.
+        use_chunked = chunked is True or (chunked is None and gate_full.offer_chunked)
+        if use_chunked and kind == "text":
+            content = truncate_text_to_token_budget(raw_content)
+            mode = "chunked"
+            gate = await estimate_content_budget(
+                content, baseline=baseline, limit=limit, tokenizer=tokenizer
+            )
+            if gate.decision is BudgetDecision.BLOCK:
+                raise MaterializeError(gate.reason, status=400)
+        elif use_chunked and kind == "spreadsheet":
+            # Already row-limited; mark chunked when gate asked for it.
+            mode = "chunked"
+    elif kind == "text" and chunked is not False:
+        # H2: full content would BLOCK — try a truncated portion before failing.
         content = truncate_text_to_token_budget(raw_content)
         mode = "chunked"
         gate = await estimate_content_budget(
@@ -192,9 +206,9 @@ async def materialize_attachment(
         )
         if gate.decision is BudgetDecision.BLOCK:
             raise MaterializeError(gate.reason, status=400)
-    elif use_chunked and kind == "spreadsheet":
-        # Already row-limited; mark chunked when gate asked for it.
-        mode = "chunked"
+    else:
+        # Non-text full BLOCK, or text with chunked=False.
+        raise MaterializeError(gate_full.reason, status=400)
 
     source = content_source
     if gate.source in ("tokenize", "heuristic", "cache"):
