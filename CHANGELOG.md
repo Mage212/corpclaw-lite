@@ -8,6 +8,11 @@
 
 ### Added
 
+- **B-093 Budget-gate (DC-013).** Pre-flight context budget check for
+  add-to-context: `evaluate_budget` / `estimate_content_budget` (thresholds
+  0.85 warn / 0.95 block / 0.5 offer_chunked; BLOCK disables chunked). HTTP
+  `POST /api/files/estimate-context` (text files only; client or server
+  baseline; uses B-092 TokenizerClient). No attach inject / FE yet (B-094/096).
 - **B-092 TokenizerClient (DC-013).** Offline-safe token estimate for upcoming
   add-to-context budget gate: llama.cpp native `POST /tokenize` when reachable,
   byte-length heuristic fallback with `approximate` flag, in-process content-hash
