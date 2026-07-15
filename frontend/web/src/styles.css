@@ -2180,6 +2180,43 @@ a {
   letter-spacing: 0.02em;
 }
 
+.context-pins-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  padding: 6px 10px;
+  border-top: 1px solid var(--border, #2a2f3a);
+  font-size: 12px;
+  color: var(--muted, #9aa3b2);
+}
+.context-pins-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.context-pin-chip {
+  border: 1px solid var(--border, #3a4150);
+  background: var(--panel-2, #1a1f2a);
+  color: inherit;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.context-pin-chip:hover {
+  border-color: var(--accent, #5b8def);
+}
+.context-files-status {
+  padding: 4px 10px 8px;
+  font-size: 12px;
+  color: var(--muted, #9aa3b2);
+}
+.context-size-pins {
+  font-size: 11px;
+  color: var(--muted, #9aa3b2);
+  white-space: nowrap;
+}
 .context-size-bar {
   display: flex;
   align-items: center;

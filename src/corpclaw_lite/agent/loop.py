@@ -311,6 +311,8 @@ class AgentConfig:
     # every turn, keyed by session_id. Restore (S2) and compress-any-chat (S3)
     # are separate sprints; S1 only accumulates data.
     chat_context_store: ChatContextStore | None = None
+    # B-095: durable pins re-injected each turn (not in compressor middle).
+    pinned_context_store: Any | None = None
     # B-107: tool-surface profile — "main" | "office" | "execution" | "none".
     # Hard phase-filter applies to "office" (and optionally main soft-hint only).
     tool_surface_profile: str = "main"
@@ -350,6 +352,8 @@ class AgentLoop:
         self._depth_modes = config.depth_modes
         # B-063 S1: full LLM-context persistence per chat.
         self._chat_context_store = config.chat_context_store
+        # B-095: pinned files store (optional; web channel).
+        self._pinned_context_store = config.pinned_context_store
         self._tool_surface_profile = config.tool_surface_profile
         # B-111: user-context assembly deps (main agent only).
         self._bootstrap = config.bootstrap
@@ -1727,12 +1731,32 @@ class AgentLoop:
                 lines = [f"- {c.file_path} ({c.tool_name})" for c in recent_changes]
                 recent_files_block = "\n\n## Recently Touched Files\n" + "\n".join(lines)
 
+        # B-095: re-inject pinned files from durable store (outside compressor middle).
+        pinned_block = ""
+        if self._pinned_context_store is not None and session_id is not None:
+            try:
+                from corpclaw_lite.channels.web.pinned_context_store import (
+                    format_pinned_files_block,
+                )
+
+                pins = await self._pinned_context_store.list_pins(
+                    session_id, str(user.memory_key())
+                )
+                pinned_block = format_pinned_files_block(pins)
+            except Exception:
+                logger.warning(
+                    "[user=%s session=%s] Failed to load pinned files",
+                    user.id,
+                    session_id,
+                    exc_info=True,
+                )
+
         # Single identity block (Path B). Path A "You are talking to…" removed (B-111).
         dynamic_prompt = (
             f"Current User Context:\n"
             f"- Name: {user.name}\n"
             f"- Department: {user.department}\n"
-            f"{user_facts_block}{recent_files_block}\n\n"
+            f"{user_facts_block}{recent_files_block}{pinned_block}\n\n"
             f"{base_prompt}"
         )
 

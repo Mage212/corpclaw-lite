@@ -271,6 +271,8 @@ class AgentSettings(BaseModel):
     depth_modes: DepthModeSettings = DepthModeSettings()
     # B-107: tool-surface phase filter + BM25 soft-hint (orthogonal to phase_policy).
     tool_surface: ToolSurfaceSettings = ToolSurfaceSettings()
+    # B-095: max fraction of context window for sticky pinned files (hard cap).
+    pin_context_ratio: float = 0.25
 
 
 class WebSettings(BaseModel):

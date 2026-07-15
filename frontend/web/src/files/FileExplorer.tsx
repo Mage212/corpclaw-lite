@@ -20,18 +20,23 @@ import {
 import type { DragEvent, FormEvent, MouseEvent } from "react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
+  attachContext,
   copyFiles,
   deleteFiles,
   downloadUrl,
   listFiles,
+  listPins,
   loadTree,
   makeDirectory,
   moveFiles,
+  pinContext,
   previewFile,
   renameFile,
   searchFiles,
+  unpinContext,
   uploadFiles
 } from "../api";
+import type { ContextAttachment, PinsPayload } from "../types";
 import { Modal } from "../components/Modal";
 import { parseDraggedPaths } from "../contracts";
 import { displayPath, fileEntryKindLabel, ROOT_LABEL, UPLOAD_FAILED_LABEL } from "../i18n/ru";
@@ -54,6 +59,11 @@ type FileExplorerProps = {
   onModeChange: (mode: FileExplorerMode) => void;
   onPreview: (preview: PreviewPayload, mode: PreviewMode) => void;
   onWorkspaceChanged?: () => void;
+  /** Active chat id for attach/pin (B-094/B-095). */
+  sessionId?: number | null;
+  /** Latest context usage tokens for attach baseline. */
+  baselineTokens?: number;
+  onContextFilesChanged?: () => void;
 };
 
 type FileAction =
@@ -75,7 +85,10 @@ export function FileExplorer({
   mode,
   onModeChange,
   onPreview,
-  onWorkspaceChanged
+  onWorkspaceChanged,
+  sessionId = null,
+  baselineTokens = 0,
+  onContextFilesChanged
 }: FileExplorerProps) {
   const [cwd, setCwd] = useState("");
   const [directory, setDirectory] = useState<DirectoryPayload>({ path: "", entries: [] });
@@ -91,7 +104,36 @@ export function FileExplorer({
   const [foldersDrawerOpen, setFoldersDrawerOpen] = useState(false);
   const [context, setContext] = useState<{ x: number; y: number; entry: FileEntry } | null>(null);
   const [action, setAction] = useState<FileAction | null>(null);
+  const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const [pins, setPins] = useState<ContextAttachment[]>([]);
+  const [pinBudget, setPinBudget] = useState<{ tokens: number; budget: number; ratio: number }>({
+    tokens: 0,
+    budget: 0,
+    ratio: 0.25
+  });
   const entries = query.trim() ? searchResults : directory.entries;
+
+  const refreshPins = useCallback(async () => {
+    if (sessionId == null || sessionId <= 0) {
+      setPins([]);
+      return;
+    }
+    try {
+      const payload: PinsPayload = await listPins(sessionId);
+      setPins(payload.pins);
+      setPinBudget({
+        tokens: payload.pin_tokens,
+        budget: payload.pin_budget,
+        ratio: payload.pin_ratio
+      });
+    } catch {
+      setPins([]);
+    }
+  }, [sessionId]);
+
+  useEffect(() => {
+    refreshPins().catch(console.error);
+  }, [refreshPins]);
 
   const refresh = useCallback(async () => {
     setBusy(true);
@@ -405,6 +447,44 @@ export function FileExplorer({
 
       <UploadQueue uploads={uploads} />
 
+      {pins.length > 0 && sessionId != null && (
+        <div className="context-pins-bar" title="Закреплённые в контексте файлы (до 25%)">
+          <span className="context-pins-label">
+            📌 {pinBudget.tokens}/{pinBudget.budget} ток. ({Math.round(pinBudget.ratio * 100)}%)
+          </span>
+          <div className="context-pins-chips">
+            {pins.map((pin) => (
+              <button
+                key={pin.path}
+                type="button"
+                className="context-pin-chip"
+                title={`${pin.path} (~${pin.tokens} ток.)`}
+                onClick={() => {
+                  if (sessionId == null) return;
+                  unpinContext(csrf, sessionId, pin.path)
+                    .then((payload) => {
+                      setPins(payload.pins);
+                      setPinBudget({
+                        tokens: payload.pin_tokens,
+                        budget: payload.pin_budget,
+                        ratio: payload.pin_ratio
+                      });
+                      setStatusMsg(`Снято: ${pin.label}`);
+                      onContextFilesChanged?.();
+                    })
+                    .catch((error: unknown) => {
+                      setStatusMsg(error instanceof Error ? error.message : "Ошибка unpin");
+                    });
+                }}
+              >
+                {pin.label} ×
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+      {statusMsg && <div className="context-files-status">{statusMsg}</div>}
+
       {context && (
         <ContextMenu
           context={context}
@@ -412,6 +492,48 @@ export function FileExplorer({
           onOpen={() => openEntry(context.entry)}
           onPreview={() => openFilePreview(context.entry, "side")}
           onFullPreview={() => openFilePreview(context.entry, "expanded")}
+          onAttachOnce={() => {
+            if (sessionId == null || sessionId <= 0) {
+              setStatusMsg("Выберите чат, чтобы добавить файл в контекст.");
+              return;
+            }
+            attachContext(csrf, context.entry.path, sessionId, {
+              baselineTokens,
+              chunked: null
+            })
+              .then((payload) => {
+                setStatusMsg(
+                  `В контекст (1 раз): ${context.entry.name} (${payload.pending_count} в очереди)`
+                );
+                onContextFilesChanged?.();
+              })
+              .catch((error: unknown) => {
+                setStatusMsg(error instanceof Error ? error.message : "Не удалось добавить");
+              });
+          }}
+          onPin={() => {
+            if (sessionId == null || sessionId <= 0) {
+              setStatusMsg("Выберите чат, чтобы закрепить файл.");
+              return;
+            }
+            pinContext(csrf, context.entry.path, sessionId, { chunked: null })
+              .then((payload) => {
+                setPins(payload.pins);
+                setPinBudget({
+                  tokens: payload.pin_tokens,
+                  budget: payload.pin_budget,
+                  ratio: payload.pin_ratio
+                });
+                setStatusMsg(
+                  `Закреплено: ${context.entry.name} (${payload.pin_tokens}/${payload.pin_budget})`
+                );
+                onContextFilesChanged?.();
+              })
+              .catch((error: unknown) => {
+                setStatusMsg(error instanceof Error ? error.message : "Не удалось закрепить");
+              });
+          }}
+          canUseContext={sessionId != null && sessionId > 0}
           onRename={() => setAction({ type: "rename", entry: context.entry })}
           onCopy={() => setAction({ type: "copy", paths: selectedPaths(context.entry) })}
           onMove={() => setAction({ type: "move", paths: selectedPaths(context.entry) })}
@@ -740,6 +862,9 @@ function ContextMenu({
   onOpen,
   onPreview,
   onFullPreview,
+  onAttachOnce,
+  onPin,
+  canUseContext,
   onRename,
   onCopy,
   onMove,
@@ -750,6 +875,9 @@ function ContextMenu({
   onOpen: () => void;
   onPreview: () => void;
   onFullPreview: () => void;
+  onAttachOnce: () => void;
+  onPin: () => void;
+  canUseContext: boolean;
   onRename: () => void;
   onCopy: () => void;
   onMove: () => void;
@@ -812,6 +940,26 @@ function ContextMenu({
           >
             Предпросмотр
           </button>
+          {canUseContext && (
+            <>
+              <button
+                onClick={() => {
+                  onAttachOnce();
+                  onClose();
+                }}
+              >
+                В контекст (один раз)
+              </button>
+              <button
+                onClick={() => {
+                  onPin();
+                  onClose();
+                }}
+              >
+                Закрепить в контексте
+              </button>
+            </>
+          )}
         </>
       )}
       {!context.entry.is_dir && (

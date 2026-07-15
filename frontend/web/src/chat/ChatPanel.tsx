@@ -24,6 +24,9 @@ type ChatPanelProps = {
   webAccess: boolean;
   onWebAccessChange: (enabled: boolean) => void;
   section: SidebarSection;
+  /** B-095 pin budget for ContextSizeBar. */
+  pinTokens?: number;
+  pinBudget?: number;
 };
 
 export function ChatPanel({
@@ -35,7 +38,9 @@ export function ChatPanel({
   onDepthModeChange,
   webAccess,
   onWebAccessChange,
-  section
+  section,
+  pinTokens = 0,
+  pinBudget = 0
 }: ChatPanelProps) {
   const messagesRef = useRef<HTMLDivElement | null>(null);
   const preserveScrollRef = useRef<{ height: number; top: number } | null>(null);
@@ -149,6 +154,8 @@ export function ChatPanel({
           usage={contextUsage}
           onCompress={session.readOnly ? undefined : session.compress}
           compressing={session.compressing}
+          pinTokens={pinTokens}
+          pinBudget={pinBudget}
         />
       </div>
     </main>

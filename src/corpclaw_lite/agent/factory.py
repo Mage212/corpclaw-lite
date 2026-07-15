@@ -84,6 +84,8 @@ class AgentStack:
     # layer (not just in the channel orchestrator), closing the IDOR gap where
     # a public service method accepted an unverified session_id.
     chat_store: WebChatStore | None = None
+    # B-095: durable pinned files for re-inject each turn.
+    pinned_context_store: Any | None = None
 
 
 def _build_router(settings: Settings | None = None) -> Provider:
@@ -671,6 +673,10 @@ def build_agent_stack(
     # B-067: WebChatStore owns get_session — the chat-ownership primitive used
     # by AgentRequestService to verify session ownership at the service layer.
     chat_store = WebChatStore(memory.db_path)
+    # B-095: pinned files (re-inject each turn; not compressor middle).
+    from corpclaw_lite.channels.web.pinned_context_store import PinnedContextStore
+
+    pinned_context_store = PinnedContextStore(memory.db_path)
 
     # B-111: create UserManager before the loop so run() can load agent_context.
     user_manager = UserManager()
@@ -692,6 +698,7 @@ def build_agent_stack(
             provider_registry=depth_provider_registry,
             depth_modes=agent_settings.depth_modes,
             chat_context_store=chat_context_store,
+            pinned_context_store=pinned_context_store,
             bootstrap=bootstrap_loader,
             user_manager=user_manager,
         )
@@ -718,6 +725,7 @@ def build_agent_stack(
         user_manager=user_manager,
         chat_context_store=chat_context_store,
         chat_store=chat_store,
+        pinned_context_store=pinned_context_store,
         tool_registry=registry,
         full_tool_registry=full_tool_reg,
         mcp_manager=mcp_manager,
