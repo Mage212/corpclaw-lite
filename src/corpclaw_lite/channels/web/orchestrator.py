@@ -2045,7 +2045,9 @@ class WebChannelOrchestrator:
         )
 
     async def _handle_reload_extensions(self, request: web.Request) -> web.Response:
-        self._require_user(request)
+        user = self._require_user(request)
+        if not user.is_admin:
+            raise web.HTTPForbidden(text="Admin privileges required.")
         errors: list[str] = []
         for label, reloader in (
             ("skills", self._skill_reloader),

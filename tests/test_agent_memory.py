@@ -77,7 +77,7 @@ async def test_agent_loop_with_session_context_store(
     assert any(isinstance(t, str) and "Your name is Test Loop User." in t for t in assistant_texts)
 
     # Transcript persisted only in context store (B-103).
-    ctx = await store.list_context(session_id)
+    ctx = await store.list_context(session_id, user_id=str(test_user.id))
     roles = [m["role"] for m in ctx]
     assert roles.count("user") >= 2
     assert any(m.get("content") == "I remember now." for m in ctx if m.get("role") == "assistant")
@@ -130,7 +130,7 @@ async def test_tool_marker_saved_in_context_store(tmp_path: Path) -> None:
     assert result == "File normalized successfully."
     assert stats.tools_used == ["normalize_excel"]
 
-    ctx = await store.list_context(session_id)
+    ctx = await store.list_context(session_id, user_id=str(user.id))
     assistant_msgs = [m for m in ctx if m["role"] == "assistant"]
     assert any("File normalized successfully." in str(m.get("content", "")) for m in assistant_msgs)
     system_msgs = [m for m in ctx if m["role"] == "system"]

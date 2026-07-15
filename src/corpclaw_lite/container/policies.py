@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from corpclaw_lite.config.settings import ContainerSettings
@@ -64,9 +63,9 @@ def build_docker_args(
         if seccomp_path.exists():
             args["security_opt"].append(f"seccomp={seccomp_path}")
 
-    ipc_secret = os.environ.get("CORPCLAW_IPC_SECRET")
-    if ipc_secret:
-        args["environment"]["CORPCLAW_IPC_SECRET"] = ipc_secret
+    # Do NOT inject CORPCLAW_IPC_SECRET into the long-lived container env.
+    # Secret is passed only on each docker exec (-e) from ContainerIPC so idle
+    # PID 1 never holds it in /proc/*/environ (security-hardening sprint1).
 
     if network_policy:
         net_args: dict[str, Any] = dict(network_policy.to_docker_args())

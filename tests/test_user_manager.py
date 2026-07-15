@@ -271,6 +271,46 @@ def test_merge_web_user_moves_credentials_workspace_and_memory(tmp_path) -> None
     assert web_message_user_ids == [(str(target.id),)]
 
 
+def test_merge_memory_facts_only_moves_non_conflicting(tmp_path) -> None:
+    """Facts-only DB (no messages): non-conflicting keys move to target."""
+    memory_db = tmp_path / "memory.db"
+    with sqlite3.connect(memory_db) as conn:
+        conn.execute(
+            """
+            CREATE TABLE memory_facts (
+                id INTEGER PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                UNIQUE(user_id, key)
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO memory_facts (user_id, key, value) VALUES (?, ?, ?)",
+            ("10", "source_only", "yes"),
+        )
+        conn.execute(
+            "INSERT INTO memory_facts (user_id, key, value) VALUES (?, ?, ?)",
+            ("20", "target_only", "keep"),
+        )
+
+    moved_messages, moved_facts = UserManager._merge_memory(
+        memory_db_path=memory_db,
+        source_key="10",
+        target_key="20",
+    )
+    assert moved_messages == 0
+    assert moved_facts == 1
+
+    with sqlite3.connect(memory_db) as conn:
+        rows = {
+            (str(r[0]), str(r[1]), str(r[2]))
+            for r in conn.execute("SELECT user_id, key, value FROM memory_facts").fetchall()
+        }
+    assert rows == {("20", "source_only", "yes"), ("20", "target_only", "keep")}
+
+
 def test_merge_web_user_failure_does_not_disable_source(tmp_path, monkeypatch) -> None:
     """B-074/M4: if a sub-migration (workspace/memory) fails mid-merge, the
     source user must NOT be left disabled. Credentials are moved and the

@@ -709,14 +709,27 @@ class UserManager:
 
     @staticmethod
     def _merge_memory(*, memory_db_path: Path, source_key: str, target_key: str) -> tuple[int, int]:
+        """Move memory facts (and optional legacy tables) from source to target user.
+
+        D-078 / B-106: ``SQLiteMemory`` is facts-only and drops the legacy
+        ``messages`` table on init. The legacy ``UPDATE messages`` is best-effort
+        only (no-op when the table is absent) so merge does not fail on modern DBs.
+        """
         if source_key == target_key or not memory_db_path.exists():
             return 0, 0
         with db_connect(memory_db_path) as conn:
-            cur = conn.execute(
-                "UPDATE messages SET user_id = ? WHERE user_id = ?",
-                (target_key, source_key),
-            )
-            moved_messages = int(cur.rowcount or 0)
+            # Legacy transcript table (pre-D-078). Optional — often missing.
+            moved_messages = 0
+            try:
+                cur = conn.execute(
+                    "UPDATE messages SET user_id = ? WHERE user_id = ?",
+                    (target_key, source_key),
+                )
+                moved_messages = int(cur.rowcount or 0)
+            except sqlite3.OperationalError as e:
+                if "no such table" not in str(e).lower():
+                    raise
+
             cur = conn.execute(
                 """
                 UPDATE memory_facts
