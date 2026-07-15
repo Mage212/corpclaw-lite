@@ -8,6 +8,11 @@
 
 ### Fixed
 
+- **Reliability sprint 2.** Mid-run context compress allowed after a *complete*
+  tool batch (incomplete tool_call/result pairs still blocked). Non-research
+  subagent wall timeouts write a partial handoff journal instead of only a bare
+  error. Process-local `UserRunGate` shares 1-in-flight locking across web/
+  headless and Telegram. Queue wait uses budget pause with finally-safe resume.
 - **Security hardening sprint 1.** User merge no longer fails on post-D-078
   facts-only `memory.db` (legacy `messages` table optional). `web_fetch` SSRF
   denies non-global addresses including CGNAT `100.64/10`. Extension reload API

@@ -94,9 +94,8 @@ async def test_research_timeout_returns_partial_report_not_bare_error(tmp_path: 
 
 
 @pytest.mark.asyncio()
-async def test_non_research_timeout_still_returns_bare_error(tmp_path: Path) -> None:
-    # MVP scope is research-only: non-research subagents still return the bare
-    # timeout error (no partial-handoff infrastructure for them yet).
+async def test_non_research_timeout_returns_partial_handoff(tmp_path: Path) -> None:
+    """Sprint 2 / C1: non-research subagents get journal handoff, not bare error only."""
     user = _user()
     dispatcher, _ = _research_dispatcher(tmp_path)
     spec = SubagentSpec(
@@ -116,7 +115,10 @@ async def test_non_research_timeout_still_returns_bare_error(tmp_path: Path) -> 
 
         result = await dispatcher.dispatch(spec, user, "List files")
 
-    assert result.startswith("Subagent error: execution timed out")
+    assert "interrupted" in result.casefold() or "timeout" in result.casefold()
+    assert not result.startswith("Subagent error: execution timed out")
+    handoff_files = list((tmp_path / f"user_{user.workspace_key()}").rglob("handoff.md"))
+    assert handoff_files, "handoff.md should be generated for non-research timeout"
 
 
 @pytest.mark.asyncio()

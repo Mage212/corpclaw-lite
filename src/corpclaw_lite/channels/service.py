@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 import secrets
 from collections.abc import Awaitable, Callable
@@ -171,8 +170,10 @@ class AgentRequestService:
         self._llm_provider_name = llm_provider_name
         self._llm_base_url = llm_base_url
         self._user_notifier = user_notifier
-        self._active_user_requests: dict[int, RunningRequest] = {}
-        self._active_user_requests_lock = asyncio.Lock()
+        # Process-wide gate shared with Telegram (Sprint 2 / C3).
+        from corpclaw_lite.runtime.user_run_gate import get_user_run_gate
+
+        self._run_gate = get_user_run_gate()
 
     def set_user_notifier(self, notifier: UserNotifier | None) -> None:
         """Attach or clear the B-120 proactive delivery sink (optional)."""
@@ -196,29 +197,25 @@ class AgentRequestService:
         Pass ``session_id`` (and optional ``title``) only for long agent runs so
         B-090 can expose is_running + reject reason. Short mutations omit them.
         """
-        async with self._active_user_requests_lock:
-            if user_id in self._active_user_requests:
-                return False
-            self._active_user_requests[user_id] = RunningRequest(
-                session_id=session_id,
-                title=title,
-            )
-            return True
+        return await self._run_gate.try_start(user_id, session_id=session_id, title=title)
 
     async def finish_user_request(self, user_id: int) -> RunningRequest | None:
         """Mark a user's active workflow as finished; return what was held (if any)."""
-        async with self._active_user_requests_lock:
-            return self._active_user_requests.pop(user_id, None)
+        info = await self._run_gate.finish(user_id)
+        if info is None:
+            return None
+        return RunningRequest(session_id=info.session_id, title=info.title)
 
     async def get_running_request(self, user_id: int) -> RunningRequest | None:
         """Return in-flight metadata for *user_id*, or None if idle."""
-        async with self._active_user_requests_lock:
-            return self._active_user_requests.get(user_id)
+        info = await self._run_gate.get(user_id)
+        if info is None:
+            return None
+        return RunningRequest(session_id=info.session_id, title=info.title)
 
     async def active_user_count(self) -> int:
         """Number of users with an in-flight workflow (not LLM slot count)."""
-        async with self._active_user_requests_lock:
-            return len(self._active_user_requests)
+        return await self._run_gate.active_count()
 
     async def reset_user_context(self, user: User) -> None:
         """Invalidate LLM KV-cache after a session reset (B-106).
@@ -489,12 +486,7 @@ class AgentRequestService:
         try:
             session_id = await chat_store.ensure_system_session(user.memory_key())
             # Refresh gate metadata for B-090 badge (system session).
-            async with self._active_user_requests_lock:
-                if user.id in self._active_user_requests:
-                    self._active_user_requests[user.id] = RunningRequest(
-                        session_id=session_id,
-                        title=title,
-                    )
+            await self._run_gate.update(user.id, session_id=session_id, title=title)
 
             request_id = secrets.token_urlsafe(10)
             meta_user: dict[str, object] = {"source": safe_source, "headless": True}

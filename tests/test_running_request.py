@@ -18,6 +18,9 @@ from corpclaw_lite.users.manager import UserManager
 
 
 def _service(tmp_path: Path) -> AgentRequestService:
+    from corpclaw_lite.runtime.user_run_gate import reset_user_run_gate_for_tests
+
+    reset_user_run_gate_for_tests()
     user_manager = UserManager(db_path=str(tmp_path / "users.db"))
     bootstrap = BootstrapLoader(tmp_path / "bootstrap")
     provider = AsyncMock(spec=Provider)

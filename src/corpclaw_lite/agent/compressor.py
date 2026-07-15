@@ -10,7 +10,7 @@ Key differences:
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from corpclaw_lite.agent.constants import PLACEHOLDER
 from corpclaw_lite.config.settings import CompressionSettings
@@ -60,6 +60,32 @@ class ContextCompressor:
         effective_tokens = max(estimated_tokens, actual_tokens or 0)
         return estimated_tokens, effective_tokens
 
+    @staticmethod
+    def _tool_batch_incomplete(messages: list[dict[str, Any]]) -> bool:
+        """True when some assistant tool_calls lack a matching tool result.
+
+        A *complete* batch ending with role=tool is safe to compress mid-run
+        (before the next LLM call). Incomplete pairs must never be compressed.
+        """
+        tool_call_ids: set[str] = set()
+        tool_result_ids: set[str] = set()
+        for msg in messages:
+            if msg.get("role") == "assistant":
+                raw_calls = msg.get("tool_calls")
+                if isinstance(raw_calls, list):
+                    for item in cast(list[object], raw_calls):
+                        if not isinstance(item, dict):
+                            continue
+                        tc_map = cast(dict[str, object], item)
+                        raw_id_obj = tc_map.get("id")
+                        if isinstance(raw_id_obj, str) and raw_id_obj:
+                            tool_call_ids.add(raw_id_obj)
+            if msg.get("role") == "tool":
+                raw_tid = msg.get("tool_call_id")
+                if isinstance(raw_tid, str) and raw_tid:
+                    tool_result_ids.add(raw_tid)
+        return bool(tool_call_ids - tool_result_ids)
+
     def should_compress(
         self,
         messages: list[dict[str, Any]],
@@ -67,22 +93,20 @@ class ContextCompressor:
     ) -> bool:
         """Check if compression is needed based on token threshold.
 
-        Returns False if a tool result is the last message — compressing mid-ReAct
-        iteration (between tool execution and the next LLM call) corrupts the agent
-        context and causes tasks to be abandoned. ``actual_tokens`` is the latest
-        backend-reported total_tokens value and is used as a conservative signal
-        when available.
+        Blocks compression only while a tool *batch is incomplete* (assistant
+        ``tool_calls`` without matching ``tool`` results). A completed batch
+        that ends with role=tool is allowed so mid-run multi-step ReAct can
+        compress before the next LLM call (Sprint 2 / C2).
+
+        ``actual_tokens`` is the latest backend-reported total_tokens value and
+        is used as a conservative signal when available.
         """
         if not self._settings.enabled:
             return False
 
-        # Safety guard: never compress while a tool call is still "in flight".
-        # The last message being a tool result means the agent hasn't yet processed
-        # the output — compressing here would produce a summary *instead of* the
-        # actual answer and lose the task context entirely.
-        if messages and messages[-1].get("role") == "tool":
+        if messages and self._tool_batch_incomplete(messages):
             logger.debug(
-                "ContextCompressor: skipping compression — last message is a pending tool result"
+                "ContextCompressor: skipping compression — incomplete tool_call/result pairs"
             )
             return False
 
