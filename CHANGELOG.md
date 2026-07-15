@@ -8,6 +8,11 @@
 
 ### Fixed
 
+- **DC-013 Phase 3 hardening (H1/H2/H3).** FE resolves attach/pin session via
+  viewed chat **or** active chat (`contextSessionId`) so ops work after
+  activate-on-send / new chat when `chatId` is null. Attach/estimate baseline is
+  `max(server_usage, client) + pending + pin_tokens` — client cannot undercut
+  server usage; sticky pins always count (conservative after turn).
 - **B-094 budget hardening.** Attach baseline is cumulative (`usage + Σ pending`
   tokens; same-path re-attach does not double-count). Text that would full-BLOCK
   is auto-chunked before failing (unless `chunked=false`). Attach/detach/pending

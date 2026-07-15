@@ -716,6 +716,96 @@ async def test_estimate_context_uses_server_baseline_when_omitted(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_attach_baseline_client_cannot_undercut_server_usage(tmp_path: Path) -> None:
+    """H3: client baseline_tokens=0 must not undercut server usage."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "note.txt").write_text("hello", encoding="utf-8")
+    user = User(id=31, name="Vadim", department="engineering")
+    settings = Settings()
+    settings.agent.compression.max_context_tokens = 50_000
+    orchestrator = WebChannelOrchestrator(settings)
+    orchestrator._service = FakeWorkspaceService(workspace)  # type: ignore[assignment]
+    orchestrator._tokenizer_client = TokenizerClient(mode="heuristic")
+    store = WebChatStore(tmp_path / "h3_mem.db")
+    orchestrator._chat_store = store
+    session_id = await store.ensure_active_session(user.memory_key())
+    orchestrator._context_usage[user.id] = {
+        "latest_total_tokens": 1200,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 1200,
+        "context_limit_tokens": 50_000,
+        "context_ratio": 0.024,
+    }
+
+    response = await orchestrator._handle_attach_context(
+        web_json_request(
+            "POST",
+            "/api/files/attach-context",
+            user,
+            {
+                "path": "note.txt",
+                "session_id": session_id,
+                "baseline_tokens": 0,
+            },
+        )
+    )
+    body = json.loads(response.text or "{}")
+    assert response.status == 200
+    assert body["effective_baseline_tokens"] >= 1200
+
+
+@pytest.mark.asyncio
+async def test_attach_baseline_includes_pin_tokens(tmp_path: Path) -> None:
+    """H2: sticky pins count toward attach baseline (even with usage=0)."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "pin.txt").write_text("p" * 4000, encoding="utf-8")  # ~1000 tok
+    (workspace / "note.txt").write_text("hello", encoding="utf-8")
+    user = User(id=32, name="Vadim", department="engineering")
+    settings = Settings()
+    settings.agent.compression.max_context_tokens = 50_000
+    settings.agent.pin_context_ratio = 0.25
+    orchestrator = WebChannelOrchestrator(settings)
+    orchestrator._service = FakeWorkspaceService(workspace)  # type: ignore[assignment]
+    orchestrator._tokenizer_client = TokenizerClient(mode="heuristic")
+    store = WebChatStore(tmp_path / "h2_mem.db")
+    pin_store = PinnedContextStore(tmp_path / "h2_mem.db")
+    orchestrator._chat_store = store
+    orchestrator._pinned_store = pin_store
+    session_id = await store.ensure_active_session(user.memory_key())
+
+    pin_resp = await orchestrator._handle_pin_context(
+        web_json_request(
+            "POST",
+            "/api/files/pin-context",
+            user,
+            {"path": "pin.txt", "session_id": session_id, "chunked": False},
+        )
+    )
+    pin_body = json.loads(pin_resp.text or "{}")
+    pin_tokens = int(pin_body["pin_tokens"])
+    assert pin_tokens > 0
+
+    attach_resp = await orchestrator._handle_attach_context(
+        web_json_request(
+            "POST",
+            "/api/files/attach-context",
+            user,
+            {
+                "path": "note.txt",
+                "session_id": session_id,
+                "baseline_tokens": 0,
+            },
+        )
+    )
+    attach_body = json.loads(attach_resp.text or "{}")
+    assert attach_resp.status == 200
+    assert attach_body["effective_baseline_tokens"] >= pin_tokens
+
+
+@pytest.mark.asyncio
 async def test_web_chat_file_payload_includes_path_only_for_available_workspace_file(
     tmp_path: Path,
 ) -> None:

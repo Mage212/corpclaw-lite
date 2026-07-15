@@ -951,7 +951,12 @@ class WebChannelOrchestrator:
             raise web.HTTPBadRequest(text="path is required")
         path = raw_path.strip()
 
-        baseline = await self._baseline_tokens_for_estimate(user, payload)
+        # Optional session for pin/pending inclusion (H2); skip if no chat store.
+        session_id: int | None = None
+        if self._chat_store is not None:
+            session_id = await self._resolve_attach_session_id(user, payload)
+
+        baseline = await self._compose_attach_baseline(user, payload, session_id=session_id)
         limit = max(1, int(self._settings.agent.compression.max_context_tokens))
 
         try:
@@ -974,22 +979,65 @@ class WebChannelOrchestrator:
         )
         body = result.to_dict()
         body["path"] = path
+        if session_id is not None:
+            body["session_id"] = session_id
         return web.json_response(body)
 
-    async def _baseline_tokens_for_estimate(self, user: User, payload: dict[str, object]) -> int:
-        raw_baseline = payload.get("baseline_tokens")
-        if raw_baseline is not None:
-            if isinstance(raw_baseline, bool) or not isinstance(raw_baseline, int | float):
-                raise web.HTTPBadRequest(text="baseline_tokens must be a non-negative number")
-            baseline = int(raw_baseline)
-            if baseline < 0:
-                raise web.HTTPBadRequest(text="baseline_tokens must be a non-negative number")
-            return baseline
+    async def _server_usage_tokens(self, user: User) -> int:
+        """Latest LLM usage for the user (0 if unknown)."""
         usage = await self._context_usage_for_user(user)
         raw_latest = usage.get("latest_total_tokens", 0)
         if isinstance(raw_latest, bool) or not isinstance(raw_latest, int | float):
             return 0
         return max(0, int(raw_latest))
+
+    def _parse_optional_client_baseline(self, payload: dict[str, object]) -> int | None:
+        """Parse client baseline_tokens; None if omitted. Invalid → HTTP 400."""
+        raw_baseline = payload.get("baseline_tokens")
+        if raw_baseline is None:
+            return None
+        if isinstance(raw_baseline, bool) or not isinstance(raw_baseline, int | float):
+            raise web.HTTPBadRequest(text="baseline_tokens must be a non-negative number")
+        baseline = int(raw_baseline)
+        if baseline < 0:
+            raise web.HTTPBadRequest(text="baseline_tokens must be a non-negative number")
+        return baseline
+
+    async def _compose_attach_baseline(
+        self,
+        user: User,
+        payload: dict[str, object],
+        *,
+        session_id: int | None,
+        reattach_path: str | None = None,
+    ) -> int:
+        """Authoritative attach/estimate baseline (H2+H3).
+
+        ``max(server_usage, client_or_0) + pending_adjusted + pin_tokens``
+
+        - H3: client cannot undercut server usage (floor).
+        - H2: sticky pins always counted (may double-count after a turn that
+          already included pins in usage — conservative, safe for local LLMs).
+        """
+        server = await self._server_usage_tokens(user)
+        client = self._parse_optional_client_baseline(payload)
+        floor = max(server, 0 if client is None else client)
+
+        pending = 0
+        pins = 0
+        if session_id is not None:
+            pending = self._pending_attachments.total_tokens(user.id, session_id)
+            if reattach_path is not None:
+                existing = self._pending_attachments.find(user.id, session_id, reattach_path)
+                if existing is not None:
+                    pending = max(0, pending - existing.tokens)
+            if self._pinned_store is not None:
+                pins = await self._pinned_store.total_tokens(session_id, user.memory_key())
+        return floor + pending + pins
+
+    async def _baseline_tokens_for_estimate(self, user: User, payload: dict[str, object]) -> int:
+        """Back-compat alias: usage/client floor only (no session pin/pending)."""
+        return await self._compose_attach_baseline(user, payload, session_id=None)
 
     def _get_tokenizer_client(self) -> TokenizerClient:
         if self._tokenizer_client is None:
@@ -1078,13 +1126,10 @@ class WebChannelOrchestrator:
             raise web.HTTPBadRequest(text="path is required")
         path = raw_path.strip()
         session_id = await self._resolve_attach_session_id(user, payload)
-        base = await self._baseline_tokens_for_estimate(user, payload)
-        # H1: include already-pending tokens so multi-attach cannot overflow on send.
-        pending_tokens = self._pending_attachments.total_tokens(user.id, session_id)
-        existing = self._pending_attachments.find(user.id, session_id, path)
-        if existing is not None:
-            pending_tokens = max(0, pending_tokens - existing.tokens)
-        effective_baseline = base + pending_tokens
+        # H1 pending + H2 pins + H3 server floor (see _compose_attach_baseline).
+        effective_baseline = await self._compose_attach_baseline(
+            user, payload, session_id=session_id, reattach_path=path
+        )
         limit = max(1, int(self._settings.agent.compression.max_context_tokens))
 
         chunked_raw = payload.get("chunked")
