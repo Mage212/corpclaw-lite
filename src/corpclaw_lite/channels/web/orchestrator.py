@@ -18,7 +18,11 @@ from aiohttp.helpers import content_disposition_header
 
 from corpclaw_lite.agent.factory import build_agent_stack
 from corpclaw_lite.agent.loop import RunStats
-from corpclaw_lite.channels.service import AgentRequestCallbacks, AgentRequestService
+from corpclaw_lite.channels.service import (
+    AgentRequestCallbacks,
+    AgentRequestService,
+    RunningRequest,
+)
 from corpclaw_lite.channels.status import (
     INITIAL_STATUS_TEXT,
     READY_STATUS_TEXT,
@@ -790,9 +794,12 @@ class WebChannelOrchestrator:
         if self._service is None:
             raise web.HTTPServiceUnavailable()
         if not await self._try_start_user_request(user.id):
+            busy = await self._busy_reject_payload(
+                user.id, "Дождитесь ответа перед сбросом контекста."
+            )
             return (
                 False,
-                "Предыдущая задача ещё выполняется. Дождитесь ответа перед сбросом контекста.",
+                str(busy["message"]),
                 self._context_usage.get(user.id, self._context_usage_payload()),
             )
         try:
@@ -1146,21 +1153,105 @@ class WebChannelOrchestrator:
             except Exception as e:
                 logger.debug("system_load poll failed: %s", e)
 
-    async def _try_start_user_request(self, user_id: int) -> bool:
-        """Acquire in-flight gate and refresh ambient system_load on success."""
+    async def _try_start_user_request(
+        self,
+        user_id: int,
+        *,
+        session_id: int | None = None,
+        title: str | None = None,
+    ) -> bool:
+        """Acquire in-flight gate; refresh system_load; push is_running for agent runs."""
         if self._service is None:
             return False
-        ok = await self._service.try_start_user_request(user_id)
+        ok = await self._service.try_start_user_request(user_id, session_id=session_id, title=title)
         if ok:
             self._schedule_system_load_broadcast()
+            if session_id is not None:
+                await self._broadcast_session_running_state(
+                    user_id,
+                    session_id=session_id,
+                    title=title,
+                    is_running=True,
+                )
         return ok
 
     async def _finish_user_request(self, user_id: int) -> None:
-        """Release in-flight gate and refresh ambient system_load."""
+        """Release in-flight gate; clear is_running badge when an agent run ends."""
         if self._service is None:
             return
-        await self._service.finish_user_request(user_id)
+        finished_raw = await self._service.finish_user_request(user_id)
+        finished = finished_raw if isinstance(finished_raw, RunningRequest) else None
         self._schedule_system_load_broadcast()
+        if finished is not None and finished.session_id is not None:
+            await self._broadcast_session_running_state(
+                user_id,
+                session_id=finished.session_id,
+                title=finished.title,
+                is_running=False,
+            )
+
+    async def _broadcast_session_running_state(
+        self,
+        user_id: int,
+        *,
+        session_id: int,
+        title: str | None,
+        is_running: bool,
+    ) -> None:
+        """B-090: push running badge state to all of this user's web sockets."""
+        payload: dict[str, object] = {
+            "type": "session_running_state",
+            "session_id": session_id,
+            "is_running": is_running,
+        }
+        if title is not None:
+            payload["title"] = title
+        await self._broadcast_to_user(user_id, payload)
+
+    async def _busy_reject_payload(self, user_id: int, action_hint: str) -> dict[str, object]:
+        """Build structured busy reject (HTTP/WS) with optional running session (B-090)."""
+        running: RunningRequest | None = None
+        if self._service is not None:
+            getter = getattr(self._service, "get_running_request", None)
+            if callable(getter):
+                running = await getter(user_id)
+            else:
+                running = None
+        if running is not None and running.session_id is not None:
+            label = f"«{running.title}»" if running.title else f"#{running.session_id}"
+            message = f"Сейчас выполняется чат {label}. {action_hint}"
+            payload: dict[str, object] = {
+                "error": message,
+                "message": message,
+                "running_session_id": running.session_id,
+            }
+            if running.title is not None:
+                payload["running_session_title"] = running.title
+            return payload
+        message = f"Предыдущая задача ещё выполняется. {action_hint}"
+        return {"error": message, "message": message}
+
+    @staticmethod
+    def _http_busy_response(busy: dict[str, object]) -> web.Response:
+        body: dict[str, object] = {"error": busy["error"]}
+        if "running_session_id" in busy:
+            body["running_session_id"] = busy["running_session_id"]
+            if "running_session_title" in busy:
+                body["running_session_title"] = busy["running_session_title"]
+        return web.json_response(body, status=409)
+
+    async def _resolve_agent_run_session(self, user: User) -> tuple[int | None, str | None]:
+        """Active web session id + title for a long agent run (send path)."""
+        if self._chat_store is None:
+            return None, None
+        try:
+            session_id = await self._chat_store.ensure_active_session(user.memory_key())
+            summary = await self._chat_store.get_session(user.memory_key(), session_id)
+            title = summary.title if summary is not None else None
+            return session_id, title
+        except Exception as e:
+            logger.debug("Failed to resolve active session for user %s: %s", user.id, e)
+            return None, None
 
     def _create_download_grant(
         self,
@@ -1217,8 +1308,12 @@ class WebChannelOrchestrator:
             payload["file"] = file_payload
         return payload
 
-    @staticmethod
-    def _session_summary_payload(summary: ChatSessionSummary) -> dict[str, object]:
+    def _session_summary_payload(
+        self,
+        summary: ChatSessionSummary,
+        *,
+        running_session_id: int | None = None,
+    ) -> dict[str, object]:
         """Serialize a chat session for the sidebar list (REST + WS)."""
         payload: dict[str, object] = {
             "id": summary.id,
@@ -1227,12 +1322,22 @@ class WebChannelOrchestrator:
             "created_at": summary.created_at,
             "active": summary.is_active,
             "msg_count": summary.msg_count,
+            # B-090: in-memory gate, not a DB column.
+            "is_running": running_session_id is not None and summary.id == running_session_id,
         }
         # updated_at drives the sidebar's "recently active" ordering + time-range
         # grouping. Omit it only when genuinely unknown (legacy rows).
         if summary.updated_at is not None:
             payload["updated_at"] = summary.updated_at
         return payload
+
+    async def _running_session_id_for(self, user_id: int) -> int | None:
+        if self._service is None:
+            return None
+        running = await self._service.get_running_request(user_id)
+        if running is None:
+            return None
+        return running.session_id
 
     def _llm_summary_payload(self) -> dict[str, object]:
         rule = next(
@@ -1415,7 +1520,15 @@ class WebChannelOrchestrator:
         if section not in {"chat", "work", None}:
             section = None
         summaries = await self._chat_store.list_sessions(user.memory_key(), section=section)
-        return web.json_response({"chats": [self._session_summary_payload(s) for s in summaries]})
+        running_id = await self._running_session_id_for(user.id)
+        return web.json_response(
+            {
+                "chats": [
+                    self._session_summary_payload(s, running_session_id=running_id)
+                    for s in summaries
+                ]
+            }
+        )
 
     async def _handle_create_chat(self, request: web.Request) -> web.Response:
         user = self._require_user(request)
@@ -1430,10 +1543,10 @@ class WebChannelOrchestrator:
             section = "chat"
         # A new chat implies a clean agent context. Block while a run is in-flight.
         if not await self._try_start_user_request(user.id):
-            return web.json_response(
-                {"error": "Дождитесь завершения активного чата перед созданием нового."},
-                status=409,
+            busy = await self._busy_reject_payload(
+                user.id, "Дождитесь завершения перед созданием нового."
             )
+            return self._http_busy_response(busy)
         try:
             await self._service.reset_user_context(user)
             session_id = await self._chat_store.create_session(user.memory_key(), section=section)
@@ -1465,10 +1578,10 @@ class WebChannelOrchestrator:
         # Switching the active chat resets agent context (memory is single-thread
         # per user). Block while a run is in-flight.
         if not await self._try_start_user_request(user.id):
-            return web.json_response(
-                {"error": "Дождитесь завершения активного чата перед переключением."},
-                status=409,
+            busy = await self._busy_reject_payload(
+                user.id, "Дождитесь завершения перед переключением."
             )
+            return self._http_busy_response(busy)
         try:
             # Activate the session FIRST (commit the intent), then restore memory.
             # If restore raises, the session flag is correct and memory can be
@@ -1547,9 +1660,8 @@ class WebChannelOrchestrator:
         # Take the single-in-flight lock for consistency with create/activate —
         # all chat mutations that can interact with an active run serialize here.
         if not await self._try_start_user_request(user.id):
-            return web.json_response(
-                {"error": "Дождитесь завершения активного чата перед удалением."}, status=409
-            )
+            busy = await self._busy_reject_payload(user.id, "Дождитесь завершения перед удалением.")
+            return self._http_busy_response(busy)
         replacement_session_id: int | None = None
         try:
             summary = await self._chat_store.get_session(user.memory_key(), session_id)
@@ -1656,6 +1768,18 @@ class WebChannelOrchestrator:
             await send(await self._build_system_load())
         except Exception as e:
             logger.debug("system_load on connect failed: %s", e)
+        # B-090: re-push running badge so reconnecting tabs see is_running.
+        if self._service is not None:
+            running = await self._service.get_running_request(user.id)
+            if running is not None and running.session_id is not None:
+                await send(
+                    {
+                        "type": "session_running_state",
+                        "session_id": running.session_id,
+                        "is_running": True,
+                        **({"title": running.title} if running.title is not None else {}),
+                    }
+                )
         active_state = self._active_request_state.get(user.id)
         if active_state is not None:
             await send({"type": "request_state", **active_state})
@@ -1812,8 +1936,21 @@ class WebChannelOrchestrator:
             if not await self._rate_limiter.check(user.id):
                 await send({"type": "error", "message": "Слишком много сообщений."})
                 return
-            if not await self._try_start_user_request(user.id):
-                await send({"type": "error", "message": "Предыдущая задача ещё выполняется."})
+            run_session_id, run_title = await self._resolve_agent_run_session(user)
+            if not await self._try_start_user_request(
+                user.id, session_id=run_session_id, title=run_title
+            ):
+                busy = await self._busy_reject_payload(
+                    user.id, "Дождитесь завершения перед отправкой нового сообщения."
+                )
+                err: dict[str, object] = {
+                    "type": "error",
+                    "message": busy["message"],
+                }
+                if "running_session_id" in busy:
+                    err["running_session_id"] = busy["running_session_id"]
+                    err["running_session_title"] = busy.get("running_session_title")
+                await send(err)
                 return
             request_acquired = True
             try:
@@ -2109,12 +2246,17 @@ class WebChannelOrchestrator:
                         await send({"type": "error", "message": "Сервис ещё не готов."})
                         continue
                     if not await self._try_start_user_request(user.id):
-                        await send(
-                            {
-                                "type": "error",
-                                "message": "Дождитесь завершения активной задачи перед сжатием контекста.",
-                            }
+                        busy = await self._busy_reject_payload(
+                            user.id, "Дождитесь завершения перед сжатием контекста."
                         )
+                        err_payload: dict[str, object] = {
+                            "type": "error",
+                            "message": busy["message"],
+                        }
+                        if "running_session_id" in busy:
+                            err_payload["running_session_id"] = busy["running_session_id"]
+                            err_payload["running_session_title"] = busy.get("running_session_title")
+                        await send(err_payload)
                         continue
                     raw_target = payload.get("session_id")
                     target_session: int | None

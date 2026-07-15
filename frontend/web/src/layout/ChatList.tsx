@@ -149,10 +149,22 @@ function ChatRow({
   return (
     <li>
       <div
-        className={`chat-item ${isActiveViewed ? "active" : ""} ${chat.active ? "is-active-session" : ""}`}
+        className={[
+          "chat-item",
+          isActiveViewed ? "active" : "",
+          chat.active ? "is-active-session" : "",
+          chat.is_running ? "is-running" : ""
+        ]
+          .filter(Boolean)
+          .join(" ")}
       >
         <button className="chat-item-main" onClick={onSelect} title={chat.title ?? `Чат #${chat.id}`}>
           <span className="chat-item-title">{chat.title ?? `Чат #${chat.id}`}</span>
+          {chat.is_running && (
+            <span className="chat-item-running" title="Сейчас выполняется задача">
+              выполняется
+            </span>
+          )}
           {chat.msg_count > 0 && <span className="chat-item-meta">{chat.msg_count}</span>}
         </button>
         <div className="chat-item-menu" ref={menuRef}>

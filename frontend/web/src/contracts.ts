@@ -44,7 +44,14 @@ export type ServerWsEvent =
   | { type: "context_reset"; message: string; usage?: ContextUsage }
   | { type: "compress_done"; message: string; usage?: ContextUsage }
   | { type: "warning"; message: string; request_id?: string }
-  | { type: "error"; message: string; request_id?: string; usage?: ContextUsage }
+  | {
+      type: "error";
+      message: string;
+      request_id?: string;
+      usage?: ContextUsage;
+      running_session_id?: number;
+      running_session_title?: string | null;
+    }
   | { type: "file_ready"; name: string; url: string; caption: string; path?: string | null }
   | { type: "approval_required"; approval_id: string; action: string; details: string; request_id?: string }
   | { type: "approval_resolved"; approval_id: string; request_id?: string }
@@ -54,7 +61,13 @@ export type ServerWsEvent =
   | { type: "chat_renamed"; session_id: number; title: string }
   | { type: "chat_activated"; session_id: number; section: string; mode: AgentMode }
   | { type: "chat_list_changed" }
-  | ({ type: "system_load" } & SystemLoad);
+  | ({ type: "system_load" } & SystemLoad)
+  | {
+      type: "session_running_state";
+      session_id: number;
+      is_running: boolean;
+      title?: string;
+    };
 
 type JsonRecord = Record<string, unknown>;
 
@@ -228,7 +241,8 @@ export function parseChatSummary(value: unknown): ChatSummary {
     active: requiredBoolean(source, "active", "chat summary"),
     msg_count: requiredNumber(source, "msg_count", "chat summary"),
     updated_at: updatedAt ?? null,
-    folder_id: folderId ?? null
+    folder_id: folderId ?? null,
+    is_running: source.is_running === true
   };
 }
 
@@ -619,6 +633,18 @@ export function parseServerWsEvent(value: unknown): ServerWsEvent | null {
       if (usage !== null) {
         event.usage = usage;
       }
+      const runningId = optionalNumber(value.running_session_id);
+      if (runningId !== undefined) {
+        event.running_session_id = runningId;
+      }
+      if (value.running_session_title === null) {
+        event.running_session_title = null;
+      } else {
+        const runningTitle = optionalString(value.running_session_title);
+        if (runningTitle !== undefined) {
+          event.running_session_title = runningTitle;
+        }
+      }
       return event;
     }
     case "file_ready": {
@@ -717,6 +743,20 @@ export function parseServerWsEvent(value: unknown): ServerWsEvent | null {
         load_level,
         updated_at: requiredNumber(value, "updated_at", "system_load")
       };
+    }
+    case "session_running_state": {
+      const sessionId = optionalNumber(value.session_id);
+      if (sessionId === undefined) return null;
+      const event: Extract<ServerWsEvent, { type: "session_running_state" }> = {
+        type: "session_running_state",
+        session_id: sessionId,
+        is_running: value.is_running === true
+      };
+      const title = optionalString(value.title);
+      if (title !== undefined) {
+        event.title = title;
+      }
+      return event;
     }
     default:
       return null;
