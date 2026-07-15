@@ -6,7 +6,7 @@ import secrets
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from corpclaw_lite.agent.loop import RunStats
 from corpclaw_lite.config.bootstrap import BootstrapLoader
@@ -18,6 +18,9 @@ from corpclaw_lite.logging.agent_logger import AgentLogger
 from corpclaw_lite.logging.trace import log_event
 from corpclaw_lite.paths import PROJECT_ROOT
 from corpclaw_lite.users.models import User
+
+if TYPE_CHECKING:
+    from corpclaw_lite.channels.user_notifier import UserNotifier
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +157,7 @@ class AgentRequestService:
         activity_logger: AgentLogger | None = None,
         llm_provider_name: str | None = None,
         llm_base_url: str | None = None,
+        user_notifier: UserNotifier | None = None,
     ) -> None:
         from corpclaw_lite.agent.factory import AgentStack
 
@@ -166,8 +170,13 @@ class AgentRequestService:
         self._activity_logger = activity_logger
         self._llm_provider_name = llm_provider_name
         self._llm_base_url = llm_base_url
+        self._user_notifier = user_notifier
         self._active_user_requests: dict[int, RunningRequest] = {}
         self._active_user_requests_lock = asyncio.Lock()
+
+    def set_user_notifier(self, notifier: UserNotifier | None) -> None:
+        """Attach or clear the B-120 proactive delivery sink (optional)."""
+        self._user_notifier = notifier
 
     def get_user_workspace(self, user: User) -> Path:
         """Return the host workspace for a user, creating it if needed."""
@@ -531,6 +540,22 @@ class AgentRequestService:
                 },
                 session_id=session_id,
             )
+
+            # B-120: push-only notify (persist=False — assistant already written).
+            if self._user_notifier is not None and result.reply.strip():
+                try:
+                    await self._user_notifier.notify(
+                        user,
+                        result.reply,
+                        source=f"headless:{safe_source}",
+                        persist=False,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "headless proactive notify failed user=%s: %s",
+                        user.id,
+                        exc,
+                    )
 
             log_event(
                 "headless_finished",

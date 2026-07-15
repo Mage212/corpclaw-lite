@@ -22,6 +22,9 @@ export function sidebarSectionLabel(section: SidebarSection): string {
   return section === "chat" ? "Чат" : "Работа";
 }
 
+/** B-120: durable system inbox (headless + proactive messages). */
+export const SYSTEM_INBOX_LABEL = "Система";
+
 export function statusPhaseLabel(phase: string): string {
   switch (phase) {
     case "idle":

@@ -8,11 +8,21 @@
 
 ### Added
 
+- **B-120 / DC-032 proactive-send (UserNotifier).** Deliver a message without an
+  inbound chat turn: always persist to the durable per-user **system** session
+  (B-119), then best-effort push to process-local sinks — WebSocket
+  `proactive_message` (+ `chat_list_changed`) and/or Telegram
+  `bot.send_message` when `telegram_id` is set. Parallel multichannel (not
+  TG-only fallback). CLI: `corpclaw-lite notify-user -u <id> -m "…"`. Headless
+  completion hooks push with `persist=False` (no double-write). Web FE: pinned
+  «Система» inbox (read-only). AdminNotifier unchanged (admin errors only).
+  Multi-process note: DB is always shared; live push only in the process that
+  registered the sink (no Redis bus in MVP).
 - **B-119 / DC-031 headless-run.** `AgentRequestService.run_headless` starts a
   task without inbound chat: DC-011 skip-if-busy, durable per-user **system**
   session (`channel=system`), UI transcript + `source` metadata, non-sticky
   LLM queue tag (`task_kind=headless`). CLI:
-  `corpclaw-lite headless-run -u <id> -t "…"`. FE system inbox deferred to B-120.
+  `corpclaw-lite headless-run -u <id> -t "…"`.
 - **B-117 / DC-042 review/revert UX (web-first).** List agent file mutations
   (`GET /api/files/changes`), text/binary diff
   (`GET /api/files/changes/{id}/diff`), revert via snapshot restore +

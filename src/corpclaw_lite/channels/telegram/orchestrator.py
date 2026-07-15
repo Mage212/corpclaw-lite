@@ -60,6 +60,8 @@ class TelegramBotOrchestrator:
         self._onboarding_engine: OnboardingEngine | None = None
         self._rate_limiter: RateLimiter | None = None
         self._admin_notifier: AdminNotifier | None = None
+        # B-120 / DC-032: proactive user messages (separate from AdminNotifier).
+        self._user_notifier: Any | None = None
         self._bootstrap: BootstrapLoader | None = None
         self._vision_processor: VisionProcessor | None = None
 
@@ -312,6 +314,15 @@ class TelegramBotOrchestrator:
                 admin_ids=tg_settings.admin_ids,
             )
             logger.info("Admin notifier active for %d admin(s)", len(tg_settings.admin_ids))
+
+        # B-120: UserNotifier with Telegram sink (DB = shared memory.db system session).
+        chat_store = getattr(stack, "chat_store", None)
+        if chat_store is not None and self._channel.app is not None:
+            from corpclaw_lite.channels.user_notifier import UserNotifier
+
+            self._user_notifier = UserNotifier(chat_store)
+            self._user_notifier.register_telegram_bot(self._channel.app.bot)
+            logger.info("UserNotifier Telegram sink registered")
 
         self._cleanup_task = asyncio.create_task(self._rate_limit_cleanup_loop())
 

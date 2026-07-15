@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { ChevronDown, LogOut, Settings2, Sparkles } from "lucide-react";
+import { Bell, ChevronDown, LogOut, Settings2, Sparkles } from "lucide-react";
 import {
   AGENT_CONTEXT_LABEL,
   COMING_SOON_LABEL,
   EXTENSIONS_LABEL,
+  SYSTEM_INBOX_LABEL,
   sidebarSectionLabel
 } from "../i18n/ru";
 import type { ChatSummary, SidebarSection, User } from "../types";
@@ -16,6 +17,9 @@ export type SidebarProps = {
   chats: ChatSummary[];
   activeChatId: number | null;
   chatsLoading: boolean;
+  /** B-120: durable system inbox entry (may be null before first proactive/headless). */
+  systemChat: ChatSummary | null;
+  systemHasUnread?: boolean;
   onSelectChat: (chat: ChatSummary) => void;
   onNewChat: () => void;
   onRenameChat: (id: number, title: string) => void;
@@ -32,6 +36,8 @@ export function Sidebar({
   chats,
   activeChatId,
   chatsLoading,
+  systemChat,
+  systemHasUnread = false,
   onSelectChat,
   onNewChat,
   onRenameChat,
@@ -81,6 +87,28 @@ export function Sidebar({
           <span>{AGENT_CONTEXT_LABEL}</span>
         </button>
       </nav>
+
+      {systemChat !== null && (
+        <div className="sidebar-system-inbox" aria-label={SYSTEM_INBOX_LABEL}>
+          <button
+            type="button"
+            className={
+              activeChatId === systemChat.id
+                ? "system-inbox-btn active"
+                : "system-inbox-btn"
+            }
+            onClick={() => onSelectChat(systemChat)}
+            title={SYSTEM_INBOX_LABEL}
+          >
+            <Bell size={16} />
+            <span>{SYSTEM_INBOX_LABEL}</span>
+            {systemChat.msg_count > 0 && (
+              <span className="system-inbox-count">{systemChat.msg_count}</span>
+            )}
+            {systemHasUnread && <span className="system-inbox-badge" aria-label="новое" />}
+          </button>
+        </div>
+      )}
 
       <ChatList
         chats={chats}

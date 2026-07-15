@@ -178,6 +178,8 @@ class WebChannelOrchestrator:
         self._active_request_state: dict[int, dict[str, object]] = {}
         self._pending_approvals: dict[str, _PendingApproval] = {}
         self._chat_store: WebChatStore | None = None
+        # B-120 / DC-032: proactive delivery (system session + WS push).
+        self._user_notifier: Any | None = None
         self._cleanup_task: asyncio.Task[None] | None = None
         self._container_prune_task: asyncio.Task[None] | None = None
         self._system_load_poll_task: asyncio.Task[None] | None = None
@@ -247,6 +249,13 @@ class WebChannelOrchestrator:
             memory_db_path,
             active_max_messages=self._web_settings.chat_active_max_messages,
         )
+        # Prefer stack.chat_store when present (same DB); else orchestrator store.
+        notify_store = stack.chat_store if stack.chat_store is not None else self._chat_store
+        from corpclaw_lite.channels.user_notifier import UserNotifier
+
+        self._user_notifier = UserNotifier(notify_store)
+        self._user_notifier.register_web_broadcast(self._broadcast_to_user)
+        self._service.set_user_notifier(self._user_notifier)
 
         stack.tool_registry.register(
             SendFileTool(self._send_file_callback, workspace_base=workspace_base),
@@ -2061,7 +2070,8 @@ class WebChannelOrchestrator:
         if self._chat_store is None:
             return web.json_response({"chats": []})
         section = request.query.get("section")
-        if section not in {"chat", "work", None}:
+        # B-120: allow section=system for the durable system inbox (list only).
+        if section not in {"chat", "work", "system", None}:
             section = None
         summaries = await self._chat_store.list_sessions(user.memory_key(), section=section)
         running_id = await self._running_session_id_for(user.id)
@@ -2764,7 +2774,11 @@ class WebChannelOrchestrator:
                         await send({"type": "error", "message": "Некорректный чат."})
                         continue
                     summary = await self._chat_store.get_session(user.memory_key(), target_session)
-                    read_only = not (summary is not None and summary.is_active)
+                    # B-120: system inbox is always read-only (no compose into system).
+                    if summary is not None and summary.section == "system":
+                        read_only = True
+                    else:
+                        read_only = not (summary is not None and summary.is_active)
                     page = await self._chat_store.list_messages(
                         user.memory_key(), session_id=target_session, limit=100
                     )
