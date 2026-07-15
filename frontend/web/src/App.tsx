@@ -163,13 +163,20 @@ function Workspace({
       .finally(() => setChatsLoading(false));
   }, [session.csrf_token, section]);
 
+  // H1: attach/pin must work when chatId is null (follow-active after send / new chat).
+  // Prefer explicitly viewed chat; else the server-side active chat from the list.
+  const contextSessionId =
+    chatId != null && chatId > 0
+      ? chatId
+      : (chats.find((chat) => chat.active)?.id ?? null);
+
   const refreshPinBudget = useCallback(() => {
-    if (chatId == null || chatId <= 0) {
+    if (contextSessionId == null || contextSessionId <= 0) {
       setPinTokens(0);
       setPinBudget(0);
       return;
     }
-    listPins(chatId)
+    listPins(contextSessionId)
       .then((payload) => {
         setPinTokens(payload.pin_tokens);
         setPinBudget(payload.pin_budget);
@@ -178,7 +185,7 @@ function Workspace({
         setPinTokens(0);
         setPinBudget(0);
       });
-  }, [chatId]);
+  }, [contextSessionId]);
 
   useEffect(() => {
     refreshPinBudget();
@@ -289,9 +296,15 @@ function Workspace({
     setChatsLoading(true);
     try {
       const created = await createChat(session.csrf_token, section);
-      // New chat is active server-side; follow it (chatId=null loads the active one).
+      // New chat is active server-side; follow it (chatId=null). Keep local
+      // active flags consistent so contextSessionId resolves for attach/pin.
       setChatId(null);
-      setChats((current) => [created, ...current.filter((chat) => chat.id !== created.id)]);
+      setChats((current) => [
+        created,
+        ...current
+          .filter((chat) => chat.id !== created.id)
+          .map((chat) => (chat.active ? { ...chat, active: false } : chat))
+      ]);
     } catch (error) {
       console.warn("Failed to create chat", error);
     } finally {
@@ -467,7 +480,7 @@ function Workspace({
             mode="side"
             onModeChange={() => undefined}
             onPreview={openPreview}
-            sessionId={chatId}
+            sessionId={contextSessionId}
             baselineTokens={contextUsage?.latest_total_tokens ?? 0}
             onContextFilesChanged={refreshPinBudget}
           />
