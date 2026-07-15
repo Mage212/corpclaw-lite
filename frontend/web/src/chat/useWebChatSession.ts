@@ -140,6 +140,10 @@ type UseWebChatSessionOptions = {
   onChatListChanged?: (() => void) | undefined;
   /** Ambient GPU/system load (DC-008). Counts only; not request timeline. */
   onSystemLoad?: ((load: SystemLoad) => void) | undefined;
+  /** B-090: agent run started/stopped on a chat session (badge + list). */
+  onSessionRunningState?:
+    | ((state: { session_id: number; is_running: boolean; title?: string }) => void)
+    | undefined;
 };
 
 export type WebChatSession = {
@@ -176,7 +180,8 @@ export function useWebChatSession({
   onChatActivated,
   onChatRenamed,
   onChatListChanged,
-  onSystemLoad
+  onSystemLoad,
+  onSessionRunningState
 }: UseWebChatSessionOptions): WebChatSession {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [status, setStatus] = useState<StatusLine>(emptyStatus);
@@ -361,7 +366,8 @@ export function useWebChatSession({
             setCompressing,
             onChatRenamed,
             onChatListChanged,
-            onSystemLoad
+            onSystemLoad,
+            onSessionRunningState
           });
         };
       })
@@ -400,7 +406,8 @@ export function useWebChatSession({
     onWorkspaceChanged,
     onChatRenamed,
     onChatListChanged,
-    onSystemLoad
+    onSystemLoad,
+    onSessionRunningState
   ]);
 
   useEffect(() => {
@@ -469,6 +476,9 @@ type WsEventHandlers = {
   onChatRenamed: (() => void) | undefined;
   /** Ambient system load (top bar); never mixed into request timeline. */
   onSystemLoad: ((load: SystemLoad) => void) | undefined;
+  onSessionRunningState:
+    | ((state: { session_id: number; is_running: boolean; title?: string }) => void)
+    | undefined;
   onChatListChanged: (() => void) | undefined;
 };
 
@@ -493,7 +503,8 @@ function handleWsEvent(event: ServerWsEvent, handlers: WsEventHandlers) {
     setCompressing,
     onChatRenamed,
     onChatListChanged,
-    onSystemLoad
+    onSystemLoad,
+    onSessionRunningState
   } = handlers;
   if (event.type === "chat_history") {
     setMessages(event.messages);
@@ -750,6 +761,12 @@ function handleWsEvent(event: ServerWsEvent, handlers: WsEventHandlers) {
       active_users: event.active_users,
       load_level: event.load_level,
       updated_at: event.updated_at
+    });
+  } else if (event.type === "session_running_state") {
+    onSessionRunningState?.({
+      session_id: event.session_id,
+      is_running: event.is_running,
+      ...(event.title !== undefined ? { title: event.title } : {})
     });
   }
 }

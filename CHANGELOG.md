@@ -8,6 +8,11 @@
 
 ### Added
 
+- **B-090 is_running (DC-011).** In-flight gate stores optional `session_id`+`title`
+  for agent runs; HTTP 409 / WS errors include `running_session_id` /
+  `running_session_title`; WS `session_running_state` + chat list `is_running`
+  badge («выполняется»). Short mutations hold the mutex without a badge.
+  Web only; no ETA. DC-008 `active_user_count` unchanged.
 - **DC-008 system_load (backend + UI).** WebSocket event `system_load` with
   count-only ambient GPU/user load (`active_count`, `max_concurrent`,
   `waiting_count`, `active_users`, `load_level`, `updated_at`). Broadcast to all

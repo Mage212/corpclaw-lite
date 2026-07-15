@@ -197,6 +197,11 @@ export type ChatSummary = {
   updated_at?: string | null;
   /** Folder grouping id (Etap 2B foundation — no UI grouping yet). */
   folder_id?: number | null;
+  /**
+   * B-090: agent run is in-flight for this session (in-memory gate).
+   * Distinct from `active` (agent's write target) and viewed chat in UI.
+   */
+  is_running?: boolean;
 };
 
 /** Where the preview overlay renders: slide-in panel on the right, or fullscreen modal. */

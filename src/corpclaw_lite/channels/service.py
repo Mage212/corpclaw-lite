@@ -22,8 +22,23 @@ __all__ = [
     "AgentRequestCallbacks",
     "AgentRequestResult",
     "AgentRequestService",
+    "RunningRequest",
     "is_llm_transport_error",
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class RunningRequest:
+    """In-flight workflow metadata for a single user (B-090 / DC-011).
+
+    ``session_id`` is set only for long agent runs (badge + reject title).
+    Short mutations (create/activate/delete/reset/compress) hold the mutex with
+    ``session_id=None`` so the chat-list badge does not flicker.
+    """
+
+    session_id: int | None = None
+    title: str | None = None
+
 
 _LLM_TRANSPORT_ERROR_NAMES = {
     "APIConnectionError",
@@ -119,7 +134,7 @@ class AgentRequestService:
         self._activity_logger = activity_logger
         self._llm_provider_name = llm_provider_name
         self._llm_base_url = llm_base_url
-        self._active_user_requests: set[int] = set()
+        self._active_user_requests: dict[int, RunningRequest] = {}
         self._active_user_requests_lock = asyncio.Lock()
 
     def get_user_workspace(self, user: User) -> Path:
@@ -128,18 +143,36 @@ class AgentRequestService:
         workspace.mkdir(parents=True, exist_ok=True)
         return workspace
 
-    async def try_start_user_request(self, user_id: int) -> bool:
-        """Return False when the user already has an active workflow."""
+    async def try_start_user_request(
+        self,
+        user_id: int,
+        *,
+        session_id: int | None = None,
+        title: str | None = None,
+    ) -> bool:
+        """Return False when the user already has an active workflow.
+
+        Pass ``session_id`` (and optional ``title``) only for long agent runs so
+        B-090 can expose is_running + reject reason. Short mutations omit them.
+        """
         async with self._active_user_requests_lock:
             if user_id in self._active_user_requests:
                 return False
-            self._active_user_requests.add(user_id)
+            self._active_user_requests[user_id] = RunningRequest(
+                session_id=session_id,
+                title=title,
+            )
             return True
 
-    async def finish_user_request(self, user_id: int) -> None:
-        """Mark a user's active workflow as finished."""
+    async def finish_user_request(self, user_id: int) -> RunningRequest | None:
+        """Mark a user's active workflow as finished; return what was held (if any)."""
         async with self._active_user_requests_lock:
-            self._active_user_requests.discard(user_id)
+            return self._active_user_requests.pop(user_id, None)
+
+    async def get_running_request(self, user_id: int) -> RunningRequest | None:
+        """Return in-flight metadata for *user_id*, or None if idle."""
+        async with self._active_user_requests_lock:
+            return self._active_user_requests.get(user_id)
 
     async def active_user_count(self) -> int:
         """Number of users with an in-flight workflow (not LLM slot count)."""

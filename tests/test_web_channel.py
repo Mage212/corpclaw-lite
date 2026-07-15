@@ -1019,8 +1019,11 @@ async def test_web_reset_context_respects_active_request_lock() -> None:
             self.reset_calls = 0
             self.finished: list[int] = []
 
-        async def try_start_user_request(self, _user_id: int) -> bool:
+        async def try_start_user_request(self, _user_id: int, **_kwargs: object) -> bool:
             return not self.active
+
+        async def get_running_request(self, _user_id: int) -> None:
+            return None
 
         async def finish_user_request(self, user_id: int) -> None:
             self.finished.append(user_id)
@@ -1049,8 +1052,11 @@ async def test_web_reset_context_clears_usage_snapshot() -> None:
             self.reset_calls = 0
             self.finished: list[int] = []
 
-        async def try_start_user_request(self, _user_id: int) -> bool:
+        async def try_start_user_request(self, _user_id: int, **_kwargs: object) -> bool:
             return True
+
+        async def get_running_request(self, _user_id: int) -> None:
+            return None
 
         async def finish_user_request(self, user_id: int) -> None:
             self.finished.append(user_id)
@@ -1084,8 +1090,11 @@ async def test_web_reset_context_clears_usage_snapshot() -> None:
 @pytest.mark.asyncio
 async def test_web_reset_context_archives_web_chat_session(tmp_path: Path) -> None:
     class FakeService:
-        async def try_start_user_request(self, _user_id: int) -> bool:
+        async def try_start_user_request(self, _user_id: int, **_kwargs: object) -> bool:
             return True
+
+        async def get_running_request(self, _user_id: int) -> None:
+            return None
 
         async def finish_user_request(self, _user_id: int) -> None:
             return None
@@ -1308,8 +1317,11 @@ async def test_compress_active_context_success(tmp_path: Path) -> None:
         def __init__(self) -> None:
             self.compress_calls = 0
 
-        async def try_start_user_request(self, _user_id: int) -> bool:
+        async def try_start_user_request(self, _user_id: int, **_kwargs: object) -> bool:
             return True
+
+        async def get_running_request(self, _user_id: int) -> None:
+            return None
 
         async def finish_user_request(self, _user_id: int) -> None:
             return None
@@ -1338,8 +1350,11 @@ async def test_compress_active_context_propagates_failure(tmp_path: Path) -> Non
     forwards the failure (ok=False) without raising."""
 
     class FakeCompressService:
-        async def try_start_user_request(self, _user_id: int) -> bool:
+        async def try_start_user_request(self, _user_id: int, **_kwargs: object) -> bool:
             return True
+
+        async def get_running_request(self, _user_id: int) -> None:
+            return None
 
         async def finish_user_request(self, _user_id: int) -> None:
             return None
@@ -1369,8 +1384,11 @@ async def test_compress_active_context_with_explicit_session_id(tmp_path: Path) 
         def __init__(self) -> None:
             self.passed_session_id: int | None = None
 
-        async def try_start_user_request(self, _user_id: int) -> bool:
+        async def try_start_user_request(self, _user_id: int, **_kwargs: object) -> bool:
             return True
+
+        async def get_running_request(self, _user_id: int) -> None:
+            return None
 
         async def finish_user_request(self, _user_id: int) -> None:
             return None
@@ -1403,8 +1421,11 @@ async def test_compress_rejects_foreign_session_id(tmp_path: Path) -> None:
     another user's context-store via replace_context."""
 
     class SpyService:
-        async def try_start_user_request(self, _user_id: int) -> bool:
+        async def try_start_user_request(self, _user_id: int, **_kwargs: object) -> bool:
             return True
+
+        async def get_running_request(self, _user_id: int) -> None:
+            return None
 
         async def finish_user_request(self, _user_id: int) -> None:
             return None
@@ -1439,8 +1460,11 @@ async def test_compress_rejects_nonexistent_session_id(tmp_path: Path) -> None:
     """B-063 S3-audit F1: compressing a non-existent session_id is rejected."""
 
     class SpyService:
-        async def try_start_user_request(self, _user_id: int) -> bool:
+        async def try_start_user_request(self, _user_id: int, **_kwargs: object) -> bool:
             return True
+
+        async def get_running_request(self, _user_id: int) -> None:
+            return None
 
         async def finish_user_request(self, _user_id: int) -> None:
             return None

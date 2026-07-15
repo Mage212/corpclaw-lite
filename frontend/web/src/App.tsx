@@ -192,6 +192,31 @@ function Workspace({
     [session.csrf_token]
   );
 
+  const handleSessionRunningState = useCallback(
+    (state: { session_id: number; is_running: boolean; title?: string }) => {
+      setChats((current) =>
+        current.map((chat) => {
+          if (state.is_running) {
+            // Only one agent run per user — clear other badges, set this one.
+            if (chat.id === state.session_id) {
+              return {
+                ...chat,
+                is_running: true,
+                title: state.title !== undefined && state.title.length > 0 ? state.title : chat.title
+              };
+            }
+            return chat.is_running ? { ...chat, is_running: false } : chat;
+          }
+          if (chat.id === state.session_id && chat.is_running) {
+            return { ...chat, is_running: false };
+          }
+          return chat;
+        })
+      );
+    },
+    []
+  );
+
   const chatSession = useWebChatSession({
     csrf: session.csrf_token,
     depthMode,
@@ -202,7 +227,8 @@ function Workspace({
     onChatActivated: () => setChatId(null),
     onChatRenamed: refreshChats,
     onChatListChanged: refreshChats,
-    onSystemLoad: setSystemLoad
+    onSystemLoad: setSystemLoad,
+    onSessionRunningState: handleSessionRunningState
   });
 
   useEffect(() => {

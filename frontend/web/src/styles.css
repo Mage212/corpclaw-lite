@@ -1203,6 +1203,23 @@ a {
   white-space: nowrap;
 }
 
+/* B-090: agent run in-flight (distinct from viewed / active-session). */
+.chat-item.is-running .chat-item-main {
+  font-weight: 600;
+}
+
+.chat-item-running {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: lowercase;
+  color: #0f766e;
+  background: rgba(13, 148, 136, 0.12);
+  padding: 1px 7px;
+  border-radius: 999px;
+}
+
 .chat-item-meta {
   flex-shrink: 0;
   color: var(--muted-2);
