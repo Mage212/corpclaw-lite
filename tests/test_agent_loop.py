@@ -2208,7 +2208,7 @@ async def test_compress_now_persists_compressed_context(
 
     assert ok is True
     assert "сжат" in message
-    history = await store.list_context(session_id)
+    history = await store.list_context(session_id, user_id=str(test_user.id))
     assert len(history) == 2
     assert history[0]["content"] == "[Context Summary] compressed"
     assert history[1]["content"] == "latest"
@@ -2248,7 +2248,7 @@ async def test_compress_now_too_few_messages_is_noop(
 
     assert ok is False
     assert "мало" in message
-    history = await store.list_context(session_id)
+    history = await store.list_context(session_id, user_id=str(test_user.id))
     assert len(history) == 1
 
 
@@ -2299,7 +2299,7 @@ async def test_agent_loop_persists_full_context_with_session_id(
 
     await loop.run(test_user, "call echo", session_id=session_id, channel="test")
 
-    ctx = await store.list_context(session_id)
+    ctx = await store.list_context(session_id, user_id=str(test_user.id))
     # Expected: user / assistant(tool_calls) / tool / assistant(final) / system tools note
     assert len(ctx) == 5
     assert ctx[0]["role"] == "user"
@@ -2382,8 +2382,8 @@ async def test_context_target_isolates_concurrent_runs(
         loop.run(user_b, "hello from B", session_id=session_b, channel="web"),
     )
 
-    ctx_a = await store.list_context(session_a)
-    ctx_b = await store.list_context(session_b)
+    ctx_a = await store.list_context(session_a, user_id=str(user_a.id))
+    ctx_b = await store.list_context(session_b, user_id=str(user_b.id))
     # Each session got exactly its own user message — no cross-contamination.
     assert any(m["content"] == "hello from A" for m in ctx_a)
     assert not any(m["content"] == "hello from B" for m in ctx_a)
@@ -2577,7 +2577,7 @@ async def test_compress_now_syncs_context_store(
 
     # The context store should now hold the COMPRESSED messages, not the
     # original 12. Without F2 it would still have 12 (no-op).
-    ctx = await store.list_context(session_id)
+    ctx = await store.list_context(session_id, user_id=str(test_user.id))
     assert len(ctx) == 2
     assert ctx[0]["content"] == "[Summary] compressed"
     assert ctx[1]["content"] == "latest"
@@ -2755,7 +2755,7 @@ async def test_compress_from_context_store_full_schema(
     assert "сжат" in msg
 
     # Context-store should hold the COMPRESSED messages (2, not 14).
-    ctx = await store.list_context(session_id)
+    ctx = await store.list_context(session_id, user_id=str(test_user.id))
     assert len(ctx) == 2
     assert ctx[0]["content"] == "[Summary] compressed"
 
@@ -2836,7 +2836,7 @@ async def test_midrun_compress_rewrites_context_store(
         await store.append_context(
             session_id=session_id, user_id=str(test_user.id), role="assistant", content=f"a{i}"
         )
-    before = await store.list_context(session_id)
+    before = await store.list_context(session_id, user_id=str(test_user.id))
     assert len(before) == 12
 
     stub = _AlwaysCompressStub()
@@ -2861,7 +2861,7 @@ async def test_midrun_compress_rewrites_context_store(
     assert stub.compress_calls >= 1
     # Store-first: compressor saw the durable transcript (≥12), not a tiny window.
     assert stub.last_input_len >= 12
-    after = await store.list_context(session_id)
+    after = await store.list_context(session_id, user_id=str(test_user.id))
     # Rewritten to stub output + possibly appended user/assistant from this run.
     # At minimum the pre-run bulk is gone (not still 12+ uncompressed history alone).
     assert any(m.get("content") == "[Summary] mid-run" for m in after)
@@ -2978,7 +2978,7 @@ async def test_midrun_store_write_failure_falls_back_to_memory(
     assert stub.compress_calls >= 1
     # Restore and verify store still has original bulk (write failed).
     store.replace_context = original_replace  # type: ignore[method-assign]
-    ctx = await store.list_context(session_id)
+    ctx = await store.list_context(session_id, user_id=str(test_user.id))
     assert len(ctx) >= 12
 
 
@@ -3062,7 +3062,7 @@ async def test_terminal_tool_no_double_persist(
 
     await loop.run(test_user, "echo", session_id=session_id, channel="web")
 
-    ctx = await store.list_context(session_id)
+    ctx = await store.list_context(session_id, user_id=str(test_user.id))
     # user, assistant(tool_calls), assistant(final), system tools note — NO tool-role.
     assert len(ctx) == 4
     assert all(m["role"] != "tool" for m in ctx)

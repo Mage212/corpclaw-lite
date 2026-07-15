@@ -2053,7 +2053,7 @@ async def test_chat_context_store_append_list_roundtrip(tmp_path: Path) -> None:
         session_id=session_id, user_id="7", role="assistant", content="Готово!"
     )
 
-    ctx = await store.list_context(session_id)
+    ctx = await store.list_context(session_id, user_id="7")
     assert len(ctx) == 4
     assert ctx[0] == {"role": "user", "content": "нормализуй Excel"}
     assert ctx[1]["role"] == "assistant"
@@ -2090,7 +2090,7 @@ async def test_chat_context_store_seq_ordering(tmp_path: Path) -> None:
     s3 = await store.append_context(session_id=session_id, user_id="7", role="user", content="c")
     assert (s1, s2, s3) == (1, 2, 3)
 
-    ctx = await store.list_context(session_id)
+    ctx = await store.list_context(session_id, user_id="7")
     assert [m["content"] for m in ctx] == ["a", "b", "c"]
 
 
@@ -2106,10 +2106,10 @@ async def test_chat_context_store_clear_and_replace(tmp_path: Path) -> None:
     await store.append_context(session_id=session_id, user_id="7", role="assistant", content="old2")
     assert store.has_context(session_id)
 
-    deleted = await store.clear_context(session_id)
+    deleted = await store.clear_context(session_id, user_id="7")
     assert deleted == 2
     assert not store.has_context(session_id)
-    assert await store.list_context(session_id) == []
+    assert await store.list_context(session_id, user_id="7") == []
 
     await store.replace_context(
         session_id=session_id,
@@ -2119,7 +2119,7 @@ async def test_chat_context_store_clear_and_replace(tmp_path: Path) -> None:
             {"role": "assistant", "content": "new2", "reasoning": "summarized"},
         ],
     )
-    ctx = await store.list_context(session_id)
+    ctx = await store.list_context(session_id, user_id="7")
     assert len(ctx) == 2
     assert ctx[0]["content"] == "new1"
     assert ctx[1]["content"] == "new2"
@@ -2138,7 +2138,7 @@ async def test_chat_context_store_cascade_on_session_delete(tmp_path: Path) -> N
 
     await ws.delete_session("7", session_id)
     assert not store.has_context(session_id)
-    assert await store.list_context(session_id) == []
+    assert await store.list_context(session_id, user_id="7") == []
 
 
 @pytest.mark.asyncio
@@ -2171,10 +2171,16 @@ async def test_chat_context_store_replace_does_not_relabel_foreign_rows(tmp_path
         )
 
     # Victim's original rows must be untouched — no silent re-attribution.
-    ctx = await store.list_context(victim_session)
+    ctx = await store.list_context(victim_session, user_id="8")
     contents = [m["content"] for m in ctx]
     assert contents == ["victim row"]
     assert "attacker row" not in contents
+    # list/clear scoped by user_id: attacker cannot read or wipe victim rows.
+    assert await store.list_context(victim_session, user_id="7") == []
+    assert await store.clear_context(victim_session, user_id="7") == 0
+    assert await store.list_context(victim_session, user_id="8") == [
+        {"role": "user", "content": "victim row"}
+    ]
 
 
 @pytest.mark.asyncio
@@ -2200,7 +2206,7 @@ async def test_chat_context_store_unique_seq_under_concurrent_append(tmp_path: P
         )
     )
 
-    ctx = await store.list_context(session_id)
+    ctx = await store.list_context(session_id, user_id="7")
     assert len(ctx) == 8
     # Every content is distinct and present (no lost inserts).
     contents = {m["content"] for m in ctx}
@@ -2257,7 +2263,7 @@ async def test_restore_user_context_validates_store_has_messages(tmp_path: Path)
     assert restored is True
     facts = await memory.recall_facts(user.memory_key())
     assert any(f["key"] == "role" for f in facts)
-    ctx = await store.list_context(session_id)
+    ctx = await store.list_context(session_id, user_id="7")
     assert any(m.get("content") == "hi" for m in ctx)
 
 

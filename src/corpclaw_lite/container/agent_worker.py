@@ -102,10 +102,10 @@ def process_request() -> None:
     try:
         req = json.loads(input_data)
 
-        # Verify — in the container env, CORPCLAW_IPC_SECRET is injected
+        # Verify — secret is injected only for this docker-exec process (-e),
+        # not the long-lived container create environment.
         auth = IPCAuth()
-        # Clear secret from process environment to reduce exposure window.
-        # IPCAuth.__init__ already stored the secret internally.
+        # Clear secret from process environment after loading into IPCAuth.
         os.environ.pop("CORPCLAW_IPC_SECRET", None)
         payload = auth.verify(req)
 

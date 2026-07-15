@@ -6,6 +6,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Security hardening sprint 1.** User merge no longer fails on post-D-078
+  facts-only `memory.db` (legacy `messages` table optional). `web_fetch` SSRF
+  denies non-global addresses including CGNAT `100.64/10`. Extension reload API
+  requires admin. `ChatContextStore.list_context` / `clear_context` require
+  `user_id`. IPC secret is not stored in long-lived container env; passed only
+  via `docker exec -e` to the short-lived worker (idle CMD is `sleep infinity`).
+
 ### Added
 
 - **B-140 web UI «Задачи».** Sidebar entry + `ScheduleView`: list

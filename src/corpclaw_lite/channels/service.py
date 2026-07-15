@@ -260,7 +260,7 @@ class AgentRequestService:
                 )
                 return False
         try:
-            messages = await store.list_context(session_id)
+            messages = await store.list_context(session_id, user_id=user.memory_key())
         except Exception:
             logger.warning(
                 "[session=%s] restore_user_context: context-store load failed",

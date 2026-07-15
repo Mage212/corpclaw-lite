@@ -509,7 +509,7 @@ class AgentLoop:
         if store is None or compressor is None:
             return None, 0, "unavailable"
         try:
-            messages = await store.list_context(session_id)
+            messages = await store.list_context(session_id, user_id=str(user_id))
         except Exception:
             logger.warning("[session=%s] compress: context-store load failed", session_id)
             return None, 0, "load_failed"
@@ -1707,7 +1707,9 @@ class AgentLoop:
         full_history: list[dict[str, Any]] | None = None
         if self._chat_context_store is not None and session_id is not None:
             try:
-                full_history = await self._chat_context_store.list_context(session_id)
+                full_history = await self._chat_context_store.list_context(
+                    session_id, user_id=mem_key
+                )
             except Exception:
                 logger.warning("[session=%s] context-store load failed", session_id, exc_info=True)
                 full_history = []

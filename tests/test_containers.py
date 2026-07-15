@@ -151,6 +151,8 @@ def test_docker_args_with_network_policy():
     env = args["environment"]
     assert isinstance(env, dict)
     assert env["CORPCLAW_USER_ID"] == "1"
+    # IPC secret must not live in long-lived container create env
+    assert "CORPCLAW_IPC_SECRET" not in env
     assert args["network_mode"] == "none"
 
 

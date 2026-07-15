@@ -233,21 +233,29 @@ class ChatContextStore:
     # ------------------------------------------------------------------
     # Read
 
-    async def list_context(self, session_id: int) -> list[dict[str, Any]]:
-        """Return the session's LLM-facing context in chronological order."""
-        return await run_in_thread(self._sync_list_context, session_id=int(session_id))
+    async def list_context(self, session_id: int, *, user_id: str) -> list[dict[str, Any]]:
+        """Return the session's LLM-facing context in chronological order.
 
-    def _sync_list_context(self, *, session_id: int) -> list[dict[str, Any]]:
+        ``user_id`` is required so a foreign ``session_id`` cannot load another
+        user's transcript (defense-in-depth; callers must still ownership-check).
+        """
+        return await run_in_thread(
+            self._sync_list_context,
+            session_id=int(session_id),
+            user_id=str(user_id),
+        )
+
+    def _sync_list_context(self, *, session_id: int, user_id: str) -> list[dict[str, Any]]:
         with db_connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 """
                 SELECT role, content, tool_calls, tool_call_id, name, reasoning, seq
                 FROM web_chat_context
-                WHERE session_id = ?
+                WHERE session_id = ? AND user_id = ?
                 ORDER BY seq ASC
                 """,
-                (session_id,),
+                (session_id, user_id),
             ).fetchall()
         out: list[dict[str, Any]] = []
         for row in rows:
@@ -272,13 +280,23 @@ class ChatContextStore:
             out.append(msg)
         return out
 
-    async def clear_context(self, session_id: int) -> int:
-        """Delete all context rows for a session. Returns the deleted count."""
-        return await run_in_thread(self._sync_clear_context, session_id=int(session_id))
+    async def clear_context(self, session_id: int, *, user_id: str) -> int:
+        """Delete all context rows for a session owned by ``user_id``.
 
-    def _sync_clear_context(self, *, session_id: int) -> int:
+        Returns the deleted count (0 when session is foreign or empty).
+        """
+        return await run_in_thread(
+            self._sync_clear_context,
+            session_id=int(session_id),
+            user_id=str(user_id),
+        )
+
+    def _sync_clear_context(self, *, session_id: int, user_id: str) -> int:
         with db_connect(self.db_path) as conn:
-            cur = conn.execute("DELETE FROM web_chat_context WHERE session_id = ?", (session_id,))
+            cur = conn.execute(
+                "DELETE FROM web_chat_context WHERE session_id = ? AND user_id = ?",
+                (session_id, user_id),
+            )
         return int(cur.rowcount or 0)
 
     def has_context(self, session_id: int) -> bool:

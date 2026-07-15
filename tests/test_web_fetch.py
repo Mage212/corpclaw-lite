@@ -58,8 +58,17 @@ def test_is_private_ip() -> None:
     assert _is_private_ip("10.0.0.1")
     assert _is_private_ip("192.168.1.1")
     assert _is_private_ip("172.16.0.1")
+    assert _is_private_ip("169.254.169.254")  # link-local / cloud metadata
+    assert _is_private_ip("100.64.0.1")  # CGNAT shared address space
+    assert _is_private_ip("100.127.1.1")
+    assert _is_private_ip("224.0.0.1")  # multicast (not is_global)
     assert not _is_private_ip("8.8.8.8")
     assert not _is_private_ip("1.1.1.1")
+
+
+def test_check_url_safety_blocks_cgnat() -> None:
+    assert _check_url_safety("http://100.64.0.1/internal") is not None
+    assert _check_url_safety("http://100.127.255.255/") is not None
 
 
 def test_check_url_safety_blocks_private() -> None:

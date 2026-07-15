@@ -48,7 +48,8 @@ RUN mkdir -p /workspace && chown agent:agent /workspace
 USER agent
 ENV PYTHONPATH=/app/src
 
-# Default command — runs as the IPC worker for docker exec
-# In practice, docker exec overrides this with:
-#   docker exec -i corpclaw_agent_{user_id} python -m corpclaw_lite.container.agent_worker
-CMD ["python", "-m", "corpclaw_lite.container.agent_worker"]
+# Idle keep-alive. Tool calls use a fresh process via:
+#   docker exec -e CORPCLAW_IPC_SECRET=… -i corpclaw_agent_{id} \
+#     python -m corpclaw_lite.container.agent_worker
+# Secret is NOT in the image/create env — only injected on each exec.
+CMD ["sleep", "infinity"]

@@ -109,9 +109,13 @@ class ContainerIPC:
         signed_message = self.auth.sign(payload)
         input_data = (json.dumps(signed_message) + "\n").encode("utf-8")
 
+        # Pass IPC secret only for this exec process (not container create env).
+        secret_str = self.auth.secret_for_exec_env()
         cmd = [
             "docker",
             "exec",
+            "-e",
+            f"CORPCLAW_IPC_SECRET={secret_str}",
             "-i",
             name,
             "python",

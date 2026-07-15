@@ -76,10 +76,16 @@ async def test_send_tool_call_success(ipc, auth) -> None:
     stdout = _make_signed_response(auth, response_payload)
     proc = _mock_process(stdout=stdout, returncode=0)
 
-    with patch("asyncio.create_subprocess_exec", return_value=proc):
+    with patch("asyncio.create_subprocess_exec", return_value=proc) as mock_exec:
         result = await ipc.send_tool_call(user_id=1, tool_name="read_file", args={"path": "/a"})
 
     assert result == "file contents here"
+    # Secret is injected only on docker exec, not container create env.
+    cmd = mock_exec.call_args[0]
+    assert "docker" in cmd
+    assert "-e" in cmd
+    env_flag_idx = list(cmd).index("-e")
+    assert cmd[env_flag_idx + 1].startswith("CORPCLAW_IPC_SECRET=")
 
 
 # ── Test 4: send_tool_call error status ───────────────────────────────────────
