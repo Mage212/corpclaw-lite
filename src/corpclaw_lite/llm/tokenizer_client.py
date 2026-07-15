@@ -96,6 +96,7 @@ class TokenizerClient:
         *,
         base_url: str | None = None,
         api_key: str | None = None,
+        model: str | None = None,
         mode: TokenizerMode = "auto",
         timeout_seconds: float = 5.0,
         cache_max_entries: int = 256,
@@ -109,6 +110,7 @@ class TokenizerClient:
             raise ValueError(msg)
         self._base_url = base_url.strip() if base_url else None
         self._api_key = api_key
+        self._model = model.strip() if model else None
         self._mode: TokenizerMode = mode
         self._timeout = httpx.Timeout(timeout_seconds)
         self._cache_max_entries = cache_max_entries
@@ -129,7 +131,8 @@ class TokenizerClient:
 
     async def estimate(self, content: str) -> TokenEstimate:
         """Return token estimate; never raises for network/server failures."""
-        cache_key = _content_hash(content)
+        # Model-scoped cache: same text can tokenize differently per model.
+        cache_key = _content_hash(f"{self._model or ''}\0{content}")
         cached = self._cache_get(cache_key)
         if cached is not None:
             return TokenEstimate(
@@ -176,6 +179,10 @@ class TokenizerClient:
         headers: dict[str, str] = {}
         if self._api_key and self._api_key != "dummy":
             headers["Authorization"] = f"Bearer {self._api_key}"
+        # Multi-model llama-server (and some proxies) require ``model`` in body.
+        body: dict[str, Any] = {"content": content}
+        if self._model:
+            body["model"] = self._model
         try:
             async with httpx.AsyncClient(
                 timeout=self._timeout,
@@ -183,7 +190,7 @@ class TokenizerClient:
             ) as client:
                 response = await client.post(
                     url,
-                    json={"content": content},
+                    json=body,
                     headers=headers,
                 )
         except httpx.HTTPError as exc:
