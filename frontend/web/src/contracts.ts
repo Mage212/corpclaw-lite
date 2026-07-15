@@ -67,7 +67,8 @@ export type ServerWsEvent =
       session_id: number;
       is_running: boolean;
       title?: string;
-    };
+    }
+  | { type: "web_access"; web_access: boolean };
 
 type JsonRecord = Record<string, unknown>;
 
@@ -758,6 +759,8 @@ export function parseServerWsEvent(value: unknown): ServerWsEvent | null {
       }
       return event;
     }
+    case "web_access":
+      return { type: "web_access", web_access: value.web_access === true };
     default:
       return null;
   }

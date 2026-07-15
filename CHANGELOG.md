@@ -8,6 +8,11 @@
 
 ### Added
 
+- **B-091 web access toggle (DC-012, B+).** Work UI «Веб» toggles main-agent
+  `web_fetch` (default ON). Cache-safe (D-087): tail hint `[Web access] OFF` +
+  execute deny; does **not** rewrite SOUL/tools schema. Does **not** register
+  `web_search` on main (research subagent unchanged). WS `web_access_change` /
+  `web_access` like depth_mode.
 - **B-090 is_running (DC-011).** In-flight gate stores optional `session_id`+`title`
   for agent runs; HTTP 409 / WS errors include `running_session_id` /
   `running_session_title`; WS `session_running_state` + chat list `is_running`

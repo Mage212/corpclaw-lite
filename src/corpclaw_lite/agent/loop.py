@@ -56,6 +56,13 @@ from corpclaw_lite.agent.guards import (
 )
 from corpclaw_lite.agent.loop_state import LoopState, TurnTokens
 from corpclaw_lite.agent.task_run import TaskRun
+from corpclaw_lite.agent.web_access import (
+    WEB_FETCH_DENIED_MESSAGE,
+    get_web_access,
+    inject_web_access_hint,
+    reset_web_access,
+    set_web_access,
+)
 from corpclaw_lite.agent.workspace_context import (
     reset_workspace_root,
     set_workspace_root,
@@ -861,6 +868,7 @@ class AgentLoop:
         depth_mode: DepthMode | None = None,
         session_id: int | None = None,
         event_sink: EventSink | None = None,
+        web_access: bool = True,
     ) -> tuple[str, RunStats]:
         """Run the ReAct loop until a final answer is given or limits are reached.
 
@@ -918,6 +926,7 @@ class AgentLoop:
                 depth_mode=depth_mode,
                 session_id=session_id,
                 tokens=tokens,
+                web_access=web_access,
             )
         except BaseException:
             self._finalize_turn(tokens)
@@ -1013,6 +1022,11 @@ class AgentLoop:
                         user_message=message,
                         settings=self._settings.tool_surface,
                         profile=self._tool_surface_profile,
+                    )
+                    # B-091 / D-087: web access OFF → cache-safe tail hint (not system rewrite).
+                    state.context.messages = inject_web_access_hint(
+                        state.context.messages,
+                        enabled=get_web_access(),
                     )
                     # D-056 PR2: phase-based per-call thinking override. The
                     # policy returns RequestOptions (or None) based on the task
@@ -1600,6 +1614,7 @@ class AgentLoop:
         depth_mode: DepthMode | None,
         session_id: int | None,
         tokens: TurnTokens,
+        web_access: bool = True,
     ) -> tuple[
         LoopState,
         Provider,
@@ -1814,6 +1829,8 @@ class AgentLoop:
         # Etap 3B: set the depth-mode contextvar FIRST, so the epilogue
         # resets it no matter what. Tokens live on ``tokens`` (B-077).
         tokens.depth = set_call_depth_mode(depth_mode) if depth_mode is not None else None
+        # B-091: main web_fetch allow/deny for this run (subagents start their own run).
+        tokens.web_access = set_web_access(web_access)
         # B-063 S1 audit: bind the state.context-persist target (session_id, user_id)
         # via contextvars so concurrent runs are isolated. Reset in epilogue.
         tokens.context_target = set_context_target(session_id, str(user.id))
@@ -1844,6 +1861,8 @@ class AgentLoop:
             health.increment("active_requests", -1)
         if tokens.depth is not None:
             reset_call_depth_mode(tokens.depth)
+        if tokens.web_access is not None:
+            reset_web_access(tokens.web_access)
         if tokens.context_target is not None:
             reset_context_target(tokens.context_target)
         if tokens.capture is not None:
@@ -2067,6 +2086,21 @@ class AgentLoop:
                 f"Error: Permission denied. Your department ({user.department})"
                 f" cannot use tool '{tc.name}'."
             )
+
+        # B-091: main-agent web_fetch blocked when web access is OFF (contextvar).
+        # Subagents start their own run() with default web_access=True.
+        if tc.name == "web_fetch" and not get_web_access():
+            log_event(
+                "tool_call_finished",
+                run_id,
+                tool=tc.name,
+                tool_call_id=tc.id,
+                status="web_access_denied",
+                duration_ms=round((time.monotonic() - tool_t0) * 1000, 1),
+                result_preview=WEB_FETCH_DENIED_MESSAGE,
+                result_hash=_payload_hash(WEB_FETCH_DENIED_MESSAGE),
+            )
+            return WEB_FETCH_DENIED_MESSAGE
 
         logger.debug(
             "[user=%s] tool_call | tool=%s | args=%s",

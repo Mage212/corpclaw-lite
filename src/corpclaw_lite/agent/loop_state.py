@@ -53,6 +53,8 @@ class TurnTokens:
     capture: tuple[Any, Any] | None = None
     run_id: Any = None
     workspace: contextvars.Token[Path | None] | None = None
+    # B-091: main-agent web_fetch allow/deny for this run.
+    web_access: contextvars.Token[bool] | None = None
     # True only after health.increment("active_requests") in prologue — so epilogue
     # does not under-count when build fails before that point.
     active_request_counted: bool = False

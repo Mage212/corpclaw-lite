@@ -144,6 +144,9 @@ type UseWebChatSessionOptions = {
   onSessionRunningState?:
     | ((state: { session_id: number; is_running: boolean; title?: string }) => void)
     | undefined;
+  /** B-091: main-agent web_fetch allow (Work toggle). Default true. */
+  webAccess?: boolean;
+  onWebAccessChange?: ((enabled: boolean) => void) | undefined;
 };
 
 export type WebChatSession = {
@@ -181,7 +184,9 @@ export function useWebChatSession({
   onChatRenamed,
   onChatListChanged,
   onSystemLoad,
-  onSessionRunningState
+  onSessionRunningState,
+  webAccess = true,
+  onWebAccessChange
 }: UseWebChatSessionOptions): WebChatSession {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [status, setStatus] = useState<StatusLine>(emptyStatus);
@@ -198,6 +203,7 @@ export function useWebChatSession({
   const wsRef = useRef<WebSocket | null>(null);
   const resetSignalRef = useRef(resetSignal);
   const depthModeRef = useRef(depthMode);
+  const webAccessRef = useRef(webAccess);
   /**
    * Tracks the most recently seen request_id (from request_started/state/finished/
    * status_update). Used to stamp `request_id` onto approvals that arrive without
@@ -296,6 +302,10 @@ export function useWebChatSession({
   }, [depthMode]);
 
   useEffect(() => {
+    webAccessRef.current = webAccess;
+  }, [webAccess]);
+
+  useEffect(() => {
     let ws: WebSocket | null = null;
     let cancelled = false;
 
@@ -314,6 +324,9 @@ export function useWebChatSession({
           }
           ws?.send(
             JSON.stringify({ type: "depth_mode_change", depth_mode: depthModeRef.current })
+          );
+          ws?.send(
+            JSON.stringify({ type: "web_access_change", web_access: webAccessRef.current })
           );
         };
         ws.onclose = () => {
@@ -367,7 +380,8 @@ export function useWebChatSession({
             onChatRenamed,
             onChatListChanged,
             onSystemLoad,
-            onSessionRunningState
+            onSessionRunningState,
+            onWebAccessChange
           });
         };
       })
@@ -407,7 +421,8 @@ export function useWebChatSession({
     onChatRenamed,
     onChatListChanged,
     onSystemLoad,
-    onSessionRunningState
+    onSessionRunningState,
+    onWebAccessChange
   ]);
 
   useEffect(() => {
@@ -415,6 +430,12 @@ export function useWebChatSession({
       wsRef.current.send(JSON.stringify({ type: "depth_mode_change", depth_mode: depthMode }));
     }
   }, [depthMode]);
+
+  useEffect(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "web_access_change", web_access: webAccess }));
+    }
+  }, [webAccess]);
 
   useEffect(() => {
     if (resetSignal === resetSignalRef.current) return;
@@ -479,6 +500,7 @@ type WsEventHandlers = {
   onSessionRunningState:
     | ((state: { session_id: number; is_running: boolean; title?: string }) => void)
     | undefined;
+  onWebAccessChange: ((enabled: boolean) => void) | undefined;
   onChatListChanged: (() => void) | undefined;
 };
 
@@ -504,7 +526,8 @@ function handleWsEvent(event: ServerWsEvent, handlers: WsEventHandlers) {
     onChatRenamed,
     onChatListChanged,
     onSystemLoad,
-    onSessionRunningState
+    onSessionRunningState,
+    onWebAccessChange
   } = handlers;
   if (event.type === "chat_history") {
     setMessages(event.messages);
@@ -768,5 +791,7 @@ function handleWsEvent(event: ServerWsEvent, handlers: WsEventHandlers) {
       is_running: event.is_running,
       ...(event.title !== undefined ? { title: event.title } : {})
     });
+  } else if (event.type === "web_access") {
+    onWebAccessChange?.(event.web_access);
   }
 }

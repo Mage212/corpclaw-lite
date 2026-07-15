@@ -1729,6 +1729,8 @@ class WebChannelOrchestrator:
         # Etap 3: depth mode (Fast/Think) is a per-connection UI state, separate
         # from `mode` (tools on/off, derived from chat section). Default = think.
         depth_mode: str = "think"
+        # B-091: main-agent web_fetch allow (Work UI toggle); default ON.
+        web_access: bool = True
 
         async def send(payload: dict[str, object]) -> None:
             await self._send_ws(ws, payload)
@@ -1764,6 +1766,7 @@ class WebChannelOrchestrator:
             await send(await self._build_system_load())
         except Exception as e:
             logger.debug("system_load on connect failed: %s", e)
+        await send({"type": "web_access", "web_access": web_access})
         # B-090: re-push running badge so reconnecting tabs see is_running.
         if self._service is not None:
             running = await self._service.get_running_request(user.id)
@@ -2001,6 +2004,7 @@ class WebChannelOrchestrator:
                     message=text,
                     mode=effective_mode,
                     depth_mode=depth_mode,
+                    web_access=web_access if effective_mode == "execute" else True,
                     channel="web",
                     session_id=user_message.session_id if user_message is not None else None,
                     callbacks=AgentRequestCallbacks(
@@ -2165,6 +2169,12 @@ class WebChannelOrchestrator:
                     if requested_depth in {"fast", "think", "research"}:
                         depth_mode = str(requested_depth)
                         await send({"type": "depth_mode", "depth_mode": depth_mode})
+                elif event_type == "web_access_change":
+                    # B-091: Work UI toggle for main-agent web_fetch (default ON).
+                    requested_web = payload.get("web_access")
+                    if isinstance(requested_web, bool):
+                        web_access = requested_web
+                        await send({"type": "web_access", "web_access": web_access})
                 elif event_type == "load_chat":
                     # Load a specific chat's transcript. Does NOT activate the
                     # chat or touch agent context — the client uses POST
