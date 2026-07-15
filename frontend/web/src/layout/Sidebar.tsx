@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { Bell, ChevronDown, LogOut, Settings2, Sparkles } from "lucide-react";
+import { Bell, CalendarClock, ChevronDown, LogOut, Settings2, Sparkles } from "lucide-react";
 import {
   AGENT_CONTEXT_LABEL,
-  COMING_SOON_LABEL,
   EXTENSIONS_LABEL,
+  SCHEDULE_LABEL,
   SYSTEM_INBOX_LABEL,
   sidebarSectionLabel
 } from "../i18n/ru";
@@ -26,6 +26,9 @@ export type SidebarProps = {
   onDeleteChat: (id: number) => void;
   onOpenExtensions: () => void;
   onOpenAgentContext: () => void;
+  /** B-140: open scheduled tasks management view. */
+  onOpenSchedule: () => void;
+  schedulePendingCount?: number;
   onLogout: () => void;
 };
 
@@ -44,6 +47,8 @@ export function Sidebar({
   onDeleteChat,
   onOpenExtensions,
   onOpenAgentContext,
+  onOpenSchedule,
+  schedulePendingCount = 0,
   onLogout
 }: SidebarProps) {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
@@ -78,6 +83,15 @@ export function Sidebar({
       <SectionSwitcher value={section} onChange={onSectionChange} />
 
       <nav className="sidebar-management" aria-label="Управление агентом">
+        <button onClick={onOpenSchedule} title={SCHEDULE_LABEL}>
+          <CalendarClock size={16} />
+          <span>{SCHEDULE_LABEL}</span>
+          {schedulePendingCount > 0 && (
+            <span className="schedule-nav-badge" aria-label={`${schedulePendingCount} ожидают`}>
+              {schedulePendingCount}
+            </span>
+          )}
+        </button>
         <button onClick={onOpenExtensions} title={EXTENSIONS_LABEL}>
           <Settings2 size={16} />
           <span>{EXTENSIONS_LABEL}</span>

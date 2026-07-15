@@ -210,6 +210,45 @@ export type ChatSummary = {
   is_running?: boolean;
 };
 
+/** B-140 / B-141: schedule task lifecycle status (consent-first). */
+export type ScheduleTaskStatus = "pending" | "active" | "paused" | "done" | "dismissed";
+
+export type ScheduleKind = "once" | "interval" | "cron" | "unset";
+
+export type ScheduleSpec = {
+  kind: ScheduleKind;
+  run_at?: string | null;
+  minutes?: number | null;
+  expr?: string | null;
+};
+
+/** One scheduled agent task from GET /api/schedule (public payload, no claim fields). */
+export type ScheduleTask = {
+  id: string;
+  user_id: number;
+  title: string;
+  task_text: string;
+  schedule_text: string;
+  schedule: ScheduleSpec;
+  timezone: string;
+  status: ScheduleTaskStatus;
+  enabled: boolean;
+  next_run_at: string | null;
+  last_run_at: string | null;
+  last_status: string | null;
+  run_count: number;
+  error_count: number;
+  created_at: string;
+  updated_at: string;
+  accepted_at: string | null;
+};
+
+export type ScheduleAcceptOverrides = {
+  title?: string;
+  task_text?: string;
+  schedule_text?: string;
+};
+
 /** Where the preview overlay renders: slide-in panel on the right, or fullscreen modal. */
 export type PreviewOverlayMode = "side" | "expanded";
 

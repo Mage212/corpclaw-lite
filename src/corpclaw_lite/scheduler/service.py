@@ -215,6 +215,7 @@ class SchedulerService:
         return task
 
     def _format_propose_message(self, task: ScheduledTask) -> str:
+        # B-143-lite / B-140: primary path is web «Задачи»; CLI remains for ops.
         return (
             f"Предложена задача по расписанию (ожидает подтверждения).\n\n"
             f"ID: {task.id}\n"
@@ -228,9 +229,10 @@ class SchedulerService:
                 else " (нужна распознаваемая формула при accept)"
             )
             + f"\nЧасовой пояс: {task.timezone}\n\n"
-            f"Подтвердить (CLI):\n"
+            f"Откройте «Задачи» в веб-интерфейсе, чтобы подтвердить, изменить "
+            f"или отклонить.\n\n"
+            f"CLI (альтернатива):\n"
             f"  corpclaw-lite schedule accept -u {task.user_id} -i {task.id}\n"
-            f"Отклонить:\n"
             f"  corpclaw-lite schedule dismiss -u {task.user_id} -i {task.id}\n"
         )
 

@@ -17,6 +17,10 @@ import type {
   PinsPayload,
   PendingContextPayload,
   PreviewPayload,
+  ScheduleKind,
+  ScheduleSpec,
+  ScheduleTask,
+  ScheduleTaskStatus,
   SessionPayload,
   SystemLoad,
   SystemLoadLevel,
@@ -300,6 +304,78 @@ export function parseExtensionsPayload(value: unknown): ExtensionsPayload {
     mcp: parseList("mcp"),
     plugins: parseList("plugins")
   };
+}
+
+// --- B-140 / B-141: schedule REST payload parsing ---
+
+const SCHEDULE_STATUSES: ReadonlySet<string> = new Set([
+  "pending",
+  "active",
+  "paused",
+  "done",
+  "dismissed"
+]);
+
+const SCHEDULE_KINDS: ReadonlySet<string> = new Set(["once", "interval", "cron", "unset"]);
+
+function parseScheduleSpec(value: unknown): ScheduleSpec {
+  if (!isRecord(value)) {
+    return { kind: "unset" };
+  }
+  const kindRaw = typeof value.kind === "string" ? value.kind : "unset";
+  const kind: ScheduleKind = SCHEDULE_KINDS.has(kindRaw)
+    ? (kindRaw as ScheduleKind)
+    : "unset";
+  const spec: ScheduleSpec = { kind };
+  if (typeof value.run_at === "string") spec.run_at = value.run_at;
+  else if (value.run_at === null) spec.run_at = null;
+  if (typeof value.minutes === "number" && Number.isFinite(value.minutes)) {
+    spec.minutes = value.minutes;
+  } else if (value.minutes === null) {
+    spec.minutes = null;
+  }
+  if (typeof value.expr === "string") spec.expr = value.expr;
+  else if (value.expr === null) spec.expr = null;
+  return spec;
+}
+
+export function parseScheduleTask(value: unknown): ScheduleTask {
+  const source = record(value, "schedule task");
+  const statusRaw = requiredString(source, "status", "schedule task");
+  const status: ScheduleTaskStatus = SCHEDULE_STATUSES.has(statusRaw)
+    ? (statusRaw as ScheduleTaskStatus)
+    : "pending";
+  return {
+    id: requiredString(source, "id", "schedule task"),
+    user_id: requiredNumber(source, "user_id", "schedule task"),
+    title: requiredString(source, "title", "schedule task"),
+    task_text: requiredString(source, "task_text", "schedule task"),
+    schedule_text: requiredString(source, "schedule_text", "schedule task"),
+    schedule: parseScheduleSpec(source.schedule),
+    timezone: stringValue(source.timezone, "UTC"),
+    status,
+    enabled: typeof source.enabled === "boolean" ? source.enabled : true,
+    next_run_at: nullableString(source, "next_run_at", "schedule task"),
+    last_run_at: nullableString(source, "last_run_at", "schedule task"),
+    last_status: nullableString(source, "last_status", "schedule task"),
+    run_count: typeof source.run_count === "number" ? source.run_count : 0,
+    error_count: typeof source.error_count === "number" ? source.error_count : 0,
+    created_at: stringValue(source.created_at, ""),
+    updated_at: stringValue(source.updated_at, ""),
+    accepted_at: nullableString(source, "accepted_at", "schedule task")
+  };
+}
+
+export function parseScheduleTaskList(value: unknown): ScheduleTask[] {
+  const source = record(value, "schedule list");
+  const tasks = source.tasks;
+  if (!Array.isArray(tasks)) return [];
+  return tasks.map(parseScheduleTask);
+}
+
+export function parseScheduleTaskEnvelope(value: unknown): ScheduleTask {
+  const source = record(value, "schedule task envelope");
+  return parseScheduleTask(source.task);
 }
 
 function parseWorkspaceOutput(value: unknown): WorkspaceOutputSummary {

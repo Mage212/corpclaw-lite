@@ -9,6 +9,7 @@ import {
   getExtensions,
   getSession,
   listPins,
+  listSchedule,
   login,
   logout,
   previewFile,
@@ -24,6 +25,7 @@ import { BottomDrawer } from "./layout/BottomDrawer";
 import { AgentContextView } from "./layout/AgentContextView";
 import { ExtensionsView } from "./layout/ExtensionsView";
 import { PreviewOverlay } from "./layout/PreviewOverlay";
+import { ScheduleView } from "./layout/ScheduleView";
 import { Sidebar } from "./layout/Sidebar";
 import type {
   ChatSummary,
@@ -150,10 +152,11 @@ function Workspace({
   const [systemChat, setSystemChat] = useState<ChatSummary | null>(null);
   const [systemHasUnread, setSystemHasUnread] = useState(false);
 
-  // Etap 4/5: view state ("chat" | "extensions" | "agent-context").
-  const [view, setView] = useState<"chat" | "extensions" | "agent-context">("chat");
+  // Etap 4/5 + B-140: view state ("chat" | "extensions" | "agent-context" | "schedule").
+  const [view, setView] = useState<"chat" | "extensions" | "agent-context" | "schedule">("chat");
   const [extensions, setExtensions] = useState<ExtensionsPayload | null>(null);
   const [extensionsLoading, setExtensionsLoading] = useState(false);
+  const [schedulePendingCount, setSchedulePendingCount] = useState(0);
 
   const { cssVars, layout, startResize, setDrawerHeight } = useResizablePanels();
   const user = session.user;
@@ -223,6 +226,16 @@ function Workspace({
       .catch((error) => console.warn("Failed to reload extensions", error));
   }, [session.csrf_token, refreshExtensions]);
 
+  const refreshSchedulePending = useCallback(() => {
+    listSchedule(session.csrf_token, ["pending"])
+      .then((items) => setSchedulePendingCount(items.length))
+      .catch((error) => console.warn("Failed to load schedule pending count", error));
+  }, [session.csrf_token]);
+
+  useEffect(() => {
+    refreshSchedulePending();
+  }, [refreshSchedulePending]);
+
   const handleActivateViewedChat = useCallback(
     async (targetChatId: number): Promise<boolean> => {
       try {
@@ -264,11 +277,13 @@ function Workspace({
   const handleProactiveMessage = useCallback(
     (sessionId: number) => {
       refreshSystemChat();
+      // B-140: schedule_propose lands in system inbox — refresh pending badge.
+      refreshSchedulePending();
       if (chatId !== sessionId) {
         setSystemHasUnread(true);
       }
     },
-    [chatId, refreshSystemChat]
+    [chatId, refreshSystemChat, refreshSchedulePending]
   );
 
   const chatSession = useWebChatSession({
@@ -417,6 +432,8 @@ function Workspace({
         onLogout={doLogout}
         onOpenExtensions={handleOpenExtensions}
         onOpenAgentContext={() => setView("agent-context")}
+        onOpenSchedule={() => setView("schedule")}
+        schedulePendingCount={schedulePendingCount}
       />
 
       <section className={`main-area ${drawerOpen ? "drawer-open" : ""}`}>
@@ -493,6 +510,16 @@ function Workspace({
             <AgentContextView
               csrf={session.csrf_token}
               onBack={() => setView("chat")}
+            />
+          )}
+          {view === "schedule" && (
+            <ScheduleView
+              csrf={session.csrf_token}
+              onBack={() => {
+                setView("chat");
+                refreshSchedulePending();
+              }}
+              onPendingCountChange={setSchedulePendingCount}
             />
           )}
         </div>

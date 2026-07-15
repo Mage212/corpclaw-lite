@@ -11,6 +11,8 @@ import type {
   PinsPayload,
   PreviewPayload,
   ChatSection,
+  ScheduleAcceptOverrides,
+  ScheduleTask,
   SessionPayload,
   SidebarSection,
   TreeNode,
@@ -31,6 +33,8 @@ import {
   parsePendingContextPayload,
   parsePinsPayload,
   parsePreviewPayload,
+  parseScheduleTaskEnvelope,
+  parseScheduleTaskList,
   parseSearchPayload,
   parseSessionPayload,
   parseTreeNode,
@@ -146,6 +150,77 @@ export function deleteChat(csrf: string, chatId: number): Promise<{ ok: boolean 
     method: "DELETE",
     csrf
   });
+}
+
+// --- B-140 / B-141: schedule lifecycle ---
+
+export function listSchedule(
+  csrf: string,
+  statuses?: string[]
+): Promise<ScheduleTask[]> {
+  const params = new URLSearchParams();
+  if (statuses && statuses.length > 0) {
+    params.set("status", statuses.join(","));
+  }
+  const qs = params.toString();
+  return apiFetch(`/api/schedule${qs ? `?${qs}` : ""}`, parseScheduleTaskList, {
+    csrf
+  });
+}
+
+export function getScheduleTask(csrf: string, taskId: string): Promise<ScheduleTask> {
+  return apiFetch(`/api/schedule/${encodeURIComponent(taskId)}`, parseScheduleTaskEnvelope, {
+    csrf
+  });
+}
+
+export function acceptSchedule(
+  csrf: string,
+  taskId: string,
+  overrides: ScheduleAcceptOverrides = {}
+): Promise<ScheduleTask> {
+  return apiFetch(
+    `/api/schedule/${encodeURIComponent(taskId)}/accept`,
+    parseScheduleTaskEnvelope,
+    {
+      method: "POST",
+      csrf,
+      body: JSON.stringify(overrides)
+    }
+  );
+}
+
+export function dismissSchedule(csrf: string, taskId: string): Promise<ScheduleTask> {
+  return apiFetch(
+    `/api/schedule/${encodeURIComponent(taskId)}/dismiss`,
+    parseScheduleTaskEnvelope,
+    {
+      method: "POST",
+      csrf
+    }
+  );
+}
+
+export function pauseSchedule(csrf: string, taskId: string): Promise<ScheduleTask> {
+  return apiFetch(
+    `/api/schedule/${encodeURIComponent(taskId)}/pause`,
+    parseScheduleTaskEnvelope,
+    {
+      method: "POST",
+      csrf
+    }
+  );
+}
+
+export function resumeSchedule(csrf: string, taskId: string): Promise<ScheduleTask> {
+  return apiFetch(
+    `/api/schedule/${encodeURIComponent(taskId)}/resume`,
+    parseScheduleTaskEnvelope,
+    {
+      method: "POST",
+      csrf
+    }
+  );
 }
 
 // --- Etap 4: Extensions management ---
