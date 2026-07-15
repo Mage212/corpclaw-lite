@@ -25,6 +25,7 @@ __all__ = [
     "make_directory",
     "move_paths",
     "preview_file",
+    "read_text_for_estimate",
     "rename_path",
     "resolve_workspace_path",
     "save_upload",
@@ -430,6 +431,38 @@ async def preview_file(workspace: Path, raw_path: str) -> dict[str, object]:
     except UnicodeDecodeError:
         content = data.decode("cp1251", errors="replace")
     return {"type": "text", "entry": entry.to_dict(), "truncated": False, "content": content}
+
+
+async def read_text_for_estimate(
+    workspace: Path,
+    raw_path: str,
+    *,
+    max_bytes: int = _MAX_PREVIEW_BYTES,
+) -> str:
+    """Read a workspace text file for B-093 budget estimation.
+
+    Raises:
+        FileNotFoundError: path missing or not a file.
+        ValueError: not a text kind, or larger than ``max_bytes``.
+        PermissionError: path escapes workspace (via resolve).
+    """
+    target = resolve_workspace_path(workspace, raw_path)
+    if not target.exists() or not target.is_file():
+        raise FileNotFoundError("File not found")
+    entry = _build_entry(workspace, target)
+    if entry.kind != "text":
+        raise ValueError(
+            "Budget estimate supports text files only "
+            f"(got kind={entry.kind!r}); binary/image/PDF is B-094."
+        )
+    size = target.stat().st_size
+    if size > max_bytes:
+        raise ValueError(f"File is too large to estimate (max {max_bytes} bytes)")
+    data = await anyio.Path(target).read_bytes()
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data.decode("cp1251", errors="replace")
 
 
 async def save_upload(

@@ -16,6 +16,7 @@ from urllib.parse import quote, urlparse
 from aiohttp import WSMsgType, hdrs, web
 from aiohttp.helpers import content_disposition_header
 
+from corpclaw_lite.agent.budget_gate import estimate_content_budget
 from corpclaw_lite.agent.factory import build_agent_stack
 from corpclaw_lite.agent.loop import RunStats
 from corpclaw_lite.channels.service import (
@@ -53,6 +54,7 @@ from corpclaw_lite.channels.web.files import (
     make_directory,
     move_paths,
     preview_file,
+    read_text_for_estimate,
     rename_path,
     resolve_workspace_path,
     save_upload_stream,
@@ -68,6 +70,7 @@ from corpclaw_lite.extensions.plugins.watcher import PluginHotReloader
 from corpclaw_lite.extensions.skills.watcher import SkillHotReloader
 from corpclaw_lite.extensions.subagents.watcher import SubagentHotReloader
 from corpclaw_lite.extensions.tools.builtin.send_file import SendFileTool
+from corpclaw_lite.llm.tokenizer_client import TokenizerClient
 from corpclaw_lite.logging.agent_logger import AgentLogger, setup_logging
 from corpclaw_lite.paths import PROJECT_ROOT
 from corpclaw_lite.runtime.shutdown import install_signal_handlers
@@ -172,6 +175,8 @@ class WebChannelOrchestrator:
         # DC-008: last fan-out snapshot for rate-limit / change detection.
         self._last_system_load_payload: dict[str, object] | None = None
         self._last_system_load_broadcast_at: float = 0.0
+        # B-093: reusable token estimate client (lazy; inject in tests).
+        self._tokenizer_client: TokenizerClient | None = None
         self._started = False
 
     async def start(self) -> None:
@@ -354,6 +359,7 @@ class WebChannelOrchestrator:
         app.router.add_get("/api/files/tree", self._handle_tree_files)
         app.router.add_get("/api/files/search", self._handle_search_files)
         app.router.add_get("/api/files/preview", self._handle_preview_file)
+        app.router.add_post("/api/files/estimate-context", self._handle_estimate_context)
         app.router.add_post("/api/files/upload", self._handle_upload)
         app.router.add_post("/api/files/mkdir", self._handle_mkdir)
         app.router.add_post("/api/files/rename", self._handle_rename)
@@ -897,6 +903,86 @@ class WebChannelOrchestrator:
         if result.get("type") == "image":
             result["url"] = f"/api/files/inline?path={quote(path)}"
         return web.json_response(result)
+
+    async def _handle_estimate_context(self, request: web.Request) -> web.Response:
+        """B-093: pre-flight budget gate for add-to-context (text files only)."""
+        user = self._require_user(request)
+        payload = await self._json_payload(request)
+        raw_path = payload.get("path")
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            raise web.HTTPBadRequest(text="path is required")
+        path = raw_path.strip()
+
+        baseline = await self._baseline_tokens_for_estimate(user, payload)
+        limit = max(1, int(self._settings.agent.compression.max_context_tokens))
+
+        try:
+            content = await read_text_for_estimate(self._workspace_for(user), path)
+        except FileNotFoundError as e:
+            raise web.HTTPNotFound(text=str(e)) from e
+        except ValueError as e:
+            message = str(e)
+            if "too large" in message.lower():
+                raise web.HTTPRequestEntityTooLarge(max_size=0, actual_size=0, text=message) from e
+            raise web.HTTPBadRequest(text=message) from e
+        except PermissionError as e:
+            raise web.HTTPForbidden(text=str(e)) from e
+
+        result = await estimate_content_budget(
+            content,
+            baseline=baseline,
+            limit=limit,
+            tokenizer=self._get_tokenizer_client(),
+        )
+        body = result.to_dict()
+        body["path"] = path
+        return web.json_response(body)
+
+    async def _baseline_tokens_for_estimate(self, user: User, payload: dict[str, object]) -> int:
+        raw_baseline = payload.get("baseline_tokens")
+        if raw_baseline is not None:
+            if isinstance(raw_baseline, bool) or not isinstance(raw_baseline, int | float):
+                raise web.HTTPBadRequest(text="baseline_tokens must be a non-negative number")
+            baseline = int(raw_baseline)
+            if baseline < 0:
+                raise web.HTTPBadRequest(text="baseline_tokens must be a non-negative number")
+            return baseline
+        usage = await self._context_usage_for_user(user)
+        raw_latest = usage.get("latest_total_tokens", 0)
+        if isinstance(raw_latest, bool) or not isinstance(raw_latest, int | float):
+            return 0
+        return max(0, int(raw_latest))
+
+    def _get_tokenizer_client(self) -> TokenizerClient:
+        if self._tokenizer_client is None:
+            self._tokenizer_client = self._build_tokenizer_client()
+        return self._tokenizer_client
+
+    def _build_tokenizer_client(self) -> TokenizerClient:
+        """Build TokenizerClient from provider env (auto → heuristic if offline)."""
+        try:
+            from corpclaw_lite.config.providers import ProviderRegistry
+
+            registry = ProviderRegistry.from_env()
+            base_url: str | None = None
+            api_key: str | None = None
+            for rule in self._settings.llm.routing:
+                conn = registry.get(rule.provider)
+                if conn is not None and conn.base_url:
+                    base_url = conn.base_url
+                    api_key = conn.api_key
+                    break
+            if base_url is None:
+                for name in registry.list_all():
+                    conn = registry.get(name)
+                    if conn is not None and conn.base_url:
+                        base_url = conn.base_url
+                        api_key = conn.api_key
+                        break
+            return TokenizerClient(base_url=base_url, api_key=api_key, mode="auto")
+        except Exception:
+            logger.exception("Failed to build TokenizerClient; using heuristic mode")
+            return TokenizerClient(mode="heuristic")
 
     async def _handle_upload(self, request: web.Request) -> web.Response:
         user = self._require_user(request)

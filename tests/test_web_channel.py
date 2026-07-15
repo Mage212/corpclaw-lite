@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 from urllib.parse import quote
 
 import pytest
@@ -29,6 +30,7 @@ from corpclaw_lite.channels.web.files import (
     make_directory,
     move_paths,
     preview_file,
+    read_text_for_estimate,
     rename_path,
     resolve_workspace_path,
     save_upload,
@@ -38,6 +40,7 @@ from corpclaw_lite.channels.web.orchestrator import WebChannelOrchestrator, _Dow
 from corpclaw_lite.config.bootstrap import BootstrapLoader
 from corpclaw_lite.config.settings import RoutingRule, Settings
 from corpclaw_lite.exceptions import LLMBackendUnavailableError
+from corpclaw_lite.llm.tokenizer_client import TokenizerClient
 from corpclaw_lite.users.manager import UserManager
 from corpclaw_lite.users.models import User
 
@@ -73,6 +76,17 @@ def web_request(
 ) -> web.Request:
     request = make_mocked_request(method, path, match_info=match_info or {})
     request["user"] = user
+    return request
+
+
+def web_json_request(
+    method: str,
+    path: str,
+    user: User,
+    payload: dict[str, Any],
+) -> web.Request:
+    request = web_request(method, path, user)
+    request.json = AsyncMock(return_value=payload)  # type: ignore[method-assign]
     return request
 
 
@@ -294,6 +308,157 @@ async def test_web_image_preview_uses_inline_endpoint(tmp_path: Path) -> None:
     assert payload is not None
     assert "/api/files/inline?path=image.jpg" in payload
     assert "/api/files/download" not in payload
+
+
+@pytest.mark.asyncio
+async def test_read_text_for_estimate_text_only(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "note.txt").write_text("hello budget", encoding="utf-8")
+    (workspace / "pic.png").write_bytes(b"\x89PNG")
+    assert await read_text_for_estimate(workspace, "note.txt") == "hello budget"
+    with pytest.raises(ValueError, match="text files only"):
+        await read_text_for_estimate(workspace, "pic.png")
+    with pytest.raises(FileNotFoundError):
+        await read_text_for_estimate(workspace, "missing.txt")
+
+
+@pytest.mark.asyncio
+async def test_estimate_context_allow(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "note.txt").write_text("abcd" * 10, encoding="utf-8")
+    user = User(id=1, name="Vadim", department="engineering")
+    settings = Settings()
+    settings.agent.compression.max_context_tokens = 10_000
+    orchestrator = WebChannelOrchestrator(settings)
+    orchestrator._service = FakeWorkspaceService(workspace)  # type: ignore[assignment]
+    orchestrator._tokenizer_client = TokenizerClient(mode="heuristic")
+
+    response = await orchestrator._handle_estimate_context(
+        web_json_request(
+            "POST",
+            "/api/files/estimate-context",
+            user,
+            {"path": "note.txt", "baseline_tokens": 0},
+        )
+    )
+    body = json.loads(response.text or "{}")
+    assert response.status == 200
+    assert body["decision"] == "allow"
+    assert body["path"] == "note.txt"
+    assert body["baseline_tokens"] == 0
+    assert body["file_tokens"] > 0
+    assert body["approximate"] is True
+    assert body["limit_tokens"] == 10_000
+
+
+@pytest.mark.asyncio
+async def test_estimate_context_block(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "big.txt").write_text("x" * 400, encoding="utf-8")  # ~100 tokens
+    user = User(id=2, name="Vadim", department="engineering")
+    settings = Settings()
+    settings.agent.compression.max_context_tokens = 100
+    orchestrator = WebChannelOrchestrator(settings)
+    orchestrator._service = FakeWorkspaceService(workspace)  # type: ignore[assignment]
+    orchestrator._tokenizer_client = TokenizerClient(mode="heuristic")
+
+    response = await orchestrator._handle_estimate_context(
+        web_json_request(
+            "POST",
+            "/api/files/estimate-context",
+            user,
+            {"path": "big.txt", "baseline_tokens": 0},
+        )
+    )
+    body = json.loads(response.text or "{}")
+    assert body["decision"] == "block"
+    assert body["offer_chunked"] is False
+
+
+@pytest.mark.asyncio
+async def test_estimate_context_missing_path(tmp_path: Path) -> None:
+    user = User(id=1, name="Vadim", department="engineering")
+    orchestrator = WebChannelOrchestrator(Settings())
+    orchestrator._service = FakeWorkspaceService(tmp_path)  # type: ignore[assignment]
+    with pytest.raises(web.HTTPBadRequest):
+        await orchestrator._handle_estimate_context(
+            web_json_request("POST", "/api/files/estimate-context", user, {})
+        )
+
+
+@pytest.mark.asyncio
+async def test_estimate_context_missing_file(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    user = User(id=1, name="Vadim", department="engineering")
+    orchestrator = WebChannelOrchestrator(Settings())
+    orchestrator._service = FakeWorkspaceService(workspace)  # type: ignore[assignment]
+    orchestrator._tokenizer_client = TokenizerClient(mode="heuristic")
+    with pytest.raises(web.HTTPNotFound):
+        await orchestrator._handle_estimate_context(
+            web_json_request(
+                "POST",
+                "/api/files/estimate-context",
+                user,
+                {"path": "nope.txt", "baseline_tokens": 0},
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_estimate_context_rejects_image(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "img.jpg").write_bytes(b"jpg")
+    user = User(id=1, name="Vadim", department="engineering")
+    orchestrator = WebChannelOrchestrator(Settings())
+    orchestrator._service = FakeWorkspaceService(workspace)  # type: ignore[assignment]
+    orchestrator._tokenizer_client = TokenizerClient(mode="heuristic")
+    with pytest.raises(web.HTTPBadRequest) as exc_info:
+        await orchestrator._handle_estimate_context(
+            web_json_request(
+                "POST",
+                "/api/files/estimate-context",
+                user,
+                {"path": "img.jpg", "baseline_tokens": 0},
+            )
+        )
+    assert "text" in str(exc_info.value.text).lower()
+
+
+@pytest.mark.asyncio
+async def test_estimate_context_uses_server_baseline_when_omitted(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "note.txt").write_text("hi", encoding="utf-8")
+    user = User(id=9, name="Vadim", department="engineering")
+    settings = Settings()
+    settings.agent.compression.max_context_tokens = 10_000
+    orchestrator = WebChannelOrchestrator(settings)
+    orchestrator._service = FakeWorkspaceService(workspace)  # type: ignore[assignment]
+    orchestrator._tokenizer_client = TokenizerClient(mode="heuristic")
+    orchestrator._context_usage[user.id] = {
+        "latest_total_tokens": 500,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 500,
+        "context_limit_tokens": 10_000,
+        "context_ratio": 0.05,
+    }
+
+    response = await orchestrator._handle_estimate_context(
+        web_json_request(
+            "POST",
+            "/api/files/estimate-context",
+            user,
+            {"path": "note.txt"},
+        )
+    )
+    body = json.loads(response.text or "{}")
+    assert body["baseline_tokens"] == 500
 
 
 @pytest.mark.asyncio
