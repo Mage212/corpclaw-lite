@@ -6,6 +6,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- **B-141 schedule REST API.** HTTP lifecycle for consent-first tasks:
+  `GET /api/schedule`, `GET /api/schedule/{id}`,
+  `POST …/accept|dismiss|pause|resume` (CSRF + session). Thin wrap over
+  `SchedulerService` for web UI (B-140). No agent self-accept; no `run-now`.
+
 ### Fixed
 
 - **B-118 hardening (H1–H5).** Scheduler claim-before-run (`claimed_at` /

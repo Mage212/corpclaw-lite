@@ -429,6 +429,13 @@ class WebChannelOrchestrator:
         app.router.add_get("/api/agent-context", self._handle_get_agent_context)
         app.router.add_put("/api/agent-context", self._handle_save_agent_context)
         app.router.add_get("/api/agent-context/preview", self._handle_preview_agent_context)
+        # B-141: schedule lifecycle REST (consent-first; no agent self-accept).
+        app.router.add_get("/api/schedule", self._handle_list_schedule)
+        app.router.add_get("/api/schedule/{id}", self._handle_get_schedule)
+        app.router.add_post("/api/schedule/{id}/accept", self._handle_schedule_accept)
+        app.router.add_post("/api/schedule/{id}/dismiss", self._handle_schedule_dismiss)
+        app.router.add_post("/api/schedule/{id}/pause", self._handle_schedule_pause)
+        app.router.add_post("/api/schedule/{id}/resume", self._handle_schedule_resume)
         app.router.add_post("/api/chats/{id}/activate", self._handle_activate_chat)
         app.router.add_patch("/api/chats/{id}", self._handle_update_chat)
         app.router.add_delete("/api/chats/{id}", self._handle_delete_chat)
@@ -2095,6 +2102,136 @@ class WebChannelOrchestrator:
         # run() feeds the agent (no private-attribute reach-in, no duplicated logic).
         prompt = await self._service.build_system_prompt(user)
         return web.json_response({"prompt": prompt or ""})
+
+    # ------------------------------------------------------------------
+    # B-141: schedule REST (list / get / accept / dismiss / pause / resume).
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _schedule_task_payload(task: Any) -> dict[str, object]:
+        """Public JSON for a scheduled task (omit internal claim fields)."""
+        raw = task.to_dict() if hasattr(task, "to_dict") else dict(task)
+        body: dict[str, object] = {
+            "id": raw.get("id"),
+            "user_id": raw.get("user_id"),
+            "title": raw.get("title"),
+            "task_text": raw.get("task_text"),
+            "schedule_text": raw.get("schedule_text"),
+            "schedule": raw.get("schedule"),
+            "timezone": raw.get("timezone"),
+            "status": raw.get("status"),
+            "enabled": raw.get("enabled"),
+            "next_run_at": raw.get("next_run_at"),
+            "last_run_at": raw.get("last_run_at"),
+            "last_status": raw.get("last_status"),
+            "run_count": raw.get("run_count"),
+            "error_count": raw.get("error_count"),
+            "created_at": raw.get("created_at"),
+            "updated_at": raw.get("updated_at"),
+            "accepted_at": raw.get("accepted_at"),
+        }
+        return body
+
+    def _require_scheduler(self) -> Any:
+        sched = self._scheduler
+        if sched is None:
+            raise web.HTTPServiceUnavailable(text="Scheduler is not available.")
+        settings = getattr(sched, "_settings", None)
+        if settings is not None and not bool(getattr(settings, "enabled", True)):
+            raise web.HTTPServiceUnavailable(text="Scheduler is disabled.")
+        return sched
+
+    async def _handle_list_schedule(self, request: web.Request) -> web.Response:
+        user = self._require_user(request)
+        sched = self._require_scheduler()
+        status_q = request.query.get("status")
+        statuses: list[str] | None = None
+        if status_q:
+            allowed = {"pending", "active", "paused", "done", "dismissed"}
+            statuses = [s.strip() for s in status_q.split(",") if s.strip() in allowed]
+            if not statuses:
+                statuses = None
+        tasks = await sched.list_for_user(user, statuses=statuses)
+        return web.json_response({"tasks": [self._schedule_task_payload(t) for t in tasks]})
+
+    async def _handle_get_schedule(self, request: web.Request) -> web.Response:
+        user = self._require_user(request)
+        sched = self._require_scheduler()
+        task_id = str(request.match_info.get("id") or "")
+        task = await sched.store.get(task_id, user_id=user.id)
+        if task is None:
+            raise web.HTTPNotFound(text="Task not found.")
+        return web.json_response({"task": self._schedule_task_payload(task)})
+
+    async def _handle_schedule_accept(self, request: web.Request) -> web.Response:
+        from corpclaw_lite.scheduler.service import SchedulerError
+
+        user = self._require_user(request)
+        sched = self._require_scheduler()
+        task_id = str(request.match_info.get("id") or "")
+        try:
+            raw_body = await request.json()
+        except Exception:
+            raw_body = {}
+        body: dict[str, object] = raw_body if isinstance(raw_body, dict) else {}
+        title = body.get("title") if isinstance(body.get("title"), str) else None
+        task_text = body.get("task_text") if isinstance(body.get("task_text"), str) else None
+        schedule_text = (
+            body.get("schedule_text") if isinstance(body.get("schedule_text"), str) else None
+        )
+        try:
+            task = await sched.accept(
+                user,
+                task_id,
+                title=title,
+                task_text=task_text,
+                schedule_text=schedule_text,
+            )
+        except SchedulerError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        return web.json_response({"task": self._schedule_task_payload(task)})
+
+    async def _handle_schedule_dismiss(self, request: web.Request) -> web.Response:
+        from corpclaw_lite.scheduler.service import SchedulerError
+
+        user = self._require_user(request)
+        sched = self._require_scheduler()
+        task_id = str(request.match_info.get("id") or "")
+        try:
+            task = await sched.dismiss(user, task_id)
+        except SchedulerError as exc:
+            msg = str(exc)
+            status = 404 if "not found" in msg.lower() else 400
+            return web.json_response({"error": msg}, status=status)
+        return web.json_response({"task": self._schedule_task_payload(task)})
+
+    async def _handle_schedule_pause(self, request: web.Request) -> web.Response:
+        from corpclaw_lite.scheduler.service import SchedulerError
+
+        user = self._require_user(request)
+        sched = self._require_scheduler()
+        task_id = str(request.match_info.get("id") or "")
+        try:
+            task = await sched.pause(user, task_id)
+        except SchedulerError as exc:
+            msg = str(exc)
+            status = 404 if "not found" in msg.lower() else 400
+            return web.json_response({"error": msg}, status=status)
+        return web.json_response({"task": self._schedule_task_payload(task)})
+
+    async def _handle_schedule_resume(self, request: web.Request) -> web.Response:
+        from corpclaw_lite.scheduler.service import SchedulerError
+
+        user = self._require_user(request)
+        sched = self._require_scheduler()
+        task_id = str(request.match_info.get("id") or "")
+        try:
+            task = await sched.resume(user, task_id)
+        except SchedulerError as exc:
+            msg = str(exc)
+            status = 404 if "not found" in msg.lower() else 400
+            return web.json_response({"error": msg}, status=status)
+        return web.json_response({"task": self._schedule_task_payload(task)})
 
     # ------------------------------------------------------------------
     # Etap 2: chat history REST endpoints (list / create / activate).
