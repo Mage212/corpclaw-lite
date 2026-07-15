@@ -8,6 +8,11 @@
 
 ### Added
 
+- **B-119 / DC-031 headless-run.** `AgentRequestService.run_headless` starts a
+  task without inbound chat: DC-011 skip-if-busy, durable per-user **system**
+  session (`channel=system`), UI transcript + `source` metadata, non-sticky
+  LLM queue tag (`task_kind=headless`). CLI:
+  `corpclaw-lite headless-run -u <id> -t "…"`. FE system inbox deferred to B-120.
 - **B-117 / DC-042 review/revert UX (web-first).** List agent file mutations
   (`GET /api/files/changes`), text/binary diff
   (`GET /api/files/changes/{id}/diff`), revert via snapshot restore +
