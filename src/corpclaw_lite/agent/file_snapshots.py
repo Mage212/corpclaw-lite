@@ -96,6 +96,10 @@ class FileSnapshotStore:
         tmp.replace(backup_target)
         return rel.as_posix()
 
+    def resolve_backup_path(self, user: User, run_id: str, backup_rel: str) -> Path:
+        """Absolute path of a backup file under ``.snapshots/<run_id>/`` (B-117)."""
+        return self._snapshot_dir(user, run_id) / backup_rel
+
     # ─── restore ─────────────────────────────────────────────────────────────
 
     def restore(self, user: User, run_id: str, backup_rel: str, target: Path) -> None:

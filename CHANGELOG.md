@@ -6,6 +6,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- **B-117 / DC-042 review/revert UX (web-first).** List agent file mutations
+  (`GET /api/files/changes`), text/binary diff
+  (`GET /api/files/changes/{id}/diff`), revert via snapshot restore +
+  `mark_reverted` (`POST …/revert`). FileExplorer panel «Изменения агента».
+  Built on B-040 journal + `FileSnapshotStore`.
+
 ### Fixed
 
 - **DC-013 Phase 3 hardening (H1/H2/H3).** FE resolves attach/pin session via

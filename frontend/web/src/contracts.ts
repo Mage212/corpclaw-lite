@@ -1,4 +1,8 @@
 import type {
+  AgentFileChange,
+  AgentFileChangesPayload,
+  AgentFileDiffPayload,
+  AgentFileRevertPayload,
   AgentMode,
   ChatMessage,
   ChatSummary,
@@ -459,6 +463,52 @@ export function parsePinsPayload(value: unknown): PinsPayload {
       ? { pin: parseContextAttachment(pinRaw) }
       : {}),
     ...(typeof source.reason === "string" ? { reason: source.reason } : {})
+  };
+}
+
+export function parseAgentFileChange(value: unknown): AgentFileChange {
+  const source = record(value, "agent file change");
+  const changeId = requiredString(source, "change_id", "agent file change");
+  return {
+    change_id: changeId,
+    run_id: optionalString(source.run_id) ?? "",
+    path: requiredString(source, "path", "agent file change"),
+    op: optionalString(source.op) ?? "modify",
+    tool_name: optionalString(source.tool_name) ?? "",
+    status: optionalString(source.status) ?? "open",
+    size_bytes: optionalNumber(source.size_bytes) ?? 0,
+    created_at: optionalNumber(source.created_at) ?? 0,
+    has_backup: Boolean(source.has_backup)
+  };
+}
+
+export function parseAgentFileChangesPayload(value: unknown): AgentFileChangesPayload {
+  const source = record(value, "agent file changes");
+  const raw = source.changes;
+  const changes = Array.isArray(raw) ? raw.map((item) => parseAgentFileChange(item)) : [];
+  return { changes };
+}
+
+export function parseAgentFileDiffPayload(value: unknown): AgentFileDiffPayload {
+  const source = record(value, "agent file diff");
+  return {
+    change_id: requiredString(source, "change_id", "agent file diff"),
+    path: requiredString(source, "path", "agent file diff"),
+    kind: optionalString(source.kind) ?? "text",
+    ...(typeof source.unified_diff === "string" ? { unified_diff: source.unified_diff } : {}),
+    ...(source.truncated !== undefined ? { truncated: Boolean(source.truncated) } : {}),
+    ...(typeof source.before_hash === "string" ? { before_hash: source.before_hash } : {}),
+    ...(typeof source.after_hash === "string" ? { after_hash: source.after_hash } : {}),
+    ...(typeof source.message === "string" ? { message: source.message } : {})
+  };
+}
+
+export function parseAgentFileRevertPayload(value: unknown): AgentFileRevertPayload {
+  const source = record(value, "agent file revert");
+  return {
+    ok: Boolean(source.ok),
+    change_id: optionalString(source.change_id) ?? "",
+    action: optionalString(source.action) ?? ""
   };
 }
 

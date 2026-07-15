@@ -24,6 +24,8 @@ import {
   copyFiles,
   deleteFiles,
   downloadUrl,
+  getAgentFileDiff,
+  listAgentFileChanges,
   listFiles,
   listPins,
   loadTree,
@@ -32,11 +34,17 @@ import {
   pinContext,
   previewFile,
   renameFile,
+  revertAgentFileChange,
   searchFiles,
   unpinContext,
   uploadFiles
 } from "../api";
-import type { ContextAttachment, PinsPayload } from "../types";
+import type {
+  AgentFileChange,
+  AgentFileDiffPayload,
+  ContextAttachment,
+  PinsPayload
+} from "../types";
 import { Modal } from "../components/Modal";
 import { parseDraggedPaths } from "../contracts";
 import { displayPath, fileEntryKindLabel, ROOT_LABEL, UPLOAD_FAILED_LABEL } from "../i18n/ru";
@@ -111,6 +119,11 @@ export function FileExplorer({
     budget: 0,
     ratio: 0.25
   });
+  const [agentChanges, setAgentChanges] = useState<AgentFileChange[]>([]);
+  const [diffView, setDiffView] = useState<{
+    change: AgentFileChange;
+    diff: AgentFileDiffPayload;
+  } | null>(null);
   const entries = query.trim() ? searchResults : directory.entries;
 
   const refreshPins = useCallback(async () => {
@@ -135,16 +148,31 @@ export function FileExplorer({
     refreshPins().catch(console.error);
   }, [refreshPins]);
 
+  const refreshAgentChanges = useCallback(async () => {
+    try {
+      const payload = await listAgentFileChanges({ limit: 30, status: "open" });
+      setAgentChanges(payload.changes);
+    } catch {
+      setAgentChanges([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    refreshAgentChanges().catch(console.error);
+  }, [open, refreshAgentChanges]);
+
   const refresh = useCallback(async () => {
     setBusy(true);
     try {
       const [listing, loadedTree] = await Promise.all([listFiles(cwd), loadTree()]);
       setDirectory(listing);
       setTree(loadedTree);
+      await refreshAgentChanges();
     } finally {
       setBusy(false);
     }
-  }, [cwd]);
+  }, [cwd, refreshAgentChanges]);
 
   useEffect(() => {
     refresh().catch(console.error);
@@ -483,7 +511,96 @@ export function FileExplorer({
           </div>
         </div>
       )}
+
+      {agentChanges.length > 0 && (
+        <div className="agent-changes-panel" title="Изменения файлов, сделанные агентом">
+          <div className="agent-changes-header">
+            <span>Изменения агента ({agentChanges.length})</span>
+            <button type="button" className="icon-button" onClick={() => refreshAgentChanges()}>
+              Обновить
+            </button>
+          </div>
+          <ul className="agent-changes-list">
+            {agentChanges.map((change) => (
+              <li key={change.change_id}>
+                <button
+                  type="button"
+                  className="agent-change-item"
+                  onClick={() => {
+                    getAgentFileDiff(change.change_id)
+                      .then((diff) => setDiffView({ change, diff }))
+                      .catch((error: unknown) => {
+                        setStatusMsg(
+                          error instanceof Error ? error.message : "Не удалось загрузить diff"
+                        );
+                      });
+                  }}
+                >
+                  <span className="agent-change-path">{change.path}</span>
+                  <span className="agent-change-meta">
+                    {change.op} · {change.tool_name}
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       {statusMsg && <div className="context-files-status">{statusMsg}</div>}
+
+      {diffView && (
+        <Modal
+          title={`Diff: ${diffView.change.path}`}
+          onClose={() => setDiffView(null)}
+          footer={
+            <div className="agent-diff-actions">
+              <button type="button" className="icon-button" onClick={() => setDiffView(null)}>
+                Закрыть
+              </button>
+              <button
+                type="button"
+                className="icon-button"
+                onClick={() => {
+                  if (!window.confirm(`Откатить ${diffView.change.path}?`)) return;
+                  revertAgentFileChange(csrf, diffView.change.change_id)
+                    .then((result) => {
+                      setStatusMsg(
+                        result.action === "restored"
+                          ? `Откат: ${diffView.change.path}`
+                          : result.action === "deleted"
+                            ? `Удалён: ${diffView.change.path}`
+                            : `Уже откачено: ${diffView.change.path}`
+                      );
+                      setDiffView(null);
+                      refreshAgentChanges().catch(console.error);
+                      refresh().catch(console.error);
+                      onWorkspaceChanged?.();
+                    })
+                    .catch((error: unknown) => {
+                      setStatusMsg(error instanceof Error ? error.message : "Ошибка отката");
+                    });
+                }}
+              >
+                Откатить
+              </button>
+            </div>
+          }
+        >
+          {diffView.diff.kind === "text" || diffView.diff.kind === "create" ? (
+            <pre className="agent-diff-pre">{diffView.diff.unified_diff ?? ""}</pre>
+          ) : (
+            <p className="agent-diff-binary">
+              {diffView.diff.message ?? "Binary file — use Revert to restore backup."}
+              {diffView.diff.before_hash && (
+                <>
+                  <br />
+                  before: {diffView.diff.before_hash} → after: {diffView.diff.after_hash}
+                </>
+              )}
+            </p>
+          )}
+        </Modal>
+      )}
 
       {context && (
         <ContextMenu

@@ -1,5 +1,8 @@
 import type {
   AgentContextPayload,
+  AgentFileChangesPayload,
+  AgentFileDiffPayload,
+  AgentFileRevertPayload,
   ChatSummary,
   DirectoryPayload,
   ExtensionsPayload,
@@ -14,6 +17,9 @@ import type {
 } from "./types";
 import {
   errorMessageFromPayload,
+  parseAgentFileChangesPayload,
+  parseAgentFileDiffPayload,
+  parseAgentFileRevertPayload,
   parseChatSummaries,
   parseChatSummary,
   parseDirectoryPayload,
@@ -350,6 +356,38 @@ export function listPins(sessionId: number): Promise<PinsPayload> {
   return apiFetch(
     `/api/files/pins?session_id=${encodeURIComponent(String(sessionId))}`,
     parsePinsPayload
+  );
+}
+
+/** B-117: agent file change journal. */
+export function listAgentFileChanges(
+  options?: { limit?: number; status?: string }
+): Promise<AgentFileChangesPayload> {
+  const params = new URLSearchParams();
+  if (options?.limit != null) params.set("limit", String(options.limit));
+  if (options?.status != null) params.set("status", options.status);
+  const qs = params.toString();
+  return apiFetch(
+    `/api/files/changes${qs ? `?${qs}` : ""}`,
+    parseAgentFileChangesPayload
+  );
+}
+
+export function getAgentFileDiff(changeId: string): Promise<AgentFileDiffPayload> {
+  return apiFetch(
+    `/api/files/changes/${encodeURIComponent(changeId)}/diff`,
+    parseAgentFileDiffPayload
+  );
+}
+
+export function revertAgentFileChange(
+  csrf: string,
+  changeId: string
+): Promise<AgentFileRevertPayload> {
+  return apiFetch(
+    `/api/files/changes/${encodeURIComponent(changeId)}/revert`,
+    parseAgentFileRevertPayload,
+    { method: "POST", csrf, body: "{}" }
   );
 }
 
