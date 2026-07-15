@@ -4,6 +4,8 @@ import type {
   DirectoryPayload,
   ExtensionsPayload,
   FileEntry,
+  PendingContextPayload,
+  PinsPayload,
   PreviewPayload,
   SessionPayload,
   SidebarSection,
@@ -19,6 +21,8 @@ import {
   parseOkPayload,
   parsePathPayload,
   parsePathsPayload,
+  parsePendingContextPayload,
+  parsePinsPayload,
   parsePreviewPayload,
   parseSearchPayload,
   parseSessionPayload,
@@ -270,6 +274,83 @@ export function deleteFiles(
 
 export function downloadUrl(path: string): string {
   return `/api/files/download?path=${encodeURIComponent(path)}`;
+}
+
+/** B-094: one-shot attach to next message. */
+export function attachContext(
+  csrf: string,
+  path: string,
+  sessionId: number,
+  options?: { baselineTokens?: number; chunked?: boolean | null }
+): Promise<PendingContextPayload> {
+  const body: Record<string, unknown> = { path, session_id: sessionId };
+  if (options?.baselineTokens !== undefined) body.baseline_tokens = options.baselineTokens;
+  if (options?.chunked !== undefined) body.chunked = options.chunked;
+  return apiFetch("/api/files/attach-context", parsePendingContextPayload, {
+    method: "POST",
+    csrf,
+    body: JSON.stringify(body)
+  });
+}
+
+export function detachContext(
+  csrf: string,
+  sessionId: number,
+  path?: string
+): Promise<PendingContextPayload> {
+  const body: Record<string, unknown> =
+    path === undefined ? { all: true, session_id: sessionId } : { path, session_id: sessionId };
+  return apiFetch("/api/files/detach-context", parsePendingContextPayload, {
+    method: "POST",
+    csrf,
+    body: JSON.stringify(body)
+  });
+}
+
+export function listPendingContext(
+  sessionId: number
+): Promise<PendingContextPayload> {
+  return apiFetch(
+    `/api/files/pending-context?session_id=${encodeURIComponent(String(sessionId))}`,
+    parsePendingContextPayload
+  );
+}
+
+/** B-095: sticky pin (≤25% context). */
+export function pinContext(
+  csrf: string,
+  path: string,
+  sessionId: number,
+  options?: { chunked?: boolean | null }
+): Promise<PinsPayload> {
+  const body: Record<string, unknown> = { path, session_id: sessionId };
+  if (options?.chunked !== undefined) body.chunked = options.chunked;
+  return apiFetch("/api/files/pin-context", parsePinsPayload, {
+    method: "POST",
+    csrf,
+    body: JSON.stringify(body)
+  });
+}
+
+export function unpinContext(
+  csrf: string,
+  sessionId: number,
+  path?: string
+): Promise<PinsPayload> {
+  const body: Record<string, unknown> =
+    path === undefined ? { all: true, session_id: sessionId } : { path, session_id: sessionId };
+  return apiFetch("/api/files/unpin-context", parsePinsPayload, {
+    method: "POST",
+    csrf,
+    body: JSON.stringify(body)
+  });
+}
+
+export function listPins(sessionId: number): Promise<PinsPayload> {
+  return apiFetch(
+    `/api/files/pins?session_id=${encodeURIComponent(String(sessionId))}`,
+    parsePinsPayload
+  );
 }
 
 export function uploadFiles(

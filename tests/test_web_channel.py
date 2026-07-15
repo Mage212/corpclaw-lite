@@ -41,6 +41,7 @@ from corpclaw_lite.channels.web.files import (
     search_files,
 )
 from corpclaw_lite.channels.web.orchestrator import WebChannelOrchestrator, _DownloadGrant
+from corpclaw_lite.channels.web.pinned_context_store import PinnedContextStore
 from corpclaw_lite.config.bootstrap import BootstrapLoader
 from corpclaw_lite.config.settings import RoutingRule, Settings
 from corpclaw_lite.exceptions import LLMBackendUnavailableError
@@ -557,6 +558,69 @@ async def test_attach_context_cumulative_pending_blocks(tmp_path: Path) -> None:
             )
         )
     assert orchestrator._pending_attachments.count(user.id, session_id) == 1
+
+
+@pytest.mark.asyncio
+async def test_pin_context_under_and_over_budget(tmp_path: Path) -> None:
+    """B-095: pin allowed under 25%; blocked when sum exceeds pin budget."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    # ~2000 tokens each (ascii/4); limit 10000 → pin_budget=2500
+    (workspace / "a.txt").write_text("a" * 8000, encoding="utf-8")
+    (workspace / "b.txt").write_text("b" * 8000, encoding="utf-8")
+    user = User(id=21, name="Vadim", department="engineering")
+    settings = Settings()
+    settings.agent.compression.max_context_tokens = 10_000
+    settings.agent.pin_context_ratio = 0.25
+    orchestrator = WebChannelOrchestrator(settings)
+    orchestrator._service = FakeWorkspaceService(workspace)  # type: ignore[assignment]
+    orchestrator._tokenizer_client = TokenizerClient(mode="heuristic")
+    store = WebChatStore(tmp_path / "pin_mem.db")
+    pin_store = PinnedContextStore(tmp_path / "pin_mem.db")
+    orchestrator._chat_store = store
+    orchestrator._pinned_store = pin_store
+    session_id = await store.ensure_active_session(user.memory_key())
+
+    r1 = await orchestrator._handle_pin_context(
+        web_json_request(
+            "POST",
+            "/api/files/pin-context",
+            user,
+            {"path": "a.txt", "session_id": session_id, "chunked": False},
+        )
+    )
+    assert r1.status == 200
+    body1 = json.loads(r1.text or "{}")
+    assert body1["pin_budget"] == 2500
+    assert body1["pin_tokens"] == 2000
+    assert len(body1["pins"]) == 1
+
+    with pytest.raises(web.HTTPBadRequest):
+        await orchestrator._handle_pin_context(
+            web_json_request(
+                "POST",
+                "/api/files/pin-context",
+                user,
+                {"path": "b.txt", "session_id": session_id, "chunked": False},
+            )
+        )
+
+    r_list = await orchestrator._handle_list_pins(
+        web_request("GET", f"/api/files/pins?session_id={session_id}", user)
+    )
+    listed = json.loads(r_list.text or "{}")
+    assert listed["pin_tokens"] == 2000
+
+    await orchestrator._handle_unpin_context(
+        web_json_request(
+            "POST",
+            "/api/files/unpin-context",
+            user,
+            {"path": "a.txt", "session_id": session_id},
+        )
+    )
+    pins = await pin_store.list_pins(session_id, user.memory_key())
+    assert pins == []
 
 
 @pytest.mark.asyncio

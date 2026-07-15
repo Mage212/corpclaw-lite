@@ -114,6 +114,9 @@ agent:
     protect_tail_tokens: 3000
     summary_ratio: 0.20
     prune_min_messages: 15
+  # B-095: sticky pinned files hard cap as fraction of max_context_tokens.
+  # Re-injected each turn outside compressor middle; default 25%.
+  pin_context_ratio: 0.25
   # D-056 PR2: per-call thinking overrides based on task phase. The policy is
   # enabled by default but is a NO-OP for the main agent in its default phase
   # (no override returned), so it only takes effect in closing mode (budget

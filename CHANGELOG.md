@@ -15,6 +15,11 @@
 
 ### Added
 
+- **B-095 Pin + B-096 FE (DC-013).** Sticky pins re-injected each turn from
+  durable `web_chat_pins` (no compressor marked-blocks). Hard cap
+  `pin_context_ratio` default **25%** of context. HTTP pin/unpin/list. FileExplorer
+  menu: «В контекст (один раз)» / «Закрепить»; pin chips + ContextSizeBar pin
+  segment.
 - **B-094 Inline attachment (DC-013).** Pending workspace-file attach into the
   next user message: materialize text/image/spreadsheet/pdf, budget-gate on
   attach, optional chunked text, compose message-local blocks (D-087). HTTP

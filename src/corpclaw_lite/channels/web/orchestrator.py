@@ -26,6 +26,7 @@ from corpclaw_lite.agent.inline_attach import (
     ui_placeholder_for_attachments,
 )
 from corpclaw_lite.agent.loop import RunStats
+from corpclaw_lite.agent.pin_budget import evaluate_pin_budget, pin_budget_limit
 from corpclaw_lite.agent.vision import VisionProcessor
 from corpclaw_lite.channels.service import (
     AgentRequestCallbacks,
@@ -69,6 +70,10 @@ from corpclaw_lite.channels.web.files import (
     search_files,
 )
 from corpclaw_lite.channels.web.pending_attachments import PendingAttachmentsStore
+from corpclaw_lite.channels.web.pinned_context_store import (
+    PinnedContextRecord,
+    PinnedContextStore,
+)
 from corpclaw_lite.config.bootstrap import BootstrapLoader
 from corpclaw_lite.config.settings import Settings, WebChannelSettings
 from corpclaw_lite.exceptions import LLMBackendUnavailableError
@@ -189,6 +194,8 @@ class WebChannelOrchestrator:
         self._tokenizer_client: TokenizerClient | None = None
         # B-094: pending inline attachments + vision describe cache.
         self._pending_attachments = PendingAttachmentsStore()
+        # B-095: durable pins (wired from stack in start(); optional inject for tests).
+        self._pinned_store: PinnedContextStore | None = None
         self._vision_processor: VisionProcessor | None = None
         self._vision_cache: dict[str, str] = {}
         self._started = False
@@ -209,6 +216,8 @@ class WebChannelOrchestrator:
 
         stack = build_agent_stack(self._settings, host_tools_surface="multiuser")
         self._stack = stack
+        pinned = getattr(stack, "pinned_context_store", None)
+        self._pinned_store = pinned if isinstance(pinned, PinnedContextStore) else None
         workspace_base = (PROJECT_ROOT / self._web_settings.workspace_base).resolve()
         llm_provider_name, llm_base_url = _default_llm_endpoint(self._settings)
         self._service = AgentRequestService(
@@ -377,6 +386,9 @@ class WebChannelOrchestrator:
         app.router.add_post("/api/files/attach-context", self._handle_attach_context)
         app.router.add_post("/api/files/detach-context", self._handle_detach_context)
         app.router.add_get("/api/files/pending-context", self._handle_pending_context)
+        app.router.add_post("/api/files/pin-context", self._handle_pin_context)
+        app.router.add_post("/api/files/unpin-context", self._handle_unpin_context)
+        app.router.add_get("/api/files/pins", self._handle_list_pins)
         app.router.add_post("/api/files/upload", self._handle_upload)
         app.router.add_post("/api/files/mkdir", self._handle_mkdir)
         app.router.add_post("/api/files/rename", self._handle_rename)
@@ -831,6 +843,13 @@ class WebChannelOrchestrator:
                 await self._chat_store.reset_session(user.memory_key(), reason="/new")
             # B-094: drop pending attaches for this user (session may rotate).
             self._pending_attachments.clear_user(user.id)
+            # B-095: clear pins for active session when resetting context.
+            if self._pinned_store is not None and self._chat_store is not None:
+                try:
+                    sid = await self._chat_store.ensure_active_session(user.memory_key())
+                    await self._pinned_store.clear_session(sid, user.memory_key())
+                except Exception:
+                    logger.debug("pin clear on reset failed", exc_info=True)
             usage = self._context_usage_payload()
             self._context_usage[user.id] = usage
             self._active_request_state.pop(user.id, None)
@@ -1143,6 +1162,157 @@ class WebChannelOrchestrator:
             payload["session_id"] = raw_session
         session_id = await self._resolve_attach_session_id(user, payload)
         body = self._pending_public(user.id, session_id)
+        body["session_id"] = session_id
+        return web.json_response(body)
+
+    def _pin_ratio(self) -> float:
+        return float(getattr(self._settings.agent, "pin_context_ratio", 0.25))
+
+    def _pin_budget_payload(self, *, pin_tokens: int, pins: list[Any]) -> dict[str, object]:
+        limit = max(1, int(self._settings.agent.compression.max_context_tokens))
+        ratio = self._pin_ratio()
+        budget = pin_budget_limit(limit, ratio=ratio)
+        return {
+            "pins": [p.to_public_dict() if hasattr(p, "to_public_dict") else p for p in pins],
+            "pin_tokens": pin_tokens,
+            "pin_budget": budget,
+            "pin_ratio": ratio,
+            "context_limit_tokens": limit,
+        }
+
+    async def _handle_pin_context(self, request: web.Request) -> web.Response:
+        """B-095: materialize + pin file (≤25% context sticky budget)."""
+        user = self._require_user(request)
+        if self._pinned_store is None:
+            raise web.HTTPServiceUnavailable(text="Pin store unavailable")
+        if self._service is not None:
+            running = await self._service.get_running_request(user.id)
+            if running is not None:
+                busy = await self._busy_reject_payload(
+                    user.id, "Дождитесь завершения перед закреплением файла."
+                )
+                return self._http_busy_response(busy)
+
+        payload = await self._json_payload(request)
+        raw_path = payload.get("path")
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            raise web.HTTPBadRequest(text="path is required")
+        path = raw_path.strip()
+        session_id = await self._resolve_attach_session_id(user, payload)
+        limit = max(1, int(self._settings.agent.compression.max_context_tokens))
+        ratio = self._pin_ratio()
+        mem_key = user.memory_key()
+
+        existing = await self._pinned_store.get_pin(session_id, mem_key, path)
+        current_tokens = await self._pinned_store.total_tokens(session_id, mem_key)
+        if existing is not None:
+            current_tokens = max(0, current_tokens - existing.tokens)
+
+        # Materialize with baseline=current_tokens and limit=pin_budget so H2
+        # chunking fits within remaining pin room (not full context).
+        pin_budget = pin_budget_limit(limit, ratio=ratio)
+        remaining = max(1, pin_budget - current_tokens)
+
+        chunked_raw = payload.get("chunked")
+        chunked: bool | None
+        if chunked_raw is None:
+            chunked = None
+        elif isinstance(chunked_raw, bool):
+            chunked = chunked_raw
+        else:
+            raise web.HTTPBadRequest(text="chunked must be a boolean or null")
+
+        vision = self._get_vision_processor()
+
+        async def describe_image(image_path: Path) -> str:
+            if vision is None:
+                return "Error: Vision is unavailable for image attach"
+            return await vision.describe(image_path, _VISION_ATTACH_PROMPT, user)
+
+        try:
+            attachment, _gate = await materialize_attachment(
+                workspace=self._workspace_for(user),
+                raw_path=path,
+                baseline=0,
+                limit=remaining,
+                tokenizer=self._get_tokenizer_client(),
+                chunked=chunked,
+                describe_image=describe_image if vision is not None else None,
+                vision_cache=self._vision_cache,
+            )
+        except MaterializeError as e:
+            if e.status == 404:
+                raise web.HTTPNotFound(text=str(e)) from e
+            if e.status == 413:
+                raise web.HTTPRequestEntityTooLarge(max_size=0, actual_size=0, text=str(e)) from e
+            raise web.HTTPBadRequest(text=str(e)) from e
+        except PermissionError as e:
+            raise web.HTTPForbidden(text=str(e)) from e
+
+        pin_check = evaluate_pin_budget(
+            current_pinned_tokens=current_tokens,
+            new_tokens=attachment.tokens,
+            context_limit=limit,
+            ratio=ratio,
+        )
+        if not pin_check.allowed:
+            raise web.HTTPBadRequest(text=pin_check.reason)
+
+        record = PinnedContextRecord(
+            session_id=session_id,
+            user_id=mem_key,
+            path=attachment.path,
+            kind=attachment.kind,
+            tokens=attachment.tokens,
+            approximate=attachment.approximate,
+            mode=attachment.mode,
+            content=attachment.content,
+            label=attachment.label,
+        )
+        try:
+            await self._pinned_store.upsert_pin(record)
+        except Exception as e:
+            logger.exception("pin upsert failed")
+            raise web.HTTPBadRequest(text=f"Failed to pin file: {e}") from e
+
+        pins = await self._pinned_store.list_pins(session_id, mem_key)
+        pin_tokens = sum(p.tokens for p in pins)
+        body = self._pin_budget_payload(pin_tokens=pin_tokens, pins=pins)
+        body["pin"] = record.to_public_dict()
+        body["session_id"] = session_id
+        body["reason"] = pin_check.reason
+        return web.json_response(body)
+
+    async def _handle_unpin_context(self, request: web.Request) -> web.Response:
+        user = self._require_user(request)
+        if self._pinned_store is None:
+            raise web.HTTPServiceUnavailable(text="Pin store unavailable")
+        payload = await self._json_payload(request)
+        session_id = await self._resolve_attach_session_id(user, payload)
+        mem_key = user.memory_key()
+        if payload.get("all") is True:
+            await self._pinned_store.clear_session(session_id, mem_key)
+        else:
+            raw_path = payload.get("path")
+            if not isinstance(raw_path, str) or not raw_path.strip():
+                raise web.HTTPBadRequest(text="path is required (or all=true)")
+            await self._pinned_store.remove_pin(session_id, mem_key, raw_path.strip())
+        pins = await self._pinned_store.list_pins(session_id, mem_key)
+        body = self._pin_budget_payload(pin_tokens=sum(p.tokens for p in pins), pins=pins)
+        body["session_id"] = session_id
+        return web.json_response(body)
+
+    async def _handle_list_pins(self, request: web.Request) -> web.Response:
+        user = self._require_user(request)
+        if self._pinned_store is None:
+            raise web.HTTPServiceUnavailable(text="Pin store unavailable")
+        raw_session = request.query.get("session_id")
+        payload: dict[str, object] = {}
+        if raw_session is not None:
+            payload["session_id"] = raw_session
+        session_id = await self._resolve_attach_session_id(user, payload)
+        pins = await self._pinned_store.list_pins(session_id, user.memory_key())
+        body = self._pin_budget_payload(pin_tokens=sum(p.tokens for p in pins), pins=pins)
         body["session_id"] = session_id
         return web.json_response(body)
 

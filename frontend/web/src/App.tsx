@@ -8,6 +8,7 @@ import {
   getChats,
   getExtensions,
   getSession,
+  listPins,
   login,
   logout,
   previewFile,
@@ -138,6 +139,8 @@ function Workspace({
   const [contextUsage, setContextUsage] = useState<ContextUsage | null>(null);
   const [systemLoad, setSystemLoad] = useState<SystemLoad | null>(null);
   const [resetSignal, setResetSignal] = useState(0);
+  const [pinTokens, setPinTokens] = useState(0);
+  const [pinBudget, setPinBudget] = useState(0);
 
   // Etap 2: multi-chat. chatId=null = follow the active chat (loaded on connect).
   const [chatId, setChatId] = useState<number | null>(null);
@@ -159,6 +162,27 @@ function Workspace({
       .catch((error) => console.warn("Failed to load chats", error))
       .finally(() => setChatsLoading(false));
   }, [session.csrf_token, section]);
+
+  const refreshPinBudget = useCallback(() => {
+    if (chatId == null || chatId <= 0) {
+      setPinTokens(0);
+      setPinBudget(0);
+      return;
+    }
+    listPins(chatId)
+      .then((payload) => {
+        setPinTokens(payload.pin_tokens);
+        setPinBudget(payload.pin_budget);
+      })
+      .catch(() => {
+        setPinTokens(0);
+        setPinBudget(0);
+      });
+  }, [chatId]);
+
+  useEffect(() => {
+    refreshPinBudget();
+  }, [refreshPinBudget]);
 
   // Etap 4: extensions list (loaded on demand when view opens or reload clicked).
   const refreshExtensions = useCallback(() => {
@@ -412,6 +436,8 @@ function Workspace({
               webAccess={webAccess}
               onWebAccessChange={setWebAccess}
               section={section}
+              pinTokens={pinTokens}
+              pinBudget={pinBudget}
             />
           </div>
           {view === "extensions" && (
@@ -441,6 +467,9 @@ function Workspace({
             mode="side"
             onModeChange={() => undefined}
             onPreview={openPreview}
+            sessionId={chatId}
+            baselineTokens={contextUsage?.latest_total_tokens ?? 0}
+            onContextFilesChanged={refreshPinBudget}
           />
         </BottomDrawer>
       </section>

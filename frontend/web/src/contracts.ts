@@ -2,6 +2,7 @@ import type {
   AgentMode,
   ChatMessage,
   ChatSummary,
+  ContextAttachment,
   ContextUsage,
   DepthMode,
   DirectoryPayload,
@@ -9,6 +10,8 @@ import type {
   ExtensionsPayload,
   FileEntry,
   PanelLayoutState,
+  PinsPayload,
+  PendingContextPayload,
   PreviewPayload,
   SessionPayload,
   SystemLoad,
@@ -411,6 +414,51 @@ export function parseUploadPayload(value: unknown): UploadPayload {
       },
       "upload payload.uploaded"
     )
+  };
+}
+
+export function parseContextAttachment(value: unknown): ContextAttachment {
+  const source = record(value, "attachment");
+  const path = requiredString(source, "path", "attachment");
+  return {
+    path,
+    kind: requiredString(source, "kind", "attachment"),
+    tokens: optionalNumber(source.tokens) ?? 0,
+    approximate: Boolean(source.approximate),
+    mode: optionalString(source.mode) ?? "full",
+    label: optionalString(source.label) ?? path
+  };
+}
+
+export function parsePendingContextPayload(value: unknown): PendingContextPayload {
+  const source = record(value, "pending");
+  const raw = source.attachments;
+  const attachments = Array.isArray(raw)
+    ? raw.map((item) => parseContextAttachment(item))
+    : [];
+  return {
+    session_id: optionalNumber(source.session_id) ?? 0,
+    pending_count: optionalNumber(source.pending_count) ?? attachments.length,
+    attachments
+  };
+}
+
+export function parsePinsPayload(value: unknown): PinsPayload {
+  const source = record(value, "pins");
+  const raw = source.pins;
+  const pins = Array.isArray(raw) ? raw.map((item) => parseContextAttachment(item)) : [];
+  const pinRaw = source.pin;
+  return {
+    session_id: optionalNumber(source.session_id) ?? 0,
+    pins,
+    pin_tokens: optionalNumber(source.pin_tokens) ?? 0,
+    pin_budget: optionalNumber(source.pin_budget) ?? 0,
+    pin_ratio: optionalNumber(source.pin_ratio) ?? 0.25,
+    context_limit_tokens: optionalNumber(source.context_limit_tokens) ?? 0,
+    ...(pinRaw !== undefined && pinRaw !== null
+      ? { pin: parseContextAttachment(pinRaw) }
+      : {}),
+    ...(typeof source.reason === "string" ? { reason: source.reason } : {})
   };
 }
 

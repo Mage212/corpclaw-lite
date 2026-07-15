@@ -216,6 +216,33 @@ export type ContextUsage = {
   context_ratio: number;
 };
 
+/** B-094/B-095: file attachment metadata (pending inline or pin). */
+export type ContextAttachment = {
+  path: string;
+  kind: string;
+  tokens: number;
+  approximate: boolean;
+  mode: string;
+  label: string;
+};
+
+export type PendingContextPayload = {
+  session_id: number;
+  pending_count: number;
+  attachments: ContextAttachment[];
+};
+
+export type PinsPayload = {
+  session_id: number;
+  pins: ContextAttachment[];
+  pin_tokens: number;
+  pin_budget: number;
+  pin_ratio: number;
+  context_limit_tokens: number;
+  pin?: ContextAttachment;
+  reason?: string;
+};
+
 /**
  * Persisted workspace layout dimensions.
  *
