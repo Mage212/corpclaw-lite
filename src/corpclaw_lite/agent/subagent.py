@@ -457,7 +457,35 @@ class SubagentDispatcher:
                     partial_len=len(partial),
                 )
                 return partial
-            return f"Subagent error: execution timed out after {int(timeout_seconds)}s"
+            # Non-research: best-effort journal handoff instead of a bare error
+            # (Sprint 2 / C1 residual). Does not re-enter AgentLoop under the
+            # outer wait_for deadline.
+            reason = f"{spec.id} timed out after {int(timeout_seconds)}s"
+            partial = (
+                f"Subagent '{spec.name}' was interrupted: wall-clock timeout "
+                f"after {int(timeout_seconds)}s. Work may be incomplete; "
+                "review the tool-call journal in the partial handoff."
+            )
+            try:
+                handoff = await TaskRun(self._workspace_base).generate_handoff(
+                    user,
+                    subagent_run_id,
+                    partial_result=partial,
+                    reason=reason,
+                )
+                log_event(
+                    "subagent_partial_handoff",
+                    subagent_run_id,
+                    parent_run_id=parent_run_id,
+                    subagent_id=spec.id,
+                    timeout_seconds=timeout_seconds,
+                    partial_len=len(handoff),
+                )
+                # Return a compact message to the parent; full handoff is on disk.
+                return partial
+            except Exception as handoff_err:  # pragma: no cover - defensive
+                logger.warning("Subagent timeout handoff failed: %s", handoff_err)
+                return f"Subagent error: execution timed out after {int(timeout_seconds)}s"
         except Exception as e:
             logger.error("Subagent %s failed: %s", spec.id, e)
             log_event(

@@ -76,22 +76,19 @@ class TelegramBotOrchestrator:
         self._container_prune_task: asyncio.Task[None] | None = None
         self._shutdown_event = asyncio.Event()
         self._agent_activity_logger: AgentLogger | None = None
-        self._active_user_requests: set[int] = set()
-        self._active_user_requests_lock = asyncio.Lock()
+        # Process-wide gate shared with web/headless (Sprint 2 / C3).
+        from corpclaw_lite.runtime.user_run_gate import get_user_run_gate
+
+        self._run_gate = get_user_run_gate()
         self._started = False
 
-    async def _try_start_user_request(self, telegram_id: int) -> bool:
+    async def _try_start_user_request(self, user_id: int) -> bool:
         """Return False when the user already has an active workflow."""
-        async with self._active_user_requests_lock:
-            if telegram_id in self._active_user_requests:
-                return False
-            self._active_user_requests.add(telegram_id)
-            return True
+        return await self._run_gate.try_start(user_id)
 
-    async def _finish_user_request(self, telegram_id: int) -> None:
+    async def _finish_user_request(self, user_id: int) -> None:
         """Mark a user's active workflow as finished."""
-        async with self._active_user_requests_lock:
-            self._active_user_requests.discard(telegram_id)
+        await self._run_gate.finish(user_id)
 
     async def check_channel_access(self, telegram_id: int, action: str) -> bool:
         """Shared Telegram preflight for commands, callbacks and uploads."""

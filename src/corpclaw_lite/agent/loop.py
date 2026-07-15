@@ -1090,40 +1090,46 @@ class AgentLoop:
                         # self._provider so Fast/Think applies to this run only.
                         is_router_queue = isinstance(effective_provider, LLMRouter)
                         if is_router_queue and effective_provider.has_queue:
+                            # Pause active-time budget for queue wait; always
+                            # resume in finally so cancel/error before on_acquired
+                            # cannot leave the run permanently paused (C6).
                             state.budget.pause()
 
                             def on_router_acquired() -> None:
                                 state.budget.resume()
                                 emit_llm_status("model_preparing")
 
-                            response = await effective_provider.call_default_with_slot(
-                                user_id=str(user.id),
-                                run_id=state.stats.run_id,
-                                messages=state.context.messages,
-                                tools=state.tools_schema,
-                                system=state.context.system_prompt or None,
-                                on_acquired=on_router_acquired,
-                                call=lambda target_provider, _tools=state.tools_schema: (
-                                    asyncio.wait_for(
-                                        self._call_llm_provider(
-                                            target_provider,
-                                            messages=state.context.messages,
-                                            tools=_tools,
-                                            system=state.context.system_prompt or None,
-                                            run_id=state.stats.run_id,
-                                            iteration=state.stats.iterations,
-                                            on_llm_stage=_on_llm_stage_for_call,
-                                            stats=state.stats,
-                                        ),
-                                        timeout=self._settings.llm_timeout_seconds,
-                                    )
-                                ),
-                                on_queue_status=_on_llm_queue_for_call,
-                                notify_position=_queue_notify_position(self._settings),
-                                notify_interval_seconds=_queue_notify_interval_seconds(
-                                    self._settings
-                                ),
-                            )
+                            try:
+                                response = await effective_provider.call_default_with_slot(
+                                    user_id=str(user.id),
+                                    run_id=state.stats.run_id,
+                                    messages=state.context.messages,
+                                    tools=state.tools_schema,
+                                    system=state.context.system_prompt or None,
+                                    on_acquired=on_router_acquired,
+                                    call=lambda target_provider, _tools=state.tools_schema: (
+                                        asyncio.wait_for(
+                                            self._call_llm_provider(
+                                                target_provider,
+                                                messages=state.context.messages,
+                                                tools=_tools,
+                                                system=state.context.system_prompt or None,
+                                                run_id=state.stats.run_id,
+                                                iteration=state.stats.iterations,
+                                                on_llm_stage=_on_llm_stage_for_call,
+                                                stats=state.stats,
+                                            ),
+                                            timeout=self._settings.llm_timeout_seconds,
+                                        )
+                                    ),
+                                    on_queue_status=_on_llm_queue_for_call,
+                                    notify_position=_queue_notify_position(self._settings),
+                                    notify_interval_seconds=_queue_notify_interval_seconds(
+                                        self._settings
+                                    ),
+                                )
+                            finally:
+                                state.budget.resume()
                         elif isinstance(effective_provider, QueuedProvider):
                             state.budget.pause()
 
@@ -1131,32 +1137,35 @@ class AgentLoop:
                                 state.budget.resume()
                                 emit_llm_status("model_preparing")
 
-                            response = await effective_provider.call_with_slot(
-                                messages=state.context.messages,
-                                tools=state.tools_schema,
-                                system=state.context.system_prompt or None,
-                                on_acquired=on_queued_provider_acquired,
-                                on_queue_status=_on_llm_queue_for_call,
-                                notify_position=_queue_notify_position(self._settings),
-                                notify_interval_seconds=_queue_notify_interval_seconds(
-                                    self._settings
-                                ),
-                                call=lambda target_provider, _tools=state.tools_schema: (
-                                    asyncio.wait_for(
-                                        self._call_llm_provider(
-                                            target_provider,
-                                            messages=state.context.messages,
-                                            tools=_tools,
-                                            system=state.context.system_prompt or None,
-                                            run_id=state.stats.run_id,
-                                            iteration=state.stats.iterations,
-                                            on_llm_stage=_on_llm_stage_for_call,
-                                            stats=state.stats,
-                                        ),
-                                        timeout=self._settings.llm_timeout_seconds,
-                                    )
-                                ),
-                            )
+                            try:
+                                response = await effective_provider.call_with_slot(
+                                    messages=state.context.messages,
+                                    tools=state.tools_schema,
+                                    system=state.context.system_prompt or None,
+                                    on_acquired=on_queued_provider_acquired,
+                                    on_queue_status=_on_llm_queue_for_call,
+                                    notify_position=_queue_notify_position(self._settings),
+                                    notify_interval_seconds=_queue_notify_interval_seconds(
+                                        self._settings
+                                    ),
+                                    call=lambda target_provider, _tools=state.tools_schema: (
+                                        asyncio.wait_for(
+                                            self._call_llm_provider(
+                                                target_provider,
+                                                messages=state.context.messages,
+                                                tools=_tools,
+                                                system=state.context.system_prompt or None,
+                                                run_id=state.stats.run_id,
+                                                iteration=state.stats.iterations,
+                                                on_llm_stage=_on_llm_stage_for_call,
+                                                stats=state.stats,
+                                            ),
+                                            timeout=self._settings.llm_timeout_seconds,
+                                        )
+                                    ),
+                                )
+                            finally:
+                                state.budget.resume()
                         else:
                             target_provider: Provider = (
                                 effective_provider.default
