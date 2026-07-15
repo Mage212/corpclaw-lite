@@ -506,6 +506,86 @@ async def test_attach_context_busy_rejects(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_attach_context_cumulative_pending_blocks(tmp_path: Path) -> None:
+    """H1: second attach must account for first pending tokens."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    # ~2500 tokens each (ascii /4). limit=5000 → block_at=4750.
+    # first alone: 2500 ALLOW; second with pending: 2500+2500=5000 → BLOCK.
+    (workspace / "a.txt").write_text("a" * 10_000, encoding="utf-8")
+    (workspace / "b.txt").write_text("b" * 10_000, encoding="utf-8")
+    user = User(id=11, name="Vadim", department="engineering")
+    settings = Settings()
+    settings.agent.compression.max_context_tokens = 5000
+    orchestrator = WebChannelOrchestrator(settings)
+    orchestrator._service = FakeWorkspaceService(workspace)  # type: ignore[assignment]
+    orchestrator._tokenizer_client = TokenizerClient(mode="heuristic")
+    store = WebChatStore(tmp_path / "mem_h1.db")
+    orchestrator._chat_store = store
+    session_id = await store.ensure_active_session(user.memory_key())
+
+    r1 = await orchestrator._handle_attach_context(
+        web_json_request(
+            "POST",
+            "/api/files/attach-context",
+            user,
+            {
+                "path": "a.txt",
+                "session_id": session_id,
+                "baseline_tokens": 0,
+                "chunked": False,
+            },
+        )
+    )
+    assert r1.status == 200
+    body1 = json.loads(r1.text or "{}")
+    assert body1["pending_count"] == 1
+    assert body1["effective_baseline_tokens"] == 0
+
+    with pytest.raises(web.HTTPBadRequest):
+        await orchestrator._handle_attach_context(
+            web_json_request(
+                "POST",
+                "/api/files/attach-context",
+                user,
+                {
+                    "path": "b.txt",
+                    "session_id": session_id,
+                    "baseline_tokens": 0,
+                    "chunked": False,
+                },
+            )
+        )
+    assert orchestrator._pending_attachments.count(user.id, session_id) == 1
+
+
+@pytest.mark.asyncio
+async def test_attach_context_unknown_session_404(tmp_path: Path) -> None:
+    """M4: session_id must belong to the user."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "a.txt").write_text("hi", encoding="utf-8")
+    user = User(id=12, name="Vadim", department="engineering")
+    settings = Settings()
+    orchestrator = WebChannelOrchestrator(settings)
+    orchestrator._service = FakeWorkspaceService(workspace)  # type: ignore[assignment]
+    orchestrator._tokenizer_client = TokenizerClient(mode="heuristic")
+    store = WebChatStore(tmp_path / "mem_m4.db")
+    orchestrator._chat_store = store
+    await store.ensure_active_session(user.memory_key())
+
+    with pytest.raises(web.HTTPNotFound):
+        await orchestrator._handle_attach_context(
+            web_json_request(
+                "POST",
+                "/api/files/attach-context",
+                user,
+                {"path": "a.txt", "session_id": 999999, "baseline_tokens": 0},
+            )
+        )
+
+
+@pytest.mark.asyncio
 async def test_detach_context_all(tmp_path: Path) -> None:
     workspace = tmp_path / "ws"
     workspace.mkdir()
