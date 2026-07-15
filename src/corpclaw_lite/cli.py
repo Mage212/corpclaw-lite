@@ -328,6 +328,35 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Source tag: manual|scheduled|memory_worker|mission|test (default: manual)",
     )
 
+    # B-120 / DC-032: proactive notify (system session + optional TG)
+    notify_p = sub.add_parser(
+        "notify-user",
+        help="Send a proactive message to a user's system inbox (DC-032)",
+    )
+    notify_p.add_argument(
+        "-u",
+        "--user-id",
+        type=int,
+        required=True,
+        help="Canonical users.id",
+    )
+    notify_p.add_argument(
+        "-m",
+        "--message",
+        required=True,
+        help="Message text to deliver",
+    )
+    notify_p.add_argument(
+        "--source",
+        default="manual",
+        help="Source tag: manual|scheduled|memory_worker|mission|test (default: manual)",
+    )
+    notify_p.add_argument(
+        "--title",
+        default=None,
+        help="Optional short label stored in message metadata",
+    )
+
     # eval (B-060): GAIA-style eval harness with A/B guard toggling
     eval_p = sub.add_parser("eval", help="Run the eval harness (B-060) over a scenario corpus")
     eval_p.add_argument(
@@ -711,6 +740,80 @@ def cmd_headless_run(*, user_id: int, task: str, source: str = "manual") -> None
         print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
         if result.status == "skipped":
             raise SystemExit(2)
+
+    asyncio.run(_run())
+
+
+def cmd_notify_user(
+    *,
+    user_id: int,
+    message: str,
+    source: str = "manual",
+    title: str | None = None,
+) -> None:
+    """B-120: deliver a proactive message into the user's system session."""
+    import asyncio
+    import json
+    import os
+
+    from corpclaw_lite.agent.factory import build_agent_stack
+    from corpclaw_lite.channels.user_notifier import UserNotifier
+    from corpclaw_lite.channels.web.chat_store import WebChatStore
+    from corpclaw_lite.config.loader import load_settings
+    from corpclaw_lite.logging.agent_logger import setup_logging
+    from corpclaw_lite.paths import PROJECT_ROOT
+    from corpclaw_lite.users.manager import UserManager
+    from corpclaw_lite.users.models import User
+
+    settings = load_settings(PROJECT_ROOT / "config" / "settings.yaml")
+    log_cfg = settings.logging
+    setup_logging(
+        log_dir=PROJECT_ROOT / log_cfg.log_dir,
+        level=log_cfg.level,
+        console_level=log_cfg.console_level,
+        trace_enabled=log_cfg.trace_enabled,
+        trace_level=log_cfg.trace_level,
+        trace_preview_chars=log_cfg.trace_preview_chars,
+        capture_enabled=log_cfg.capture_enabled,
+        capture_fields=log_cfg.capture_fields,
+        capture_dir=PROJECT_ROOT / (log_cfg.capture_dir or log_cfg.log_dir),
+    )
+    um = UserManager()
+    user: User | None = um.get_by_id(user_id)
+    if user is None:
+        raise SystemExit(f"User id={user_id} not found")
+    stack = build_agent_stack(settings)
+    chat_store = stack.chat_store
+    if chat_store is None:
+        memory = stack.loop.memory
+        memory_db_path = getattr(memory, "db_path", PROJECT_ROOT / "data" / "memory.db")
+        chat_store = WebChatStore(memory_db_path)
+    notifier = UserNotifier(chat_store)
+
+    # Optional one-shot Telegram path when the bot token is available.
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    if token:
+
+        async def _with_bot() -> None:
+            from telegram import Bot as TelegramBot
+
+            bot = TelegramBot(token=token)
+            notifier.register_telegram_bot(bot)
+            assert user is not None
+            result = await notifier.notify(user, message, source=source, title=title)
+            print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+            if not result.ok:
+                raise SystemExit(1)
+
+        asyncio.run(_with_bot())
+        return
+
+    async def _run() -> None:
+        assert user is not None
+        result = await notifier.notify(user, message, source=source, title=title)
+        print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+        if not result.ok:
+            raise SystemExit(1)
 
     asyncio.run(_run())
 
@@ -1344,6 +1447,13 @@ def main() -> None:
                 user_id=args.user_id,
                 task=args.task,
                 source=args.source,
+            )
+        elif args.command == "notify-user":
+            cmd_notify_user(
+                user_id=args.user_id,
+                message=args.message,
+                source=args.source,
+                title=args.title,
             )
         else:
             parser.print_help()

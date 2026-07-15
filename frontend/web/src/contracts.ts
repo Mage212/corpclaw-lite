@@ -68,6 +68,13 @@ export type ServerWsEvent =
   | { type: "chat_renamed"; session_id: number; title: string }
   | { type: "chat_activated"; session_id: number; section: string; mode: AgentMode }
   | { type: "chat_list_changed" }
+  | {
+      type: "proactive_message";
+      session_id: number;
+      source: string;
+      title: string | null;
+      message: ChatMessage;
+    }
   | ({ type: "system_load" } & SystemLoad)
   | {
       type: "session_running_state";
@@ -241,9 +248,11 @@ export function parseChatSummary(value: unknown): ChatSummary {
   const titleValue = source.title;
   const updatedAt = optionalString(source.updated_at);
   const folderId = optionalNumber(source.folder_id);
+  const section =
+    rawSection === "work" ? "work" : rawSection === "system" ? "system" : "chat";
   return {
     id: requiredNumber(source, "id", "chat summary"),
-    section: rawSection === "work" ? "work" : "chat",
+    section,
     title: typeof titleValue === "string" && titleValue.length > 0 ? titleValue : null,
     created_at: requiredString(source, "created_at", "chat summary"),
     active: requiredBoolean(source, "active", "chat summary"),
@@ -820,15 +829,31 @@ export function parseServerWsEvent(value: unknown): ServerWsEvent | null {
       const activatedId = optionalNumber(value.session_id);
       if (activatedId === undefined) return null;
       const sectionValue = stringValue(value.section, "chat");
+      const section =
+        sectionValue === "work" ? "work" : sectionValue === "system" ? "system" : "chat";
       return {
         type: "chat_activated",
         session_id: activatedId,
-        section: sectionValue === "work" ? "work" : "chat",
+        section,
         mode: modeValue(value.mode)
       };
     }
     case "chat_list_changed":
       return { type: "chat_list_changed" };
+    case "proactive_message": {
+      const sessionId = optionalNumber(value.session_id);
+      if (sessionId === undefined) return null;
+      const message = parseChatMessage(value.message);
+      if (message === null) return null;
+      const titleRaw = value.title;
+      return {
+        type: "proactive_message",
+        session_id: sessionId,
+        source: stringValue(value.source, "manual"),
+        title: typeof titleRaw === "string" && titleRaw.length > 0 ? titleRaw : null,
+        message
+      };
+    }
     case "system_load": {
       const levelRaw = stringValue(value.load_level, "idle");
       const load_level: SystemLoadLevel =

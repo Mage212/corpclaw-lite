@@ -10,6 +10,7 @@ import type {
   PendingContextPayload,
   PinsPayload,
   PreviewPayload,
+  ChatSection,
   SessionPayload,
   SidebarSection,
   TreeNode,
@@ -107,7 +108,7 @@ export function getWorkspaceOverview(): Promise<WorkspaceOverviewPayload> {
 
 // --- Etap 2: chat history endpoints ---
 
-export function getChats(csrf: string, section?: SidebarSection): Promise<ChatSummary[]> {
+export function getChats(csrf: string, section?: ChatSection): Promise<ChatSummary[]> {
   const params = section ? new URLSearchParams({ section }) : new URLSearchParams();
   const qs = params.toString();
   return apiFetch(`/api/chats${qs ? `?${qs}` : ""}`, (value) =>

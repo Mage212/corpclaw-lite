@@ -146,6 +146,9 @@ function Workspace({
   const [chatId, setChatId] = useState<number | null>(null);
   const [chats, setChats] = useState<ChatSummary[]>([]);
   const [chatsLoading, setChatsLoading] = useState(false);
+  // B-120: durable system inbox (section=system), separate from Chat/Work tabs.
+  const [systemChat, setSystemChat] = useState<ChatSummary | null>(null);
+  const [systemHasUnread, setSystemHasUnread] = useState(false);
 
   // Etap 4/5: view state ("chat" | "extensions" | "agent-context").
   const [view, setView] = useState<"chat" | "extensions" | "agent-context">("chat");
@@ -155,13 +158,22 @@ function Workspace({
   const { cssVars, layout, startResize, setDrawerHeight } = useResizablePanels();
   const user = session.user;
 
+  const refreshSystemChat = useCallback(() => {
+    getChats(session.csrf_token, "system")
+      .then((items) => {
+        setSystemChat(items[0] ?? null);
+      })
+      .catch((error) => console.warn("Failed to load system inbox", error));
+  }, [session.csrf_token]);
+
   const refreshChats = useCallback(() => {
     setChatsLoading(true);
     getChats(session.csrf_token, section)
       .then(setChats)
       .catch((error) => console.warn("Failed to load chats", error))
       .finally(() => setChatsLoading(false));
-  }, [session.csrf_token, section]);
+    refreshSystemChat();
+  }, [session.csrf_token, section, refreshSystemChat]);
 
   // H1: attach/pin must work when chatId is null (follow-active after send / new chat).
   // Prefer explicitly viewed chat; else the server-side active chat from the list.
@@ -249,6 +261,16 @@ function Workspace({
     []
   );
 
+  const handleProactiveMessage = useCallback(
+    (sessionId: number) => {
+      refreshSystemChat();
+      if (chatId !== sessionId) {
+        setSystemHasUnread(true);
+      }
+    },
+    [chatId, refreshSystemChat]
+  );
+
   const chatSession = useWebChatSession({
     csrf: session.csrf_token,
     depthMode,
@@ -259,6 +281,7 @@ function Workspace({
     onChatActivated: () => setChatId(null),
     onChatRenamed: refreshChats,
     onChatListChanged: refreshChats,
+    onProactiveMessage: handleProactiveMessage,
     onSystemLoad: setSystemLoad,
     onSessionRunningState: handleSessionRunningState,
     webAccess,
@@ -290,6 +313,9 @@ function Workspace({
     // null means "no chat viewed → empty panel", which made returning to the
     // active chat's transcript impossible after viewing another one.
     setChatId(chat.id);
+    if (chat.section === "system") {
+      setSystemHasUnread(false);
+    }
   }
 
   async function startNewChat() {
@@ -382,6 +408,8 @@ function Workspace({
         chats={chats}
         activeChatId={chatId}
         chatsLoading={chatsLoading}
+        systemChat={systemChat}
+        systemHasUnread={systemHasUnread}
         onSelectChat={selectChat}
         onNewChat={startNewChat}
         onRenameChat={renameChat}

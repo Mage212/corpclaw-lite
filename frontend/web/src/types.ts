@@ -185,10 +185,16 @@ export type AgentContextPayload = {
 /** Sidebar navigation section. Chat = conversational (tools off in Etap 2), Work = task (tools on). */
 export type SidebarSection = "chat" | "work";
 
+/**
+ * Session section tag from the API. Includes durable system inbox (B-120 / DC-032),
+ * which is not a Chat/Work tool-mode tab.
+ */
+export type ChatSection = SidebarSection | "system";
+
 /** A chat session as shown in the sidebar chat list (from GET /api/chats). */
 export type ChatSummary = {
   id: number;
-  section: SidebarSection;
+  section: ChatSection;
   title: string | null;
   created_at: string;
   active: boolean;

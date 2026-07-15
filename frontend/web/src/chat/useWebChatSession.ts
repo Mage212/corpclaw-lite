@@ -138,6 +138,8 @@ type UseWebChatSessionOptions = {
   onChatRenamed?: (() => void) | undefined;
   /** Fired when the server signals the chat list changed (create/activate/rename). */
   onChatListChanged?: (() => void) | undefined;
+  /** B-120: proactive system-inbox message (refresh sidebar + optional badge). */
+  onProactiveMessage?: ((sessionId: number) => void) | undefined;
   /** Ambient GPU/system load (DC-008). Counts only; not request timeline. */
   onSystemLoad?: ((load: SystemLoad) => void) | undefined;
   /** B-090: agent run started/stopped on a chat session (badge + list). */
@@ -183,6 +185,7 @@ export function useWebChatSession({
   onChatActivated,
   onChatRenamed,
   onChatListChanged,
+  onProactiveMessage,
   onSystemLoad,
   onSessionRunningState,
   webAccess = true,
@@ -379,9 +382,11 @@ export function useWebChatSession({
             setCompressing,
             onChatRenamed,
             onChatListChanged,
+            onProactiveMessage,
             onSystemLoad,
             onSessionRunningState,
-            onWebAccessChange
+            onWebAccessChange,
+            viewedChatId: chatId
           });
         };
       })
@@ -416,10 +421,12 @@ export function useWebChatSession({
     addMessage,
     addRunEvent,
     csrf,
+    chatId,
     onContextUsage,
     onWorkspaceChanged,
     onChatRenamed,
     onChatListChanged,
+    onProactiveMessage,
     onSystemLoad,
     onSessionRunningState,
     onWebAccessChange
@@ -502,6 +509,9 @@ type WsEventHandlers = {
     | undefined;
   onWebAccessChange: ((enabled: boolean) => void) | undefined;
   onChatListChanged: (() => void) | undefined;
+  onProactiveMessage: ((sessionId: number) => void) | undefined;
+  /** Currently viewed chat id (null = follow active). Used for live proactive append. */
+  viewedChatId: number | null;
 };
 
 function pushRunEvent(
@@ -525,9 +535,11 @@ function handleWsEvent(event: ServerWsEvent, handlers: WsEventHandlers) {
     setCompressing,
     onChatRenamed,
     onChatListChanged,
+    onProactiveMessage,
     onSystemLoad,
     onSessionRunningState,
-    onWebAccessChange
+    onWebAccessChange,
+    viewedChatId
   } = handlers;
   if (event.type === "chat_history") {
     setMessages(event.messages);
@@ -775,6 +787,13 @@ function handleWsEvent(event: ServerWsEvent, handlers: WsEventHandlers) {
     setMessages([]);
     onChatListChanged?.();
   } else if (event.type === "chat_list_changed") {
+    onChatListChanged?.();
+  } else if (event.type === "proactive_message") {
+    // Live-append when viewing the system session; always refresh sidebar badge.
+    if (viewedChatId === event.session_id) {
+      addMessage(event.message);
+    }
+    onProactiveMessage?.(event.session_id);
     onChatListChanged?.();
   } else if (event.type === "system_load") {
     onSystemLoad?.({
