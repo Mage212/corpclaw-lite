@@ -29,7 +29,7 @@ import logging
 import os
 import sys
 import threading
-from typing import TYPE_CHECKING, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -327,6 +327,35 @@ def _build_parser() -> argparse.ArgumentParser:
         default="manual",
         help="Source tag: manual|scheduled|memory_worker|mission|test (default: manual)",
     )
+
+    # B-118 / DC-030: schedule management (consent accept/dismiss + ops)
+    sched_p = sub.add_parser("schedule", help="Manage scheduled agent tasks (B-118)")
+    sched_sub = sched_p.add_subparsers(dest="schedule_cmd", required=True)
+    sched_list = sched_sub.add_parser("list", help="List tasks for a user")
+    sched_list.add_argument("-u", "--user-id", type=int, required=True)
+    sched_accept = sched_sub.add_parser("accept", help="Accept a pending proposal")
+    sched_accept.add_argument("-u", "--user-id", type=int, required=True)
+    sched_accept.add_argument("-i", "--task-id", required=True)
+    sched_accept.add_argument("--title", default=None)
+    sched_accept.add_argument("--task", default=None, help="Override task_text")
+    sched_accept.add_argument("--schedule", default=None, help="Override schedule_text")
+    sched_dismiss = sched_sub.add_parser("dismiss", help="Dismiss pending/active task")
+    sched_dismiss.add_argument("-u", "--user-id", type=int, required=True)
+    sched_dismiss.add_argument("-i", "--task-id", required=True)
+    sched_pause = sched_sub.add_parser("pause", help="Pause an active task")
+    sched_pause.add_argument("-u", "--user-id", type=int, required=True)
+    sched_pause.add_argument("-i", "--task-id", required=True)
+    sched_resume = sched_sub.add_parser("resume", help="Resume a paused task")
+    sched_resume.add_argument("-u", "--user-id", type=int, required=True)
+    sched_resume.add_argument("-i", "--task-id", required=True)
+    sched_run = sched_sub.add_parser("run-now", help="Force-run an active/paused task")
+    sched_run.add_argument("-u", "--user-id", type=int, required=True)
+    sched_run.add_argument("-i", "--task-id", required=True)
+    sched_propose = sched_sub.add_parser("propose", help="Create pending proposal (ops)")
+    sched_propose.add_argument("-u", "--user-id", type=int, required=True)
+    sched_propose.add_argument("--title", required=True)
+    sched_propose.add_argument("--task", required=True)
+    sched_propose.add_argument("--schedule", required=True)
 
     # B-120 / DC-032: proactive notify (system session + optional TG)
     notify_p = sub.add_parser(
@@ -740,6 +769,120 @@ def cmd_headless_run(*, user_id: int, task: str, source: str = "manual") -> None
         print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
         if result.status == "skipped":
             raise SystemExit(2)
+
+    asyncio.run(_run())
+
+
+def _build_scheduler_cli(*, with_agent: bool = False) -> tuple[Any, Any, Any]:
+    """Return (settings, UserManager, SchedulerService) for CLI schedule cmds."""
+    from pathlib import Path
+
+    from corpclaw_lite.config.loader import load_settings
+    from corpclaw_lite.logging.agent_logger import setup_logging
+    from corpclaw_lite.paths import PROJECT_ROOT
+    from corpclaw_lite.scheduler.service import SchedulerService
+    from corpclaw_lite.scheduler.store import SchedulerStore
+    from corpclaw_lite.users.manager import UserManager
+
+    settings = load_settings(PROJECT_ROOT / "config" / "settings.yaml")
+    log_cfg = settings.logging
+    setup_logging(
+        log_dir=PROJECT_ROOT / log_cfg.log_dir,
+        level=log_cfg.level,
+        console_level=log_cfg.console_level,
+        trace_enabled=log_cfg.trace_enabled,
+        trace_level=log_cfg.trace_level,
+        trace_preview_chars=log_cfg.trace_preview_chars,
+        capture_enabled=log_cfg.capture_enabled,
+        capture_fields=log_cfg.capture_fields,
+        capture_dir=PROJECT_ROOT / (log_cfg.capture_dir or log_cfg.log_dir),
+    )
+    um = UserManager()
+    db_path = Path(settings.scheduler.db_path)
+    if not db_path.is_absolute():
+        db_path = (PROJECT_ROOT / db_path).resolve()
+    agent_service = None
+    if with_agent:
+        from corpclaw_lite.agent.factory import build_agent_stack
+        from corpclaw_lite.channels.service import AgentRequestService
+
+        stack = build_agent_stack(settings)
+        ws_base = settings.web_channel.workspace_base
+        workspace = Path(ws_base)
+        if not workspace.is_absolute():
+            workspace = PROJECT_ROOT / workspace
+        agent_service = AgentRequestService(stack=stack, workspace_base=workspace)
+    service = SchedulerService(
+        store=SchedulerStore(db_path),
+        user_manager=um,
+        agent_service=agent_service,
+        notifier=None,
+        settings=settings.scheduler,
+    )
+    return settings, um, service
+
+
+def cmd_schedule(args: Any) -> None:
+    """B-118: schedule list/accept/dismiss/pause/resume/run-now/propose."""
+    import asyncio
+    import json
+
+    from corpclaw_lite.scheduler.service import SchedulerError
+
+    need_agent = args.schedule_cmd == "run-now"
+    _settings, um, service = _build_scheduler_cli(with_agent=need_agent)
+    user = um.get_by_id(args.user_id)
+    if user is None:
+        raise SystemExit(f"User id={args.user_id} not found")
+
+    async def _run() -> None:
+        assert user is not None
+        try:
+            if args.schedule_cmd == "list":
+                tasks = await service.list_for_user(user)
+                print(
+                    json.dumps(
+                        [t.to_dict() for t in tasks],
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+            elif args.schedule_cmd == "propose":
+                task = await service.propose(
+                    user,
+                    title=args.title,
+                    task_text=args.task,
+                    schedule_text=args.schedule,
+                    notify=False,
+                )
+                print(json.dumps(task.to_dict(), ensure_ascii=False, indent=2))
+            elif args.schedule_cmd == "accept":
+                task = await service.accept(
+                    user,
+                    args.task_id,
+                    title=args.title,
+                    task_text=args.task,
+                    schedule_text=args.schedule,
+                )
+                print(json.dumps(task.to_dict(), ensure_ascii=False, indent=2))
+            elif args.schedule_cmd == "dismiss":
+                task = await service.dismiss(user, args.task_id)
+                print(json.dumps(task.to_dict(), ensure_ascii=False, indent=2))
+            elif args.schedule_cmd == "pause":
+                task = await service.pause(user, args.task_id)
+                print(json.dumps(task.to_dict(), ensure_ascii=False, indent=2))
+            elif args.schedule_cmd == "resume":
+                task = await service.resume(user, args.task_id)
+                print(json.dumps(task.to_dict(), ensure_ascii=False, indent=2))
+            elif args.schedule_cmd == "run-now":
+                result = await service.run_now(user, args.task_id)
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+                if result.get("status") == "skipped":
+                    raise SystemExit(2)
+            else:
+                raise SystemExit(f"Unknown schedule command: {args.schedule_cmd}")
+        except SchedulerError as exc:
+            raise SystemExit(str(exc)) from exc
 
     asyncio.run(_run())
 
@@ -1455,6 +1598,8 @@ def main() -> None:
                 source=args.source,
                 title=args.title,
             )
+        elif args.command == "schedule":
+            cmd_schedule(args)
         else:
             parser.print_help()
     except StartupConfigurationError as e:

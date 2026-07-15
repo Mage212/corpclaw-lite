@@ -1,0 +1,453 @@
+"""B-118 / DC-030: SchedulerService — poll loop + consent CRUD + headless dispatch."""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import logging
+import uuid
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any
+
+from corpclaw_lite.scheduler.models import ScheduledTask, ScheduleSpec
+from corpclaw_lite.scheduler.parse import (
+    ScheduleParseError,
+    compute_next_run,
+    parse_schedule,
+)
+from corpclaw_lite.scheduler.prompt import build_headless_prompt
+from corpclaw_lite.scheduler.store import SchedulerStore
+
+if TYPE_CHECKING:
+    from corpclaw_lite.channels.service import AgentRequestService
+    from corpclaw_lite.channels.user_notifier import UserNotifier
+    from corpclaw_lite.config.settings import SchedulerSettings
+    from corpclaw_lite.users.manager import UserManager
+    from corpclaw_lite.users.models import User
+
+__all__ = [
+    "SchedulerError",
+    "SchedulerService",
+    "make_dedup_key",
+]
+
+logger = logging.getLogger(__name__)
+
+
+class SchedulerError(Exception):
+    """Domain error for scheduler operations (limits, not found, bad state)."""
+
+
+def make_dedup_key(*, user_id: int, title: str, task_text: str, schedule_text: str) -> str:
+    raw = (
+        f"{user_id}|{title.strip().lower()}|"
+        f"{task_text.strip().lower()}|{schedule_text.strip().lower()}"
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC).replace(microsecond=0)
+
+
+def _iso(dt: datetime) -> str:
+    return dt.astimezone(UTC).replace(microsecond=0).isoformat()
+
+
+class SchedulerService:
+    """Web-owned poll loop; consent-first task lifecycle."""
+
+    def __init__(
+        self,
+        *,
+        store: SchedulerStore,
+        user_manager: UserManager,
+        agent_service: AgentRequestService | None = None,
+        notifier: UserNotifier | None = None,
+        settings: SchedulerSettings,
+    ) -> None:
+        self._store = store
+        self._user_manager = user_manager
+        self._agent_service = agent_service
+        self._notifier = notifier
+        self._settings = settings
+        self._task: asyncio.Task[None] | None = None
+        self._running = False
+
+    @property
+    def store(self) -> SchedulerStore:
+        return self._store
+
+    def start(self) -> None:
+        if not self._settings.enabled:
+            logger.info("Scheduler disabled (scheduler.enabled=false)")
+            return
+        if self._task is None or self._task.done():
+            self._running = True
+            self._task = asyncio.create_task(self._poll_loop())
+            logger.info(
+                "SchedulerService started poll_seconds=%s db=%s",
+                self._settings.poll_seconds,
+                self._store.db_path,
+            )
+
+    def stop(self) -> None:
+        self._running = False
+        if self._task is not None and not self._task.done():
+            self._task.cancel()
+            logger.info("SchedulerService stopped")
+        self._task = None
+
+    async def _poll_loop(self) -> None:
+        interval = max(5.0, float(self._settings.poll_seconds))
+        while self._running:
+            try:
+                await self.tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error("Scheduler tick failed: %s", exc)
+            try:
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                raise
+
+    async def tick(self) -> None:
+        """One poll cycle: expire pending, run due tasks."""
+        await self._expire_pending()
+        now = _utcnow()
+        due = await self._store.list_due(_iso(now), limit=20)
+        for task in due:
+            try:
+                await self._dispatch(task, now=now)
+            except Exception as exc:
+                logger.exception("Dispatch failed task=%s: %s", task.id, exc)
+                task.error_count += 1
+                task.last_status = "error"
+                task.last_run_at = _iso(now)
+                # Defer 1 min to avoid tight error loop
+                task.next_run_at = _iso(now + timedelta(minutes=1))
+                await self._store.update(task)
+
+    async def _expire_pending(self) -> None:
+        days = int(self._settings.pending_ttl_days)
+        if days <= 0:
+            return
+        cutoff = _iso(_utcnow() - timedelta(days=days))
+        n = await self._store.expire_pending(cutoff)
+        if n:
+            logger.info("Expired %d pending schedule proposals", n)
+
+    async def propose(
+        self,
+        user: User,
+        *,
+        title: str,
+        task_text: str,
+        schedule_text: str,
+        dedup_key: str | None = None,
+        notify: bool = True,
+    ) -> ScheduledTask:
+        title_s = (title or "").strip() or "Задача по расписанию"
+        task_s = (task_text or "").strip()
+        sched_s = (schedule_text or "").strip()
+        if not task_s:
+            raise SchedulerError("task_text is required")
+        if not sched_s:
+            raise SchedulerError("schedule_text is required")
+
+        key = dedup_key or make_dedup_key(
+            user_id=user.id, title=title_s, task_text=task_s, schedule_text=sched_s
+        )
+        if await self._store.has_dismissed_dedup(user.id, key):
+            raise SchedulerError(
+                "This proposal was dismissed earlier (same fingerprint). "
+                "Change the wording or schedule to propose again."
+            )
+
+        max_n = int(self._settings.max_tasks_per_user)
+        count = await self._store.count_active(user.id)
+        if count >= max_n:
+            raise SchedulerError(
+                f"Limit reached: at most {max_n} pending+active tasks per user (currently {count})."
+            )
+
+        tz = self._settings.timezone
+        try:
+            spec = parse_schedule(sched_s, now=_utcnow(), tz=tz)
+        except ScheduleParseError:
+            spec = ScheduleSpec(kind="unset")
+
+        task = ScheduledTask(
+            id=uuid.uuid4().hex,
+            user_id=user.id,
+            title=title_s[:120],
+            task_text=task_s,
+            schedule_text=sched_s,
+            schedule=spec,
+            timezone=tz,
+            status="pending",
+            enabled=True,
+            dedup_key=key,
+            next_run_at=None,
+        )
+        await self._store.insert(task)
+
+        if notify and self._notifier is not None:
+            msg = self._format_propose_message(task)
+            try:
+                await self._notifier.notify(
+                    user,
+                    msg,
+                    source="schedule_propose",
+                    title=f"Подтвердите: {task.title}",
+                )
+            except Exception as exc:
+                logger.warning("schedule propose notify failed: %s", exc)
+
+        return task
+
+    def _format_propose_message(self, task: ScheduledTask) -> str:
+        return (
+            f"Предложена задача по расписанию (ожидает подтверждения).\n\n"
+            f"ID: {task.id}\n"
+            f"Название: {task.title}\n"
+            f"Задание: {task.task_text}\n"
+            f"Когда: {task.schedule_text}\n"
+            f"Разбор: {task.schedule.kind}"
+            + (
+                f" ({task.schedule.to_json()})"
+                if task.schedule.kind != "unset"
+                else " (нужна распознаваемая формула при accept)"
+            )
+            + f"\nЧасовой пояс: {task.timezone}\n\n"
+            f"Подтвердить (CLI):\n"
+            f"  corpclaw-lite schedule accept -u {task.user_id} -i {task.id}\n"
+            f"Отклонить:\n"
+            f"  corpclaw-lite schedule dismiss -u {task.user_id} -i {task.id}\n"
+        )
+
+    async def accept(
+        self,
+        user: User,
+        task_id: str,
+        *,
+        title: str | None = None,
+        task_text: str | None = None,
+        schedule_text: str | None = None,
+    ) -> ScheduledTask:
+        task = await self._store.get(task_id, user_id=user.id)
+        if task is None:
+            raise SchedulerError(f"Task {task_id} not found")
+        if task.status != "pending":
+            raise SchedulerError(f"Task is not pending (status={task.status})")
+
+        if title is not None and title.strip():
+            task.title = title.strip()[:120]
+        if task_text is not None and task_text.strip():
+            task.task_text = task_text.strip()
+        if schedule_text is not None and schedule_text.strip():
+            task.schedule_text = schedule_text.strip()
+
+        try:
+            task.schedule = parse_schedule(task.schedule_text, now=_utcnow(), tz=task.timezone)
+        except ScheduleParseError as exc:
+            raise SchedulerError(str(exc)) from exc
+
+        next_run = compute_next_run(
+            task.schedule, last_run_at=None, now=_utcnow(), tz=task.timezone
+        )
+        if next_run is None:
+            raise SchedulerError("Could not compute next_run for schedule")
+
+        task.status = "active"
+        task.enabled = True
+        task.next_run_at = _iso(next_run)
+        task.accepted_at = _iso(_utcnow())
+        await self._store.update(task)
+
+        if self._notifier is not None:
+            try:
+                await self._notifier.notify(
+                    user,
+                    (
+                        f"Задача по расписанию активна.\n"
+                        f"ID: {task.id}\n"
+                        f"{task.title}\n"
+                        f"Следующий запуск (UTC): {task.next_run_at}"
+                    ),
+                    source="schedule_accept",
+                    title=task.title,
+                )
+            except Exception as exc:
+                logger.warning("schedule accept notify failed: %s", exc)
+        return task
+
+    async def dismiss(self, user: User, task_id: str) -> ScheduledTask:
+        task = await self._require(user, task_id)
+        if task.status not in {"pending", "active", "paused"}:
+            raise SchedulerError(f"Cannot dismiss status={task.status}")
+        task.status = "dismissed"
+        task.enabled = False
+        task.next_run_at = None
+        await self._store.update(task)
+        return task
+
+    async def pause(self, user: User, task_id: str) -> ScheduledTask:
+        task = await self._require(user, task_id)
+        if task.status != "active":
+            raise SchedulerError("Only active tasks can be paused")
+        task.status = "paused"
+        task.enabled = False
+        await self._store.update(task)
+        return task
+
+    async def resume(self, user: User, task_id: str) -> ScheduledTask:
+        task = await self._require(user, task_id)
+        if task.status != "paused":
+            raise SchedulerError("Only paused tasks can be resumed")
+        next_run = compute_next_run(
+            task.schedule,
+            last_run_at=_parse_iso(task.last_run_at),
+            now=_utcnow(),
+            tz=task.timezone,
+        )
+        task.status = "active"
+        task.enabled = True
+        task.next_run_at = _iso(next_run) if next_run else _iso(_utcnow())
+        await self._store.update(task)
+        return task
+
+    async def delete(self, user: User, task_id: str) -> None:
+        task = await self._require(user, task_id)
+        task.status = "dismissed"
+        task.enabled = False
+        task.next_run_at = None
+        await self._store.update(task)
+
+    async def list_for_user(
+        self, user: User, *, statuses: list[str] | None = None
+    ) -> list[ScheduledTask]:
+        return await self._store.list_for_user(user.id, statuses=statuses)
+
+    async def run_now(self, user: User, task_id: str) -> dict[str, Any]:
+        task = await self._require(user, task_id)
+        if task.status not in {"active", "paused"}:
+            raise SchedulerError("run-now only for active/paused tasks")
+        return await self._dispatch(task, now=_utcnow(), force=True)
+
+    async def _require(self, user: User, task_id: str) -> ScheduledTask:
+        task = await self._store.get(task_id, user_id=user.id)
+        if task is None:
+            raise SchedulerError(f"Task {task_id} not found")
+        return task
+
+    async def _dispatch(
+        self,
+        task: ScheduledTask,
+        *,
+        now: datetime,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        if self._agent_service is None:
+            raise SchedulerError("agent_service is not configured")
+
+        user = self._user_manager.get_by_id(task.user_id)
+        if user is None:
+            task.last_status = "error"
+            task.error_count += 1
+            task.next_run_at = _iso(now + timedelta(minutes=5))
+            await self._store.update(task)
+            return {"status": "error", "reason": "user_not_found"}
+
+        from zoneinfo import ZoneInfo
+
+        try:
+            zone = ZoneInfo(task.timezone)
+        except Exception:
+            zone = ZoneInfo("UTC")
+        now_local = now.astimezone(zone)
+        prompt = build_headless_prompt(
+            task_text=task.task_text,
+            schedule_text=task.schedule_text,
+            now_local=now_local,
+            tz=task.timezone,
+        )
+
+        result = await self._agent_service.run_headless(
+            user=user,
+            task=prompt,
+            source="scheduled",
+        )
+
+        if result.status == "skipped":
+            # Defer 1 minute to avoid tight busy loop (plan).
+            task.last_status = "skipped_busy"
+            task.last_run_at = _iso(now)
+            task.next_run_at = _iso(now + timedelta(minutes=1))
+            await self._store.update(task)
+            await self._store.append_run_log(
+                task_id=task.id,
+                status="skipped_busy",
+                skip_reason=result.skip_reason,
+            )
+            return {
+                "status": "skipped",
+                "skip_reason": result.skip_reason,
+                "task_id": task.id,
+            }
+
+        # completed
+        task.run_count += 1
+        task.last_run_at = _iso(now)
+        task.last_status = "ok"
+        reply = result.reply or ""
+        run_id = result.stats.run_id if result.stats is not None else None
+
+        if task.schedule.kind == "once":
+            task.status = "done"
+            task.enabled = False
+            task.next_run_at = None
+        else:
+            nxt = compute_next_run(
+                task.schedule,
+                last_run_at=now,
+                now=now,
+                tz=task.timezone,
+            )
+            if nxt is None:
+                task.status = "done"
+                task.enabled = False
+                task.next_run_at = None
+            else:
+                # Ensure strictly after now for intervals
+                if nxt <= now:
+                    nxt = now + timedelta(minutes=max(1, task.schedule.minutes or 1))
+                task.next_run_at = _iso(nxt)
+
+        await self._store.update(task)
+        await self._store.append_run_log(
+            task_id=task.id,
+            status="ok",
+            run_id=run_id,
+            reply_preview=reply[:500],
+        )
+        return {
+            "status": "completed",
+            "task_id": task.id,
+            "reply": reply,
+            "next_run_at": task.next_run_at,
+            "task_status": task.status,
+        }
+
+
+def _parse_iso(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        return dt
+    except ValueError:
+        return None
