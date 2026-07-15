@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from corpclaw_lite.agent.loop import RunStats
 from corpclaw_lite.config.bootstrap import BootstrapLoader
@@ -13,6 +15,7 @@ from corpclaw_lite.exceptions import LLMBackendUnavailableError
 from corpclaw_lite.extensions.tools.builtin._path_utils import user_workspace_path
 from corpclaw_lite.llm.queue import LLMQueueStatus
 from corpclaw_lite.logging.agent_logger import AgentLogger
+from corpclaw_lite.logging.trace import log_event
 from corpclaw_lite.paths import PROJECT_ROOT
 from corpclaw_lite.users.models import User
 
@@ -22,6 +25,7 @@ __all__ = [
     "AgentRequestCallbacks",
     "AgentRequestResult",
     "AgentRequestService",
+    "HeadlessResult",
     "RunningRequest",
     "is_llm_transport_error",
 ]
@@ -108,6 +112,34 @@ class AgentRequestResult:
 
     reply: str
     stats: RunStats
+
+
+@dataclass(frozen=True, slots=True)
+class HeadlessResult:
+    """Outcome of :meth:`AgentRequestService.run_headless` (B-119 / DC-031)."""
+
+    status: Literal["completed", "skipped"]
+    reply: str | None = None
+    session_id: int | None = None
+    stats: RunStats | None = None
+    skip_reason: str | None = None
+    source: str = "manual"
+
+    def to_dict(self) -> dict[str, object]:
+        body: dict[str, object] = {
+            "status": self.status,
+            "source": self.source,
+        }
+        if self.reply is not None:
+            body["reply"] = self.reply
+        if self.session_id is not None:
+            body["session_id"] = self.session_id
+        if self.skip_reason is not None:
+            body["skip_reason"] = self.skip_reason
+        if self.stats is not None:
+            body["run_id"] = self.stats.run_id
+            body["status_detail"] = self.stats.status
+        return body
 
 
 class AgentRequestService:
@@ -396,3 +428,124 @@ class AgentRequestService:
 
         assert run_stats is not None
         return AgentRequestResult(reply=reply, stats=run_stats)
+
+    async def run_headless(
+        self,
+        *,
+        user: User,
+        task: str,
+        source: str = "manual",
+        depth_mode: str | None = None,
+        web_access: bool = True,
+        callbacks: AgentRequestCallbacks | None = None,
+    ) -> HeadlessResult:
+        """B-119 / DC-031: start an agent task without inbound user message.
+
+        - Skips when the user already has an interactive/in-flight workflow (DC-011).
+        - Persists transcript into the durable per-user **system** session.
+        - Does not rewrite :meth:`AgentLoop.run`; uses ``channel=\"system\"``.
+        """
+        task_text = task.strip()
+        if not task_text:
+            raise ValueError("task must be a non-empty string")
+        safe_source = (source or "manual").strip() or "manual"
+        title = f"[{safe_source}] {task_text[:80]}"
+
+        started = await self.try_start_user_request(user.id, session_id=None, title=title)
+        if not started:
+            log_event(
+                "headless_skipped",
+                "",
+                user_id=user.id,
+                source=safe_source,
+                reason="user_busy",
+            )
+            logger.info(
+                "headless skipped user=%s source=%s reason=user_busy",
+                user.memory_key(),
+                safe_source,
+            )
+            return HeadlessResult(
+                status="skipped",
+                skip_reason="user_busy",
+                source=safe_source,
+            )
+
+        chat_store = getattr(self._stack, "chat_store", None)
+        if chat_store is None:
+            await self.finish_user_request(user.id)
+            raise RuntimeError("chat_store is required for headless runs")
+
+        session_id: int | None = None
+        try:
+            session_id = await chat_store.ensure_system_session(user.memory_key())
+            # Refresh gate metadata for B-090 badge (system session).
+            async with self._active_user_requests_lock:
+                if user.id in self._active_user_requests:
+                    self._active_user_requests[user.id] = RunningRequest(
+                        session_id=session_id,
+                        title=title,
+                    )
+
+            request_id = secrets.token_urlsafe(10)
+            meta_user: dict[str, object] = {"source": safe_source, "headless": True}
+            await chat_store.append_message(
+                user_id=user.memory_key(),
+                role="user",
+                content=task_text,
+                request_id=request_id,
+                metadata=meta_user,
+                session_id=session_id,
+            )
+
+            log_event(
+                "headless_started",
+                "",
+                user_id=user.id,
+                source=safe_source,
+                session_id=session_id,
+                task_len=len(task_text),
+            )
+
+            result = await self.run(
+                user=user,
+                message=task_text,
+                mode="execute",
+                channel="system",
+                callbacks=callbacks,
+                depth_mode=depth_mode,
+                session_id=session_id,
+                web_access=web_access,
+            )
+
+            await chat_store.append_message(
+                user_id=user.memory_key(),
+                role="assistant",
+                content=result.reply,
+                request_id=request_id,
+                metadata={
+                    "source": safe_source,
+                    "headless": True,
+                    "status": result.stats.status,
+                    "tools_used": result.stats.tools_used,
+                },
+                session_id=session_id,
+            )
+
+            log_event(
+                "headless_finished",
+                result.stats.run_id,
+                user_id=user.id,
+                source=safe_source,
+                session_id=session_id,
+                status=result.stats.status,
+            )
+            return HeadlessResult(
+                status="completed",
+                reply=result.reply,
+                session_id=session_id,
+                stats=result.stats,
+                source=safe_source,
+            )
+        finally:
+            await self.finish_user_request(user.id)

@@ -13,9 +13,11 @@ from corpclaw_lite.utils.async_helpers import run_in_thread
 from corpclaw_lite.utils.db import db_connect
 
 __all__ = [
+    "CHANNEL_SYSTEM",
     "CHANNEL_TELEGRAM",
     "CHANNEL_WEB",
     "ChatSessionSummary",
+    "SECTION_SYSTEM",
     "WebChatFile",
     "WebChatMessage",
     "WebChatPage",
@@ -33,7 +35,12 @@ _DEFAULT_ACTIVE_MAX_MESSAGES = 2000
 # per (user_id, channel), not per user alone.
 CHANNEL_WEB = "web"
 CHANNEL_TELEGRAM = "telegram"
-_KNOWN_CHANNELS = frozenset({CHANNEL_WEB, CHANNEL_TELEGRAM})
+# B-119 / DC-031: autonomous headless runs use a durable system channel so
+# create/ensure never archives the user's chat/work sessions.
+CHANNEL_SYSTEM = "system"
+SECTION_SYSTEM = "system"
+_KNOWN_CHANNELS = frozenset({CHANNEL_WEB, CHANNEL_TELEGRAM, CHANNEL_SYSTEM})
+_KNOWN_SECTIONS = frozenset({"chat", "work", SECTION_SYSTEM})
 
 
 def _empty_metadata() -> dict[str, Any]:
@@ -292,7 +299,17 @@ class WebChatStore:
             INSERT INTO web_chat_sessions (user_id, channel, section)
             VALUES (?, ?, ?)
             """,
-            (str(user_id), channel, "chat" if channel == CHANNEL_WEB else channel),
+            (
+                str(user_id),
+                channel,
+                (
+                    "chat"
+                    if channel == CHANNEL_WEB
+                    else SECTION_SYSTEM
+                    if channel == CHANNEL_SYSTEM
+                    else channel
+                ),
+            ),
         )
         row = conn.execute("SELECT last_insert_rowid()").fetchone()
         if row is None:
@@ -430,13 +447,28 @@ class WebChatStore:
         request_id: str | None,
         metadata: dict[str, Any] | None,
         file: WebChatFile | None,
+        session_id: int | None = None,
+        channel: str = CHANNEL_WEB,
     ) -> WebChatMessage:
         if role not in {"user", "assistant", "system"}:
             raise StorageError(f"Unsupported web chat role: {role}")
         try:
             with db_connect(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
-                session_id = self._sync_ensure_active_session_id(conn, user_id)
+                if session_id is not None:
+                    owned = conn.execute(
+                        "SELECT id FROM web_chat_sessions WHERE id = ? AND user_id = ?",
+                        (int(session_id), str(user_id)),
+                    ).fetchone()
+                    if owned is None:
+                        raise StorageError(
+                            f"Chat session {session_id} not found for user {user_id}"
+                        )
+                    resolved_session_id = int(session_id)
+                else:
+                    resolved_session_id = self._sync_ensure_active_session_id(
+                        conn, user_id, channel=channel
+                    )
                 cursor = conn.execute(
                     """
                     INSERT INTO web_chat_messages (
@@ -446,7 +478,7 @@ class WebChatStore:
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        session_id,
+                        resolved_session_id,
                         str(user_id),
                         role,
                         self._clean_content(content),
@@ -465,11 +497,11 @@ class WebChatStore:
                 # to the top of the sidebar list (sorted by updated_at DESC).
                 conn.execute(
                     "UPDATE web_chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                    (session_id,),
+                    (resolved_session_id,),
                 )
                 self._sync_prune_active_messages(
                     conn,
-                    session_id=session_id,
+                    session_id=resolved_session_id,
                     max_messages=self._active_max_messages,
                 )
                 row = conn.execute(
@@ -494,8 +526,14 @@ class WebChatStore:
         request_id: str | None = None,
         metadata: dict[str, Any] | None = None,
         file: WebChatFile | None = None,
+        session_id: int | None = None,
+        channel: str = CHANNEL_WEB,
     ) -> WebChatMessage:
-        """Persist a user-visible web chat message."""
+        """Persist a user-visible web chat message.
+
+        When *session_id* is set, append to that session (must be owned by
+        *user_id*). Otherwise open/create the active session for *channel*.
+        """
         return await run_in_thread(
             self._sync_append_message,
             user_id=str(user_id),
@@ -505,6 +543,8 @@ class WebChatStore:
             request_id=request_id,
             metadata=metadata,
             file=file,
+            session_id=session_id,
+            channel=channel,
         )
 
     # ------------------------------------------------------------------
@@ -595,11 +635,31 @@ class WebChatStore:
         """Return a single chat session if owned by the user, else None."""
         return await run_in_thread(self._sync_get_session, str(user_id), int(session_id))
 
+    def _sync_ensure_system_session(self, user_id: str) -> int:
+        """Return durable open system session id for headless (B-119).
+
+        Uses ``channel=system`` so it never closes web chat/work sessions.
+        """
+        try:
+            with db_connect(self.db_path) as conn:
+                return self._sync_ensure_active_session_id(
+                    conn, str(user_id), channel=CHANNEL_SYSTEM
+                )
+        except Exception as e:
+            raise StorageError(f"Failed to ensure system session for user {user_id}: {e}") from e
+
+    async def ensure_system_session(self, user_id: str) -> int:
+        """B-119: open (or create) the per-user system session for headless runs."""
+        return await run_in_thread(self._sync_ensure_system_session, str(user_id))
+
     def _sync_create_session(
         self, user_id: str, section: str, *, channel: str = CHANNEL_WEB
     ) -> int:
-        if section not in {"chat", "work"}:
+        if section not in _KNOWN_SECTIONS:
             section = "chat"
+        if section == SECTION_SYSTEM:
+            # Prefer ensure_system_session; force channel isolation if called.
+            channel = CHANNEL_SYSTEM
         channel = self._normalize_channel(channel)
         try:
             with db_connect(self.db_path) as conn:

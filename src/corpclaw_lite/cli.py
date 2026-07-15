@@ -304,6 +304,30 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Clear previous calibration before starting",
     )
 
+    # B-119 / DC-031: headless agent entry (no inbound chat)
+    headless_p = sub.add_parser(
+        "headless-run",
+        help="Run an agent task without inbound message (system session)",
+    )
+    headless_p.add_argument(
+        "-u",
+        "--user-id",
+        type=int,
+        required=True,
+        help="Canonical users.id",
+    )
+    headless_p.add_argument(
+        "-t",
+        "--task",
+        required=True,
+        help="Task text (synthetic user message)",
+    )
+    headless_p.add_argument(
+        "--source",
+        default="manual",
+        help="Source tag: manual|scheduled|memory_worker|mission|test (default: manual)",
+    )
+
     # eval (B-060): GAIA-style eval harness with A/B guard toggling
     eval_p = sub.add_parser("eval", help="Run the eval harness (B-060) over a scenario corpus")
     eval_p.add_argument(
@@ -641,6 +665,54 @@ def cmd_telegram() -> None:
     from corpclaw_lite.channels.telegram.runner import run_telegram_bot
 
     asyncio.run(run_telegram_bot(token))
+
+
+def cmd_headless_run(*, user_id: int, task: str, source: str = "manual") -> None:
+    """B-119: run one headless agent task into the user system session."""
+    import asyncio
+    import json
+    from pathlib import Path
+
+    from corpclaw_lite.agent.factory import build_agent_stack
+    from corpclaw_lite.channels.service import AgentRequestService
+    from corpclaw_lite.config.loader import load_settings
+    from corpclaw_lite.logging.agent_logger import setup_logging
+    from corpclaw_lite.paths import PROJECT_ROOT
+    from corpclaw_lite.users.manager import UserManager
+    from corpclaw_lite.users.models import User
+
+    settings = load_settings(PROJECT_ROOT / "config" / "settings.yaml")
+    log_cfg = settings.logging
+    setup_logging(
+        log_dir=PROJECT_ROOT / log_cfg.log_dir,
+        level=log_cfg.level,
+        console_level=log_cfg.console_level,
+        trace_enabled=log_cfg.trace_enabled,
+        trace_level=log_cfg.trace_level,
+        trace_preview_chars=log_cfg.trace_preview_chars,
+        capture_enabled=log_cfg.capture_enabled,
+        capture_fields=log_cfg.capture_fields,
+        capture_dir=PROJECT_ROOT / (log_cfg.capture_dir or log_cfg.log_dir),
+    )
+    um = UserManager()
+    user: User | None = um.get_by_id(user_id)
+    if user is None:
+        raise SystemExit(f"User id={user_id} not found")
+    stack = build_agent_stack(settings)
+    ws_base = settings.web_channel.workspace_base
+    workspace = Path(ws_base) if not Path(ws_base).is_absolute() else Path(ws_base)
+    if not workspace.is_absolute():
+        workspace = PROJECT_ROOT / workspace
+    service = AgentRequestService(stack=stack, workspace_base=workspace)
+
+    async def _run() -> None:
+        assert user is not None
+        result = await service.run_headless(user=user, task=task, source=source)
+        print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+        if result.status == "skipped":
+            raise SystemExit(2)
+
+    asyncio.run(_run())
 
 
 def cmd_web() -> None:
@@ -1266,6 +1338,12 @@ def main() -> None:
                 output_dir=args.output,
                 seeds=args.seeds,
                 judge_ensemble=args.judge_ensemble,
+            )
+        elif args.command == "headless-run":
+            cmd_headless_run(
+                user_id=args.user_id,
+                task=args.task,
+                source=args.source,
             )
         else:
             parser.print_help()

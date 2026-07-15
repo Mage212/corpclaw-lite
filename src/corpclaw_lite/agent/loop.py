@@ -1643,6 +1643,15 @@ class AgentLoop:
         effective_provider: Provider = self._provider
         if depth_mode is not None and isinstance(self._provider, LLMRouter):
             effective_provider = self._apply_depth_override(self._provider, depth_mode)
+        # B-119 / DC-031: headless (channel=system) must not take sticky interactive
+        # slots — use non-default task_kind so queue routes to overflow (D-084 path 1).
+        if channel == "system" and isinstance(effective_provider, LLMRouter):
+            effective_provider = effective_provider.for_task(
+                "headless",
+                user_id=str(user.id),
+                load_class="subagent",
+                run_id=stats.run_id,
+            )
 
         def emit_llm_status(stage: str) -> None:
             if self._settings.llm_stream_status_updates:
