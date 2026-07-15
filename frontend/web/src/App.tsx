@@ -127,6 +127,7 @@ function Workspace({
   const [section, setSection] = useState<SidebarSection>("chat");
   // Etap 3: depth mode (Fast/Think) — orthogonal to section (tools on/off).
   const [depthMode, setDepthMode] = useState<DepthMode>("think");
+  const [webAccess, setWebAccess] = useState(true);
 
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -228,7 +229,9 @@ function Workspace({
     onChatRenamed: refreshChats,
     onChatListChanged: refreshChats,
     onSystemLoad: setSystemLoad,
-    onSessionRunningState: handleSessionRunningState
+    onSessionRunningState: handleSessionRunningState,
+    webAccess,
+    onWebAccessChange: setWebAccess
   });
 
   useEffect(() => {
@@ -406,6 +409,8 @@ function Workspace({
               contextUsage={contextUsage}
               depthMode={depthMode}
               onDepthModeChange={setDepthMode}
+              webAccess={webAccess}
+              onWebAccessChange={setWebAccess}
               section={section}
             />
           </div>

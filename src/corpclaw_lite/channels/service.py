@@ -282,6 +282,7 @@ class AgentRequestService:
         callbacks: AgentRequestCallbacks | None = None,
         depth_mode: str | None = None,
         session_id: int | None = None,
+        web_access: bool = True,
     ) -> AgentRequestResult:
         """Run an agent request with shared skill matching, container and logging.
 
@@ -342,6 +343,7 @@ class AgentRequestService:
                 channel=channel,
                 depth_mode=depth_mode,  # type: ignore[arg-type]
                 session_id=session_id,
+                web_access=web_access,
             )
         except Exception as e:
             if is_llm_transport_error(e):

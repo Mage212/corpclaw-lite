@@ -20,6 +20,9 @@ type ChatPanelProps = {
   contextUsage: ContextUsage | null;
   depthMode: DepthMode;
   onDepthModeChange: (mode: DepthMode) => void;
+  /** B-091: main web_fetch allow; Work only. */
+  webAccess: boolean;
+  onWebAccessChange: (enabled: boolean) => void;
   section: SidebarSection;
 };
 
@@ -30,6 +33,8 @@ export function ChatPanel({
   contextUsage,
   depthMode,
   onDepthModeChange,
+  webAccess,
+  onWebAccessChange,
   section
 }: ChatPanelProps) {
   const messagesRef = useRef<HTMLDivElement | null>(null);
@@ -137,6 +142,9 @@ export function ChatPanel({
       </footer>
       <div className="composer-extras">
         <ModeSelector value={depthMode} onChange={onDepthModeChange} section={section} />
+        {section === "work" && (
+          <WebAccessToggle value={webAccess} onChange={onWebAccessChange} />
+        )}
         <ContextSizeBar
           usage={contextUsage}
           onCompress={session.readOnly ? undefined : session.compress}
@@ -144,6 +152,35 @@ export function ChatPanel({
         />
       </div>
     </main>
+  );
+}
+
+/**
+ * B-091: Work-only toggle for main-agent web_fetch (not web_search; research stays).
+ * Cache-safe server path uses tail hint + execute deny — UI only flips the flag.
+ */
+function WebAccessToggle({
+  value,
+  onChange
+}: {
+  value: boolean;
+  onChange: (enabled: boolean) => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={`web-access-toggle ${value ? "on" : "off"}`}
+      onClick={() => onChange(!value)}
+      title={
+        value
+          ? "Веб включён (web_fetch). Нажмите, чтобы отключить сеть для main-агента."
+          : "Веб выключен. Main-агент не ходит в сеть; deep research — через субагента."
+      }
+      aria-pressed={value}
+    >
+      <span className="web-access-label">Веб</span>
+      <span className="web-access-state">{value ? "вкл" : "выкл"}</span>
+    </button>
   );
 }
 
