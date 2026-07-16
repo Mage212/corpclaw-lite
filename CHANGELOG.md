@@ -6,6 +6,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- **B-109 PR1 foundations (DC-027 Layer 2+3).** `MemoryWorkerSettings` config
+  block; `user_memory_worker` opt-in table in users.db with sync/async CRUD
+  (`enable`/`disable`/`status`/`list_enabled`/`update_run`); merge helpers
+  (`.md` backup + atomic write + disclaimer ensure, strict JSON response parser,
+  merge-only entry application via `SQLiteMemory.store_entry`); transcript
+  gatherer from recent non-system chat sessions. CLI `memory-worker enable
+  /disable/status`. Worker runtime + LLM loop in PR2.
+
 ### Fixed
 
 - **Scheduler status-guarded transitions.** `accept`/`dismiss`/`pause`/`resume`

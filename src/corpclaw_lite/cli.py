@@ -357,6 +357,16 @@ def _build_parser() -> argparse.ArgumentParser:
     sched_propose.add_argument("--task", required=True)
     sched_propose.add_argument("--schedule", required=True)
 
+    # B-109 / DC-027 Layer 2+3: memory worker opt-in + ops.
+    mw_p = sub.add_parser("memory-worker", help="Manage background memory worker (B-109)")
+    mw_sub = mw_p.add_subparsers(dest="memory_worker_cmd", required=True)
+    mw_enable = mw_sub.add_parser("enable", help="Opt a user in to the memory worker")
+    mw_enable.add_argument("-u", "--user-id", type=int, required=True)
+    mw_disable = mw_sub.add_parser("disable", help="Opt a user out of the memory worker")
+    mw_disable.add_argument("-u", "--user-id", type=int, required=True)
+    mw_status = mw_sub.add_parser("status", help="Show memory-worker state for a user")
+    mw_status.add_argument("-u", "--user-id", type=int, required=True)
+
     # B-120 / DC-032: proactive notify (system session + optional TG)
     notify_p = sub.add_parser(
         "notify-user",
@@ -885,6 +895,34 @@ def cmd_schedule(args: Any) -> None:
             raise SystemExit(str(exc)) from exc
 
     asyncio.run(_run())
+
+
+def cmd_memory_worker(args: Any) -> None:
+    """B-109: memory-worker enable/disable/status."""
+    from corpclaw_lite.users.manager import UserManager
+
+    um = UserManager()
+    user_id = int(args.user_id)
+    cmd = str(args.memory_worker_cmd)
+    if cmd == "enable":
+        um.set_memory_worker_enabled(user_id, True)
+        print(f"User {user_id}: memory worker ENABLED.")
+    elif cmd == "disable":
+        um.set_memory_worker_enabled(user_id, False)
+        print(f"User {user_id}: memory worker DISABLED.")
+    elif cmd == "status":
+        state = um.get_memory_worker_state(user_id)
+        if state is None:
+            print(f"User {user_id}: no memory-worker row (not opted in).")
+        else:
+            print(f"User {user_id}:")
+            print(f"  enabled:     {state.enabled}")
+            print(f"  last_run_at: {state.last_run_at or '—'}")
+            print(f"  last_status: {state.last_status or '—'}")
+            if state.last_error:
+                print(f"  last_error:  {state.last_error[:200]}")
+    else:
+        raise SystemExit(f"Unknown memory-worker command: {cmd}")
 
 
 def cmd_notify_user(
@@ -1600,6 +1638,8 @@ def main() -> None:
             )
         elif args.command == "schedule":
             cmd_schedule(args)
+        elif args.command == "memory-worker":
+            cmd_memory_worker(args)
         else:
             parser.print_help()
     except StartupConfigurationError as e:
