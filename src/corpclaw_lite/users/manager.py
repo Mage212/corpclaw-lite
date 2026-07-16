@@ -6,6 +6,7 @@ import logging
 import secrets
 import shutil
 import sqlite3
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from hashlib import pbkdf2_hmac
@@ -18,11 +19,24 @@ from corpclaw_lite.users.models import User
 from corpclaw_lite.utils.db import db_connect
 
 __all__ = [
+    "MemoryWorkerState",
     "UserManager",
     "tone_directive",
 ]
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryWorkerState:
+    """B-109: per-user memory-worker opt-in state + last-run metadata."""
+
+    user_id: int
+    enabled: bool
+    last_run_at: str | None = None
+    last_status: str | None = None
+    last_error: str | None = None
+
 
 # Response-tone directives injected into the system prompt per the user's
 # ``user_agent_context.tone`` setting (Etap 5). ``"default"`` has no directive —
@@ -133,6 +147,19 @@ class UserManager:
                     instructions TEXT NOT NULL DEFAULT '',
                     tone TEXT NOT NULL DEFAULT 'default',
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            # B-109: per-user memory worker opt-in + run history.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_memory_worker (
+                    user_id INTEGER PRIMARY KEY,
+                    enabled INTEGER NOT NULL DEFAULT 0,
+                    last_run_at TEXT,
+                    last_status TEXT,
+                    last_error TEXT,
+                    updated_at TEXT NOT NULL DEFAULT ''
                 )
                 """
             )
@@ -1109,4 +1136,116 @@ class UserManager:
         """Async wrapper around set_agent_context."""
         await anyio.to_thread.run_sync(
             partial(self.set_agent_context, user_id, instructions=instructions, tone=tone)
+        )
+
+    # ── B-109: Memory worker opt-in + run history ───────────────────────────
+
+    def set_memory_worker_enabled(self, user_id: int, enabled: bool) -> None:
+        """Opt a user in/out of the background memory worker (B-109)."""
+        now = datetime.now(UTC).isoformat()
+        try:
+            with db_connect(self._db) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO user_memory_worker (user_id, enabled, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        enabled = excluded.enabled,
+                        updated_at = excluded.updated_at
+                    """,
+                    (int(user_id), 1 if enabled else 0, now),
+                )
+        except Exception as e:
+            logger.warning("Failed to set memory_worker state for user %s: %s", user_id, e)
+
+    async def async_set_memory_worker_enabled(self, user_id: int, enabled: bool) -> None:
+        """Async wrapper around set_memory_worker_enabled."""
+        await anyio.to_thread.run_sync(partial(self.set_memory_worker_enabled, user_id, enabled))
+
+    def get_memory_worker_state(self, user_id: int) -> MemoryWorkerState | None:
+        """Return the user's memory-worker state, or None if no row exists."""
+        try:
+            with db_connect(self._db) as conn:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(
+                    "SELECT * FROM user_memory_worker WHERE user_id = ?",
+                    (int(user_id),),
+                ).fetchone()
+        except Exception as e:
+            logger.warning("Failed to get memory_worker state for user %s: %s", user_id, e)
+            return None
+        if row is None:
+            return None
+        return MemoryWorkerState(
+            user_id=int(row["user_id"]),
+            enabled=bool(row["enabled"]),
+            last_run_at=str(row["last_run_at"]) if row["last_run_at"] is not None else None,
+            last_status=str(row["last_status"]) if row["last_status"] is not None else None,
+            last_error=str(row["last_error"]) if row["last_error"] is not None else None,
+        )
+
+    async def async_get_memory_worker_state(self, user_id: int) -> MemoryWorkerState | None:
+        """Async wrapper around get_memory_worker_state."""
+        return await anyio.to_thread.run_sync(partial(self.get_memory_worker_state, user_id))
+
+    def list_memory_worker_enabled_users(self) -> list[int]:
+        """Return user_ids that have opted in to the memory worker."""
+        try:
+            with db_connect(self._db) as conn:
+                rows = conn.execute(
+                    "SELECT user_id FROM user_memory_worker WHERE enabled = 1"
+                ).fetchall()
+        except Exception as e:
+            logger.warning("Failed to list memory_worker enabled users: %s", e)
+            return []
+        return [int(r[0]) for r in rows]
+
+    async def async_list_memory_worker_enabled_users(self) -> list[int]:
+        """Async wrapper around list_memory_worker_enabled_users."""
+        return await anyio.to_thread.run_sync(self.list_memory_worker_enabled_users)
+
+    def update_memory_worker_run(
+        self,
+        user_id: int,
+        *,
+        status: str,
+        error: str | None = None,
+    ) -> None:
+        """Record the outcome of a memory-worker run for the user.
+
+        Does NOT auto-enable: if no row exists, inserts with ``enabled=0`` so the
+        opt-in guarantee is preserved (worker should only call this for already
+        opted-in users, but defense-in-depth).
+        """
+        now = datetime.now(UTC).isoformat()
+        truncated_error = error[:2000] if error else None
+        try:
+            with db_connect(self._db) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO user_memory_worker (
+                        user_id, enabled, last_run_at, last_status, last_error, updated_at
+                    )
+                    VALUES (?, 0, ?, ?, ?, ?)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        last_run_at = excluded.last_run_at,
+                        last_status = excluded.last_status,
+                        last_error = excluded.last_error,
+                        updated_at = excluded.updated_at
+                    """,
+                    (int(user_id), now, status, truncated_error, now),
+                )
+        except Exception as e:
+            logger.warning("Failed to update memory_worker run for user %s: %s", user_id, e)
+
+    async def async_update_memory_worker_run(
+        self,
+        user_id: int,
+        *,
+        status: str,
+        error: str | None = None,
+    ) -> None:
+        """Async wrapper around update_memory_worker_run."""
+        await anyio.to_thread.run_sync(
+            partial(self.update_memory_worker_run, user_id, status=status, error=error)
         )

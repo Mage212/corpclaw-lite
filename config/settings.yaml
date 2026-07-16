@@ -258,6 +258,26 @@ scheduler:
   max_task_text_chars: 16000
   max_schedule_text_chars: 500
 
+# B-109 / DC-027 Layer 2+3: background memory curator (web-owned; not consent UI).
+# Master switch off by default; each user must also opt in (CLI memory-worker enable).
+memory_worker:
+  enabled: false
+  interval_hours: 24
+  quiet_hours_start: "22:00"
+  quiet_hours_end: "07:00"
+  # null → reuse scheduler.timezone
+  timezone: null
+  max_users_per_tick: 20
+  max_sessions: 5
+  max_messages_per_session: 40
+  max_transcript_chars: 24000
+  max_entries_per_run: 20
+  notify_on_update: false
+  keep_history_backups: false
+  bootstrap_users_dir: "config/bootstrap/users"
+  entries_backup_dir: "memory_backups"
+  poll_seconds: 300
+
 logging:
   level: "DEBUG"
   console_level: "INFO"

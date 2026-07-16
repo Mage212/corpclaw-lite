@@ -24,6 +24,7 @@ __all__ = [
     "QueueSettings",
     "ResearchSettings",
     "RoutingRule",
+    "MemoryWorkerSettings",
     "SchedulerSettings",
     "Settings",
     "SkillsSettings",
@@ -438,6 +439,31 @@ class SchedulerSettings(BaseModel):
     max_schedule_text_chars: int = 500
 
 
+class MemoryWorkerSettings(BaseModel):
+    """B-109 / DC-027 Layer 2+3: background memory curator (web-owned)."""
+
+    # Master switch — deploy must opt in; per-user opt-in still required.
+    enabled: bool = False
+    interval_hours: float = 24.0
+    quiet_hours_start: str = "22:00"
+    quiet_hours_end: str = "07:00"
+    # null → use scheduler.timezone at runtime
+    timezone: str | None = None
+    max_users_per_tick: int = 20
+    max_sessions: int = 5
+    max_messages_per_session: int = 40
+    max_transcript_chars: int = 24_000
+    max_entries_per_run: int = 20
+    notify_on_update: bool = False
+    keep_history_backups: bool = False
+    # Relative to PROJECT_ROOT unless absolute
+    bootstrap_users_dir: str = "config/bootstrap/users"
+    # Optional entries snapshot dir (relative to DATA_DIR)
+    entries_backup_dir: str = "memory_backups"
+    # Sleep between idle wake checks when waiting for quiet hours (seconds)
+    poll_seconds: float = 300.0
+
+
 class Settings(BaseSettings):
     """Main application settings."""
 
@@ -452,5 +478,6 @@ class Settings(BaseSettings):
     extensions: ExtensionsSettings = ExtensionsSettings()
     logging: LoggingSettings = LoggingSettings()
     scheduler: SchedulerSettings = SchedulerSettings()
+    memory_worker: MemoryWorkerSettings = MemoryWorkerSettings()
 
     model_config = {"env_nested_delimiter": "__"}
