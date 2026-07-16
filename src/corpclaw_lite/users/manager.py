@@ -59,7 +59,7 @@ class UserManager:
     """
     Manages user storage in SQLite (default path: data/users.db).
 
-    Cross-chat agent facts live in SQLiteMemory (memory.db / memory_facts), not here.
+    Cross-chat agent facts live in SQLiteMemory (memory.db / memory_entries), not here.
     """
 
     def __init__(
@@ -730,21 +730,84 @@ class UserManager:
                 if "no such table" not in str(e).lower():
                     raise
 
-            cur = conn.execute(
-                """
-                UPDATE memory_facts
-                SET user_id = ?
-                WHERE user_id = ?
-                  AND NOT EXISTS (
-                      SELECT 1 FROM memory_facts existing
-                      WHERE existing.user_id = ?
-                        AND existing.key = memory_facts.key
-                  )
-                """,
-                (target_key, source_key, target_key),
-            )
-            moved_facts = int(cur.rowcount or 0)
-            conn.execute("DELETE FROM memory_facts WHERE user_id = ?", (source_key,))
+            # B-108: memory_entries (abstraction UNIQUE per user). Legacy memory_facts optional.
+            moved_facts = 0
+            try:
+                cur = conn.execute(
+                    """
+                    UPDATE memory_entries
+                    SET user_id = ?
+                    WHERE user_id = ?
+                      AND NOT EXISTS (
+                          SELECT 1 FROM memory_entries existing
+                          WHERE existing.user_id = ?
+                            AND existing.primary_abstraction =
+                                memory_entries.primary_abstraction
+                      )
+                    """,
+                    (target_key, source_key, target_key),
+                )
+                moved_facts = int(cur.rowcount or 0)
+                conn.execute("DELETE FROM memory_entries WHERE user_id = ?", (source_key,))
+                # Best-effort FTS cleanup (table may be missing).
+                try:
+                    conn.execute(
+                        "DELETE FROM memory_entries_fts WHERE user_id = ?",
+                        (source_key,),
+                    )
+                    # Re-index moved rows for target (application dual-write normally
+                    # keeps FTS in sync; after raw SQL merge rebuild rows for target).
+                    rows = conn.execute(
+                        """
+                        SELECT id, user_id, primary_abstraction, cue_indices_json
+                        FROM memory_entries WHERE user_id = ?
+                        """,
+                        (target_key,),
+                    ).fetchall()
+                    for row in rows:
+                        rid, uid, abstr, cues_json = row[0], row[1], row[2], row[3]
+                        try:
+                            cues_list = json.loads(cues_json) if cues_json else []
+                            cues_text = (
+                                " ".join(str(c) for c in cues_list)
+                                if isinstance(cues_list, list)
+                                else ""
+                            )
+                        except Exception:
+                            cues_text = ""
+                        conn.execute(
+                            "DELETE FROM memory_entries_fts WHERE rowid = ?",
+                            (rid,),
+                        )
+                        conn.execute(
+                            """
+                            INSERT INTO memory_entries_fts(
+                                rowid, user_id, primary_abstraction, cues
+                            ) VALUES (?, ?, ?, ?)
+                            """,
+                            (rid, uid, abstr, cues_text),
+                        )
+                except sqlite3.OperationalError:
+                    pass
+            except sqlite3.OperationalError as e:
+                if "no such table" not in str(e).lower():
+                    raise
+                # Pre-B-108 DBs
+                cur = conn.execute(
+                    """
+                    UPDATE memory_facts
+                    SET user_id = ?
+                    WHERE user_id = ?
+                      AND NOT EXISTS (
+                          SELECT 1 FROM memory_facts existing
+                          WHERE existing.user_id = ?
+                            AND existing.key = memory_facts.key
+                      )
+                    """,
+                    (target_key, source_key, target_key),
+                )
+                moved_facts = int(cur.rowcount or 0)
+                conn.execute("DELETE FROM memory_facts WHERE user_id = ?", (source_key,))
             try:
                 target_active = conn.execute(
                     """

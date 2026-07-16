@@ -8,6 +8,12 @@
 
 ### Added
 
+- **B-108 Memora-style memory entries.** Replace flat `memory_facts` with
+  `memory_entries` (primary_abstraction + memory_value + cue_indices) and
+  hybrid recall (FTS5 + exact cue boost, LIKE fallback). Tools
+  `memory_store`/`memory_recall` accept abstraction/value/cues with legacy
+  key/value back-compat. Clean-start drop of `memory_facts`. Foundation for
+  B-109 memory-worker.
 - **B-143 PR3 LLM parse-assist.** `POST /api/schedule/{id}/parse-assist` —
   one optional LLM call maps free-form `schedule_text` → validated formula
   (`every Nh` / cron / ISO); never on poll. Deterministic parse skips LLM.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any
 
 from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
@@ -14,21 +15,61 @@ if TYPE_CHECKING:
     from corpclaw_lite.users.models import User
 
 
+def _parse_cues(raw: Any) -> list[str] | None:
+    if raw is None:
+        return None
+    if isinstance(raw, list):
+        items: list[Any] = list(raw)
+        return [str(x) for x in items]
+    if not isinstance(raw, str):
+        return None
+    text = raw.strip()
+    if not text:
+        return None
+    if text.startswith("["):
+        try:
+            data: Any = json.loads(text)
+            if isinstance(data, list):
+                parsed: list[Any] = list(data)
+                return [str(x) for x in parsed]
+        except json.JSONDecodeError:
+            pass
+    return [p.strip() for p in text.split(",") if p.strip()]
+
+
 class MemoryStoreTool(Tool):
-    """Store a key-value fact about the user in long-term memory."""
+    """Store a long-term memory entry (Memora-style abstraction + value + cues)."""
 
     name = "memory_store"
-    description = "Store a fact about the user in long-term memory for future reference."
+    description = (
+        "Store a fact about the user in long-term memory for future reference. "
+        "Prefer abstraction (short 6–8 word hook) + value (full text) + optional cues "
+        "(names, INN, project titles). Legacy key/value still accepted (key→abstraction)."
+    )
     params = [
         ToolParam(
-            name="key",
+            name="abstraction",
             type="string",
-            description="Key or category (e.g. 'name', 'preference', 'project')",
+            description="Short search hook, 6–8 words (e.g. 'Prefers brief replies')",
+            required=False,
         ),
         ToolParam(
             name="value",
             type="string",
-            description="The fact value to remember",
+            description="Full fact text to remember",
+            required=False,
+        ),
+        ToolParam(
+            name="cues",
+            type="string",
+            description='Optional anchors as JSON array or comma list: ["Иванов","7707"]',
+            required=False,
+        ),
+        ToolParam(
+            name="key",
+            type="string",
+            description="Legacy: key/category (mapped to abstraction)",
+            required=False,
         ),
     ]
     risk_level = RiskLevel.LOW
@@ -37,32 +78,50 @@ class MemoryStoreTool(Tool):
         self._memory = memory
 
     async def execute(self, *, user: User | None = None, **kwargs: Any) -> str:
-        key = kwargs.get("key")
-        value = kwargs.get("value")
-
-        if not isinstance(key, str) or not isinstance(value, str):
-            return "Error: 'key' and 'value' are required string parameters."
-
         if user is None:
             return "Error: User context is required for memory_store."
 
-        await self._memory.store_fact(str(user.id), key, value)
-        return f"Stored: {key} = {value}"
+        abstraction_raw = kwargs.get("abstraction")
+        value_raw = kwargs.get("value")
+        key_raw = kwargs.get("key")
+
+        abstraction: str | None = None
+        if isinstance(abstraction_raw, str) and abstraction_raw.strip():
+            abstraction = abstraction_raw.strip()
+        elif isinstance(key_raw, str) and key_raw.strip():
+            abstraction = key_raw.strip()
+
+        value: str | None = None
+        if isinstance(value_raw, str) and value_raw.strip():
+            value = value_raw.strip()
+
+        if abstraction is None or value is None:
+            return "Error: require (abstraction + value) or legacy (key + value) string parameters."
+
+        cues = _parse_cues(kwargs.get("cues"))
+        await self._memory.store_entry(
+            str(user.id),
+            primary_abstraction=abstraction,
+            memory_value=value,
+            cues=cues,
+        )
+        cue_note = f" cues={cues}" if cues else ""
+        return f"Stored: {abstraction} = {value}{cue_note}"
 
 
 class MemoryRecallTool(Tool):
-    """Recall stored facts about the user from long-term memory."""
+    """Recall stored memory entries (hybrid FTS + cue match)."""
 
     name = "memory_recall"
     description = (
         "Recall stored facts about the user from long-term memory. "
-        "Optionally filter by a search query."
+        "Optionally filter by a search query (matches abstraction, value, and cues)."
     )
     params = [
         ToolParam(
             name="query",
             type="string",
-            description="Optional search filter for keys and values",
+            description="Optional search filter for abstraction, value, and cues",
             required=False,
         ),
     ]
@@ -77,25 +136,33 @@ class MemoryRecallTool(Tool):
         if user is None:
             return "Error: User context is required for memory_recall."
 
-        # Normalize empty string to None
         if isinstance(query, str) and not query.strip():
             query = None
 
-        facts = await self._memory.recall_facts(str(user.id), query)
+        entries = await self._memory.recall_entries(str(user.id), query)
 
-        # Fallback: if query-based search missed (e.g. cross-language key mismatch),
-        # return ALL facts so the LLM can find the right one itself.
-        if not facts and query:
-            facts = await self._memory.recall_facts(str(user.id), None)
-            if facts:
-                lines = [f"- {f['key']}: {f['value']}" for f in facts]
+        if not entries and query:
+            entries = await self._memory.recall_entries(str(user.id), None)
+            if entries:
                 return (
-                    f"No facts matched '{query}' directly, "
-                    f"but here are all stored facts:\n" + "\n".join(lines)
+                    f"No entries matched '{query}' directly, "
+                    f"but here are all stored entries:\n" + _format_entries(entries)
                 )
 
-        if not facts:
+        if not entries:
             return "No facts stored."
 
-        lines = [f"- {f['key']}: {f['value']}" for f in facts]
-        return "Stored facts:\n" + "\n".join(lines)
+        return "Stored facts:\n" + _format_entries(entries)
+
+
+def _format_entries(entries: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    for e in entries:
+        abs_ = str(e.get("abstraction") or e.get("key") or "")
+        val = str(e.get("value") or "")
+        lines.append(f"- {abs_}: {val}")
+        cues_raw = e.get("cues")
+        if isinstance(cues_raw, list) and cues_raw:
+            cue_items: list[Any] = list(cues_raw)
+            lines.append(f"  cues: {', '.join(str(c) for c in cue_items)}")
+    return "\n".join(lines)
