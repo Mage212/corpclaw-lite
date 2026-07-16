@@ -8,6 +8,11 @@
 
 ### Added
 
+- **B-143 PR3 LLM parse-assist.** `POST /api/schedule/{id}/parse-assist` —
+  one optional LLM call maps free-form `schedule_text` → validated formula
+  (`every Nh` / cron / ISO); never on poll. Deterministic parse skips LLM.
+  ScheduleView: «Разобрать» when `kind=unset`, show interpretation, then
+  «Подтвердить так». Human accept still required.
 - **B-143 PR2 Telegram schedule consent.** Inline ✅/❌ on
   `schedule_propose` notify (when `TELEGRAM_BOT_TOKEN` is set for web outbound
   and/or telegram process). Callbacks `sc:a:|sc:d:` →
@@ -15,8 +20,7 @@
 - **B-143 PR1 web schedule confirm card.** `schedule_propose` notify carries
   `metadata.kind=schedule_confirm` + `task_id`; system-inbox FE card with
   Подтвердить / Отклонить / «В Задачи» via B-141 REST. Chat history payload
-  includes message metadata (cards survive reload). LLM parse-assist deferred
-  (PR3).
+  includes message metadata (cards survive reload).
 
 ### Fixed
 
