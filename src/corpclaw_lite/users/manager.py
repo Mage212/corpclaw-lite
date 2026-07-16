@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from functools import partial
 from hashlib import pbkdf2_hmac
 from pathlib import Path
+from typing import Any, cast
 
 import anyio
 
@@ -767,12 +768,13 @@ class UserManager:
                     for row in rows:
                         rid, uid, abstr, cues_json = row[0], row[1], row[2], row[3]
                         try:
-                            cues_list = json.loads(cues_json) if cues_json else []
-                            cues_text = (
-                                " ".join(str(c) for c in cues_list)
-                                if isinstance(cues_list, list)
-                                else ""
-                            )
+                            parsed_cues: Any = json.loads(cues_json) if cues_json else []
+                            if isinstance(parsed_cues, list):
+                                cues_text = " ".join(
+                                    str(item) for item in cast(list[Any], parsed_cues)
+                                )
+                            else:
+                                cues_text = ""
                         except Exception:
                             cues_text = ""
                         conn.execute(

@@ -8,7 +8,7 @@ import logging
 import re
 import sqlite3
 from functools import partial
-from typing import Any
+from typing import Any, cast
 
 import anyio
 
@@ -72,7 +72,7 @@ def _cues_from_json(raw: str | None) -> list[str]:
         return []
     if not isinstance(data, list):
         return []
-    items: list[Any] = list(data)
+    items = cast(list[Any], data)
     return _normalize_cues([str(x) for x in items])
 
 

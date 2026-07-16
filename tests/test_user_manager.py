@@ -267,9 +267,7 @@ def test_merge_web_user_moves_credentials_workspace_and_memory(tmp_path) -> None
 
     with sqlite3.connect(memory_db) as conn:
         message_user_ids = conn.execute("SELECT user_id FROM messages").fetchall()
-        fact_user_ids = conn.execute(
-            "SELECT user_id FROM memory_entries"
-        ).fetchall()
+        fact_user_ids = conn.execute("SELECT user_id FROM memory_entries").fetchall()
         web_session_user_ids = conn.execute("SELECT user_id FROM web_chat_sessions").fetchall()
         web_message_user_ids = conn.execute("SELECT user_id FROM web_chat_messages").fetchall()
     assert message_user_ids == [(str(target.id),)]
@@ -449,9 +447,7 @@ def test_migrate_canonical_ids_moves_legacy_telegram_data(tmp_path) -> None:
 
     with sqlite3.connect(memory_db) as conn:
         message_user_ids = conn.execute("SELECT user_id FROM messages").fetchall()
-        fact_user_ids = conn.execute(
-            "SELECT user_id FROM memory_entries"
-        ).fetchall()
+        fact_user_ids = conn.execute("SELECT user_id FROM memory_entries").fetchall()
     with sqlite3.connect(db) as conn:
         onboarding_ids = conn.execute("SELECT user_id FROM onboarding_state").fetchall()
     assert message_user_ids == [(str(user.id),)]

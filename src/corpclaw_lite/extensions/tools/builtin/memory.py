@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
 
@@ -15,12 +15,19 @@ if TYPE_CHECKING:
     from corpclaw_lite.users.models import User
 
 
+def _list_to_str_items(raw: Any) -> list[str]:
+    """Coerce a JSON/list-like value to list[str] without pyright Unknown churn."""
+    if not isinstance(raw, list):
+        return []
+    items = cast(list[Any], raw)
+    return [str(x) for x in items]
+
+
 def _parse_cues(raw: Any) -> list[str] | None:
     if raw is None:
         return None
     if isinstance(raw, list):
-        items: list[Any] = list(raw)
-        return [str(x) for x in items]
+        return _list_to_str_items(cast(Any, raw))
     if not isinstance(raw, str):
         return None
     text = raw.strip()
@@ -30,8 +37,7 @@ def _parse_cues(raw: Any) -> list[str] | None:
         try:
             data: Any = json.loads(text)
             if isinstance(data, list):
-                parsed: list[Any] = list(data)
-                return [str(x) for x in parsed]
+                return _list_to_str_items(data)
         except json.JSONDecodeError:
             pass
     return [p.strip() for p in text.split(",") if p.strip()]
@@ -163,6 +169,5 @@ def _format_entries(entries: list[dict[str, Any]]) -> str:
         lines.append(f"- {abs_}: {val}")
         cues_raw = e.get("cues")
         if isinstance(cues_raw, list) and cues_raw:
-            cue_items: list[Any] = list(cues_raw)
-            lines.append(f"  cues: {', '.join(str(c) for c in cue_items)}")
+            lines.append(f"  cues: {', '.join(_list_to_str_items(cast(Any, cues_raw)))}")
     return "\n".join(lines)
