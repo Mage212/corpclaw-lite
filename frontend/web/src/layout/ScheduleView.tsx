@@ -6,6 +6,7 @@ import {
   Pencil,
   Play,
   RefreshCw,
+  Sparkles,
   X
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
@@ -13,8 +14,10 @@ import {
   acceptSchedule,
   dismissSchedule,
   listSchedule,
+  parseAssistSchedule,
   pauseSchedule,
-  resumeSchedule
+  resumeSchedule,
+  type ScheduleParseAssist
 } from "../api";
 import { Modal } from "../components/Modal";
 import { SCHEDULE_LABEL } from "../i18n/ru";
@@ -56,6 +59,10 @@ export function ScheduleView({ csrf, onBack, onPendingCountChange }: ScheduleVie
   const [busyId, setBusyId] = useState<string | null>(null);
   const [tab, setTab] = useState<FilterTab>("live");
   const [editing, setEditing] = useState<ScheduleTask | null>(null);
+  const [assistFor, setAssistFor] = useState<ScheduleTask | null>(null);
+  const [assist, setAssist] = useState<ScheduleParseAssist | null>(null);
+  const [assistBusy, setAssistBusy] = useState(false);
+  const [assistError, setAssistError] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
     setLoading(true);
@@ -141,6 +148,38 @@ export function ScheduleView({ csrf, onBack, onPendingCountChange }: ScheduleVie
     }
   }
 
+  async function handleParseAssist(task: ScheduleTask, scheduleText?: string) {
+    setAssistFor(task);
+    setAssist(null);
+    setAssistError(null);
+    setAssistBusy(true);
+    try {
+      const result = await parseAssistSchedule(csrf, task.id, scheduleText);
+      setAssist(result);
+    } catch (err) {
+      setAssistError(err instanceof Error ? err.message : "Не удалось разобрать расписание");
+    } finally {
+      setAssistBusy(false);
+    }
+  }
+
+  async function handleAcceptWithFormula() {
+    if (!assistFor || !assist) return;
+    const taskId = assistFor.id;
+    setBusyId(taskId);
+    setError(null);
+    try {
+      await acceptSchedule(csrf, taskId, { schedule_text: assist.formula });
+      setAssistFor(null);
+      setAssist(null);
+      refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось подтвердить");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   const shown = tab === "live" ? liveTasks : historyTasks;
 
   return (
@@ -209,12 +248,13 @@ export function ScheduleView({ csrf, onBack, onPendingCountChange }: ScheduleVie
                   <ScheduleCard
                     key={task.id}
                     task={task}
-                    busy={busyId === task.id}
+                    busy={busyId === task.id || assistBusy}
                     onAccept={() => handleAccept(task)}
                     onEdit={() => setEditing(task)}
                     onDismiss={() => handleDismiss(task)}
                     onPause={() => handlePause(task)}
                     onResume={() => handleResume(task)}
+                    onParseAssist={() => void handleParseAssist(task)}
                   />
                 ))}
               </ScheduleSection>
@@ -274,9 +314,27 @@ export function ScheduleView({ csrf, onBack, onPendingCountChange }: ScheduleVie
       {editing && (
         <EditAcceptModal
           task={editing}
-          busy={busyId === editing.id}
+          busy={busyId === editing.id || assistBusy}
+          csrf={csrf}
           onClose={() => setEditing(null)}
           onSubmit={handleEditSubmit}
+          onParseAssist={(scheduleText) => void handleParseAssist(editing, scheduleText)}
+        />
+      )}
+
+      {assistFor && (
+        <AssistModal
+          task={assistFor}
+          assist={assist}
+          busy={assistBusy || busyId === assistFor.id}
+          error={assistError}
+          onClose={() => {
+            setAssistFor(null);
+            setAssist(null);
+            setAssistError(null);
+          }}
+          onAcceptFormula={() => void handleAcceptWithFormula()}
+          onRetry={() => void handleParseAssist(assistFor)}
         />
       )}
     </main>
@@ -308,7 +366,8 @@ function ScheduleCard({
   onEdit,
   onDismiss,
   onPause,
-  onResume
+  onResume,
+  onParseAssist
 }: {
   task: ScheduleTask;
   busy: boolean;
@@ -318,6 +377,7 @@ function ScheduleCard({
   onDismiss: () => void;
   onPause: () => void;
   onResume: () => void;
+  onParseAssist?: () => void;
 }) {
   const statusClass =
     task.status === "pending"
@@ -382,13 +442,29 @@ function ScheduleCard({
               <button
                 type="button"
                 className="schedule-btn primary"
-                disabled={busy}
+                disabled={busy || task.schedule.kind === "unset"}
                 onClick={onAccept}
-                title="Подтвердить как есть"
+                title={
+                  task.schedule.kind === "unset"
+                    ? "Сначала разберите или укажите формулу"
+                    : "Подтвердить как есть"
+                }
               >
                 <Check size={14} />
                 <span>Подтвердить</span>
               </button>
+              {task.schedule.kind === "unset" && onParseAssist && (
+                <button
+                  type="button"
+                  className="schedule-btn"
+                  disabled={busy}
+                  onClick={onParseAssist}
+                  title="Разобрать фразу через LLM (один вызов)"
+                >
+                  <Sparkles size={14} />
+                  <span>Разобрать</span>
+                </button>
+              )}
               <button
                 type="button"
                 className="schedule-btn"
@@ -453,17 +529,21 @@ function ScheduleCard({
 function EditAcceptModal({
   task,
   busy,
+  csrf: _csrf,
   onClose,
-  onSubmit
+  onSubmit,
+  onParseAssist
 }: {
   task: ScheduleTask;
   busy: boolean;
+  csrf: string;
   onClose: () => void;
   onSubmit: (overrides: {
     title: string;
     task_text: string;
     schedule_text: string;
   }) => void | Promise<void>;
+  onParseAssist?: (scheduleText: string) => void;
 }) {
   const [title, setTitle] = useState(task.title);
   const [taskText, setTaskText] = useState(task.task_text);
@@ -483,6 +563,17 @@ function EditAcceptModal({
       }
       footer={
         <>
+          {onParseAssist && (
+            <button
+              type="button"
+              className="schedule-btn"
+              disabled={busy}
+              onClick={() => onParseAssist(scheduleText.trim())}
+            >
+              <Sparkles size={14} />
+              <span>Разобрать</span>
+            </button>
+          )}
           <button type="button" className="schedule-btn" onClick={onClose} disabled={busy}>
             Отмена
           </button>
@@ -513,9 +604,76 @@ function EditAcceptModal({
         />
       </label>
       <p className="schedule-field-hint">
-        Примеры: <code>every 30m</code>, <code>every 1h</code>, <code>tomorrow 09:00</code>,{" "}
-        <code>0 9 * * 1-5</code> (cron). Часовой пояс: {task.timezone}.
+        Примеры: <code>every 30m</code>, <code>every 1h</code>, <code>0 9 * * 1-5</code> (cron).
+        Свободную фразу можно разобрать кнопкой «Разобрать» (один LLM-вызов). Часовой пояс:{" "}
+        {task.timezone}.
       </p>
+    </Modal>
+  );
+}
+
+function AssistModal({
+  task,
+  assist,
+  busy,
+  error,
+  onClose,
+  onAcceptFormula,
+  onRetry
+}: {
+  task: ScheduleTask;
+  assist: ScheduleParseAssist | null;
+  busy: boolean;
+  error: string | null;
+  onClose: () => void;
+  onAcceptFormula: () => void;
+  onRetry: () => void;
+}) {
+  return (
+    <Modal
+      title="Как понял расписание"
+      description={`«${task.schedule_text}» — проверка перед активацией.`}
+      onClose={onClose}
+      footer={
+        <>
+          <button type="button" className="schedule-btn" onClick={onClose} disabled={busy}>
+            Закрыть
+          </button>
+          {assist && (
+            <button
+              type="button"
+              className="schedule-btn primary"
+              disabled={busy}
+              onClick={onAcceptFormula}
+            >
+              <Check size={14} />
+              <span>{busy ? "Сохраняю…" : "Подтвердить так"}</span>
+            </button>
+          )}
+          {!assist && (
+            <button type="button" className="schedule-btn" disabled={busy} onClick={onRetry}>
+              {busy ? "Думаю…" : "Повторить"}
+            </button>
+          )}
+        </>
+      }
+    >
+      {busy && !assist && <p className="schedule-field-hint">Разбираю фразу…</p>}
+      {error && <div className="schedule-error">{error}</div>}
+      {assist && (
+        <div className="schedule-assist-result">
+          <p>
+            <strong>Формула:</strong> <code>{assist.formula}</code>
+          </p>
+          <p>
+            <strong>Пояснение:</strong> {assist.explanation}
+          </p>
+          <p>
+            <strong>Вид:</strong> {assist.schedule.kind}
+            {assist.next_run_at ? ` · след. запуск UTC ${assist.next_run_at}` : ""}
+          </p>
+        </div>
+      )}
     </Modal>
   );
 }

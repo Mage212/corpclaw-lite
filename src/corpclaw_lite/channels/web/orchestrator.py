@@ -296,6 +296,7 @@ class WebChannelOrchestrator:
             agent_service=self._service,
             notifier=self._user_notifier,
             settings=sched_settings,
+            provider=stack.loop.provider,
         )
         for tool in (
             ScheduleProposeTool(self._scheduler),
@@ -452,6 +453,8 @@ class WebChannelOrchestrator:
         app.router.add_post("/api/schedule/{id}/dismiss", self._handle_schedule_dismiss)
         app.router.add_post("/api/schedule/{id}/pause", self._handle_schedule_pause)
         app.router.add_post("/api/schedule/{id}/resume", self._handle_schedule_resume)
+        # B-143 PR3: optional LLM map free-form schedule → formula (human still accepts).
+        app.router.add_post("/api/schedule/{id}/parse-assist", self._handle_schedule_parse_assist)
         app.router.add_post("/api/chats/{id}/activate", self._handle_activate_chat)
         app.router.add_patch("/api/chats/{id}", self._handle_update_chat)
         app.router.add_delete("/api/chats/{id}", self._handle_delete_chat)
@@ -2212,6 +2215,29 @@ class WebChannelOrchestrator:
         except SchedulerError as exc:
             return web.json_response({"error": str(exc)}, status=400)
         return web.json_response({"task": self._schedule_task_payload(task)})
+
+    async def _handle_schedule_parse_assist(self, request: web.Request) -> web.Response:
+        """B-143 PR3: preview LLM/deterministic interpretation (does not activate)."""
+        from corpclaw_lite.scheduler.service import SchedulerError
+
+        user = self._require_user(request)
+        sched = self._require_scheduler()
+        task_id = str(request.match_info.get("id") or "")
+        try:
+            raw_body = await request.json()
+        except Exception:
+            raw_body = {}
+        body: dict[str, object] = raw_body if isinstance(raw_body, dict) else {}
+        schedule_text = (
+            body.get("schedule_text") if isinstance(body.get("schedule_text"), str) else None
+        )
+        try:
+            result = await sched.parse_assist(user, task_id, schedule_text=schedule_text)
+        except SchedulerError as exc:
+            msg = str(exc)
+            status = 404 if "not found" in msg.lower() else 400
+            return web.json_response({"error": msg}, status=status)
+        return web.json_response({"assist": result.to_dict(), "task_id": task_id})
 
     async def _handle_schedule_dismiss(self, request: web.Request) -> web.Response:
         from corpclaw_lite.scheduler.service import SchedulerError

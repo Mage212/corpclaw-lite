@@ -22,6 +22,8 @@ if TYPE_CHECKING:
     from corpclaw_lite.channels.service import AgentRequestService
     from corpclaw_lite.channels.user_notifier import UserNotifier
     from corpclaw_lite.config.settings import SchedulerSettings
+    from corpclaw_lite.llm.base import Provider
+    from corpclaw_lite.scheduler.parse_assist import ParseAssistResult
     from corpclaw_lite.users.manager import UserManager
     from corpclaw_lite.users.models import User
 
@@ -65,12 +67,15 @@ class SchedulerService:
         agent_service: AgentRequestService | None = None,
         notifier: UserNotifier | None = None,
         settings: SchedulerSettings,
+        provider: Provider | None = None,
     ) -> None:
         self._store = store
         self._user_manager = user_manager
         self._agent_service = agent_service
         self._notifier = notifier
         self._settings = settings
+        # B-143 PR3: optional LLM for parse-assist (never used on poll).
+        self._provider = provider
         self._task: asyncio.Task[None] | None = None
         self._running = False
 
@@ -244,6 +249,64 @@ class SchedulerService:
             f"Подтвердите или отклоните кнопками ниже, либо откройте «Задачи».\n"
             f"(CLI: schedule accept/dismiss -u {task.user_id} -i {task.id})\n"
         )
+
+    async def parse_assist(
+        self,
+        user: User,
+        task_id: str,
+        *,
+        schedule_text: str | None = None,
+    ) -> ParseAssistResult:
+        """B-143: one LLM call to map free-form schedule_text → validated formula.
+
+        Does not activate the task. Human must still call :meth:`accept`.
+        """
+        from corpclaw_lite.scheduler.parse_assist import ParseAssistError, llm_parse_schedule
+
+        task = await self._store.get(task_id, user_id=user.id)
+        if task is None:
+            raise SchedulerError(f"Task {task_id} not found")
+        if task.status != "pending":
+            raise SchedulerError(f"Task is not pending (status={task.status})")
+
+        text = (
+            schedule_text.strip()
+            if isinstance(schedule_text, str) and schedule_text.strip()
+            else task.schedule_text
+        )
+        # If deterministic parse already works, skip LLM.
+        try:
+            spec = parse_schedule(text, now=_utcnow(), tz=task.timezone)
+            if spec.kind != "unset":
+                next_run = compute_next_run(spec, last_run_at=None, now=_utcnow(), tz=task.timezone)
+                from corpclaw_lite.scheduler.parse_assist import ParseAssistResult
+
+                return ParseAssistResult(
+                    formula=text,
+                    explanation="Распознано без LLM (детерминистический разбор).",
+                    schedule=spec,
+                    next_run_at=_iso(next_run) if next_run else None,
+                    original_text=text,
+                )
+        except ScheduleParseError:
+            pass
+
+        provider = self._provider
+        if provider is None and self._agent_service is not None:
+            loop = getattr(getattr(self._agent_service, "_stack", None), "loop", None)
+            provider = getattr(loop, "provider", None) if loop is not None else None
+        if provider is None:
+            raise SchedulerError("LLM parse-assist is not available (no provider configured).")
+
+        try:
+            return await llm_parse_schedule(
+                provider,
+                schedule_text=text,
+                timezone=task.timezone,
+                now=_utcnow(),
+            )
+        except ParseAssistError as exc:
+            raise SchedulerError(str(exc)) from exc
 
     async def accept(
         self,

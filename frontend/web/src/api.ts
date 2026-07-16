@@ -223,6 +223,51 @@ export function resumeSchedule(csrf: string, taskId: string): Promise<ScheduleTa
   );
 }
 
+/** B-143 PR3: preview parse of free-form schedule_text (no activate). */
+export type ScheduleParseAssist = {
+  formula: string;
+  explanation: string;
+  schedule: { kind: string; run_at?: string | null; minutes?: number | null; expr?: string | null };
+  next_run_at: string | null;
+  original_text: string;
+};
+
+export function parseAssistSchedule(
+  csrf: string,
+  taskId: string,
+  scheduleText?: string
+): Promise<ScheduleParseAssist> {
+  const body: { schedule_text?: string } = {};
+  if (scheduleText !== undefined) {
+    body.schedule_text = scheduleText;
+  }
+  return apiFetch(
+    `/api/schedule/${encodeURIComponent(taskId)}/parse-assist`,
+    (value) => {
+      const source = value as { assist?: unknown };
+      const a = (source.assist ?? {}) as Record<string, unknown>;
+      const scheduleRaw = (a.schedule ?? {}) as Record<string, unknown>;
+      return {
+        formula: typeof a.formula === "string" ? a.formula : "",
+        explanation: typeof a.explanation === "string" ? a.explanation : "",
+        schedule: {
+          kind: typeof scheduleRaw.kind === "string" ? scheduleRaw.kind : "unset",
+          ...(typeof scheduleRaw.run_at === "string" ? { run_at: scheduleRaw.run_at } : {}),
+          ...(typeof scheduleRaw.minutes === "number" ? { minutes: scheduleRaw.minutes } : {}),
+          ...(typeof scheduleRaw.expr === "string" ? { expr: scheduleRaw.expr } : {})
+        },
+        next_run_at: typeof a.next_run_at === "string" ? a.next_run_at : null,
+        original_text: typeof a.original_text === "string" ? a.original_text : ""
+      };
+    },
+    {
+      method: "POST",
+      csrf,
+      body: JSON.stringify(body)
+    }
+  );
+}
+
 // --- Etap 4: Extensions management ---
 
 export function getExtensions(): Promise<ExtensionsPayload> {
