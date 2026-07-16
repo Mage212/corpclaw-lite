@@ -8,11 +8,15 @@
 
 ### Added
 
+- **B-143 PR2 Telegram schedule consent.** Inline ✅/❌ on
+  `schedule_propose` notify (when `TELEGRAM_BOT_TOKEN` is set for web outbound
+  and/or telegram process). Callbacks `sc:a:|sc:d:` →
+  `SchedulerService.accept/dismiss` (TG process, no poll ownership).
 - **B-143 PR1 web schedule confirm card.** `schedule_propose` notify carries
   `metadata.kind=schedule_confirm` + `task_id`; system-inbox FE card with
   Подтвердить / Отклонить / «В Задачи» via B-141 REST. Chat history payload
-  includes message metadata (cards survive reload). TG inline + LLM parse-assist
-  deferred (PR2/PR3).
+  includes message metadata (cards survive reload). LLM parse-assist deferred
+  (PR3).
 
 ### Fixed
 

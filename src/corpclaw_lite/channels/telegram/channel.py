@@ -116,6 +116,10 @@ class TelegramChannel(Channel):
         # Approval system: message_id → (Future[bool], expected_telegram_user_id)
         self._pending_approvals: dict[str, tuple[asyncio.Future[bool], int]] = {}
 
+        # B-143 PR2: schedule accept/dismiss via inline buttons.
+        # Handler: (telegram_user_id, action "accept"|"dismiss", task_id) → reply text
+        self._schedule_action_handler: Callable[[int, str, str], Awaitable[str]] | None = None
+
         # Deduplication
         self._processed_ids: set[int] = set()
         self._processed_order: deque[int] = deque()
@@ -779,6 +783,12 @@ class TelegramChannel(Channel):
 
     # ── Callback handler ──────────────────────────────────────────────────────
 
+    def set_schedule_action_handler(
+        self, handler: Callable[[int, str, str], Awaitable[str]] | None
+    ) -> None:
+        """Register B-143 schedule consent callback handler (accept/dismiss)."""
+        self._schedule_action_handler = handler
+
     async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
         if not query or not query.message:
@@ -788,6 +798,11 @@ class TelegramChannel(Channel):
             return
 
         data = query.data or ""
+
+        # B-143 PR2: schedule consent (sc:a:|sc:d: + task_id)
+        if data.startswith("sc:"):
+            await self._handle_schedule_callback(query, data)
+            return
 
         # Delete-flow callbacks → file manager handler
         if data.startswith("del:"):
@@ -832,6 +847,37 @@ class TelegramChannel(Channel):
         await query.answer()
         label = "✅ Approved" if approved else "❌ Denied"
         await query.edit_message_text(text=label)
+
+    async def _handle_schedule_callback(self, query: Any, data: str) -> None:
+        """B-143: Accept/Dismiss scheduled task from inline keyboard."""
+        from corpclaw_lite.channels.telegram.callback_data import parse_schedule_callback
+
+        parsed = parse_schedule_callback(data)
+        if parsed is None:
+            await query.answer("Некорректная кнопка.", show_alert=True)
+            return
+        if self._schedule_action_handler is None:
+            await query.answer(
+                "Планировщик недоступен в этом процессе. Откройте «Задачи» в web.",
+                show_alert=True,
+            )
+            return
+        action, task_id = parsed
+        caller_uid = query.from_user.id if query.from_user else None
+        if caller_uid is None:
+            await query.answer("Access denied.", show_alert=True)
+            return
+        try:
+            result_text = await self._schedule_action_handler(caller_uid, action, task_id)
+        except Exception:
+            logger.exception("Schedule callback failed action=%s task=%s", action, task_id)
+            await query.answer("Ошибка обработки. Попробуйте в web «Задачи».", show_alert=True)
+            return
+        await query.answer()
+        try:
+            await query.edit_message_text(text=result_text)
+        except Exception as exc:
+            logger.debug("Could not edit schedule message: %s", exc)
 
     # ── Error handler ─────────────────────────────────────────────────────────
 

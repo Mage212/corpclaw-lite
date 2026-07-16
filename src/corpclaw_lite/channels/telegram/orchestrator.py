@@ -62,6 +62,8 @@ class TelegramBotOrchestrator:
         self._admin_notifier: AdminNotifier | None = None
         # B-120 / DC-032: proactive user messages (separate from AdminNotifier).
         self._user_notifier: Any | None = None
+        # B-143 PR2: store-backed scheduler for accept/dismiss callbacks (no poll).
+        self._scheduler: Any | None = None
         self._bootstrap: BootstrapLoader | None = None
         self._vision_processor: VisionProcessor | None = None
 
@@ -132,6 +134,30 @@ class TelegramBotOrchestrator:
         """Return the canonical user row for a Telegram identity."""
         stack, _, _, _ = self._require_started()
         return await stack.user_manager.async_get_by_telegram_id(telegram_id)
+
+    async def _handle_schedule_action(self, telegram_id: int, action: str, task_id: str) -> str:
+        """B-143 PR2: accept/dismiss a pending schedule from TG inline buttons."""
+        from corpclaw_lite.scheduler.service import SchedulerError
+
+        if self._scheduler is None:
+            return "❌ Планировщик недоступен. Откройте «Задачи» в web."
+        user = await self._resolve_user_by_telegram_id(telegram_id)
+        if user is None:
+            return "❌ Пользователь не найден. Обратитесь к администратору."
+        try:
+            if action == "accept":
+                task = await self._scheduler.accept(user, task_id)
+                return (
+                    f"✅ Задача подтверждена и активна.\n"
+                    f"{task.title}\n"
+                    f"Следующий запуск (UTC): {task.next_run_at or '—'}"
+                )
+            if action == "dismiss":
+                task = await self._scheduler.dismiss(user, task_id)
+                return f"❌ Задача отклонена.\n{task.title}"
+            return "❌ Неизвестное действие."
+        except SchedulerError as exc:
+            return f"❌ {exc}"
 
     def _require_started(
         self,
@@ -313,13 +339,35 @@ class TelegramBotOrchestrator:
             logger.info("Admin notifier active for %d admin(s)", len(tg_settings.admin_ids))
 
         # B-120: UserNotifier with Telegram sink (DB = shared memory.db system session).
+        # B-143 PR2: schedule consent keyboard + callback accept/dismiss (store only; no poll).
         chat_store = getattr(stack, "chat_store", None)
         if chat_store is not None and self._channel.app is not None:
+            from corpclaw_lite.channels.telegram.schedule_markup import (
+                markup_from_notify_metadata,
+            )
             from corpclaw_lite.channels.user_notifier import UserNotifier
+            from corpclaw_lite.scheduler.service import SchedulerService
+            from corpclaw_lite.scheduler.store import SchedulerStore
 
             self._user_notifier = UserNotifier(chat_store)
             self._user_notifier.register_telegram_bot(self._channel.app.bot)
-            logger.info("UserNotifier Telegram sink registered")
+            self._user_notifier.register_telegram_markup_builder(markup_from_notify_metadata)
+            logger.info("UserNotifier Telegram sink registered (schedule markup enabled)")
+
+            sched_settings = self._settings.scheduler
+            sched_db = Path(sched_settings.db_path)
+            if not sched_db.is_absolute():
+                sched_db = (PROJECT_ROOT / sched_db).resolve()
+            # Accept/dismiss only — web owns the poll loop (DC-030).
+            self._scheduler = SchedulerService(
+                store=SchedulerStore(sched_db),
+                user_manager=user_manager,
+                agent_service=None,
+                notifier=self._user_notifier,
+                settings=sched_settings,
+            )
+            self._channel.set_schedule_action_handler(self._handle_schedule_action)
+            logger.info("Telegram schedule consent callbacks wired (store=%s)", sched_db)
 
         self._cleanup_task = asyncio.create_task(self._rate_limit_cleanup_loop())
 
