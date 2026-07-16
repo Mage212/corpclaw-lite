@@ -90,11 +90,15 @@ class UserNotifier:
         source: str = _DEFAULT_SOURCE,
         title: str | None = None,
         persist: bool = True,
+        extra_metadata: dict[str, object] | None = None,
     ) -> NotifyResult:
         """Persist (optional) to system session, then best-effort push sinks.
 
         When *persist* is False (headless already wrote the assistant row), only
         resolve the system session id and push live sinks — no second append.
+
+        *extra_metadata* is merged into the stored/WS message metadata after base
+        keys. Callers cannot override ``proactive`` or ``source`` via extra.
         """
         body = (text or "").strip()
         if not body:
@@ -114,6 +118,11 @@ class UserNotifier:
         }
         if safe_title is not None:
             metadata["title"] = safe_title
+        if extra_metadata:
+            for key, value in extra_metadata.items():
+                if key in {"proactive", "source"}:
+                    continue
+                metadata[key] = value
 
         try:
             session_id = await self._chat_store.ensure_system_session(user.memory_key())

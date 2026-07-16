@@ -53,6 +53,46 @@ async def test_notify_empty_text_rejected(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_notify_extra_metadata_merged_and_protected(tmp_path: Path) -> None:
+    """B-143: extra_metadata lands in store + WS; proactive/source cannot be overridden."""
+    store = WebChatStore(tmp_path / "mem.db")
+    user = User(id=22, name="Meta", department="engineering")
+    notifier = UserNotifier(store)
+    broadcasts: list[dict[str, object]] = []
+
+    async def _broadcast(_uid: int, payload: dict[str, object]) -> None:
+        broadcasts.append(payload)
+
+    notifier.register_web_broadcast(_broadcast)
+    result = await notifier.notify(
+        user,
+        "card body",
+        source="schedule_propose",
+        title="Подтвердите",
+        extra_metadata={
+            "kind": "schedule_confirm",
+            "task_id": "abc123",
+            "source": "hijack",
+            "proactive": False,
+        },
+    )
+    assert result.ok is True
+    page = await store.list_messages(user.memory_key(), session_id=result.session_id, limit=5)
+    assert page.messages[0].metadata.get("kind") == "schedule_confirm"
+    assert page.messages[0].metadata.get("task_id") == "abc123"
+    assert page.messages[0].metadata.get("source") == "schedule_propose"
+    assert page.messages[0].metadata.get("proactive") is True
+
+    proactive = next(p for p in broadcasts if p.get("type") == "proactive_message")
+    message = proactive.get("message")
+    assert isinstance(message, dict)
+    meta = message.get("metadata")
+    assert isinstance(meta, dict)
+    assert meta.get("task_id") == "abc123"
+    assert meta.get("source") == "schedule_propose"
+
+
+@pytest.mark.asyncio
 async def test_notify_web_sink(tmp_path: Path) -> None:
     store = WebChatStore(tmp_path / "mem.db")
     user = User(id=3, name="C", department="engineering")

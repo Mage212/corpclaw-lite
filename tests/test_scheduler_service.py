@@ -72,6 +72,38 @@ async def test_propose_accept_limit(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_propose_notify_schedule_confirm_metadata(tmp_path: Path) -> None:
+    """B-143: propose notify includes schedule_confirm metadata for web card."""
+    user = User(id=7, name="N", department="engineering")
+    store = SchedulerStore(tmp_path / "s.db")
+    notifier = AsyncMock()
+    notifier.notify = AsyncMock(return_value=None)
+    svc = SchedulerService(
+        store=store,
+        user_manager=_FakeUM(user),  # type: ignore[arg-type]
+        settings=_settings(tmp_path),
+        notifier=notifier,
+    )
+    task = await svc.propose(
+        user,
+        title="Ежедневный отчёт",
+        task_text="собери метрики",
+        schedule_text="every 1d",
+        notify=True,
+    )
+    notifier.notify.assert_awaited_once()
+    kwargs = notifier.notify.await_args.kwargs
+    assert kwargs.get("source") == "schedule_propose"
+    extra = kwargs.get("extra_metadata")
+    assert isinstance(extra, dict)
+    assert extra.get("kind") == "schedule_confirm"
+    assert extra.get("task_id") == task.id
+    assert extra.get("title") == "Ежедневный отчёт"
+    assert extra.get("schedule_text") == "every 1d"
+    assert extra.get("status") == "pending"
+
+
+@pytest.mark.asyncio
 async def test_dismiss_dedup_blocks_repropose(tmp_path: Path) -> None:
     user = User(id=2, name="B", department="engineering")
     store = SchedulerStore(tmp_path / "s.db")

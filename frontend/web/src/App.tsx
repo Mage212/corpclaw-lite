@@ -496,6 +496,9 @@ function Workspace({
               section={section}
               pinTokens={pinTokens}
               pinBudget={pinBudget}
+              csrf={session.csrf_token}
+              onOpenSchedule={() => setView("schedule")}
+              onScheduleResolved={refreshSchedulePending}
             />
           </div>
           {view === "extensions" && (
