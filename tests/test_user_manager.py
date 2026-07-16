@@ -184,12 +184,13 @@ def test_merge_web_user_moves_credentials_workspace_and_memory(tmp_path) -> None
         )
         conn.execute(
             """
-            CREATE TABLE memory_facts (
+            CREATE TABLE memory_entries (
                 id INTEGER PRIMARY KEY,
                 user_id TEXT NOT NULL,
-                key TEXT NOT NULL,
-                value TEXT NOT NULL,
-                UNIQUE(user_id, key)
+                primary_abstraction TEXT NOT NULL,
+                memory_value TEXT NOT NULL,
+                cue_indices_json TEXT NOT NULL DEFAULT '[]',
+                UNIQUE(user_id, primary_abstraction)
             )
             """
         )
@@ -218,7 +219,11 @@ def test_merge_web_user_moves_credentials_workspace_and_memory(tmp_path) -> None
             (str(source.id), "user", "hello"),
         )
         conn.execute(
-            "INSERT INTO memory_facts (user_id, key, value) VALUES (?, ?, ?)",
+            """
+            INSERT INTO memory_entries (
+                user_id, primary_abstraction, memory_value, cue_indices_json
+            ) VALUES (?, ?, ?, '[]')
+            """,
             (str(source.id), "source_fact", "yes"),
         )
         conn.execute(
@@ -262,7 +267,7 @@ def test_merge_web_user_moves_credentials_workspace_and_memory(tmp_path) -> None
 
     with sqlite3.connect(memory_db) as conn:
         message_user_ids = conn.execute("SELECT user_id FROM messages").fetchall()
-        fact_user_ids = conn.execute("SELECT user_id FROM memory_facts").fetchall()
+        fact_user_ids = conn.execute("SELECT user_id FROM memory_entries").fetchall()
         web_session_user_ids = conn.execute("SELECT user_id FROM web_chat_sessions").fetchall()
         web_message_user_ids = conn.execute("SELECT user_id FROM web_chat_messages").fetchall()
     assert message_user_ids == [(str(target.id),)]
@@ -272,26 +277,35 @@ def test_merge_web_user_moves_credentials_workspace_and_memory(tmp_path) -> None
 
 
 def test_merge_memory_facts_only_moves_non_conflicting(tmp_path) -> None:
-    """Facts-only DB (no messages): non-conflicting keys move to target."""
+    """Entries DB (no messages): non-conflicting abstractions move to target."""
     memory_db = tmp_path / "memory.db"
     with sqlite3.connect(memory_db) as conn:
         conn.execute(
             """
-            CREATE TABLE memory_facts (
+            CREATE TABLE memory_entries (
                 id INTEGER PRIMARY KEY,
                 user_id TEXT NOT NULL,
-                key TEXT NOT NULL,
-                value TEXT NOT NULL,
-                UNIQUE(user_id, key)
+                primary_abstraction TEXT NOT NULL,
+                memory_value TEXT NOT NULL,
+                cue_indices_json TEXT NOT NULL DEFAULT '[]',
+                UNIQUE(user_id, primary_abstraction)
             )
             """
         )
         conn.execute(
-            "INSERT INTO memory_facts (user_id, key, value) VALUES (?, ?, ?)",
+            """
+            INSERT INTO memory_entries (
+                user_id, primary_abstraction, memory_value, cue_indices_json
+            ) VALUES (?, ?, ?, '[]')
+            """,
             ("10", "source_only", "yes"),
         )
         conn.execute(
-            "INSERT INTO memory_facts (user_id, key, value) VALUES (?, ?, ?)",
+            """
+            INSERT INTO memory_entries (
+                user_id, primary_abstraction, memory_value, cue_indices_json
+            ) VALUES (?, ?, ?, '[]')
+            """,
             ("20", "target_only", "keep"),
         )
 
@@ -306,7 +320,9 @@ def test_merge_memory_facts_only_moves_non_conflicting(tmp_path) -> None:
     with sqlite3.connect(memory_db) as conn:
         rows = {
             (str(r[0]), str(r[1]), str(r[2]))
-            for r in conn.execute("SELECT user_id, key, value FROM memory_facts").fetchall()
+            for r in conn.execute(
+                "SELECT user_id, primary_abstraction, memory_value FROM memory_entries"
+            ).fetchall()
         }
     assert rows == {("20", "source_only", "yes"), ("20", "target_only", "keep")}
 
@@ -374,12 +390,13 @@ def test_migrate_canonical_ids_moves_legacy_telegram_data(tmp_path) -> None:
         )
         conn.execute(
             """
-            CREATE TABLE memory_facts (
+            CREATE TABLE memory_entries (
                 id INTEGER PRIMARY KEY,
                 user_id TEXT NOT NULL,
-                key TEXT NOT NULL,
-                value TEXT NOT NULL,
-                UNIQUE(user_id, key)
+                primary_abstraction TEXT NOT NULL,
+                memory_value TEXT NOT NULL,
+                cue_indices_json TEXT NOT NULL DEFAULT '[]',
+                UNIQUE(user_id, primary_abstraction)
             )
             """
         )
@@ -388,7 +405,11 @@ def test_migrate_canonical_ids_moves_legacy_telegram_data(tmp_path) -> None:
             ("278278319", "user", "hello"),
         )
         conn.execute(
-            "INSERT INTO memory_facts (user_id, key, value) VALUES (?, ?, ?)",
+            """
+            INSERT INTO memory_entries (
+                user_id, primary_abstraction, memory_value, cue_indices_json
+            ) VALUES (?, ?, ?, '[]')
+            """,
             ("278278319", "role", "architect"),
         )
 
@@ -426,7 +447,7 @@ def test_migrate_canonical_ids_moves_legacy_telegram_data(tmp_path) -> None:
 
     with sqlite3.connect(memory_db) as conn:
         message_user_ids = conn.execute("SELECT user_id FROM messages").fetchall()
-        fact_user_ids = conn.execute("SELECT user_id FROM memory_facts").fetchall()
+        fact_user_ids = conn.execute("SELECT user_id FROM memory_entries").fetchall()
     with sqlite3.connect(db) as conn:
         onboarding_ids = conn.execute("SELECT user_id FROM onboarding_state").fetchall()
     assert message_user_ids == [(str(user.id),)]
