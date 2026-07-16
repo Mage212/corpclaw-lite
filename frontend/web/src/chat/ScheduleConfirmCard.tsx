@@ -112,10 +112,15 @@ export function ScheduleConfirmCard({
         </div>
       ) : (
         <div className="schedule-confirm-actions">
+          {kind === "unset" && (
+            <span className="schedule-confirm-hint">
+              Расписание не распознано — откройте «В Задачи» для разбора.
+            </span>
+          )}
           <button
             type="button"
             className="schedule-btn primary"
-            disabled={busy}
+            disabled={busy || kind === "unset"}
             onClick={() => void handleAccept()}
           >
             <Check size={14} />
