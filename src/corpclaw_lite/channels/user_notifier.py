@@ -11,7 +11,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, cast, runtime_checkable
 
 from corpclaw_lite.channels.web.chat_store import WebChatStore
 from corpclaw_lite.logging.trace import log_event
@@ -30,13 +30,19 @@ _MAX_NOTIFY_CHARS = 20_000
 _DEFAULT_SOURCE = "manual"
 
 WebBroadcastFn = Callable[[int, dict[str, object]], Awaitable[None]]
+# Optional reply_markup for Telegram (e.g. schedule_confirm inline keyboard).
+TelegramMarkupBuilder = Callable[[dict[str, object]], Any | None]
 
 
 @runtime_checkable
 class TelegramBotLike(Protocol):
-    """Minimal bot surface for proactive Telegram delivery."""
+    """Minimal bot surface for proactive Telegram delivery.
 
-    async def send_message(self, chat_id: int, text: str) -> Any: ...
+    Signature is intentionally loose: real ``telegram.Bot.send_message`` has many
+    optional keyword parameters (parse_mode, reply_markup, …).
+    """
+
+    async def send_message(self, chat_id: int | str, text: str, **kwargs: Any) -> Any: ...
 
 
 @dataclass(slots=True)
@@ -72,15 +78,22 @@ class UserNotifier:
     def __init__(self, chat_store: WebChatStore) -> None:
         self._chat_store = chat_store
         self._web_broadcast: WebBroadcastFn | None = None
-        self._telegram_bot: TelegramBotLike | None = None
+        # Stored as Any: python-telegram-bot Bot.send_message is not Protocol-compatible
+        # (named optional params vs **kwargs) under strict pyright.
+        self._telegram_bot: Any | None = None
+        self._telegram_markup_builder: TelegramMarkupBuilder | None = None
 
     def register_web_broadcast(self, fn: WebBroadcastFn) -> None:
         """Register a WebSocket (or similar) fan-out for online web clients."""
         self._web_broadcast = fn
 
-    def register_telegram_bot(self, bot: TelegramBotLike) -> None:
-        """Register a Telegram bot for proactive DMs."""
+    def register_telegram_bot(self, bot: Any) -> None:
+        """Register a Telegram bot for proactive DMs (``TelegramBotLike`` duck type)."""
         self._telegram_bot = bot
+
+    def register_telegram_markup_builder(self, fn: TelegramMarkupBuilder) -> None:
+        """Optional builder: message metadata → Telegram reply_markup (B-143)."""
+        self._telegram_markup_builder = fn
 
     async def notify(
         self,
@@ -242,7 +255,24 @@ class UserNotifier:
             if self._telegram_bot is None or user.telegram_id is None:
                 return False, None
             try:
-                await self._telegram_bot.send_message(chat_id=user.telegram_id, text=body)
+                reply_markup: Any | None = None
+                if self._telegram_markup_builder is not None:
+                    meta_raw = message_payload.get("metadata")
+                    if isinstance(meta_raw, dict):
+                        reply_markup = self._telegram_markup_builder(
+                            cast("dict[str, object]", meta_raw)
+                        )
+                if reply_markup is not None:
+                    await self._telegram_bot.send_message(
+                        chat_id=user.telegram_id,
+                        text=body,
+                        reply_markup=reply_markup,
+                    )
+                else:
+                    await self._telegram_bot.send_message(
+                        chat_id=user.telegram_id,
+                        text=body,
+                    )
                 return True, None
             except Exception as exc:
                 logger.warning(

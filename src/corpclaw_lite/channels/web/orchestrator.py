@@ -257,6 +257,22 @@ class WebChannelOrchestrator:
 
         self._user_notifier = UserNotifier(notify_store)
         self._user_notifier.register_web_broadcast(self._broadcast_to_user)
+        # B-143 PR2: dual-process — web may own propose; outbound TG keyboard if token set.
+        # Callbacks are handled by the telegram process (polling).
+        tg_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+        if tg_token:
+            try:
+                from telegram import Bot
+
+                from corpclaw_lite.channels.telegram.schedule_markup import (
+                    markup_from_notify_metadata,
+                )
+
+                self._user_notifier.register_telegram_bot(Bot(token=tg_token))
+                self._user_notifier.register_telegram_markup_builder(markup_from_notify_metadata)
+                logger.info("UserNotifier Telegram outbound registered for schedule keyboards")
+            except Exception as exc:
+                logger.warning("Could not register Telegram outbound for schedule: %s", exc)
         self._service.set_user_notifier(self._user_notifier)
 
         # B-118: scheduler backbone (poll owner = web process).
