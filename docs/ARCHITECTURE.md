@@ -122,7 +122,7 @@ corpclaw-lite/
 │   ├── departments/        # RBAC по департаментам (10 департаментов)
 │   ├── users/              # Пользователи + whitelist + session revocation
 │   ├── config/             # Settings, bootstrap prompts, interpolation, loader
-│   ├── runtime/            # Graceful shutdown (SIGINT/SIGTERM)
+│   ├── runtime/            # Graceful shutdown; UserRunGate (process-local 1-in-flight)
 │   ├── utils/              # DB helpers
 │   └── logging/            # Структурированное логирование + health endpoint
 ├── config/                 # YAML-конфигурации + bootstrap prompts

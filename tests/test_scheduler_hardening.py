@@ -151,6 +151,52 @@ async def test_dedup_blocks_live_duplicate(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_ttl_expire_clears_dedup_allows_repropose(tmp_path: Path) -> None:
+    """F4: TTL expiry must not permanent-latch fingerprint; re-propose works."""
+    store = SchedulerStore(tmp_path / "s.db")
+    user = User(id=23, name="TTL", department="engineering")
+    svc = SchedulerService(
+        store=store,
+        user_manager=_FakeUM(user),  # type: ignore[arg-type]
+        settings=_settings(tmp_path),
+    )
+    first = await svc.propose(
+        user, title="daily", task_text="report", schedule_text="every 1d", notify=False
+    )
+    # Force-expire as if pending_ttl elapsed
+    n = await store.expire_pending("9999-12-31T00:00:00+00:00")
+    assert n >= 1
+    expired = await store.get(first.id, user_id=user.id)
+    assert expired is not None
+    assert expired.status == "dismissed"
+    assert expired.dedup_key == ""
+
+    second = await svc.propose(
+        user, title="daily", task_text="report", schedule_text="every 1d", notify=False
+    )
+    assert second.status == "pending"
+    assert second.id != first.id
+
+
+@pytest.mark.asyncio
+async def test_user_dismiss_still_latches_dedup(tmp_path: Path) -> None:
+    """F4: explicit user dismiss keeps fingerprint latch."""
+    store = SchedulerStore(tmp_path / "s.db")
+    user = User(id=24, name="Latch", department="engineering")
+    svc = SchedulerService(
+        store=store,
+        user_manager=_FakeUM(user),  # type: ignore[arg-type]
+        settings=_settings(tmp_path),
+    )
+    first = await svc.propose(
+        user, title="x", task_text="body", schedule_text="every 2h", notify=False
+    )
+    await svc.dismiss(user, first.id)
+    with pytest.raises(SchedulerError, match="dismissed earlier"):
+        await svc.propose(user, title="x", task_text="body", schedule_text="every 2h", notify=False)
+
+
+@pytest.mark.asyncio
 async def test_task_text_cap(tmp_path: Path) -> None:
     store = SchedulerStore(tmp_path / "s.db")
     user = User(id=14, name="E", department="engineering")

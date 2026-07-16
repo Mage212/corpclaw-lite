@@ -484,7 +484,11 @@ class SubagentDispatcher:
                 # Return a compact message to the parent; full handoff is on disk.
                 return partial
             except Exception as handoff_err:  # pragma: no cover - defensive
-                logger.warning("Subagent timeout handoff failed: %s", handoff_err)
+                logger.exception(
+                    "Subagent timeout handoff failed subagent=%s: %s",
+                    spec.id,
+                    handoff_err,
+                )
                 return f"Subagent error: execution timed out after {int(timeout_seconds)}s"
         except Exception as e:
             logger.error("Subagent %s failed: %s", spec.id, e)

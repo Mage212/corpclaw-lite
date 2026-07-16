@@ -144,6 +144,60 @@ async def test_review_ownership_404(
 
 
 @pytest.mark.asyncio
+async def test_build_diff_foreign_user_404(
+    review_stack: tuple[FileReviewService, Path, User, FileChangeDAO],
+) -> None:
+    """F7: build_diff must not leak another user's change content."""
+    service, ws, user, dao = review_stack
+    target = ws / "secret.md"
+    target.write_text("private\n", encoding="utf-8")
+    cid = await dao.record_change(
+        user_id=user.memory_key(),
+        run_id="run-f7-diff",
+        tool_name="write_file",
+        file_path="secret.md",
+        op="create",
+        before_hash=None,
+        after_hash="h",
+        backup_path=None,
+        size_bytes=8,
+    )
+    assert cid is not None
+    other = User(id=99, name="Other", department="engineering")
+    with pytest.raises(FileReviewError) as exc:
+        await service.build_diff(other, cid)
+    assert exc.value.status == 404
+
+
+@pytest.mark.asyncio
+async def test_revert_foreign_user_404(
+    review_stack: tuple[FileReviewService, Path, User, FileChangeDAO],
+) -> None:
+    """F7: revert must 404 for foreign user and leave disk unchanged."""
+    service, ws, user, dao = review_stack
+    target = ws / "keep.txt"
+    target.write_text("must stay\n", encoding="utf-8")
+    cid = await dao.record_change(
+        user_id=user.memory_key(),
+        run_id="run-f7-rev",
+        tool_name="write_file",
+        file_path="keep.txt",
+        op="create",
+        before_hash=None,
+        after_hash="h",
+        backup_path=None,
+        size_bytes=10,
+    )
+    assert cid is not None
+    other = User(id=99, name="Other", department="engineering")
+    with pytest.raises(FileReviewError) as exc:
+        await service.revert_change(other, cid)
+    assert exc.value.status == 404
+    assert target.exists()
+    assert target.read_text(encoding="utf-8") == "must stay\n"
+
+
+@pytest.mark.asyncio
 async def test_web_list_diff_revert_handlers(tmp_path: Path) -> None:
     workspace_base = tmp_path / "workspaces"
     user = User(id=88, name="Vadim", department="engineering")

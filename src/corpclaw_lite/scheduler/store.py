@@ -518,11 +518,17 @@ class SchedulerStore:
         )
 
     def _sync_expire_pending(self, cutoff_iso: str) -> int:
+        """Mark stale pending proposals dismissed and clear dedup fingerprint.
+
+        TTL expiry must not permanent-latch the proposal fingerprint: the user
+        should be able to re-propose the same wording after abandon/expire.
+        Explicit user dismiss keeps ``dedup_key`` so re-propose stays blocked.
+        """
         with db_connect(self.db_path) as conn:
             cur = conn.execute(
                 """
                 UPDATE scheduled_tasks
-                SET status = 'dismissed', updated_at = ?
+                SET status = 'dismissed', dedup_key = '', updated_at = ?
                 WHERE status = 'pending' AND created_at < ?
                 """,
                 (_utcnow_iso(), cutoff_iso),

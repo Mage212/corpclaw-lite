@@ -5,7 +5,8 @@ headless / scheduler) and Telegram orchestrator so the same ``user.id`` cannot
 run two agent workflows concurrently **in one process**.
 
 Multi-process deploys (separate telegram + web processes) still have separate
-gates — durable cross-process locking is a later follow-up.
+gates — durable cross-process locking is a later follow-up. Documented in
+``SECURITY.md`` (Known deployment limitations).
 """
 
 from __future__ import annotations

@@ -208,6 +208,55 @@ async def test_agent_loop_reports_queue_then_model_waiting_status(
 
 
 @pytest.mark.asyncio
+async def test_budget_resumed_when_queue_slot_fails_before_on_acquired(
+    test_user: User, empty_registry: ToolRegistry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C6: cancel/error before on_acquired must not leave budget permanently paused.
+
+    Regression guard for the outer ``finally: state.budget.resume()`` around
+    ``call_default_with_slot``. If that finally is removed, pause sticks.
+    """
+    from corpclaw_lite.agent.guards import SimpleBudgetGuard
+
+    created: list[SimpleBudgetGuard] = []
+    real_init = SimpleBudgetGuard.__init__
+
+    def tracking_init(self: SimpleBudgetGuard, config: Any = None) -> None:
+        real_init(self, config)
+        created.append(self)
+
+    monkeypatch.setattr(SimpleBudgetGuard, "__init__", tracking_init)
+    # AgentLoop imports SimpleBudgetGuard into its module namespace.
+    monkeypatch.setattr("corpclaw_lite.agent.loop.SimpleBudgetGuard", SimpleBudgetGuard)
+
+    provider = MockProvider(responses=[LLMResponse(content="should not run")])
+    queue = LLMRequestQueue(max_concurrent=1)
+    router = LLMRouter(
+        providers={},
+        default_provider=provider,
+        default_provider_name="llamacpp",
+        routing=[("default", None, provider, "llamacpp")],
+        queue=queue,
+    )
+
+    async def boom_before_slot(**_kwargs: Any) -> LLMResponse:
+        # Fail during queue wait — on_acquired never runs.
+        raise RuntimeError("slot acquisition failed")
+
+    monkeypatch.setattr(router, "call_default_with_slot", boom_before_slot)
+
+    loop = AgentLoop(AgentConfig(router, empty_registry, AgentSettings()))
+    with pytest.raises(RuntimeError, match="slot acquisition failed"):
+        await loop.run(test_user, "Hi")
+
+    assert created, "expected SimpleBudgetGuard instance from the run"
+    guard = created[-1]
+    assert guard.state.paused_at is None, (
+        "budget left paused after queue failure — C6 finally:resume is missing"
+    )
+
+
+@pytest.mark.asyncio
 async def test_agent_loop_trace_and_token_stats(
     tmp_path: Path, test_user: User, empty_registry: ToolRegistry
 ) -> None:
