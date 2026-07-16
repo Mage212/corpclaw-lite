@@ -6,6 +6,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- **B-143 PR1 web schedule confirm card.** `schedule_propose` notify carries
+  `metadata.kind=schedule_confirm` + `task_id`; system-inbox FE card with
+  Подтвердить / Отклонить / «В Задачи» via B-141 REST. Chat history payload
+  includes message metadata (cards survive reload). TG inline + LLM parse-assist
+  deferred (PR2/PR3).
+
 ### Fixed
 
 - **Post-review hardening (F1–F7).** `SECURITY.md` documents process-local

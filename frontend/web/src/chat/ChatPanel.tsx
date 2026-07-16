@@ -11,6 +11,7 @@ import type {
 import { ActivityCard } from "./ActivityCard";
 import { ContextSizeBar } from "./ContextSizeBar";
 import { MarkdownMessage } from "./MarkdownMessage";
+import { parseScheduleConfirmMeta, ScheduleConfirmCard } from "./ScheduleConfirmCard";
 import type { WebChatSession } from "./useWebChatSession";
 
 type ChatPanelProps = {
@@ -27,6 +28,10 @@ type ChatPanelProps = {
   /** B-095 pin budget for ContextSizeBar. */
   pinTokens?: number;
   pinBudget?: number;
+  /** B-143: CSRF for schedule confirm card REST actions. */
+  csrf?: string;
+  onOpenSchedule?: () => void;
+  onScheduleResolved?: () => void;
 };
 
 export function ChatPanel({
@@ -40,7 +45,10 @@ export function ChatPanel({
   onWebAccessChange,
   section,
   pinTokens = 0,
-  pinBudget = 0
+  pinBudget = 0,
+  csrf,
+  onOpenSchedule,
+  onScheduleResolved
 }: ChatPanelProps) {
   const messagesRef = useRef<HTMLDivElement | null>(null);
   const preserveScrollRef = useRef<{ height: number; top: number } | null>(null);
@@ -91,7 +99,14 @@ export function ChatPanel({
         )}
         {session.messages.flatMap((message, index) => {
           const bubble = (
-            <MessageBubble key={message.id} message={message} onPreviewFile={onPreviewFile} />
+            <MessageBubble
+              key={message.id}
+              message={message}
+              onPreviewFile={onPreviewFile}
+              {...(csrf !== undefined ? { csrf } : {})}
+              {...(onOpenSchedule !== undefined ? { onOpenSchedule } : {})}
+              {...(onScheduleResolved !== undefined ? { onScheduleResolved } : {})}
+            />
           );
           // After a user message that opened a request, render its ActivityCard.
           // The card is omitted when there's no timeline data and the request
@@ -232,14 +247,21 @@ function ModeSelector({
 
 function MessageBubble({
   message,
-  onPreviewFile
+  onPreviewFile,
+  csrf,
+  onOpenSchedule,
+  onScheduleResolved
 }: {
   message: ChatMessage;
   onPreviewFile: (path: string) => void;
+  csrf?: string;
+  onOpenSchedule?: () => void;
+  onScheduleResolved?: () => void;
 }) {
   const roleLabel =
     message.role === "user" ? "Вы" : message.role === "assistant" ? "CorpClaw" : "Система";
   const filePath = message.file?.path || "";
+  const scheduleMeta = parseScheduleConfirmMeta(message.metadata ?? null);
   return (
     <article className={`message ${message.role} ${message.tone || "normal"}`}>
       <div className="message-role">{roleLabel}</div>
@@ -272,6 +294,14 @@ function MessageBubble({
         <MarkdownMessage text={message.text} />
       ) : (
         <div className="message-text">{message.text}</div>
+      )}
+      {scheduleMeta && csrf && (
+        <ScheduleConfirmCard
+          csrf={csrf}
+          meta={scheduleMeta}
+          {...(onOpenSchedule !== undefined ? { onOpenSchedule } : {})}
+          {...(onScheduleResolved !== undefined ? { onResolved: onScheduleResolved } : {})}
+        />
       )}
     </article>
   );

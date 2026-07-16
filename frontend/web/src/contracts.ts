@@ -642,6 +642,9 @@ export function parseChatMessage(value: unknown): ChatMessage | null {
   if (tone === "warning" || tone === "error" || tone === "file" || tone === "normal") {
     message.tone = tone;
   }
+  if (isRecord(value.metadata)) {
+    message.metadata = value.metadata;
+  }
   if (isRecord(value.file)) {
     const file: NonNullable<ChatMessage["file"]> = {
       name: stringValue(value.file.name, "файл")

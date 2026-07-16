@@ -1881,6 +1881,10 @@ class WebChannelOrchestrator:
             payload["tone"] = message.tone
         if message.request_id:
             payload["request_id"] = message.request_id
+        # B-143: proactive schedule cards and other structured UI need metadata
+        # on history reload (not only live proactive_message).
+        if message.metadata:
+            payload["metadata"] = dict(message.metadata)
         if message.file is not None:
             file_payload: dict[str, object] = {
                 "name": message.file.name,

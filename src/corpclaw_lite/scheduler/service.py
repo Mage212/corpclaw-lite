@@ -202,12 +202,26 @@ class SchedulerService:
 
         if notify and self._notifier is not None:
             msg = self._format_propose_message(task)
+            preview = task.task_text
+            max_preview = 500
+            if len(preview) > max_preview:
+                preview = preview[: max_preview - 1] + "…"
             try:
                 await self._notifier.notify(
                     user,
                     msg,
                     source="schedule_propose",
                     title=f"Подтвердите: {task.title}",
+                    extra_metadata={
+                        "kind": "schedule_confirm",
+                        "task_id": task.id,
+                        "title": task.title,
+                        "task_text": preview,
+                        "schedule_text": task.schedule_text,
+                        "schedule_kind": task.schedule.kind,
+                        "timezone": task.timezone,
+                        "status": task.status,
+                    },
                 )
             except Exception as exc:
                 logger.warning("schedule propose notify failed: %s", exc)
@@ -215,25 +229,20 @@ class SchedulerService:
         return task
 
     def _format_propose_message(self, task: ScheduledTask) -> str:
-        # B-143-lite / B-140: primary path is web «Задачи»; CLI remains for ops.
+        # B-143: primary path is system-inbox card + «Задачи»; CLI remains for ops.
+        parse_note = (
+            f"Разбор: {task.schedule.kind}"
+            if task.schedule.kind != "unset"
+            else "Разбор: не распознано (при подтверждении укажите формулу в «Задачи»)"
+        )
         return (
             f"Предложена задача по расписанию (ожидает подтверждения).\n\n"
-            f"ID: {task.id}\n"
             f"Название: {task.title}\n"
-            f"Задание: {task.task_text}\n"
             f"Когда: {task.schedule_text}\n"
-            f"Разбор: {task.schedule.kind}"
-            + (
-                f" ({task.schedule.to_json()})"
-                if task.schedule.kind != "unset"
-                else " (нужна распознаваемая формула при accept)"
-            )
-            + f"\nЧасовой пояс: {task.timezone}\n\n"
-            f"Откройте «Задачи» в веб-интерфейсе, чтобы подтвердить, изменить "
-            f"или отклонить.\n\n"
-            f"CLI (альтернатива):\n"
-            f"  corpclaw-lite schedule accept -u {task.user_id} -i {task.id}\n"
-            f"  corpclaw-lite schedule dismiss -u {task.user_id} -i {task.id}\n"
+            f"{parse_note}\n"
+            f"Часовой пояс: {task.timezone}\n\n"
+            f"Подтвердите или отклоните кнопками ниже, либо откройте «Задачи».\n"
+            f"(CLI: schedule accept/dismiss -u {task.user_id} -i {task.id})\n"
         )
 
     async def accept(

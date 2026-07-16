@@ -53,6 +53,8 @@ export type ChatMessage = {
   created_at?: string;
   request_id?: string;
   tone?: "normal" | "warning" | "error" | "file";
+  /** Structured UI payloads (e.g. B-143 schedule_confirm). */
+  metadata?: Record<string, unknown> | null;
   file?: {
     name: string;
     path?: string | null;
@@ -60,6 +62,18 @@ export type ChatMessage = {
     caption?: string;
     available?: boolean;
   };
+};
+
+/** B-143: system-inbox schedule consent card metadata. */
+export type ScheduleConfirmMeta = {
+  kind: "schedule_confirm";
+  task_id: string;
+  title?: string;
+  task_text?: string;
+  schedule_text?: string;
+  schedule_kind?: string;
+  timezone?: string;
+  status?: string;
 };
 
 export type StatusLine = {

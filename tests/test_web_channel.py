@@ -842,6 +842,30 @@ async def test_web_chat_file_payload_includes_path_only_for_available_workspace_
 
 
 @pytest.mark.asyncio
+async def test_chat_message_payload_includes_metadata(tmp_path: Path) -> None:
+    """B-143: history reload must surface schedule_confirm metadata for FE cards."""
+    user = User(id=71, name="Meta", department="engineering")
+    orchestrator = WebChannelOrchestrator(Settings())
+    store = WebChatStore(tmp_path / "memory.db")
+    msg = await store.append_message(
+        user_id=user.memory_key(),
+        role="assistant",
+        content="Предложена задача",
+        metadata={
+            "proactive": True,
+            "source": "schedule_propose",
+            "kind": "schedule_confirm",
+            "task_id": "deadbeef",
+        },
+    )
+    payload = await orchestrator._chat_message_payload(msg, user)
+    meta = payload.get("metadata")
+    assert isinstance(meta, dict)
+    assert meta.get("kind") == "schedule_confirm"
+    assert meta.get("task_id") == "deadbeef"
+
+
+@pytest.mark.asyncio
 async def test_web_workspace_overview_returns_safe_operational_summary(tmp_path: Path) -> None:
     workspace = tmp_path / "ws"
     workspace.mkdir()
