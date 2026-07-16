@@ -7,6 +7,7 @@ AdminNotifier remains separate (admin error alerts only).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -158,42 +159,17 @@ class UserNotifier:
         if message_id is not None:
             message_payload["db_id"] = message_id
 
-        web_pushed = False
-        if self._web_broadcast is not None:
-            try:
-                await self._web_broadcast(
-                    user.id,
-                    {
-                        "type": "proactive_message",
-                        "session_id": session_id,
-                        "source": safe_source,
-                        "title": safe_title,
-                        "message": message_payload,
-                    },
-                )
-                await self._web_broadcast(user.id, {"type": "chat_list_changed"})
-                web_pushed = True
-            except Exception as exc:
-                logger.warning(
-                    "user_notifier web broadcast failed user=%s: %s",
-                    user.id,
-                    exc,
-                )
-                errors.append(f"web:{exc}")
-
-        telegram_sent = False
-        if self._telegram_bot is not None and user.telegram_id is not None:
-            try:
-                await self._telegram_bot.send_message(chat_id=user.telegram_id, text=body)
-                telegram_sent = True
-            except Exception as exc:
-                logger.warning(
-                    "user_notifier telegram send failed user=%s tg=%s: %s",
-                    user.id,
-                    user.telegram_id,
-                    exc,
-                )
-                errors.append(f"telegram:{exc}")
+        # D-084: parallel multichannel delivery — web and Telegram are peers.
+        # Persist above runs first; live sinks fan out concurrently.
+        web_pushed, telegram_sent, sink_errors = await self._push_sinks_parallel(
+            user=user,
+            body=body,
+            session_id=session_id,
+            source=safe_source,
+            title=safe_title,
+            message_payload=message_payload,
+        )
+        errors.extend(sink_errors)
 
         log_event(
             "proactive_notified",
@@ -216,3 +192,64 @@ class UserNotifier:
             telegram_sent=telegram_sent,
             errors=errors,
         )
+
+    async def _push_sinks_parallel(
+        self,
+        *,
+        user: User,
+        body: str,
+        session_id: int | None,
+        source: str,
+        title: str | None,
+        message_payload: dict[str, object],
+    ) -> tuple[bool, bool, list[str]]:
+        """Best-effort concurrent push to web + Telegram sinks."""
+
+        async def push_web() -> tuple[bool, str | None]:
+            if self._web_broadcast is None:
+                return False, None
+            try:
+                await self._web_broadcast(
+                    user.id,
+                    {
+                        "type": "proactive_message",
+                        "session_id": session_id,
+                        "source": source,
+                        "title": title,
+                        "message": message_payload,
+                    },
+                )
+                await self._web_broadcast(user.id, {"type": "chat_list_changed"})
+                return True, None
+            except Exception as exc:
+                logger.warning(
+                    "user_notifier web broadcast failed user=%s: %s",
+                    user.id,
+                    exc,
+                )
+                return False, f"web:{exc}"
+
+        async def push_telegram() -> tuple[bool, str | None]:
+            if self._telegram_bot is None or user.telegram_id is None:
+                return False, None
+            try:
+                await self._telegram_bot.send_message(chat_id=user.telegram_id, text=body)
+                return True, None
+            except Exception as exc:
+                logger.warning(
+                    "user_notifier telegram send failed user=%s tg=%s: %s",
+                    user.id,
+                    user.telegram_id,
+                    exc,
+                )
+                return False, f"telegram:{exc}"
+
+        web_result, tg_result = await asyncio.gather(push_web(), push_telegram())
+        web_pushed, web_err = web_result
+        telegram_sent, tg_err = tg_result
+        sink_errors: list[str] = []
+        if web_err is not None:
+            sink_errors.append(web_err)
+        if tg_err is not None:
+            sink_errors.append(tg_err)
+        return web_pushed, telegram_sent, sink_errors

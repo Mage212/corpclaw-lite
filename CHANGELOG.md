@@ -8,6 +8,13 @@
 
 ### Fixed
 
+- **Post-review hardening (F1–F7).** `SECURITY.md` documents process-local
+  `UserRunGate` and IPC secret host-argv visibility; C6 regression test ensures
+  budget resumes if queue slot fails before `on_acquired`; ownership-404 tests
+  for `build_diff` / `revert_change`; TTL expire clears `dedup_key` so abandoned
+  proposals can be re-proposed (explicit dismiss still latches); `UserNotifier`
+  pushes web+Telegram concurrently (`asyncio.gather`, D-084); subagent timeout
+  handoff failures log with `exc_info`.
 - **Reliability sprint 2.** Mid-run context compress allowed after a *complete*
   tool batch (incomplete tool_call/result pairs still blocked). Non-research
   subagent wall timeouts write a partial handoff journal instead of only a bare

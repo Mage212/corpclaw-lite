@@ -111,6 +111,33 @@ async def test_notify_no_telegram_id_skips_tg(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_notify_web_and_telegram_both_fire(tmp_path: Path) -> None:
+    """F6: D-084 parallel multichannel — both sinks receive when registered."""
+    store = WebChatStore(tmp_path / "mem.db")
+    user = User(id=15, name="Both", department="engineering", telegram_id=42)
+    notifier = UserNotifier(store)
+    broadcasts: list[str] = []
+
+    async def _broadcast(uid: int, payload: dict[str, object]) -> None:
+        t = payload.get("type")
+        if isinstance(t, str):
+            broadcasts.append(t)
+
+    bot = AsyncMock()
+    bot.send_message = AsyncMock()
+    notifier.register_web_broadcast(_broadcast)
+    notifier.register_telegram_bot(bot)
+
+    result = await notifier.notify(user, "to both", source="scheduled")
+
+    assert result.ok is True
+    assert result.web_pushed is True
+    assert result.telegram_sent is True
+    assert "proactive_message" in broadcasts
+    bot.send_message.assert_awaited_once_with(chat_id=42, text="to both")
+
+
+@pytest.mark.asyncio
 async def test_notify_persist_false_no_double_append(tmp_path: Path) -> None:
     store = WebChatStore(tmp_path / "mem.db")
     user = User(id=6, name="F", department="engineering")
