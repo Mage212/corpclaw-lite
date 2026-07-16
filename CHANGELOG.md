@@ -15,6 +15,11 @@
   merge-only entry application via `SQLiteMemory.store_entry`); transcript
   gatherer from recent non-system chat sessions. CLI `memory-worker enable
   /disable/status`. Worker runtime + LLM loop in PR2.
+- **B-109 PR2 worker runtime (DC-027 Layer 2+3).** `MemoryWorkerService`
+  (asyncio poll loop, quiet hours, busy gate, one-shot LLM call, merge-only
+  write with backup + audit). Routing `memory_worker` → `maintenance` load class
+  (overflow). Web orchestrator start/stop wiring. CLI `memory-worker run -u`.
+  Opt-in default off; corp HR-safe.
 
 ### Fixed
 

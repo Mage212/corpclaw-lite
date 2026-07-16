@@ -366,6 +366,8 @@ def _build_parser() -> argparse.ArgumentParser:
     mw_disable.add_argument("-u", "--user-id", type=int, required=True)
     mw_status = mw_sub.add_parser("status", help="Show memory-worker state for a user")
     mw_status.add_argument("-u", "--user-id", type=int, required=True)
+    mw_run = mw_sub.add_parser("run", help="Run memory worker once for a user (ops/debug)")
+    mw_run.add_argument("-u", "--user-id", type=int, required=True)
 
     # B-120 / DC-032: proactive notify (system session + optional TG)
     notify_p = sub.add_parser(
@@ -898,7 +900,7 @@ def cmd_schedule(args: Any) -> None:
 
 
 def cmd_memory_worker(args: Any) -> None:
-    """B-109: memory-worker enable/disable/status."""
+    """B-109: memory-worker enable/disable/status/run."""
     from corpclaw_lite.users.manager import UserManager
 
     um = UserManager()
@@ -921,8 +923,42 @@ def cmd_memory_worker(args: Any) -> None:
             print(f"  last_status: {state.last_status or '—'}")
             if state.last_error:
                 print(f"  last_error:  {state.last_error[:200]}")
+    elif cmd == "run":
+        cmd_memory_worker_run(user_id)
     else:
         raise SystemExit(f"Unknown memory-worker command: {cmd}")
+
+
+def cmd_memory_worker_run(user_id: int) -> None:
+    """Run the memory worker once for a specific user (ops/debug)."""
+    from corpclaw_lite.agent.factory import build_agent_stack
+    from corpclaw_lite.config.bootstrap import BootstrapLoader
+    from corpclaw_lite.extensions.paths import resolve_dirs
+    from corpclaw_lite.memory.worker import MemoryWorkerService
+    from corpclaw_lite.paths import PROJECT_ROOT
+
+    stack = build_agent_stack()
+    um = stack.user_manager
+    user = um.get_by_id(user_id)
+    if user is None:
+        raise SystemExit(f"User {user_id} not found.")
+
+    if stack.loop.memory is None or stack.chat_store is None or stack.chat_context_store is None:
+        raise SystemExit("Agent stack missing memory/chat stores.")
+
+    bootstrap_dirs = resolve_dirs("bootstrap", stack.loop._settings, PROJECT_ROOT)  # type: ignore[attr-defined]
+    worker = MemoryWorkerService(
+        settings=stack.loop._settings.memory_worker,  # type: ignore[attr-defined]
+        user_manager=um,
+        memory=stack.loop.memory,
+        chat_store=stack.chat_store,
+        context_store=stack.chat_context_store,
+        bootstrap=BootstrapLoader(list(bootstrap_dirs)),
+        provider=stack.loop.provider,
+    )
+
+    status = asyncio.run(worker.run_user(user))
+    print(f"User {user_id}: memory worker run → {status}.")
 
 
 def cmd_notify_user(
