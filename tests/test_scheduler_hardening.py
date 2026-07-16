@@ -288,3 +288,99 @@ async def test_system_channel_denies_schedule_tool() -> None:
         assert "not available in headless/system" in result
         tasks = await store.list_for_user(user.id)
         assert tasks == []
+
+
+# ── Status-guarded transitions (post-review hardening) ────────────────────
+
+
+@pytest.mark.asyncio
+async def test_update_guarded_returns_false_on_status_mismatch(tmp_path: Path) -> None:
+    """update_guarded must return False when on-disk status doesn't match expected."""
+    store = SchedulerStore(tmp_path / "s.db")
+    user = User(id=30, name="Guard", department="engineering")
+    svc = SchedulerService(
+        store=store,
+        user_manager=_FakeUM(user),  # type: ignore[arg-type]
+        settings=_settings(tmp_path),
+    )
+    p = await svc.propose(user, title="t", task_text="body", schedule_text="every 1h", notify=False)
+    # Task is "pending" on disk. Try a guarded update expecting "active" → must fail.
+    p.status = "active"  # simulate caller thinking it's already active
+    ok = await store.update_guarded(p, expected_status="active")
+    assert ok is False, "expected False — on-disk status is 'pending', not 'active'"
+    # Correct expectation matches → success.
+    p.status = "paused"
+    ok = await store.update_guarded(p, expected_status="pending")
+    assert ok is True
+
+
+@pytest.mark.asyncio
+async def test_accept_rejects_after_concurrent_dismiss(tmp_path: Path) -> None:
+    """Cross-channel race: dismiss wins first, accept must fail (Python check or SQL guard)."""
+    store = SchedulerStore(tmp_path / "s.db")
+    user = User(id=31, name="Race", department="engineering")
+    svc = SchedulerService(
+        store=store,
+        user_manager=_FakeUM(user),  # type: ignore[arg-type]
+        settings=_settings(tmp_path),
+    )
+    p = await svc.propose(user, title="t", task_text="body", schedule_text="every 1h", notify=False)
+    # Channel A dismisses the proposal.
+    await svc.dismiss(user, p.id)
+    # Channel B tries to accept the same task_id. The fresh get() sees status=dismissed,
+    # so the Python-level check catches it first (SQL guard is the TOCTOU safety net).
+    with pytest.raises(SchedulerError):
+        await svc.accept(user, p.id)
+
+
+@pytest.mark.asyncio
+async def test_accept_sql_guard_catches_toctou(tmp_path: Path) -> None:
+    """SQL guard catches the TOCTOU window: status changed between get() and update_guarded()."""
+    store = SchedulerStore(tmp_path / "s.db")
+    user = User(id=33, name="TOCTOU", department="engineering")
+    svc = SchedulerService(
+        store=store,
+        user_manager=_FakeUM(user),  # type: ignore[arg-type]
+        settings=_settings(tmp_path),
+    )
+    p = await svc.propose(user, title="t", task_text="body", schedule_text="every 1h", notify=False)
+    # Read a snapshot while status is still "pending".
+    snapshot = await store.get(p.id, user_id=user.id)
+    assert snapshot is not None and snapshot.status == "pending"
+    # Competitor changes status to dismissed (simulating cross-channel race).
+    await svc.dismiss(user, p.id)
+    # Now attempt a guarded write on the stale snapshot expecting "pending".
+    snapshot.status = "active"  # simulate accept's mutation
+    ok = await store.update_guarded(snapshot, expected_status="pending")
+    assert ok is False, "SQL guard should reject — on-disk status is 'dismissed', not 'pending'"
+
+
+@pytest.mark.asyncio
+async def test_pause_resume_status_guard(tmp_path: Path) -> None:
+    """pause/resume reject double-transitions (Python check or SQL guard)."""
+    store = SchedulerStore(tmp_path / "s.db")
+    user = User(id=32, name="PR", department="engineering")
+    svc = SchedulerService(
+        store=store,
+        user_manager=_FakeUM(user),  # type: ignore[arg-type]
+        settings=_settings(tmp_path),
+    )
+    p = await svc.propose(user, title="t", task_text="body", schedule_text="every 1h", notify=False)
+    active = await svc.accept(user, p.id)
+    assert active.status == "active"
+
+    # Pause → paused.
+    paused = await svc.pause(user, p.id)
+    assert paused.status == "paused"
+
+    # Second pause: fresh get() sees "paused", Python check rejects.
+    with pytest.raises(SchedulerError):
+        await svc.pause(user, p.id)
+
+    # Resume → active.
+    resumed = await svc.resume(user, p.id)
+    assert resumed.status == "active"
+
+    # Second resume: fresh get() sees "active", Python check rejects.
+    with pytest.raises(SchedulerError):
+        await svc.resume(user, p.id)

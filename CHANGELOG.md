@@ -8,6 +8,14 @@
 
 ### Fixed
 
+- **Scheduler status-guarded transitions.** `accept`/`dismiss`/`pause`/`resume`
+  now use an atomic optimistic-lock `update_guarded` (mirrors `claim_task`)
+  instead of read-check-then-blind-update, preventing cross-channel races where
+  the last writer wins with a stale snapshot.
+- **Inbox schedule card: Accept disabled for unrecognized schedules.**
+  `ScheduleConfirmCard` now disables the Accept button when `schedule_kind` is
+  `unset` (matching `ScheduleView`) and shows a hint to open «Задачи» for
+  parse-assist, instead of failing with a backend 400.
 - **B-108 FTS durability.** Do not drop `memory_entries_fts` on every
   `SQLiteMemory` init; rebuild from `memory_entries` when row counts diverge
   (restart / dual-process partial fill). Exact-cue boost applied once in the

@@ -353,7 +353,11 @@ class SchedulerService:
         task.enabled = True
         task.next_run_at = _iso(next_run)
         task.accepted_at = _iso(_utcnow())
-        await self._store.update(task)
+        ok = await self._store.update_guarded(task, expected_status="pending")
+        if not ok:
+            raise SchedulerError(
+                "Task was modified concurrently (expected pending); reload the task list."
+            )
 
         if self._notifier is not None:
             try:
@@ -379,7 +383,12 @@ class SchedulerService:
         task.status = "dismissed"
         task.enabled = False
         task.next_run_at = None
-        await self._store.update(task)
+        ok = await self._store.update_guarded(task, expected_status=("pending", "active", "paused"))
+        if not ok:
+            raise SchedulerError(
+                "Task was modified concurrently (expected pending/active/paused); "
+                "reload the task list."
+            )
         return task
 
     async def pause(self, user: User, task_id: str) -> ScheduledTask:
@@ -388,7 +397,11 @@ class SchedulerService:
             raise SchedulerError("Only active tasks can be paused")
         task.status = "paused"
         task.enabled = False
-        await self._store.update(task)
+        ok = await self._store.update_guarded(task, expected_status="active")
+        if not ok:
+            raise SchedulerError(
+                "Task was modified concurrently (expected active); reload the task list."
+            )
         return task
 
     async def resume(self, user: User, task_id: str) -> ScheduledTask:
@@ -404,7 +417,11 @@ class SchedulerService:
         task.status = "active"
         task.enabled = True
         task.next_run_at = _iso(next_run) if next_run else _iso(_utcnow())
-        await self._store.update(task)
+        ok = await self._store.update_guarded(task, expected_status="paused")
+        if not ok:
+            raise SchedulerError(
+                "Task was modified concurrently (expected paused); reload the task list."
+            )
         return task
 
     async def delete(self, user: User, task_id: str) -> None:

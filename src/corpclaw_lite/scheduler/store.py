@@ -313,6 +313,75 @@ class SchedulerStore:
     async def update(self, task: ScheduledTask) -> ScheduledTask:
         return await run_in_thread(self._sync_update, task)
 
+    def _sync_update_guarded(
+        self,
+        task: ScheduledTask,
+        expected_status: str | tuple[str, ...],
+    ) -> bool:
+        """Atomic status-guarded transition (optimistic lock, like ``claim_task``).
+
+        Returns True iff the row was updated — i.e. the on-disk status still
+        matched *expected_status* at UPDATE time. False means a concurrent
+        mutation (cross-channel accept/dismiss, scheduler dispatch, ...) won
+        the race; the caller should re-read and surface a conflict error.
+
+        Unlike ``_sync_update``, this does NOT raise on rowcount == 0 — the
+        caller decides whether a missed update is an error (accept/dismiss) or
+        a no-op.
+        """
+        task.updated_at = _utcnow_iso()
+        if isinstance(expected_status, str):
+            status_clause = "AND status = ?"
+            status_params: tuple[Any, ...] = (expected_status,)
+        else:
+            placeholders = ",".join("?" for _ in expected_status)
+            status_clause = f"AND status IN ({placeholders})"
+            status_params = tuple(expected_status)
+        with db_connect(self.db_path) as conn:
+            cur = conn.execute(
+                f"""
+                UPDATE scheduled_tasks SET
+                    title = ?, task_text = ?, schedule_text = ?, schedule_spec = ?,
+                    timezone = ?, status = ?, enabled = ?, dedup_key = ?,
+                    next_run_at = ?, last_run_at = ?, last_status = ?,
+                    run_count = ?, error_count = ?, updated_at = ?, accepted_at = ?,
+                    claimed_at = ?, claim_token = ?
+                WHERE id = ? AND user_id = ? {status_clause}
+                """,
+                (
+                    task.title,
+                    task.task_text,
+                    task.schedule_text,
+                    json.dumps(task.schedule.to_json(), ensure_ascii=False),
+                    task.timezone,
+                    task.status,
+                    1 if task.enabled else 0,
+                    task.dedup_key,
+                    task.next_run_at,
+                    task.last_run_at,
+                    task.last_status,
+                    task.run_count,
+                    task.error_count,
+                    task.updated_at,
+                    task.accepted_at,
+                    task.claimed_at,
+                    task.claim_token,
+                    task.id,
+                    task.user_id,
+                    *status_params,
+                ),
+            )
+            return int(cur.rowcount) == 1
+
+    async def update_guarded(
+        self,
+        task: ScheduledTask,
+        *,
+        expected_status: str | tuple[str, ...],
+    ) -> bool:
+        """Async wrapper for :meth:`_sync_update_guarded`."""
+        return await run_in_thread(self._sync_update_guarded, task, expected_status)
+
     def _sync_list_due(
         self, now_iso: str, stale_before_iso: str, limit: int = 20
     ) -> list[ScheduledTask]:
