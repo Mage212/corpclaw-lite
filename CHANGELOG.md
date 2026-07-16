@@ -6,6 +6,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **B-108 FTS durability.** Do not drop `memory_entries_fts` on every
+  `SQLiteMemory` init; rebuild from `memory_entries` when row counts diverge
+  (restart / dual-process partial fill). Exact-cue boost applied once in the
+  FTS recall path (no double-count).
+
 ### Added
 
 - **B-108 Memora-style memory entries.** Replace flat `memory_facts` with

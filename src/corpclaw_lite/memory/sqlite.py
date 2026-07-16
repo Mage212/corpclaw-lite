@@ -100,7 +100,12 @@ class SQLiteMemory:
         self._init_db()
 
     def _init_db(self) -> None:
-        """Create entries tables; drop legacy memory_facts / messages (clean start)."""
+        """Create entries tables; drop legacy memory_facts / messages (clean start).
+
+        FTS is durable: never drop ``memory_entries_fts`` on init. If the FTS
+        row count diverges from ``memory_entries`` (empty after crash, partial
+        dual-process fill), rebuild from the primary table.
+        """
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             with db_connect(self.db_path) as conn:
@@ -108,7 +113,6 @@ class SQLiteMemory:
                 # Clean-start migrations (dev phase, D-078 / B-108).
                 conn.execute("DROP TABLE IF EXISTS messages")
                 conn.execute("DROP TABLE IF EXISTS memory_facts")
-                conn.execute("DROP TABLE IF EXISTS memory_entries_fts")
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS memory_entries (
@@ -141,6 +145,7 @@ class SQLiteMemory:
                         """
                     )
                     self._fts_ok = True
+                    self._fts_heal_if_needed(conn)
                 except sqlite3.OperationalError as exc:
                     logger.warning("FTS5 unavailable for memory_entries: %s", exc)
                     self._fts_ok = False
@@ -196,6 +201,55 @@ class SQLiteMemory:
         except sqlite3.OperationalError as exc:
             logger.warning("FTS user delete failed: %s", exc)
             self._fts_ok = False
+
+    def _fts_rebuild(self, conn: sqlite3.Connection) -> None:
+        """Rebuild FTS from ``memory_entries`` (rowid = entry id)."""
+        if not self._fts_ok:
+            return
+        try:
+            conn.execute("DELETE FROM memory_entries_fts")
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT id, user_id, primary_abstraction, cue_indices_json
+                FROM memory_entries
+                """
+            ).fetchall()
+            for row in rows:
+                cues = _cues_from_json(str(row["cue_indices_json"] or "[]"))
+                conn.execute(
+                    """
+                    INSERT INTO memory_entries_fts(
+                        rowid, user_id, primary_abstraction, cues
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        int(row["id"]),
+                        str(row["user_id"]),
+                        str(row["primary_abstraction"]),
+                        _cues_fts_text(cues),
+                    ),
+                )
+            logger.info("Rebuilt memory_entries_fts: %d rows", len(rows))
+        except sqlite3.OperationalError as exc:
+            logger.warning("FTS rebuild failed: %s", exc)
+            self._fts_ok = False
+
+    def _fts_heal_if_needed(self, conn: sqlite3.Connection) -> None:
+        """Rebuild FTS when row counts diverge from the primary table."""
+        if not self._fts_ok:
+            return
+        try:
+            entries_n = int(conn.execute("SELECT COUNT(*) FROM memory_entries").fetchone()[0])
+            fts_n = int(conn.execute("SELECT COUNT(*) FROM memory_entries_fts").fetchone()[0])
+        except (sqlite3.OperationalError, TypeError, IndexError) as exc:
+            logger.warning("FTS heal count failed: %s", exc)
+            self._fts_ok = False
+            return
+        if entries_n == 0 and fts_n == 0:
+            return
+        if entries_n != fts_n:
+            self._fts_rebuild(conn)
 
     def _sync_store_entry(
         self,
@@ -271,9 +325,6 @@ class SQLiteMemory:
                 cues,
             )
         )
-
-    def _sync_store_fact(self, user_id: str, key: str, value: str) -> None:
-        self._sync_store_entry(user_id, key, value, None)
 
     async def store_fact(self, user_id: str, key: str, value: str) -> None:
         """Legacy alias: key → abstraction, value → memory_value."""
@@ -410,10 +461,11 @@ class SQLiteMemory:
             if not any(c.casefold() == qfold for c in cues):
                 continue
             rid = int(r["id"])
+            # FTS loop already applied exact-cue boost when MATCH returned the row.
+            # Only add entries FTS missed (short tokens / empty index edge cases).
             if rid in by_id:
-                by_id[rid]["score"] = float(by_id[rid]["score"]) + _CUE_EXACT_WEIGHT
-            else:
-                by_id[rid] = self._row_to_entry(r, score=_CUE_EXACT_WEIGHT)
+                continue
+            by_id[rid] = self._row_to_entry(r, score=_CUE_EXACT_WEIGHT)
 
         out = list(by_id.values())
         out.sort(key=lambda e: (-float(e["score"]), str(e["abstraction"])))

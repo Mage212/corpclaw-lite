@@ -3,10 +3,21 @@
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 
 import pytest
 
-from corpclaw_lite.memory.sqlite import SQLiteMemory
+from corpclaw_lite.memory.sqlite import _CUE_EXACT_WEIGHT, SQLiteMemory
+
+
+def _fts_count(db_path: Path) -> int:
+    with sqlite3.connect(str(db_path)) as conn:
+        return int(conn.execute("SELECT COUNT(*) FROM memory_entries_fts").fetchone()[0])
+
+
+def _entries_count(db_path: Path) -> int:
+    with sqlite3.connect(str(db_path)) as conn:
+        return int(conn.execute("SELECT COUNT(*) FROM memory_entries").fetchone()[0])
 
 
 @pytest.fixture
@@ -97,3 +108,79 @@ async def test_legacy_tables_dropped_on_init(tmp_path) -> None:
     # Facts API still works via memory_entries aliases.
     await mem.store_fact("u", "k", "v")
     assert (await mem.recall_facts("u"))[0]["value"] == "v"
+
+
+@pytest.mark.asyncio
+async def test_fts_survives_reinit(tmp_path: Path) -> None:
+    """M1: re-opening SQLiteMemory must not wipe a populated FTS index."""
+    db = tmp_path / "durable.db"
+    m1 = SQLiteMemory(str(db))
+    await m1.store_entry(
+        "u1",
+        primary_abstraction="Client INN for Acme",
+        memory_value="7707083893",
+        cues=["Acme", "7707083893"],
+    )
+    assert _entries_count(m1.db_path) == 1
+    assert _fts_count(m1.db_path) == 1
+
+    m2 = SQLiteMemory(str(db))
+    assert _entries_count(m2.db_path) == 1
+    assert _fts_count(m2.db_path) == 1
+    hits = await m2.recall_entries("u1", "Acme")
+    assert len(hits) >= 1
+    assert hits[0]["abstraction"] == "Client INN for Acme"
+    # FTS+BM25 path scores above pure cue-only (1.0) when index is warm.
+    assert float(hits[0]["score"]) > _CUE_EXACT_WEIGHT
+
+
+@pytest.mark.asyncio
+async def test_fts_rebuild_when_empty(tmp_path: Path) -> None:
+    """M1: empty/desynced FTS is rebuilt from memory_entries on init."""
+    db = tmp_path / "rebuild.db"
+    m1 = SQLiteMemory(str(db))
+    await m1.store_entry(
+        "u1",
+        primary_abstraction="Prefers brief replies",
+        memory_value="short answers",
+        cues=["brief"],
+    )
+    await m1.store_entry(
+        "u1",
+        primary_abstraction="Works in Moscow",
+        memory_value="office",
+        cues=["Moscow"],
+    )
+    assert _fts_count(m1.db_path) == 2
+
+    with sqlite3.connect(str(m1.db_path)) as conn:
+        conn.execute("DELETE FROM memory_entries_fts")
+        conn.commit()
+    assert _fts_count(m1.db_path) == 0
+    assert _entries_count(m1.db_path) == 2
+
+    m2 = SQLiteMemory(str(db))
+    assert _fts_count(m2.db_path) == 2
+    assert _entries_count(m2.db_path) == 2
+    hits = await m2.recall_entries("u1", "brief")
+    assert any(h["abstraction"] == "Prefers brief replies" for h in hits)
+
+
+@pytest.mark.asyncio
+async def test_cue_exact_score_not_doubled(tmp_path: Path) -> None:
+    """S2: exact-cue boost applied once in FTS path (no all-rows double-count)."""
+    db = tmp_path / "score.db"
+    m = SQLiteMemory(str(db))
+    await m.store_entry(
+        "u1",
+        primary_abstraction="Tax id Acme",
+        memory_value="x",
+        cues=["Acme"],
+    )
+    hits = await m.recall_entries("u1", "Acme")
+    assert len(hits) == 1
+    score = float(hits[0]["score"])
+    # Double-boost historically produced ~12; single boost stays strictly below that.
+    assert score < 12.0
+    # Still above pure cue-only floor when FTS MATCH hits.
+    assert score > _CUE_EXACT_WEIGHT
