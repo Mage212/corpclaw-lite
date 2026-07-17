@@ -182,6 +182,8 @@ class WebChannelOrchestrator:
         self._user_notifier: Any | None = None
         # B-118 / DC-030: web-owned scheduler poll (agent-on-schedule).
         self._scheduler: Any | None = None
+        # B-109: background memory worker (web-owned; opt-in; quiet hours).
+        self._memory_worker: Any | None = None
         self._cleanup_task: asyncio.Task[None] | None = None
         self._container_prune_task: asyncio.Task[None] | None = None
         self._system_load_poll_task: asyncio.Task[None] | None = None
@@ -308,6 +310,27 @@ class WebChannelOrchestrator:
             stack.tool_registry.register(tool, allow_replace=True)
         self._scheduler.start()
 
+        # B-109: memory worker (only if master switch is on).
+        if self._settings.memory_worker.enabled and memory is not None:
+            from corpclaw_lite.extensions.paths import resolve_dirs as _resolve_dirs
+            from corpclaw_lite.memory.worker import MemoryWorkerService
+
+            bootstrap_dirs = _resolve_dirs("bootstrap", self._settings, PROJECT_ROOT)
+            self._memory_worker = MemoryWorkerService(
+                settings=self._settings.memory_worker,
+                user_manager=stack.user_manager,
+                memory=memory,
+                chat_store=self._chat_store,
+                context_store=stack.chat_context_store
+                if stack.chat_context_store is not None
+                else self._chat_store,  # type: ignore[arg-type]
+                bootstrap=BootstrapLoader(list(bootstrap_dirs)),
+                provider=stack.loop.provider,
+                agent_service=self._service,
+                notifier=self._user_notifier,
+            )
+            self._memory_worker.start()
+
         stack.tool_registry.register(
             SendFileTool(self._send_file_callback, workspace_base=workspace_base),
             allow_replace=True,
@@ -388,6 +411,8 @@ class WebChannelOrchestrator:
     async def stop(self) -> None:
         if self._scheduler is not None:
             self._scheduler.stop()
+        if self._memory_worker is not None:
+            self._memory_worker.stop()
         if self._cleanup_task is not None:
             self._cleanup_task.cancel()
         if self._container_prune_task is not None:

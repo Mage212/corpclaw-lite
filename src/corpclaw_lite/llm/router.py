@@ -77,6 +77,8 @@ def _load_class_for_task(task_kind: str) -> LLMLoadClass:
         return "consolidation"
     if task_kind == "calibration":
         return "calibration"
+    if task_kind == "memory_worker":
+        return "maintenance"
     return "interactive"
 
 

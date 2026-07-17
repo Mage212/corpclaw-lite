@@ -311,3 +311,268 @@ def test_update_memory_worker_run_does_not_auto_enable(tmp_path: Path) -> None:
     assert state.enabled is False  # defense-in-depth: no auto-enable
     assert state.last_status == "ok"
     assert 99 not in um.list_memory_worker_enabled_users()
+
+
+# ── PR2: MemoryWorkerService integration tests ────────────────────────────
+
+from typing import Any  # noqa: E402
+
+from corpclaw_lite.llm.base import LLMResponse  # noqa: E402
+from corpclaw_lite.memory.worker import MemoryWorkerService  # noqa: E402
+
+
+def _mw_settings(tmp_path: Path, **overrides: Any) -> Any:
+    from corpclaw_lite.config.settings import MemoryWorkerSettings
+
+    defaults: dict[str, Any] = {
+        "enabled": True,
+        "interval_hours": 24.0,
+        "quiet_hours_start": "00:00",
+        "quiet_hours_end": "23:59",
+        "timezone": "UTC",
+        "max_users_per_tick": 20,
+        "max_sessions": 5,
+        "max_messages_per_session": 40,
+        "max_transcript_chars": 24_000,
+        "max_entries_per_run": 20,
+        "notify_on_update": False,
+        "keep_history_backups": False,
+        "bootstrap_users_dir": "config/bootstrap/users",
+        "entries_backup_dir": "memory_backups",
+        "poll_seconds": 300.0,
+    }
+    defaults.update(overrides)
+    return MemoryWorkerSettings(**defaults)
+
+
+class _FakeProvider:
+    """Minimal provider for worker tests — returns canned JSON."""
+
+    def __init__(self, content: str) -> None:
+        self._content = content
+
+    async def chat(self, **kwargs: Any) -> LLMResponse:
+        return LLMResponse(content=self._content, tool_calls=[])
+
+
+class _FakeAgentService:
+    """Fake gate that always allows (or denies)."""
+
+    def __init__(self, *, allow: bool = True) -> None:
+        self._allow = allow
+
+    async def try_start_user_request(self, *args: Any, **kwargs: Any) -> bool:
+        return self._allow
+
+    async def finish_user_request(self, *args: Any, **kwargs: Any) -> Any:
+        return None
+
+
+def _build_worker(
+    tmp_path: Path,
+    *,
+    provider_content: str = "",
+    allow_gate: bool = True,
+    settings_overrides: dict[str, Any] | None = None,
+) -> tuple[MemoryWorkerService, UserManager, SQLiteMemory, Path]:
+    """Construct a MemoryWorkerService with fakes for integration testing."""
+    from corpclaw_lite.channels.web.chat_context_store import ChatContextStore
+    from corpclaw_lite.channels.web.chat_store import WebChatStore
+    from corpclaw_lite.config.bootstrap import BootstrapLoader
+
+    db = tmp_path / "mem.db"
+    users_db = tmp_path / "users.db"
+    um = UserManager(str(users_db))
+    memory = SQLiteMemory(str(db))
+    chat_store = WebChatStore(db)
+    ctx_store = ChatContextStore(db)
+    bootstrap = BootstrapLoader(tmp_path / "bootstrap")
+    (tmp_path / "bootstrap" / "users").mkdir(parents=True, exist_ok=True)
+
+    settings = _mw_settings(tmp_path, **(settings_overrides or {}))
+    provider = _FakeProvider(provider_content)
+    worker = MemoryWorkerService(
+        settings=settings,
+        user_manager=um,
+        memory=memory,
+        chat_store=chat_store,
+        context_store=ctx_store,
+        bootstrap=bootstrap,
+        provider=provider,
+        agent_service=_FakeAgentService(allow=allow_gate),
+    )
+    return worker, um, memory, tmp_path
+
+
+@pytest.mark.asyncio
+async def test_run_user_cold_start_skip(tmp_path: Path) -> None:
+    """No transcript + no md → skip, no LLM call."""
+    from corpclaw_lite.users.models import User
+
+    worker, um, _, _ = _build_worker(tmp_path, provider_content="SHOULD NOT BE CALLED")
+    user = User(id=1, name="Cold", department="engineering")
+    status = await worker.run_user(user)
+    assert status == "skipped"
+    state = um.get_memory_worker_state(1)
+    assert state is not None
+    assert state.last_status == "skipped"
+
+
+@pytest.mark.asyncio
+async def test_run_user_busy_skip(tmp_path: Path) -> None:
+    """Busy gate denies → skip, no LLM call."""
+    from corpclaw_lite.users.models import User
+
+    worker, um, _, _ = _build_worker(
+        tmp_path, provider_content="SHOULD NOT BE CALLED", allow_gate=False
+    )
+    user = User(id=2, name="Busy", department="engineering")
+    status = await worker.run_user(user)
+    assert status == "skipped"
+    state = um.get_memory_worker_state(2)
+    assert state is not None
+    assert "busy" in (state.last_error or "")
+
+
+@pytest.mark.asyncio
+async def test_run_user_success_fake_llm(tmp_path: Path) -> None:
+    """Valid JSON → md written, .bak exists, entries upserted, existing survives."""
+    from corpclaw_lite.channels.web.chat_context_store import ChatContextStore
+    from corpclaw_lite.channels.web.chat_store import WebChatStore
+    from corpclaw_lite.users.models import User
+
+    llm_json = json.dumps(
+        {
+            "md": "# About\n\nUpdated profile.",
+            "entries": [
+                {"abstraction": "prefers ru", "value": "Russian speaker", "cues": ["ru"]},
+            ],
+            "summary": "Added language preference",
+        }
+    )
+
+    worker, um, memory, base = _build_worker(tmp_path, provider_content=llm_json)
+    user = User(id=3, name="Success", department="engineering")
+
+    # Pre-existing entry that should survive merge-only.
+    await memory.store_entry("3", primary_abstraction="old_fact", memory_value="stays", cues=[])
+
+    # Create a chat session with transcript so it's not cold-start.
+    chat_store = WebChatStore(base / "mem.db")
+    ctx_store = ChatContextStore(base / "mem.db")
+    sid = await chat_store.create_session("3", section="work")
+    await ctx_store.append_context(session_id=sid, user_id="3", role="user", content="hello")
+
+    status = await worker.run_user(user)
+    assert status == "ok"
+
+    state = um.get_memory_worker_state(3)
+    assert state is not None
+    assert state.last_status == "ok"
+
+    # New entry stored + old entry survived.
+    recalled = await memory.recall_entries("3", limit=20)
+    abstractions = {e["abstraction"] for e in recalled}
+    assert "prefers ru" in abstractions
+    assert "old_fact" in abstractions  # merge-only
+
+    # .md written.
+    md_path = base / "bootstrap" / "users" / "3.md"
+    assert md_path.exists()
+    content = md_path.read_text(encoding="utf-8")
+    assert "Updated profile" in content
+    assert "auto-managed" in content  # disclaimer ensured
+
+    # Backup exists only when there was a prior .md to back up. On first write
+    # there is no prior file, so no .bak — that's correct. Test backup separately
+    # in the unit tests above (test_backup_creates_bak_with_previous_content).
+
+
+@pytest.mark.asyncio
+async def test_run_user_bad_json_no_write(tmp_path: Path) -> None:
+    """Prose response → error, no file mutation."""
+    from corpclaw_lite.users.models import User
+
+    worker, um, _, base = _build_worker(tmp_path, provider_content="This is prose, not JSON.")
+    user = User(id=4, name="Bad", department="engineering")
+
+    # Pre-create a .md to verify it's NOT overwritten on error.
+    md_path = base / "bootstrap" / "users" / "4.md"
+    md_path.parent.mkdir(parents=True, exist_ok=True)
+    md_path.write_text("ORIGINAL", encoding="utf-8")
+
+    # Give it a transcript so it's not cold-start.
+    from corpclaw_lite.channels.web.chat_context_store import ChatContextStore
+    from corpclaw_lite.channels.web.chat_store import WebChatStore
+
+    chat_store = WebChatStore(base / "mem.db")
+    ctx_store = ChatContextStore(base / "mem.db")
+    sid = await chat_store.create_session("4", section="work")
+    await ctx_store.append_context(session_id=sid, user_id="4", role="user", content="hi")
+
+    status = await worker.run_user(user)
+    assert status == "error"
+    state = um.get_memory_worker_state(4)
+    assert state is not None
+    assert state.last_status == "error"
+    # File untouched.
+    assert md_path.read_text(encoding="utf-8") == "ORIGINAL"
+
+
+@pytest.mark.asyncio
+async def test_run_user_no_provider_error(tmp_path: Path) -> None:
+    """No provider configured → error."""
+    from corpclaw_lite.users.models import User
+
+    worker, um, memory, base = _build_worker(tmp_path, provider_content="")
+    worker._provider = None  # type: ignore[attr-defined]
+    user = User(id=5, name="NoProv", department="engineering")
+
+    # Give transcript to pass cold-start check.
+    from corpclaw_lite.channels.web.chat_context_store import ChatContextStore
+    from corpclaw_lite.channels.web.chat_store import WebChatStore
+
+    chat_store = WebChatStore(base / "mem.db")
+    ctx_store = ChatContextStore(base / "mem.db")
+    sid = await chat_store.create_session("5", section="work")
+    await ctx_store.append_context(session_id=sid, user_id="5", role="user", content="hi")
+
+    status = await worker.run_user(user)
+    assert status == "error"
+
+
+def test_router_memory_worker_to_maintenance() -> None:
+    """_load_class_for_task maps memory_worker → maintenance (overflow)."""
+    from corpclaw_lite.llm.router import _load_class_for_task
+
+    assert _load_class_for_task("memory_worker") == "maintenance"
+
+
+def test_quiet_hours_wrap_midnight() -> None:
+    """22:00–07:00 window: 23:00 is quiet, 12:00 is not."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    worker, _, _, _ = _build_worker(
+        Path("/tmp"),  # not used for this test
+        settings_overrides={"quiet_hours_start": "22:00", "quiet_hours_end": "07:00"},
+    )
+    tz = ZoneInfo("UTC")
+    assert worker._is_quiet_hours(now=datetime(2026, 1, 1, 23, 0, tzinfo=tz)) is True
+    assert worker._is_quiet_hours(now=datetime(2026, 1, 1, 12, 0, tzinfo=tz)) is False
+    assert worker._is_quiet_hours(now=datetime(2026, 1, 1, 6, 0, tzinfo=tz)) is True  # before 07:00
+    assert worker._is_quiet_hours(now=datetime(2026, 1, 1, 22, 0, tzinfo=tz)) is True  # at start
+
+
+def test_quiet_hours_same_day() -> None:
+    """09:00–17:00 window: 12:00 is quiet, 20:00 is not."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    worker, _, _, _ = _build_worker(
+        Path("/tmp"),
+        settings_overrides={"quiet_hours_start": "09:00", "quiet_hours_end": "17:00"},
+    )
+    tz = ZoneInfo("UTC")
+    assert worker._is_quiet_hours(now=datetime(2026, 1, 1, 12, 0, tzinfo=tz)) is True
+    assert worker._is_quiet_hours(now=datetime(2026, 1, 1, 20, 0, tzinfo=tz)) is False
