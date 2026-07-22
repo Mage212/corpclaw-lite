@@ -23,6 +23,14 @@
 
 ### Fixed
 
+- **Security & Correctness Sprint 1.** Directory copy rejects nested symlinks
+  without leaving partial output; department overlays preserve omitted policy
+  fields and skill prompts respect department RBAC. Telegram whitelist and
+  revocations now use transactionally migrated SQLite state. Credential
+  scrubbing covers modern token formats and formatted tracebacks. Native tool
+  calls are limited to the offered schema, queue cancellation releases partial
+  acquisitions, terminal-tool history remains protocol-complete, and scheduler
+  workers finish claims atomically without reviving paused/dismissed tasks.
 - **Scheduler status-guarded transitions.** `accept`/`dismiss`/`pause`/`resume`
   now use an atomic optimistic-lock `update_guarded` (mirrors `claim_task`)
   instead of read-check-then-blind-update, preventing cross-channel races where
