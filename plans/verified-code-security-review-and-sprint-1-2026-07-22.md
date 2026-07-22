@@ -1,8 +1,8 @@
-# Verified Code & Security Review — Sprint 1
+# Verified Code & Security Review — Master Register
 
 > Date: 2026-07-22
 > Baseline: `pre-release` at `975448a`
-> Purpose: canonical, code-traced register for the July 2026 review and its fixes.
+> Purpose: canonical, code-traced register for the July 2026 review and its Sprint 1–2 fixes.
 
 ## Reading and status rules
 
@@ -189,21 +189,156 @@ exploit was established and upgrades remain Sprint 3 work.
 
 ### Sprint 2 — LLM and extension contracts
 
-- **S2-01 High:** Plugin/MCP tools receive runtime `User` and callbacks as serialised business
-  arguments. Introduce a non-serialised `ToolExecutionContext` without breaking `Tool.execute`.
-- **S2-02 High when enabled:** Anthropic receives OpenAI-style `tool_calls`/`tool` messages;
-  implement `tool_use`/`tool_result` conversion and RequestOptions parity.
-- **S2-03 High correctness:** mid-run compression can reinsert `system` roles into a message
-  history whose system prompt is transported separately.
-- **S2-04 Medium/High correctness:** main-agent closing mode can narrow a text task to only
-  `read_image`; restrict only workflows with an explicit terminal contract.
-- **S2-05 High safety:** onboarding and recalled memory are interpolated into authoritative
-  system text. Represent persisted user data as untrusted structured context.
-- **S2-06 Medium:** auto-finalize executes terminal tools outside the ordinary guard/execution
-  path; batch budget and terminal-parallel semantics also need normalisation.
-- **S2-07 Medium:** loop fallback attempts durable save after resetting the context target.
-- **S2-08 Medium:** Anthropic sampling/request overrides and streaming accumulation need parity
-  and bounded-memory tests.
+#### S2-01 — Runtime execution context leaks into plugin/MCP business arguments
+
+- **Severity/status:** High when extensions are enabled / verified.
+- **Boundary:** host runtime identity and callbacks versus an extension's declared tool schema.
+- **Trace:** `ToolRegistry.execute` adds `user`, `run_id`, four subagent callbacks and the parent
+  trajectory recorder to `arguments`; `PluginToolProxy.execute` serialises the resulting mapping
+  as JSON-RPC, while `MCPToolAdapter.execute` forwards its remaining kwargs to the MCP server.
+- **Impact/preconditions:** plugin calls can fail on non-serialisable `User`/function objects;
+  MCP receives undeclared internal values. The extension must be enabled and selected.
+- **Root cause:** runtime control data and LLM-authored business input share one kwargs channel.
+- **Decision:** bind immutable `ToolExecutionContext` with `contextvars`; pass only original tool
+  arguments to `Tool.execute`; migrate built-ins to the context getter while preserving explicit
+  direct-call arguments as a compatibility fallback.
+- **Rejected alternatives:** source-kind filtering in the registry would create two execution
+  contracts; JSON-coercing runtime objects would preserve the leakage and expose internals.
+- **Acceptance:** plugin/MCP observe exactly schema-declared arguments; context is isolated across
+  concurrent calls; RBAC still runs before execution; existing direct built-in calls work.
+- **Regression evidence:** pending Sprint 2 PR 1.
+
+#### S2-02 — Anthropic history is sent in OpenAI tool-call format
+
+- **Severity/status:** High correctness when Anthropic is enabled / verified.
+- **Boundary:** canonical internal transcript versus provider-native wire protocol.
+- **Trace:** `ContextBuilder` stores assistant `tool_calls` followed by role `tool`, and
+  `AnthropicProvider.chat` passes `messages` directly to `messages.create` without converting
+  them to `tool_use`/`tool_result` content blocks.
+- **Impact/preconditions:** the first Anthropic tool call may parse, but the following ReAct turn
+  has an invalid provider history and fails or loses its tool-result association.
+- **Root cause:** only outbound tool schemas and response blocks were translated; history was not.
+- **Decision:** add a strict canonical-to-Anthropic converter, batch consecutive tool results,
+  preserve mixed text/tool blocks, reject malformed stored arguments before network I/O, and
+  parse native thinking/tool blocks back into `LLMResponse`.
+- **Rejected alternatives:** provider-specific history in `ContextBuilder` would contaminate the
+  durable canonical transcript; flattening calls to text loses protocol and audit fidelity.
+- **Acceptance:** deterministic user → tool_use → tool_result → final exchanges work, including
+  multiple results and error results; OpenAI-compatible history remains unchanged.
+- **Regression evidence:** pending Sprint 2 PR 3.
+
+#### S2-03 — Compression can reinsert system roles into provider history
+
+- **Severity/status:** High correctness / verified.
+- **Boundary:** separately transported trusted system prompt versus durable chat transcript.
+- **Trace:** `_save_turn` appends a role=`system` tools marker to `ChatContextStore`;
+  `_compress_store_transcript` compresses the raw store; `_maybe_compress_mid_run` assigns the
+  returned list directly to `state.context.messages`, bypassing `build_from_full_history`'s
+  system extraction.
+- **Impact/preconditions:** a session-bound conversation that compresses mid-run can send system
+  messages inside `messages` to templates/providers that require system to be separate.
+- **Root cause:** no canonical role invariant exists at store/compressor boundaries.
+- **Decision:** durable/provider transcripts allow only user/assistant/tool; remove new tools
+  markers, normalise before and after compression, and clean legacy system rows on rewrite.
+- **Rejected alternatives:** extracting system only during initial load leaves the mid-run path
+  inconsistent; retaining markers duplicates structured calls/results.
+- **Acceptance:** manual and mid-run compression never return or store role=`system`, including
+  noop compression of legacy rows, while complete tool pairs survive.
+- **Regression evidence:** pending Sprint 2 PR 2.
+
+#### S2-04 — Main-agent closing mode can force an unrelated terminal tool
+
+- **Severity/status:** Medium/High correctness / verified.
+- **Boundary:** deadline adaptation versus the tool surface offered for the user's task.
+- **Trace:** both closing-mode call sites derive terminal names from every registered tool with
+  `terminal=True`; on the main agent the only such tool may be `read_image`, so a text task is
+  narrowed to an image-only schema after the soft deadline.
+- **Impact/preconditions:** a long main-agent request crosses the soft deadline while an unrelated
+  terminal tool is registered; the model can no longer complete with the appropriate tools.
+- **Root cause:** a generic tool attribute was treated as an explicit workflow-finalisation
+  contract.
+- **Decision:** closing mode narrows schemas only for an active `TerminalToolMandate`, using its
+  declared terminal tool/prerequisites. Main-agent closing still emits telemetry and disables
+  thinking but preserves its task tool surface.
+- **Rejected alternatives:** removing closing mode entirely would restore hard-timeout failures
+  for research workflows; selecting any registry terminal repeats the ambiguity.
+- **Acceptance:** main text tasks never become read-image-only; configured research workflows
+  still narrow to their declared finalisation funnel.
+- **Regression evidence:** pending Sprint 2 PR 4.
+
+#### S2-05 — Persisted user data is promoted to authoritative system text
+
+- **Severity/status:** High safety / verified.
+- **Boundary:** administrator policy versus user-controlled and model-generated persistent data.
+- **Trace:** `_assemble_user_layers` joins onboarding user Markdown, personal instructions and
+  tone with the department prompt; recalled facts, name, recent files and pins are then
+  interpolated into `dynamic_prompt`, passed as `system_prompt_override`.
+- **Impact/preconditions:** content stored through onboarding/memory/profile/file context can be
+  interpreted as higher-authority instructions on every later request.
+- **Root cause:** prompt composition grouped data by persistence, not by trust authority.
+- **Decision:** keep SOUL/company/department/admin skills in system; render identity, onboarding,
+  preferences, facts and file context as structured untrusted user-level data combined with the
+  current request and rebuilt each turn without durable duplication.
+- **Rejected alternatives:** Markdown fences inside system do not change model authority;
+  deleting personalisation would discard intended product behaviour.
+- **Acceptance:** adversarial persisted strings appear only in the user message, trusted layers
+  remain system, and generated context does not accumulate in `ChatContextStore`.
+- **Regression evidence:** pending Sprint 2 PR 2.
+
+#### S2-06 — Tool batches and auto-finalize bypass deterministic execution invariants
+
+- **Severity/status:** Medium / verified.
+- **Boundary:** resource limits, ToolGuard/RBAC and terminal side-effect ordering.
+- **Trace:** the loop checks the current budget and only then adds the whole batch count, allowing
+  overshoot; `_can_parallelize` trusts `parallel_safe` even for terminal tools; auto-finalize
+  Stage C calls `tool.execute` directly rather than the guarded registry path.
+- **Impact/preconditions:** a final batch can exceed the configured tool budget; a misdeclared
+  terminal plugin can race sibling calls; programmatic finalisation can skip normal policy.
+- **Root cause:** admission, execution and salvage use separate partial contracts.
+- **Decision:** reserve complete batches before persistence/execution; reject mixed terminal
+  batches with protocol-valid error results; make all terminal calls non-parallel; route both
+  auto-finalize stages through `_execute_single_tool` and persist complete exchanges.
+- **Rejected alternatives:** truncating a batch changes model intent and leaves orphan calls;
+  duplicating a reduced guard inside auto-finalize will drift from the main path.
+- **Acceptance:** no partial or over-budget execution; terminal calls run alone; deny/approval
+  applies to auto-finalize; successful salvage stores assistant-call → tool-result → assistant.
+- **Regression evidence:** pending Sprint 2 PR 1.
+
+#### S2-07 — Loop-exhaustion fallback is saved after context teardown
+
+- **Severity/status:** Medium correctness / verified.
+- **Boundary:** request lifecycle versus durable per-session transcript targeting.
+- **Trace:** the main `try/finally` calls `_finalize_turn`, which resets the context target; code
+  after that `finally` invokes `_save_turn` for `_LOOP_FALLBACK`, so `_persist_context_msg` sees no
+  session/user and silently performs no write.
+- **Impact/preconditions:** a session-bound run exits its loop via guard recovery `break`; the
+  user sees a fallback answer that is absent after chat reload.
+- **Root cause:** response persistence occurs outside the lifetime that owns its storage target.
+- **Decision:** persist and trace loop exhaustion before entering the common epilogue; keep the
+  epilogue in `finally` for success, exception and cancellation cleanup.
+- **Rejected alternatives:** passing session IDs directly only for this answer creates a second
+  persistence contract; delaying all resets risks context leakage on exceptions.
+- **Acceptance:** fallback is durable for session runs, absent for sessionless CLI/subagents, and
+  every contextvar is reset after return or failure.
+- **Regression evidence:** pending Sprint 2 PR 4.
+
+#### S2-08 — Anthropic request options and streaming diverge from chat
+
+- **Severity/status:** Medium / verified.
+- **Boundary:** provider-independent sampling/phase policy and bounded response accumulation.
+- **Trace:** Anthropic ignores `get_request_options`; sampling budget only adjusts `max_tokens`;
+  `stream` bypasses profiles, tools and thinking, and no `chat_streamed` implementation exists.
+- **Impact/preconditions:** Anthropic routes do not honour closing/research phase thinking policy;
+  enabling internal streaming silently changes request semantics and lacks bounded accumulation.
+- **Root cause:** Anthropic pre-dates the split model/sampling/request and StreamingProvider
+  contracts.
+- **Decision:** one request builder for chat/image/stream; native Anthropic thinking mapping with
+  documented priority; implement full streamed accumulation/events and hard character bounds.
+- **Rejected alternatives:** disabling Anthropic streaming leaves provider behaviour divergent;
+  relying solely on `max_tokens` does not defend against a non-conforming endpoint.
+- **Acceptance:** chat and streamed chat have equivalent params/results, phase overrides win,
+  fragmented tool JSON is assembled before exposure, and limit breaches fail closed.
+- **Regression evidence:** pending Sprint 2 PR 3.
 
 ### Sprint 3 — Operational hardening
 
