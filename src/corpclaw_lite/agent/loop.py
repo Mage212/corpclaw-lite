@@ -543,6 +543,9 @@ class AgentLoop:
                 dropped_system=normalized_input.dropped_system,
                 dropped_leading=normalized_input.dropped_leading,
                 dropped_unknown=normalized_input.dropped_unknown,
+                dropped_orphan_tools=normalized_input.dropped_orphan_tools,
+                dropped_invalid_tool_calls=normalized_input.dropped_invalid_tool_calls,
+                added_stub_results=normalized_input.added_stub_results,
                 path="compression_input",
             )
         if len(messages) < 5:
@@ -567,6 +570,9 @@ class AgentLoop:
                 dropped_system=normalized_output.dropped_system,
                 dropped_leading=normalized_output.dropped_leading,
                 dropped_unknown=normalized_output.dropped_unknown,
+                dropped_orphan_tools=normalized_output.dropped_orphan_tools,
+                dropped_invalid_tool_calls=normalized_output.dropped_invalid_tool_calls,
+                added_stub_results=normalized_output.added_stub_results,
                 path="compression_output",
             )
         if compressed == original_messages:
@@ -651,8 +657,13 @@ class AgentLoop:
                 actual_tokens=actual,
             )
             if status == "rewritten" and compressed is not None:
-                # Align this turn's window with durable truth (system_prompt unchanged).
-                state.context.messages = compressed
+                # Align with durable truth, then restore the regenerated user-data
+                # envelope for this run only.  It must never be written to the store.
+                state.context.messages = self._restore_ephemeral_user_message(
+                    compressed,
+                    state.ephemeral_user_message,
+                    state.durable_user_message,
+                )
                 state.last_actual_total_tokens = None
                 log_event(
                     "context_compressed",
@@ -690,6 +701,32 @@ class AgentLoop:
                 )
         except Exception:
             logger.exception("[user=%s] mid-run in-memory compress failed", state.mem_key)
+
+    @staticmethod
+    def _restore_ephemeral_user_message(
+        messages: list[dict[str, Any]],
+        ephemeral_message: str | None,
+        durable_message: str | None,
+    ) -> list[dict[str, Any]]:
+        """Restore per-run persisted context after a durable transcript rewrite."""
+        restored = [dict(message) for message in messages]
+        if not ephemeral_message:
+            return restored
+        if any(
+            item.get("role") == "user" and item.get("content") == ephemeral_message
+            for item in restored
+        ):
+            return restored
+        if durable_message is not None:
+            for index in range(len(restored) - 1, -1, -1):
+                item = restored[index]
+                if item.get("role") == "user" and item.get("content") == durable_message:
+                    item["content"] = ephemeral_message
+                    return restored
+        # An aggressive/custom compressor may summarize away the raw current
+        # request. Re-append the envelope so the active request is not lost.
+        restored.append({"role": "user", "content": ephemeral_message})
+        return restored
 
     async def _call_llm_provider(
         self,
@@ -1032,7 +1069,7 @@ class AgentLoop:
                     user,
                     state.stats,
                     terminal_tool_names=(
-                        frozenset({self._terminal_tool})
+                        frozenset(self._required_before_terminal) | {self._terminal_tool}
                         if state.mandate.enabled and self._terminal_tool
                         else frozenset()
                     ),
@@ -1074,7 +1111,7 @@ class AgentLoop:
                         user,
                         state.stats,
                         terminal_tool_names=(
-                            frozenset({self._terminal_tool})
+                            frozenset(self._required_before_terminal) | {self._terminal_tool}
                             if state.mandate.enabled and self._terminal_tool
                             else frozenset()
                         ),
@@ -1442,6 +1479,11 @@ class AgentLoop:
                                 "name": tc.name,
                                 "arguments": json.dumps(tc.arguments),
                             },
+                            **(
+                                {"_provider_metadata": tc.provider_metadata}
+                                if tc.provider_metadata is not None
+                                else {}
+                            ),
                         }
                         for tc in response.tool_calls
                     ],
@@ -1670,6 +1712,11 @@ class AgentLoop:
                                     "name": tc.name,
                                     "arguments": json.dumps(tc.arguments),
                                 },
+                                **(
+                                    {"_provider_metadata": tc.provider_metadata}
+                                    if tc.provider_metadata is not None
+                                    else {}
+                                ),
                             }
                         ],
                     )
@@ -1846,6 +1893,9 @@ class AgentLoop:
                     dropped_system=normalized.dropped_system,
                     dropped_leading=normalized.dropped_leading,
                     dropped_unknown=normalized.dropped_unknown,
+                    dropped_orphan_tools=normalized.dropped_orphan_tools,
+                    dropped_invalid_tool_calls=normalized.dropped_invalid_tool_calls,
+                    added_stub_results=normalized.added_stub_results,
                     path="context_load",
                 )
 
@@ -2010,6 +2060,8 @@ class AgentLoop:
             tools_schema=tools_schema,
             task_run=task_run,
             mem_key=mem_key,
+            ephemeral_user_message=current_user_message,
+            durable_user_message=message,
             t0=t0,
             channel=channel,
         )

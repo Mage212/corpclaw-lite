@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
@@ -27,6 +29,9 @@ from corpclaw_lite.logging.trace import log_event
 __all__ = ["AnthropicProvider"]
 
 logger = logging.getLogger(__name__)
+
+_ANTHROPIC_METADATA_KEY = "anthropic"
+_OPAQUE_THINKING_KEY = "opaque_thinking"
 
 
 def _raw_get(value: Any, key: str, default: Any = None) -> Any:
@@ -68,6 +73,11 @@ class AnthropicProvider(Provider):
     _MAX_STREAM_TOOL_ARGUMENT_CHARS = 262_144
     _MAX_STREAM_TOTAL_TOOL_ARGUMENT_CHARS = 1_000_000
     _MAX_STREAM_TOOL_CALLS = 128
+    _MAX_STREAM_TOOL_ID_CHARS = 512
+    _MAX_STREAM_TOOL_NAME_CHARS = 64
+    _MAX_OPAQUE_THINKING_CHARS = 1_000_000
+    _MAX_OPAQUE_THINKING_BLOCKS = 128
+    _MAX_OPAQUE_THINKING_ENTRIES = 256
 
     def __init__(
         self,
@@ -92,6 +102,15 @@ class AnthropicProvider(Provider):
         if settings.base_url:
             client_kwargs["base_url"] = settings.base_url
         self._client = anthropic.AsyncAnthropic(**client_kwargs)
+        # Anthropic requires signed/redacted thinking blocks to be returned
+        # unchanged with the tool results.  The generic LLMResponse intentionally
+        # exposes only display-safe reasoning text, so keep the opaque protocol
+        # blocks provider-local and scope them to the current run/session plus the
+        # exact ordered tool-call ids.  The bounded LRU prevents cross-run growth.
+        self._opaque_thinking: OrderedDict[
+            tuple[tuple[str | None, str | None, int | None], tuple[str, ...]],
+            list[dict[str, str]],
+        ] = OrderedDict()
 
     @staticmethod
     def _convert_tool(tool: dict[str, Any]) -> dict[str, Any]:
@@ -130,7 +149,9 @@ class AnthropicProvider(Provider):
         converted.append({"role": role, "content": blocks})
 
     @staticmethod
-    def _tool_call_fields(tool_call: Any) -> tuple[str, str, dict[str, Any]]:
+    def _tool_call_fields(
+        tool_call: Any,
+    ) -> tuple[str, str, dict[str, Any], dict[str, Any] | None]:
         call_id = str(_raw_get(tool_call, "id", ""))
         function = _raw_get(tool_call, "function", {})
         name = str(_raw_get(function, "name", ""))
@@ -144,7 +165,9 @@ class AnthropicProvider(Provider):
             raise ValueError(f"Tool arguments for {name or '<unknown>'} must be an object")
         if not call_id or not name:
             raise ValueError("Assistant tool call requires non-empty id and name")
-        return call_id, name, arguments
+        raw_metadata = _raw_get(tool_call, "_provider_metadata")
+        metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else None
+        return call_id, name, arguments, metadata
 
     def _convert_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Translate canonical OpenAI history into Anthropic content blocks.
@@ -153,40 +176,168 @@ class AnthropicProvider(Provider):
         coalesced because Anthropic requires alternating user/assistant turns.
         """
         converted: list[dict[str, Any]] = []
+        pending_tool_ids: set[str] = set()
         for message in messages:
             role = message.get("role")
             if role == "system":
                 raise ValueError("System messages must be passed via the system argument")
             if role == "user":
+                if pending_tool_ids:
+                    raise ValueError("Tool results must immediately follow assistant tool calls")
                 self._append_message(
                     converted, "user", self._content_blocks(message.get("content"))
                 )
                 continue
             if role == "assistant":
-                blocks = self._content_blocks(message.get("content"))
-                for tool_call in message.get("tool_calls") or []:
-                    call_id, name, arguments = self._tool_call_fields(tool_call)
+                if pending_tool_ids:
+                    raise ValueError("Tool results must immediately follow assistant tool calls")
+                blocks: list[dict[str, Any]] = self._content_blocks(message.get("content"))
+                parsed_calls = [
+                    self._tool_call_fields(tool_call)
+                    for tool_call in (message.get("tool_calls") or [])
+                ]
+                call_ids = tuple(call_id for call_id, _name, _arguments, _metadata in parsed_calls)
+                if len(set(call_ids)) != len(call_ids):
+                    raise ValueError("Assistant tool call ids must be unique")
+                opaque_blocks: list[dict[str, str]] = []
+                for _call_id, _name, _arguments, metadata in parsed_calls:
+                    carried = self._opaque_from_metadata(metadata)
+                    if carried:
+                        if opaque_blocks and carried != opaque_blocks:
+                            raise ValueError("Conflicting Anthropic opaque thinking metadata")
+                        opaque_blocks = carried
+                if not opaque_blocks:
+                    opaque_blocks = self._get_opaque_thinking(call_ids)
+                if opaque_blocks:
+                    blocks = [dict(block) for block in opaque_blocks] + blocks
+                for call_id, name, arguments, _metadata in parsed_calls:
                     blocks.append(
                         {"type": "tool_use", "id": call_id, "name": name, "input": arguments}
                     )
+                pending_tool_ids = set(call_ids)
                 self._append_message(converted, "assistant", blocks)
                 continue
             if role == "tool":
                 tool_use_id = message.get("tool_call_id")
                 if not isinstance(tool_use_id, str) or not tool_use_id:
                     raise ValueError("Tool result requires a non-empty tool_call_id")
+                if tool_use_id not in pending_tool_ids:
+                    raise ValueError(
+                        f"Tool result {tool_use_id!r} has no pending assistant tool call"
+                    )
                 content = message.get("content", "")
                 result_text = content if isinstance(content, str) else json.dumps(content)
                 block = {
                     "type": "tool_result",
                     "tool_use_id": tool_use_id,
                     "content": result_text,
-                    "is_error": result_text.lstrip().lower().startswith("error:"),
+                    "is_error": self._is_tool_error(result_text),
                 }
                 self._append_message(converted, "user", [block])
+                pending_tool_ids.remove(tool_use_id)
                 continue
             raise ValueError(f"Unsupported message role for Anthropic: {role!r}")
+        if pending_tool_ids:
+            raise ValueError("Assistant tool calls are missing immediate tool results")
         return converted
+
+    @staticmethod
+    def _is_tool_error(result: str) -> bool:
+        first_line = result.lstrip().splitlines()[0].lower() if result.strip() else ""
+        return bool(re.match(r"^(?:error\b|subagent error\b|mcp tool .+ error:)", first_line))
+
+    @staticmethod
+    def _opaque_scope() -> tuple[str | None, str | None, int | None]:
+        return get_run_id(), get_capture_user_id(), get_capture_session_id()
+
+    def _opaque_key(
+        self, call_ids: tuple[str, ...]
+    ) -> tuple[tuple[str | None, str | None, int | None], tuple[str, ...]]:
+        return self._opaque_scope(), call_ids
+
+    def _get_opaque_thinking(self, call_ids: tuple[str, ...]) -> list[dict[str, str]]:
+        if not call_ids:
+            return []
+        key = self._opaque_key(call_ids)
+        blocks = self._opaque_thinking.get(key)
+        if blocks is None:
+            return []
+        self._opaque_thinking.move_to_end(key)
+        return blocks
+
+    def _remember_opaque_thinking(
+        self, call_ids: tuple[str, ...], blocks: list[dict[str, str]]
+    ) -> None:
+        if not call_ids or not blocks:
+            return
+        self._validate_opaque_collection(blocks)
+        key = self._opaque_key(call_ids)
+        self._opaque_thinking[key] = [dict(block) for block in blocks]
+        self._opaque_thinking.move_to_end(key)
+        while len(self._opaque_thinking) > self._MAX_OPAQUE_THINKING_ENTRIES:
+            self._opaque_thinking.popitem(last=False)
+
+    def _opaque_block(self, block: Any) -> dict[str, str] | None:
+        block_type = _raw_get(block, "type")
+        if block_type == "thinking":
+            thinking = _text(_raw_get(block, "thinking"))
+            signature = _text(_raw_get(block, "signature"))
+            if not signature:
+                raise ValueError("Anthropic thinking block requires a signature")
+            self._check_stream_bound(
+                len(thinking), signature, self._MAX_OPAQUE_THINKING_CHARS, "opaque thinking"
+            )
+            return {"type": "thinking", "thinking": thinking, "signature": signature}
+        if block_type == "redacted_thinking":
+            data = _text(_raw_get(block, "data"))
+            if not data:
+                raise ValueError("Anthropic redacted thinking block requires data")
+            self._check_stream_bound(0, data, self._MAX_OPAQUE_THINKING_CHARS, "opaque thinking")
+            return {"type": "redacted_thinking", "data": data}
+        return None
+
+    def _validate_opaque_collection(self, blocks: list[dict[str, str]]) -> None:
+        if len(blocks) > self._MAX_OPAQUE_THINKING_BLOCKS:
+            raise ValueError("Anthropic opaque thinking block count exceeded the safe limit")
+        total_chars = sum(
+            len(value) for block in blocks for key, value in block.items() if key != "type"
+        )
+        if total_chars > self._MAX_OPAQUE_THINKING_CHARS:
+            raise ValueError("Anthropic opaque thinking exceeded the safe total accumulation limit")
+
+    def _opaque_from_metadata(self, metadata: dict[str, Any] | None) -> list[dict[str, str]]:
+        if not metadata or _ANTHROPIC_METADATA_KEY not in metadata:
+            return []
+        anthropic_metadata = metadata[_ANTHROPIC_METADATA_KEY]
+        if not isinstance(anthropic_metadata, dict) or set(anthropic_metadata) != {
+            _OPAQUE_THINKING_KEY
+        }:
+            raise ValueError("Malformed Anthropic provider metadata")
+        raw_blocks = anthropic_metadata[_OPAQUE_THINKING_KEY]
+        if not isinstance(raw_blocks, list):
+            raise ValueError("Anthropic opaque thinking metadata must be a list")
+        blocks: list[dict[str, str]] = []
+        for raw_block in raw_blocks:
+            if not isinstance(raw_block, dict):
+                raise ValueError("Malformed Anthropic opaque thinking block")
+            opaque = self._opaque_block(raw_block)
+            if opaque is None:
+                raise ValueError("Unsupported Anthropic opaque thinking block")
+            if set(raw_block) != set(opaque):
+                raise ValueError("Unsupported keys in Anthropic opaque thinking block")
+            blocks.append(opaque)
+        self._validate_opaque_collection(blocks)
+        return blocks
+
+    @staticmethod
+    def _metadata_for_opaque(blocks: list[dict[str, str]]) -> dict[str, Any] | None:
+        if not blocks:
+            return None
+        return {
+            _ANTHROPIC_METADATA_KEY: {
+                _OPAQUE_THINKING_KEY: [dict(block) for block in blocks],
+            }
+        }
 
     def _effective_thinking(self) -> tuple[str, int | None]:
         mode = self._sampling.thinking_mode if self._sampling else "default"
@@ -233,6 +384,16 @@ class AnthropicProvider(Provider):
         elif mode == "budget":
             if budget is None or budget < 1024:
                 raise ValueError("Anthropic thinking budget must be at least 1024 tokens")
+            # Manual extended thinking is incompatible with modified sampling
+            # controls.  Let Anthropic use its required defaults instead of
+            # sending a request the API will reject.
+            for incompatible in ("temperature", "top_p", "top_k"):
+                if incompatible in kwargs:
+                    logger.warning(
+                        "Ignoring Anthropic %s while extended thinking is enabled",
+                        incompatible,
+                    )
+                    kwargs.pop(incompatible, None)
             kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
             if not (options and options.inference and "max_tokens" in options.inference):
                 kwargs["max_tokens"] = budget + 1024
@@ -274,6 +435,35 @@ class AnthropicProvider(Provider):
         )
 
     @staticmethod
+    def _capture_safe_messages(messages: Any) -> Any:
+        """Remove opaque replay credentials from opt-in payload diagnostics."""
+
+        if not isinstance(messages, list):
+            return messages
+        safe_messages: list[Any] = []
+        for message in messages:
+            if not isinstance(message, dict):
+                safe_messages.append(message)
+                continue
+            safe_message = dict(message)
+            content = safe_message.get("content")
+            if isinstance(content, list):
+                safe_blocks: list[Any] = []
+                for raw_block in content:
+                    if not isinstance(raw_block, dict):
+                        safe_blocks.append(raw_block)
+                        continue
+                    block = dict(raw_block)
+                    if block.get("type") == "thinking":
+                        block.pop("signature", None)
+                    elif block.get("type") == "redacted_thinking":
+                        block["data"] = "[OPAQUE_REDACTED_THINKING]"
+                    safe_blocks.append(block)
+                safe_message["content"] = safe_blocks
+            safe_messages.append(safe_message)
+        return safe_messages
+
+    @staticmethod
     def _allowed_tool_names(tools: list[dict[str, Any]] | None) -> set[str]:
         names: set[str] = set()
         for tool in tools or []:
@@ -288,6 +478,7 @@ class AnthropicProvider(Provider):
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
         tool_calls: list[ToolCall] = []
+        opaque_thinking: list[dict[str, str]] = []
         allowed_names = self._allowed_tool_names(tools)
         for block in _raw_get(response, "content", []) or []:
             block_type = _raw_get(block, "type")
@@ -295,6 +486,15 @@ class AnthropicProvider(Provider):
                 content_parts.append(_text(_raw_get(block, "text")))
             elif block_type == "thinking":
                 reasoning_parts.append(_text(_raw_get(block, "thinking")))
+                opaque = self._opaque_block(block)
+                if opaque is not None:
+                    opaque_thinking.append(opaque)
+                    self._validate_opaque_collection(opaque_thinking)
+            elif block_type == "redacted_thinking":
+                opaque = self._opaque_block(block)
+                if opaque is not None:
+                    opaque_thinking.append(opaque)
+                    self._validate_opaque_collection(opaque_thinking)
             elif block_type == "tool_use":
                 name = str(_raw_get(block, "name", ""))
                 if name not in allowed_names:
@@ -310,9 +510,15 @@ class AnthropicProvider(Provider):
                 if not isinstance(arguments, dict):
                     logger.warning("Rejected Anthropic tool call with non-object input: %s", name)
                     continue
-                tool_calls.append(
-                    ToolCall(id=str(_raw_get(block, "id", "")), name=name, arguments=arguments)
-                )
+                call_id = str(_raw_get(block, "id", ""))
+                if not call_id:
+                    raise ValueError("Anthropic tool call requires a non-empty id")
+                tool_calls.append(ToolCall(id=call_id, name=name, arguments=arguments))
+        if tool_calls and opaque_thinking:
+            tool_calls[0] = tool_calls[0].model_copy(
+                update={"provider_metadata": self._metadata_for_opaque(opaque_thinking)}
+            )
+        self._remember_opaque_thinking(tuple(call.id for call in tool_calls), opaque_thinking)
         return LLMResponse(
             content="".join(content_parts),
             reasoning="".join(reasoning_parts),
@@ -340,7 +546,7 @@ class AnthropicProvider(Provider):
             phase=phase,
             request={
                 "model": kwargs.get("model"),
-                "messages": kwargs.get("messages"),
+                "messages": self._capture_safe_messages(kwargs.get("messages")),
                 "tools": kwargs.get("tools"),
                 "params": {
                     key: value
@@ -428,9 +634,11 @@ class AnthropicProvider(Provider):
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
         tool_parts: dict[int, dict[str, str]] = {}
+        opaque_parts: dict[int, dict[str, str]] = {}
         content_chars = 0
         reasoning_chars = 0
         tool_argument_chars = 0
+        opaque_chars = 0
         usage = TokenUsage()
         finish_reason: str | None = None
         self._emit(on_event, LLMStreamEvent(stage="started"))
@@ -444,7 +652,8 @@ class AnthropicProvider(Provider):
                 if event_type == "content_block_start":
                     index = int(_raw_get(event, "index", 0))
                     block = _raw_get(event, "content_block")
-                    if _raw_get(block, "type") == "tool_use":
+                    block_type = _raw_get(block, "type")
+                    if block_type == "tool_use":
                         if (
                             index not in tool_parts
                             and len(tool_parts) >= self._MAX_STREAM_TOOL_CALLS
@@ -452,9 +661,17 @@ class AnthropicProvider(Provider):
                             raise ValueError(
                                 "Anthropic streamed tool calls exceeded the safe accumulation limit"
                             )
+                        call_id = str(_raw_get(block, "id", ""))
+                        name = str(_raw_get(block, "name", ""))
+                        self._check_stream_bound(
+                            0, call_id, self._MAX_STREAM_TOOL_ID_CHARS, "tool call id"
+                        )
+                        self._check_stream_bound(
+                            0, name, self._MAX_STREAM_TOOL_NAME_CHARS, "tool call name"
+                        )
                         tool_parts[index] = {
-                            "id": str(_raw_get(block, "id", "")),
-                            "name": str(_raw_get(block, "name", "")),
+                            "id": call_id,
+                            "name": name,
                             "arguments": "",
                         }
                         self._emit(
@@ -468,6 +685,55 @@ class AnthropicProvider(Provider):
                                 tool_call_count=len(tool_parts),
                             ),
                         )
+                    elif block_type == "thinking":
+                        if (
+                            index not in opaque_parts
+                            and len(opaque_parts) >= self._MAX_OPAQUE_THINKING_BLOCKS
+                        ):
+                            raise ValueError(
+                                "Anthropic opaque thinking block count exceeded the safe limit"
+                            )
+                        thinking = _text(_raw_get(block, "thinking"))
+                        signature = _text(_raw_get(block, "signature"))
+                        self._check_stream_bound(
+                            len(thinking),
+                            signature,
+                            self._MAX_OPAQUE_THINKING_CHARS,
+                            "opaque thinking",
+                        )
+                        opaque_chars = self._check_stream_bound(
+                            opaque_chars,
+                            thinking + signature,
+                            self._MAX_OPAQUE_THINKING_CHARS,
+                            "total opaque thinking",
+                        )
+                        opaque_parts[index] = {
+                            "type": "thinking",
+                            "thinking": thinking,
+                            "signature": signature,
+                        }
+                    elif block_type == "redacted_thinking":
+                        if (
+                            index not in opaque_parts
+                            and len(opaque_parts) >= self._MAX_OPAQUE_THINKING_BLOCKS
+                        ):
+                            raise ValueError(
+                                "Anthropic opaque thinking block count exceeded the safe limit"
+                            )
+                        data = _text(_raw_get(block, "data"))
+                        self._check_stream_bound(
+                            0,
+                            data,
+                            self._MAX_OPAQUE_THINKING_CHARS,
+                            "opaque thinking",
+                        )
+                        opaque_chars = self._check_stream_bound(
+                            opaque_chars,
+                            data,
+                            self._MAX_OPAQUE_THINKING_CHARS,
+                            "total opaque thinking",
+                        )
+                        opaque_parts[index] = {"type": "redacted_thinking", "data": data}
                     continue
                 if event_type == "content_block_delta":
                     index = int(_raw_get(event, "index", 0))
@@ -503,6 +769,30 @@ class AnthropicProvider(Provider):
                         )
                         reasoning_chars += len(value)
                         reasoning_parts.append(value)
+                        if (
+                            index not in opaque_parts
+                            and len(opaque_parts) >= self._MAX_OPAQUE_THINKING_BLOCKS
+                        ):
+                            raise ValueError(
+                                "Anthropic opaque thinking block count exceeded the safe limit"
+                            )
+                        opaque = opaque_parts.setdefault(
+                            index,
+                            {"type": "thinking", "thinking": "", "signature": ""},
+                        )
+                        self._check_stream_bound(
+                            len(opaque.get("thinking", "")) + len(opaque.get("signature", "")),
+                            value,
+                            self._MAX_OPAQUE_THINKING_CHARS,
+                            "opaque thinking",
+                        )
+                        opaque_chars = self._check_stream_bound(
+                            opaque_chars,
+                            value,
+                            self._MAX_OPAQUE_THINKING_CHARS,
+                            "total opaque thinking",
+                        )
+                        opaque["thinking"] = opaque.get("thinking", "") + value
                         self._emit(
                             on_event,
                             LLMStreamEvent(
@@ -513,6 +803,32 @@ class AnthropicProvider(Provider):
                                 tool_call_count=len(tool_parts),
                             ),
                         )
+                    elif delta_type == "signature_delta":
+                        value = _text(_raw_get(delta, "signature"))
+                        if (
+                            index not in opaque_parts
+                            and len(opaque_parts) >= self._MAX_OPAQUE_THINKING_BLOCKS
+                        ):
+                            raise ValueError(
+                                "Anthropic opaque thinking block count exceeded the safe limit"
+                            )
+                        opaque = opaque_parts.setdefault(
+                            index,
+                            {"type": "thinking", "thinking": "", "signature": ""},
+                        )
+                        self._check_stream_bound(
+                            len(opaque.get("thinking", "")) + len(opaque.get("signature", "")),
+                            value,
+                            self._MAX_OPAQUE_THINKING_CHARS,
+                            "opaque thinking",
+                        )
+                        opaque_chars = self._check_stream_bound(
+                            opaque_chars,
+                            value,
+                            self._MAX_OPAQUE_THINKING_CHARS,
+                            "total opaque thinking",
+                        )
+                        opaque["signature"] = opaque.get("signature", "") + value
                     elif delta_type == "input_json_delta":
                         value = _text(_raw_get(delta, "partial_json"))
                         if (
@@ -585,13 +901,27 @@ class AnthropicProvider(Provider):
                 raise ValueError(f"Malformed streamed tool arguments for {part['name']}") from exc
             if not isinstance(arguments, dict):
                 raise ValueError(f"Tool arguments for {part['name']} must be an object")
+            if not part["id"]:
+                raise ValueError("Anthropic streamed tool call requires a non-empty id")
             tool_calls.append(
                 ToolCall(
-                    id=part["id"] or f"toolu_{index}",
+                    id=part["id"],
                     name=part["name"],
                     arguments=arguments,
                 )
             )
+
+        opaque_thinking: list[dict[str, str]] = []
+        for index in sorted(opaque_parts):
+            opaque = self._opaque_block(opaque_parts[index])
+            if opaque is not None:
+                opaque_thinking.append(opaque)
+        self._validate_opaque_collection(opaque_thinking)
+        if tool_calls and opaque_thinking:
+            tool_calls[0] = tool_calls[0].model_copy(
+                update={"provider_metadata": self._metadata_for_opaque(opaque_thinking)}
+            )
+        self._remember_opaque_thinking(tuple(call.id for call in tool_calls), opaque_thinking)
 
         response = LLMResponse(
             content="".join(content_parts),

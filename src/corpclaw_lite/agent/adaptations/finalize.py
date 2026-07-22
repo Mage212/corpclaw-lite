@@ -214,6 +214,12 @@ async def auto_finalize_cascade(
                     user.id,
                     result[:200],
                 )
+                # A guarded execution already made an authorization/approval
+                # decision. Replaying the same terminal action through Stage C
+                # would prompt twice after a denial and undermine the meaning of
+                # that decision. Stage C is only for a missing/plain-text Stage B
+                # response, not for retrying a rejected tool execution.
+                return None
             except Exception:
                 logger.warning(
                     "[user=%s] auto-finalize stage B: terminal tool execute "

@@ -156,7 +156,7 @@ class TestCompress:
             {"role": "user", "content": "hi"},
         ]
         result = await compressor.compress(messages)
-        assert result == messages
+        assert result == [{"role": "user", "content": "hi"}]
 
     @pytest.mark.asyncio
     async def test_compress_generates_summary(
@@ -230,8 +230,8 @@ class TestCompress:
         ]
         result = await compressor.compress(messages)
 
-        assert result[0]["role"] == "system"
-        assert result[0]["content"] == "system prompt"
+        assert all(message["role"] != "system" for message in result)
+        assert result[0] == {"role": "user", "content": "first"}
 
 
 class TestGenerateSummary:

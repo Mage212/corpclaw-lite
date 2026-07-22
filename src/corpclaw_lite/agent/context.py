@@ -42,10 +42,115 @@ class TranscriptNormalization:
     dropped_system: int = 0
     dropped_leading: int = 0
     dropped_unknown: int = 0
+    dropped_orphan_tools: int = 0
+    dropped_invalid_tool_calls: int = 0
+    added_stub_results: int = 0
 
     @property
     def changed(self) -> bool:
-        return bool(self.dropped_system or self.dropped_leading or self.dropped_unknown)
+        return bool(
+            self.dropped_system
+            or self.dropped_leading
+            or self.dropped_unknown
+            or self.dropped_orphan_tools
+            or self.dropped_invalid_tool_calls
+            or self.added_stub_results
+        )
+
+
+def _normalize_tool_pairs(
+    messages: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], int, int, int]:
+    """Return a provider-valid transcript with complete adjacent tool batches."""
+    result: list[dict[str, Any]] = []
+    dropped_orphan_tools = 0
+    dropped_invalid_tool_calls = 0
+    added_stub_results = 0
+    index = 0
+
+    while index < len(messages):
+        message = dict(messages[index])
+        if message.get("role") == "tool":
+            # A tool result is valid only directly after the assistant batch
+            # that declared its id.  All valid results are consumed below.
+            dropped_orphan_tools += 1
+            index += 1
+            continue
+
+        raw_calls = message.get("tool_calls") if message.get("role") == "assistant" else None
+        if not isinstance(raw_calls, list) or not raw_calls:
+            result.append(message)
+            index += 1
+            continue
+
+        valid_calls: list[dict[str, Any]] = []
+        call_names: dict[str, str] = {}
+        for raw_call in cast(list[object], raw_calls):
+            if not isinstance(raw_call, dict):
+                dropped_invalid_tool_calls += 1
+                continue
+            call = dict(cast(dict[str, Any], raw_call))
+            call_id = call.get("id")
+            function_raw = call.get("function")
+            if (
+                not isinstance(call_id, str)
+                or not call_id
+                or call_id in call_names
+                or not isinstance(function_raw, dict)
+            ):
+                dropped_invalid_tool_calls += 1
+                continue
+            function = cast(dict[str, Any], function_raw)
+            function_name = function.get("name")
+            if not isinstance(function_name, str) or not function_name:
+                dropped_invalid_tool_calls += 1
+                continue
+            valid_calls.append(call)
+            call_names[call_id] = function_name
+
+        if valid_calls:
+            message["tool_calls"] = valid_calls
+        else:
+            message.pop("tool_calls", None)
+        result.append(message)
+        index += 1
+
+        if not valid_calls:
+            continue
+
+        actual_results: dict[str, dict[str, Any]] = {}
+        while index < len(messages) and messages[index].get("role") == "tool":
+            tool_message = dict(messages[index])
+            tool_call_id = tool_message.get("tool_call_id")
+            if (
+                isinstance(tool_call_id, str)
+                and tool_call_id in call_names
+                and tool_call_id not in actual_results
+            ):
+                actual_results[tool_call_id] = tool_message
+            else:
+                dropped_orphan_tools += 1
+            index += 1
+
+        # Anthropic and OpenAI both require every declared call to receive a
+        # result before the next user/assistant message. Preserve call order.
+        for call in valid_calls:
+            call_id = str(call["id"])
+            actual = actual_results.get(call_id)
+            if actual is not None:
+                result.append(actual)
+                continue
+            result.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "name": call_names[call_id],
+                    "content": "[Tool result was lost before it could be persisted]",
+                }
+            )
+            added_stub_results += 1
+
+    return result, dropped_orphan_tools, dropped_invalid_tool_calls, added_stub_results
 
 
 def normalize_transcript(messages: list[dict[str, Any]]) -> TranscriptNormalization:
@@ -74,18 +179,36 @@ def normalize_transcript(messages: list[dict[str, Any]]) -> TranscriptNormalizat
         canonical.pop(0)
         dropped_leading += 1
 
-    if dropped_system or dropped_leading or dropped_unknown:
+    canonical, dropped_orphan_tools, dropped_invalid_tool_calls, added_stub_results = (
+        _normalize_tool_pairs(canonical)
+    )
+
+    if (
+        dropped_system
+        or dropped_leading
+        or dropped_unknown
+        or dropped_orphan_tools
+        or dropped_invalid_tool_calls
+        or added_stub_results
+    ):
         logger.info(
-            "Normalized transcript: dropped system=%d leading=%d unknown=%d",
+            "Normalized transcript: dropped system=%d leading=%d unknown=%d "
+            "orphan_tools=%d invalid_tool_calls=%d added_stub_results=%d",
             dropped_system,
             dropped_leading,
             dropped_unknown,
+            dropped_orphan_tools,
+            dropped_invalid_tool_calls,
+            added_stub_results,
         )
     return TranscriptNormalization(
         messages=canonical,
         dropped_system=dropped_system,
         dropped_leading=dropped_leading,
         dropped_unknown=dropped_unknown,
+        dropped_orphan_tools=dropped_orphan_tools,
+        dropped_invalid_tool_calls=dropped_invalid_tool_calls,
+        added_stub_results=added_stub_results,
     )
 
 
@@ -122,6 +245,11 @@ class ContextBuilder:
                     "name": tc.name,
                     "arguments": json.dumps(tc.arguments),
                 },
+                **(
+                    {"_provider_metadata": tc.provider_metadata}
+                    if tc.provider_metadata is not None
+                    else {}
+                ),
             }
             for tc in tool_calls
         ]
@@ -354,6 +482,11 @@ def _tool_calls_from_dicts(calls: list[dict[str, Any]]) -> list[ToolCall]:
                 id=str(call.get("id", "")),
                 name=str(fn.get("name", "")),
                 arguments=args,
+                provider_metadata=(
+                    cast(dict[str, Any], call["_provider_metadata"])
+                    if isinstance(call.get("_provider_metadata"), dict)
+                    else None
+                ),
             )
         )
     return out

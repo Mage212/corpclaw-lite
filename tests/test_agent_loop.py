@@ -1632,6 +1632,76 @@ async def test_main_agent_closing_mode_preserves_task_tool_schema(
 
 
 @pytest.mark.asyncio
+async def test_workflow_closing_keeps_required_before_terminal(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """Soft closing cannot remove a configured prerequisite from the final funnel."""
+
+    class WorkflowTool:
+        description = "workflow"
+        params: list[Any] = []
+        parallel_safe = False
+        terminal = False
+        risk_level = None
+
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        async def execute(self, **kwargs: Any) -> str:
+            if self.name == "gather":
+                await asyncio.sleep(0.015)
+            return "ok"
+
+    gather = WorkflowTool("gather")
+    prerequisite = WorkflowTool("research_list_facts")
+    terminal = WorkflowTool("research_finalize")
+    terminal.terminal = True
+    empty_registry._tools[gather.name] = gather  # type: ignore[attr-defined]
+    empty_registry._tools[prerequisite.name] = prerequisite  # type: ignore[attr-defined]
+    empty_registry._tools[terminal.name] = terminal  # type: ignore[attr-defined]
+
+    captured_tools: list[set[str]] = []
+
+    class CapturingProvider(MockProvider):
+        async def chat(self, messages, tools=None, system=None):  # type: ignore[override]
+            captured_tools.append(
+                {str(tool.get("function", {}).get("name", "")) for tool in (tools or [])}
+            )
+            return await super().chat(messages, tools=tools, system=system)
+
+    provider = CapturingProvider(
+        responses=[
+            LLMResponse(
+                content="",
+                tool_calls=[ToolCall(id=f"g{i}", name="gather", arguments={})],
+            )
+            for i in range(4)
+        ]
+        + [LLMResponse(content="done")]
+    )
+    loop = AgentLoop(
+        AgentConfig(
+            provider,
+            empty_registry,
+            AgentSettings(
+                max_steps=10,
+                max_tool_calls=30,
+                max_wall_time_ms=200,
+                soft_deadline_ratio=0.1,
+            ),
+            terminal_tool="research_finalize",
+            required_before_terminal=["research_list_facts"],
+        )
+    )
+
+    await loop.run(test_user, "research", channel="test")
+
+    closing_schema = {"research_list_facts", "research_finalize"}
+    assert closing_schema in captured_tools
+    assert {"research_finalize"} not in captured_tools
+
+
+@pytest.mark.asyncio
 async def test_tool_budget_rejects_complete_batch_before_execution(
     test_user: User, empty_registry: ToolRegistry
 ) -> None:

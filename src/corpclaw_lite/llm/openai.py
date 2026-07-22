@@ -32,6 +32,35 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 
+def _strip_provider_metadata(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Copy canonical messages without provider-private transcript metadata.
+
+    Anthropic signed-thinking state is durable metadata, not part of the
+    OpenAI/LiteLLM wire contract.  Strip it before requests and payload capture
+    without mutating the canonical transcript used by a possible route switch.
+    """
+
+    sanitized: list[dict[str, Any]] = []
+    for message in messages:
+        copied = dict(message)
+        raw_calls = copied.get("tool_calls")
+        if isinstance(raw_calls, list):
+            calls: list[Any] = []
+            for raw_call in raw_calls:
+                if isinstance(raw_call, dict):
+                    call = dict(raw_call)
+                    call.pop("_provider_metadata", None)
+                    call.pop("provider_metadata", None)
+                    calls.append(call)
+                else:
+                    calls.append(raw_call)
+            copied["tool_calls"] = calls
+        copied.pop("_provider_metadata", None)
+        copied.pop("provider_metadata", None)
+        sanitized.append(copied)
+    return sanitized
+
+
 def _text_delta(value: Any) -> str:
     """Return provider delta text only when it is actually a string."""
     return value if isinstance(value, str) else ""
@@ -565,7 +594,7 @@ class OpenAIProvider(Provider):
 
         if system:
             final_messages.append({"role": "system", "content": system})
-        final_messages.extend(messages)
+        final_messages.extend(_strip_provider_metadata(messages))
 
         # Defensive: ensure no None content in any message (breaks Jinja templates)
         for msg in final_messages:

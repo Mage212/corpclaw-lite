@@ -284,6 +284,48 @@ class TestOpenAIProvider:
         assert result.usage.total_tokens == 30
 
     @pytest.mark.asyncio
+    async def test_provider_metadata_is_stripped_from_actual_openai_payload(self) -> None:
+        from corpclaw_lite.llm.openai import OpenAIProvider
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = AsyncMock(return_value=self._text_resp("done"))
+        with patch("corpclaw_lite.llm.openai.openai") as mock_mod:
+            mock_mod.AsyncOpenAI.return_value = mock_client
+            provider = OpenAIProvider(_openai_settings())
+
+        canonical = [
+            {"role": "user", "content": "read"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "toolu_1",
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": "{}"},
+                        "_provider_metadata": {
+                            "anthropic": {
+                                "opaque_thinking": [
+                                    {"type": "thinking", "thinking": "private", "signature": "sig"}
+                                ]
+                            }
+                        },
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "toolu_1", "content": "contents"},
+        ]
+
+        await provider.chat(canonical)
+
+        sent = mock_client.chat.completions.create.await_args.kwargs["messages"]
+        assert "_provider_metadata" not in sent[1]["tool_calls"][0]
+        assert "provider_metadata" not in sent[1]["tool_calls"][0]
+        assert "sig" not in json.dumps(sent)
+        # Sanitization must not destroy the durable canonical carrier.
+        assert canonical[1]["tool_calls"][0]["_provider_metadata"]["anthropic"]
+
+    @pytest.mark.asyncio
     async def test_native_tool_call_outside_offered_schema_is_rejected(self) -> None:
         from corpclaw_lite.llm.openai import OpenAIProvider
 

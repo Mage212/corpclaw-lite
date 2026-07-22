@@ -82,6 +82,11 @@ class LoopState:
     tools_schema: list[dict[str, Any]] | None
     task_run: TaskRun
     mem_key: str
+    # Regenerated persisted-user data is provider input for this run only.  The
+    # durable store intentionally contains the raw user message, so store-first
+    # compression must restore this envelope in memory before the next LLM call.
+    ephemeral_user_message: str | None = None
+    durable_user_message: str | None = None
     prev_turn_tools: list[str] = field(default_factory=lambda: [])
     current_turn_tools: list[str] = field(default_factory=lambda: [])
     last_actual_total_tokens: int | None = None

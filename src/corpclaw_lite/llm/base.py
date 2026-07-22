@@ -48,6 +48,10 @@ class ToolCall(BaseModel):
     id: str
     name: str
     arguments: dict[str, Any]
+    # Provider-private protocol state that must survive a durable tool round-trip
+    # but must never be sent to tools, shown in UI, or included in model_dump/logs.
+    # Providers opt in explicitly when serializing the canonical transcript.
+    provider_metadata: dict[str, Any] | None = Field(default=None, exclude=True, repr=False)
 
 
 class TokenUsage(BaseModel):
