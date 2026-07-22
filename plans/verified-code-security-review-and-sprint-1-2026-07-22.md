@@ -191,7 +191,7 @@ exploit was established and upgrades remain Sprint 3 work.
 
 #### S2-01 — Runtime execution context leaks into plugin/MCP business arguments
 
-- **Severity/status:** High when extensions are enabled / verified.
+- **Severity/status:** High when extensions are enabled / fixed in `78244f8`.
 - **Boundary:** host runtime identity and callbacks versus an extension's declared tool schema.
 - **Trace:** `ToolRegistry.execute` adds `user`, `run_id`, four subagent callbacks and the parent
   trajectory recorder to `arguments`; `PluginToolProxy.execute` serialises the resulting mapping
@@ -206,11 +206,14 @@ exploit was established and upgrades remain Sprint 3 work.
   contracts; JSON-coercing runtime objects would preserve the leakage and expose internals.
 - **Acceptance:** plugin/MCP observe exactly schema-declared arguments; context is isolated across
   concurrent calls; RBAC still runs before execution; existing direct built-in calls work.
-- **Regression evidence:** pending Sprint 2 PR 1.
+- **Regression evidence:** `test_tool_execution_context.py` verifies exact plugin/MCP payloads,
+  concurrent ContextVar isolation, direct built-in compatibility and registry RBAC. Full Sprint 2
+  gate: 2003 passed / 1 skipped.
 
 #### S2-02 — Anthropic history is sent in OpenAI tool-call format
 
-- **Severity/status:** High correctness when Anthropic is enabled / verified.
+- **Severity/status:** High correctness when Anthropic is enabled / fixed in `5ccd61e`, hardened
+  after independent review in `eef2069`.
 - **Boundary:** canonical internal transcript versus provider-native wire protocol.
 - **Trace:** `ContextBuilder` stores assistant `tool_calls` followed by role `tool`, and
   `AnthropicProvider.chat` passes `messages` directly to `messages.create` without converting
@@ -225,11 +228,15 @@ exploit was established and upgrades remain Sprint 3 work.
   durable canonical transcript; flattening calls to text loses protocol and audit fidelity.
 - **Acceptance:** deterministic user → tool_use → tool_result → final exchanges work, including
   multiple results and error results; OpenAI-compatible history remains unchanged.
-- **Regression evidence:** pending Sprint 2 PR 3.
+- **Regression evidence:** deterministic Anthropic tests cover tool-use/result batching, strict
+  ordering, malformed arguments/IDs, offered-schema filtering and error results. Signed and
+  redacted thinking blocks survive a durable transcript round-trip through bounded, validated
+  provider metadata; OpenAI-compatible requests strip that metadata before wire/capture.
 
 #### S2-03 — Compression can reinsert system roles into provider history
 
-- **Severity/status:** High correctness / verified.
+- **Severity/status:** High correctness / fixed in `3ba071d`, hardened after independent review in
+  `eef2069`.
 - **Boundary:** separately transported trusted system prompt versus durable chat transcript.
 - **Trace:** `_save_turn` appends a role=`system` tools marker to `ChatContextStore`;
   `_compress_store_transcript` compresses the raw store; `_maybe_compress_mid_run` assigns the
@@ -244,11 +251,14 @@ exploit was established and upgrades remain Sprint 3 work.
   inconsistent; retaining markers duplicates structured calls/results.
 - **Acceptance:** manual and mid-run compression never return or store role=`system`, including
   noop compression of legacy rows, while complete tool pairs survive.
-- **Regression evidence:** pending Sprint 2 PR 2.
+- **Regression evidence:** compression tests verify legacy system removal on both full and noop
+  paths. Cross-review added deterministic orphan-result removal, missing-result stubs and durable
+  repair of short histories.
 
 #### S2-04 — Main-agent closing mode can force an unrelated terminal tool
 
-- **Severity/status:** Medium/High correctness / verified.
+- **Severity/status:** Medium/High correctness / fixed in `3ba071d`, hardened after independent
+  review in `eef2069`.
 - **Boundary:** deadline adaptation versus the tool surface offered for the user's task.
 - **Trace:** both closing-mode call sites derive terminal names from every registered tool with
   `terminal=True`; on the main agent the only such tool may be `read_image`, so a text task is
@@ -264,11 +274,13 @@ exploit was established and upgrades remain Sprint 3 work.
   for research workflows; selecting any registry terminal repeats the ambiguity.
 - **Acceptance:** main text tasks never become read-image-only; configured research workflows
   still narrow to their declared finalisation funnel.
-- **Regression evidence:** pending Sprint 2 PR 4.
+- **Regression evidence:** the main-agent soft-deadline test preserves its full schema; workflow
+  tests prove closing mode retains the configured prerequisites plus its declared terminal tool.
 
 #### S2-05 — Persisted user data is promoted to authoritative system text
 
-- **Severity/status:** High safety / verified.
+- **Severity/status:** High safety / fixed in `3ba071d`, hardened after independent review in
+  `eef2069`.
 - **Boundary:** administrator policy versus user-controlled and model-generated persistent data.
 - **Trace:** `_assemble_user_layers` joins onboarding user Markdown, personal instructions and
   tone with the department prompt; recalled facts, name, recent files and pins are then
@@ -283,11 +295,13 @@ exploit was established and upgrades remain Sprint 3 work.
   deleting personalisation would discard intended product behaviour.
 - **Acceptance:** adversarial persisted strings appear only in the user message, trusted layers
   remain system, and generated context does not accumulate in `ChatContextStore`.
-- **Regression evidence:** pending Sprint 2 PR 2.
+- **Regression evidence:** adversarial name/onboarding/preferences/facts/pins remain inside the
+  structured user-level envelope, while department/admin layers remain system. Mid-run store-first
+  compression restores the generated envelope only in memory and never durably duplicates it.
 
 #### S2-06 — Tool batches and auto-finalize bypass deterministic execution invariants
 
-- **Severity/status:** Medium / verified.
+- **Severity/status:** Medium / fixed in `78244f8`, hardened after independent review in `eef2069`.
 - **Boundary:** resource limits, ToolGuard/RBAC and terminal side-effect ordering.
 - **Trace:** the loop checks the current budget and only then adds the whole batch count, allowing
   overshoot; `_can_parallelize` trusts `parallel_safe` even for terminal tools; auto-finalize
@@ -302,11 +316,13 @@ exploit was established and upgrades remain Sprint 3 work.
   duplicating a reduced guard inside auto-finalize will drift from the main path.
 - **Acceptance:** no partial or over-budget execution; terminal calls run alone; deny/approval
   applies to auto-finalize; successful salvage stores assistant-call → tool-result → assistant.
-- **Regression evidence:** pending Sprint 2 PR 1.
+- **Regression evidence:** batch-budget and mixed-terminal tests prove all-or-nothing admission;
+  auto-finalize tests cover guarded allow/deny, unavailable approval and complete durable protocol.
+  A rejected Stage-B action is not replayed by Stage C.
 
 #### S2-07 — Loop-exhaustion fallback is saved after context teardown
 
-- **Severity/status:** Medium correctness / verified.
+- **Severity/status:** Medium correctness / fixed in `38f2250`.
 - **Boundary:** request lifecycle versus durable per-session transcript targeting.
 - **Trace:** the main `try/finally` calls `_finalize_turn`, which resets the context target; code
   after that `finally` invokes `_save_turn` for `_LOOP_FALLBACK`, so `_persist_context_msg` sees no
@@ -320,11 +336,12 @@ exploit was established and upgrades remain Sprint 3 work.
   persistence contract; delaying all resets risks context leakage on exceptions.
 - **Acceptance:** fallback is durable for session runs, absent for sessionless CLI/subagents, and
   every contextvar is reset after return or failure.
-- **Regression evidence:** pending Sprint 2 PR 4.
+- **Regression evidence:** session-bound loop exhaustion persists the fallback before contextvar
+  teardown; sessionless and exception/cancellation paths retain their previous cleanup contract.
 
 #### S2-08 — Anthropic request options and streaming diverge from chat
 
-- **Severity/status:** Medium / verified.
+- **Severity/status:** Medium / fixed in `5ccd61e`, hardened after independent review in `eef2069`.
 - **Boundary:** provider-independent sampling/phase policy and bounded response accumulation.
 - **Trace:** Anthropic ignores `get_request_options`; sampling budget only adjusts `max_tokens`;
   `stream` bypasses profiles, tools and thinking, and no `chat_streamed` implementation exists.
@@ -338,7 +355,9 @@ exploit was established and upgrades remain Sprint 3 work.
   relying solely on `max_tokens` does not defend against a non-conforming endpoint.
 - **Acceptance:** chat and streamed chat have equivalent params/results, phase overrides win,
   fragmented tool JSON is assembled before exposure, and limit breaches fail closed.
-- **Regression evidence:** pending Sprint 2 PR 3.
+- **Regression evidence:** chat/stream request parity, thinking modes, fragmented JSON, usage,
+  unknown tools, ID/name/argument/opaque-thinking bounds and payload correlation are covered by
+  deterministic provider tests. Extended thinking removes incompatible sampling controls.
 
 ### Sprint 3 — Operational hardening
 
@@ -405,4 +424,50 @@ exploit was established and upgrades remain Sprint 3 work.
   was pulled into this change set.
 
 The pilot assumption is OpenAI-compatible llama.cpp with built-in tools and shipped subagents.
-Anthropic, MCP and custom plugins are not pilot-ready until Sprint 2.
+Anthropic, MCP and custom plugins were not pilot-ready at this Sprint 1 snapshot.
+
+## Sprint 2 delivery log
+
+| Package | Branch | Status | Verification |
+|---|---|---|---|
+| PR 1 execution boundary | `codex/security-s2-tool-context` | fixed (`78244f8`) | targeted + final gate |
+| PR 2 prompt/transcript | `codex/security-s2-prompt-compression` | fixed (`3ba071d`) | targeted + final gate |
+| PR 3 Anthropic parity | `codex/security-s2-anthropic` | fixed (`5ccd61e`) | targeted + final gate |
+| PR 4 loop lifecycle | `codex/security-s2-loop-lifecycle` | fixed (`38f2250`) | targeted + final gate |
+| Independent-review corrections | `codex/security-s2-loop-lifecycle` | fixed (`eef2069`) | three zonal reviews + final gate |
+
+### Sprint 2 independent-review corrections
+
+All zonal findings were reproduced and traced in the integrated code before acceptance. The
+following claims were confirmed and fixed in `eef2069`:
+
+- mid-run durable compression discarded the regenerated, user-level persisted-context envelope;
+- the first transcript normalizer removed roles but did not repair orphaned/incomplete tool pairs;
+- workflow closing removed configured prerequisite tools;
+- a rejected Stage-B auto-finalize action was retried by Stage C;
+- Anthropic extended-thinking replay lost signed/redacted blocks, including after restart;
+- Anthropic budget thinking retained incompatible sampling controls;
+- malformed history and empty tool IDs were not consistently rejected before execution;
+- streamed tool metadata and opaque thinking needed additional aggregate bounds;
+- normal tool execution errors were not always represented as Anthropic `is_error=true`.
+
+The reviews also re-confirmed ContextVar isolation/reset, pre-execution RBAC, atomic batch budget,
+mixed-terminal rejection, main-agent closing behaviour and lifecycle persistence. Claims that did
+not reproduce were not added as defects.
+
+### Sprint 2 final verification and rollout record
+
+- `uv run ruff check src/ tests/`: passed.
+- `uv run ruff format src/ tests/ --check`: passed; 380 files formatted.
+- `uv run pyright src/`: 0 errors; 16 pre-existing matplotlib typing warnings.
+- `uv run pytest tests/ -q`: 2003 passed, 1 skipped, 1 aiohttp warning in 192.00 seconds.
+- `uvx bandit -r src/ -q -lll`: passed, zero High findings.
+- Deterministic smoke covers Anthropic user → tool-use → tool-result → final, durable signed
+  thinking replay, exact plugin/MCP business payload, prompt trust separation, legacy transcript
+  repair, auto-finalize allow/deny, terminal batching and loop fallback persistence.
+- Telegram/Web live smoke, live Anthropic and live llama.cpp were not run because this checkout
+  has no pilot credentials/services; these remain desirable but non-blocking under the agreed DoD.
+- Public configuration remains unchanged: Anthropic, MCP and plugins are opt-in. Trusted
+  administrator plugins and MCP are suitable for a limited pilot; plugin subprocesses remain
+  crash isolation, not a sandbox for untrusted code.
+- No Sprint 3 container, IPC, channel, dependency or deployment-hardening work was pulled in.

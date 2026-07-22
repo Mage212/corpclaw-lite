@@ -23,6 +23,15 @@
 
 ### Fixed
 
+- **Security & Correctness Sprint 2.** Runtime identity and callbacks now travel through an
+  isolated execution context instead of plugin/MCP business arguments; tool batches reserve
+  budget atomically and terminal/auto-finalize actions use the normal guard path. Persisted user
+  data is rendered at user authority, while durable transcripts contain only canonical
+  user/assistant/tool messages and repair legacy tool pairs. Anthropic now supports native ReAct
+  history, bounded streaming, request-option/thinking parity and durable signed-thinking replay
+  without leaking provider metadata into OpenAI-compatible requests. Closing mode preserves each
+  workflow's declared finalisation funnel, and loop-exhaustion answers are saved before lifecycle
+  teardown.
 - **Security & Correctness Sprint 1.** Directory copy rejects nested symlinks
   without leaving partial output; department overlays preserve omitted policy
   fields and skill prompts respect department RBAC. Telegram whitelist and
