@@ -36,6 +36,7 @@ def _build_container_registry() -> ToolRegistry:
     Lazy-loading tools here to speed up python startup in the container.
     """
     try:
+        from corpclaw_lite.extensions.tools.builtin.apply_fill_plan import ApplyFillPlanTool
         from corpclaw_lite.extensions.tools.builtin.chart_generate import ChartGenerateTool
         from corpclaw_lite.extensions.tools.builtin.convert_format import ConvertFormatTool
         from corpclaw_lite.extensions.tools.builtin.diff_text import DiffTextTool
@@ -73,6 +74,11 @@ def _build_container_registry() -> ToolRegistry:
         PdfReaderTool(),
         ExcelInspectTool(),
         ExcelWorkbookTool(),
+        # Brief→FillPlan production path.
+        # Must be kept in sync with factory._all_tool_classes(); otherwise
+        # container.enabled=true rejects the tool call the LLM emits after
+        # reading FILES_BRIEF.
+        ApplyFillPlanTool(),
     ]:
         registry.register(tool)
     return registry

@@ -337,18 +337,10 @@ class EvalRunner:
             generate_workbook(generator_id, dest_path)
 
     def _cleanup_workspace(self, scenario: EvalScenario) -> None:
-        if scenario.setup is None:
-            return
-        all_paths = [p for p, _ in scenario.setup.files]
-        all_paths += [d for d, _ in scenario.setup.copy_from_corpus]
-        all_paths += [d for d, _ in scenario.setup.generated_images]
-        all_paths += [d for d, _ in scenario.setup.generated_workbooks]
-        for rel_path in all_paths:
-            full = self._workspace_dir / rel_path
-            if full.exists():
-                full.unlink()
-        for rel_path in all_paths:
-            parent = (self._workspace_dir / rel_path).parent
-            while parent != self._workspace_dir and parent.exists() and not any(parent.iterdir()):
-                parent.rmdir()
-                parent = parent.parent
+        import shutil
+
+        for child in self._workspace_dir.iterdir():
+            if child.is_file() or child.is_symlink():
+                child.unlink()
+            elif child.is_dir():
+                shutil.rmtree(child)

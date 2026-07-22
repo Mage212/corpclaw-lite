@@ -167,6 +167,24 @@ _EMPTY_RESPONSE_PROMPT = (
     "final answer. Continue your task: call a tool to gather more data, or "
     "if you have enough information, provide a complete response now."
 )
+_APPLY_FILL_CLOSE_NUDGE = (
+    "[Tool result] Excel fill finished successfully (apply_fill_plan SUCCESS). "
+    "The output file is ready. Summarize for the user now. "
+    "Do not call apply_fill_plan again, and do not start unrelated tasks."
+)
+
+
+def _is_apply_fill_success_result(result: str) -> bool:
+    """True only when apply_fill_plan reports a non-empty successful write."""
+    text = result.strip()
+    # CR-1 defensive guard: an empty-write "NOOP:" status must never be treated
+    # as success. The message-head branches in _fill_by_date/_fill_by_key
+    # already avoid emitting "SUCCESS:" in the NOOP case, but keep this guard
+    # so future edits to the success wording cannot accidentally re-trigger
+    # the close-nudge on a zero-row write.
+    if "NOOP:" in text:
+        return False
+    return text.startswith("SUCCESS: apply_fill_plan finished.")
 
 
 def _json_preview(value: Any, limit: int = _LOG_TRUNCATE) -> str:
@@ -253,6 +271,28 @@ def _detect_result_dedup(
 def _is_loop_guard_echo(content: str) -> bool:
     """Detect old internal guard text if the model echoes it as a final answer."""
     return content.strip() == _LOOP_GUARD_TEXT
+
+
+def _maybe_inject_apply_fill_close_nudge(
+    state: LoopState,
+    tool_name: str,
+    result: str,
+    *,
+    run_id: str,
+    iteration: int,
+) -> None:
+    """One-shot close nudge after a successful main-agent FillPlan."""
+    if state.apply_fill_close_nudge_injected or tool_name != "apply_fill_plan":
+        return
+    if result.startswith(TOOL_ERROR_PREFIX) or not _is_apply_fill_success_result(result):
+        return
+    state.context.add_user_message(_APPLY_FILL_CLOSE_NUDGE)
+    state.apply_fill_close_nudge_injected = True
+    log_event(
+        "apply_fill_close_nudge_injected",
+        run_id,
+        iteration=iteration,
+    )
 
 
 @dataclass
@@ -1419,6 +1459,13 @@ class AgentLoop:
                         state.stats.tools_used.append(tc.name)
                         state.current_turn_tools.append(tc.name)
                         action_results.append((tc.name, result))
+                        _maybe_inject_apply_fill_close_nudge(
+                            state,
+                            tc.name,
+                            result,
+                            run_id=state.stats.run_id,
+                            iteration=state.stats.iterations,
+                        )
                     # B-047 FIRST: the wall-clock deadline is time-critical and must
                     # always get a chance to nudge/restrict, even if the same tools
                     # keep returning identical results (B-055) or errors
@@ -1513,6 +1560,14 @@ class AgentLoop:
                                 final_answer_len=len(result),
                             )
                             return result, state.stats
+
+                        _maybe_inject_apply_fill_close_nudge(
+                            state,
+                            tc.name,
+                            result,
+                            run_id=state.stats.run_id,
+                            iteration=state.stats.iterations,
+                        )
 
                     # B-047 FIRST (see parallel branch): wall-clock deadline wins
                     # over dedup/error-loop detection.

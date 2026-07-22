@@ -11,8 +11,8 @@
 # the department budget wins). The `budget:` block is still parsed for
 # back-compat but no longer applied in the agent loop.
 #
-# Main agent tools (inspection + routing):
-#   read_file, list_files, search_files, excel_inspect
+# Main agent tools (inspection + routing + brief fill):
+#   read_file, list_files, search_files, excel_inspect, apply_fill_plan
 # Host-side tools (registered separately):
 #   web_fetch, web_search, read_image, memory_store, memory_recall,
 #   dispatch_subagent, send_file
@@ -35,6 +35,7 @@ departments:
       - read_image
       - dispatch_subagent
       - excel_inspect
+      - apply_fill_plan
       - send_file
     allowed_subagents:
       - filesystem-agent
@@ -64,6 +65,7 @@ departments:
       - read_image
       - dispatch_subagent
       - excel_inspect
+      - apply_fill_plan
       - web_fetch
       - web_search
       - send_file
@@ -86,6 +88,7 @@ departments:
       - read_image
       - dispatch_subagent
       - excel_inspect
+      - apply_fill_plan
     allowed_subagents:
       - document-agent
       - research-agent
@@ -102,6 +105,7 @@ departments:
       - read_image
       - dispatch_subagent
       - excel_inspect
+      - apply_fill_plan
       - web_fetch
       - web_search
     allowed_subagents:
@@ -121,6 +125,7 @@ departments:
       - read_image
       - dispatch_subagent
       - excel_inspect
+      - apply_fill_plan
       - web_fetch
       - web_search
     allowed_subagents:
@@ -141,6 +146,7 @@ departments:
       - read_image
       - dispatch_subagent
       - excel_inspect
+      - apply_fill_plan
     allowed_subagents:
       - data-agent
       - document-agent
@@ -159,6 +165,7 @@ departments:
       - read_image
       - dispatch_subagent
       - excel_inspect
+      - apply_fill_plan
       - send_file
     allowed_subagents:
       - document-agent

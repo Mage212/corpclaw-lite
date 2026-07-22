@@ -95,3 +95,5 @@ class LoopState:
     empty_response_retries: int = 0
     # B-118 H2: channel for this run (e.g. "system" headless) — execute-time denylist.
     channel: str | None = None
+    # One-shot after successful apply_fill_plan (anti-repeat close).
+    apply_fill_close_nudge_injected: bool = False

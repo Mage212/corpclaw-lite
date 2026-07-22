@@ -306,16 +306,22 @@ def test_container_enabled_registers_ipc_proxies() -> None:
     assert not isinstance(full_web_search, IPCToolProxy)
 
 
-def test_main_agent_tool_classes_has_four_factory_tools() -> None:
-    """Main agent should have exactly 4 factory tools (inspection + routing)."""
+def test_main_agent_tool_classes_has_five_factory_tools() -> None:
+    """Main agent: filesystem inspect + excel_inspect + apply_fill_plan."""
     from corpclaw_lite.agent.factory import _main_agent_tool_classes
 
     main_tools = {t.name for t in _main_agent_tool_classes()}
-    assert main_tools == {"read_file", "list_files", "search_files", "excel_inspect"}
+    assert main_tools == {
+        "read_file",
+        "list_files",
+        "search_files",
+        "excel_inspect",
+        "apply_fill_plan",
+    }
 
 
 def test_all_tool_classes_has_full_set() -> None:
-    """Full tool set should include all 14 factory tools."""
+    """Full tool set should include all factory tools (incl. apply_fill_plan)."""
     from corpclaw_lite.agent.factory import _all_tool_classes
 
     all_names = {t.name for t in _all_tool_classes()}
@@ -334,6 +340,7 @@ def test_all_tool_classes_has_full_set() -> None:
         "pdf_reader",
         "excel_inspect",
         "excel_workbook",
+        "apply_fill_plan",
     }
     assert all_names == expected
 
