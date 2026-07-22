@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -132,6 +133,108 @@ async def test_dispatch_claim_prevents_double(tmp_path: Path) -> None:
     assert a2 is not None
     assert a2.status == "done"
     assert agent.run_headless.await_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["pause", "dismiss"])
+async def test_user_state_change_wins_while_claim_runs(tmp_path: Path, action: str) -> None:
+    """Worker completion records its outcome without reviving a user-stopped task."""
+    store = SchedulerStore(tmp_path / f"{action}.db")
+    user = User(id=120, name="Race", department="engineering")
+    started = asyncio.Event()
+    release = asyncio.Event()
+    agent = AsyncMock()
+
+    async def _run_headless(**_kwargs: Any) -> HeadlessResult:
+        started.set()
+        await release.wait()
+        return HeadlessResult(
+            status="completed",
+            reply="ok",
+            session_id=1,
+            stats=RunStats(status="ok"),
+            source="scheduled",
+        )
+
+    agent.run_headless.side_effect = _run_headless
+    svc = SchedulerService(
+        store=store,
+        user_manager=_FakeUM(user),  # type: ignore[arg-type]
+        agent_service=agent,
+        settings=_settings(tmp_path),
+    )
+    proposed = await svc.propose(
+        user, title="race", task_text="work", schedule_text="every 1h", notify=False
+    )
+    active = await svc.accept(user, proposed.id)
+    active.next_run_at = "2000-01-01T00:00:00+00:00"
+    await store.update(active)
+
+    dispatch = asyncio.create_task(
+        svc._dispatch(active, now=datetime(2026, 7, 15, 12, 0, tzinfo=UTC))
+    )
+    await started.wait()
+    if action == "pause":
+        await svc.pause(user, active.id)
+    else:
+        await svc.dismiss(user, active.id)
+    release.set()
+    result = await dispatch
+
+    current = await store.get(active.id, user_id=user.id)
+    assert current is not None
+    assert current.status == ("paused" if action == "pause" else "dismissed")
+    assert current.enabled is False
+    assert current.claim_token is None
+    assert current.claimed_at is None
+    assert current.run_count == 1
+    assert current.last_status == "ok"
+    assert result["task_status"] == current.status
+
+
+@pytest.mark.asyncio
+async def test_stale_worker_cannot_complete_newer_claim(tmp_path: Path) -> None:
+    store = SchedulerStore(tmp_path / "claim-token.db")
+    user = User(id=121, name="Token", department="engineering")
+    svc = SchedulerService(
+        store=store,
+        user_manager=_FakeUM(user),  # type: ignore[arg-type]
+        settings=_settings(tmp_path),
+    )
+    proposed = await svc.propose(
+        user, title="token", task_text="work", schedule_text="every 1h", notify=False
+    )
+    active = await svc.accept(user, proposed.id)
+    assert active.next_run_at is not None
+    assert await store.claim_task(
+        active.id,
+        expected_next_run_at=active.next_run_at,
+        now_iso="2026-07-15T10:00:00+00:00",
+        claim_token="old-worker",
+        stale_before_iso="2026-07-15T09:00:00+00:00",
+    )
+    assert await store.claim_task(
+        active.id,
+        expected_next_run_at=active.next_run_at,
+        now_iso="2026-07-15T12:00:00+00:00",
+        claim_token="new-worker",
+        stale_before_iso="2026-07-15T11:00:00+00:00",
+    )
+
+    completed = await store.complete_claim(
+        active.id,
+        user.id,
+        "old-worker",
+        last_run_at="2026-07-15T12:00:00+00:00",
+        last_status="ok",
+        run_count_delta=1,
+        active_next_run_at="2026-07-15T13:00:00+00:00",
+    )
+    assert completed is False
+    current = await store.get(active.id, user_id=user.id)
+    assert current is not None
+    assert current.claim_token == "new-worker"
+    assert current.run_count == 0
 
 
 @pytest.mark.asyncio

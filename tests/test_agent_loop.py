@@ -3074,8 +3074,7 @@ async def test_capture_context_populated_during_run(
 async def test_terminal_tool_no_double_persist(
     test_user: User, empty_registry: ToolRegistry, tmp_path: Path
 ) -> None:
-    """B1 fix: terminal tool result is persisted as assistant (via _save_turn)
-    but NOT as a separate tool-role message in the context store."""
+    """Terminal runs persist a complete tool protocol plus one final answer."""
     from corpclaw_lite.channels.web.chat_context_store import ChatContextStore
     from corpclaw_lite.channels.web.chat_store import WebChatStore
     from corpclaw_lite.extensions.tools.base import Tool, ToolParam
@@ -3112,11 +3111,12 @@ async def test_terminal_tool_no_double_persist(
     await loop.run(test_user, "echo", session_id=session_id, channel="web")
 
     ctx = await store.list_context(session_id, user_id=str(test_user.id))
-    # user, assistant(tool_calls), assistant(final), system tools note — NO tool-role.
-    assert len(ctx) == 4
-    assert all(m["role"] != "tool" for m in ctx)
+    # user -> assistant(tool_calls) -> tool(result) -> assistant(final) -> tools note.
+    assert [m["role"] for m in ctx] == ["user", "assistant", "tool", "assistant", "system"]
+    assert ctx[2]["tool_call_id"] == "c1"
     assert ctx[2]["content"] == "DIRECT:hi"
-    assert ctx[3]["role"] == "system"
+    assert ctx[3]["content"] == "DIRECT:hi"
+    assert sum(m["role"] == "system" for m in ctx) == 1
 
 
 def test_build_from_full_history_preserves_tool_calls_in_leading_strip(

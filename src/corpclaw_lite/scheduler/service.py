@@ -9,6 +9,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+from corpclaw_lite.logging.trace import log_event
 from corpclaw_lite.scheduler.models import ScheduledTask, ScheduleSpec
 from corpclaw_lite.scheduler.parse import (
     ScheduleParseError,
@@ -133,14 +134,6 @@ class SchedulerService:
                 await self._dispatch(task, now=now)
             except Exception as exc:
                 logger.exception("Dispatch failed task=%s: %s", task.id, exc)
-                task.error_count += 1
-                task.last_status = "error"
-                task.last_run_at = _iso(now)
-                task.claimed_at = None
-                task.claim_token = None
-                # Defer 1 min to avoid tight error loop
-                task.next_run_at = _iso(now + timedelta(minutes=1))
-                await self._store.update(task)
 
     async def _expire_pending(self) -> None:
         days = int(self._settings.pending_ttl_days)
@@ -489,12 +482,14 @@ class SchedulerService:
 
         user = self._user_manager.get_by_id(task.user_id)
         if user is None:
-            task.last_status = "error"
-            task.error_count += 1
-            task.claimed_at = None
-            task.claim_token = None
-            task.next_run_at = _iso(now + timedelta(minutes=5))
-            await self._store.update(task)
+            await self._complete_owned_claim(
+                task,
+                claim_token,
+                last_run_at=now_iso,
+                last_status="error",
+                error_count_delta=1,
+                active_next_run_at=_iso(now + timedelta(minutes=5)),
+            )
             return {"status": "error", "reason": "user_not_found"}
 
         from zoneinfo import ZoneInfo
@@ -518,23 +513,25 @@ class SchedulerService:
                 source="scheduled",
             )
         except Exception:
-            task.error_count += 1
-            task.last_status = "error"
-            task.last_run_at = _iso(now)
-            task.claimed_at = None
-            task.claim_token = None
-            task.next_run_at = _iso(now + timedelta(minutes=1))
-            await self._store.update(task)
+            await self._complete_owned_claim(
+                task,
+                claim_token,
+                last_run_at=now_iso,
+                last_status="error",
+                error_count_delta=1,
+                active_next_run_at=_iso(now + timedelta(minutes=1)),
+            )
             raise
 
         if result.status == "skipped":
             # Defer 1 minute to avoid tight busy loop (plan).
-            task.last_status = "skipped_busy"
-            task.last_run_at = _iso(now)
-            task.next_run_at = _iso(now + timedelta(minutes=1))
-            task.claimed_at = None
-            task.claim_token = None
-            await self._store.update(task)
+            await self._complete_owned_claim(
+                task,
+                claim_token,
+                last_run_at=now_iso,
+                last_status="skipped_busy",
+                active_next_run_at=_iso(now + timedelta(minutes=1)),
+            )
             await self._store.append_run_log(
                 task_id=task.id,
                 status="skipped_busy",
@@ -547,18 +544,13 @@ class SchedulerService:
             }
 
         # completed
-        task.run_count += 1
-        task.last_run_at = _iso(now)
-        task.last_status = "ok"
-        task.claimed_at = None
-        task.claim_token = None
         reply = result.reply or ""
         run_id = result.stats.run_id if result.stats is not None else None
 
         if task.schedule.kind == "once":
-            task.status = "done"
-            task.enabled = False
-            task.next_run_at = None
+            active_status = "done"
+            active_enabled = False
+            active_next_run_at = None
         else:
             nxt = compute_next_run(
                 task.schedule,
@@ -567,16 +559,27 @@ class SchedulerService:
                 tz=task.timezone,
             )
             if nxt is None:
-                task.status = "done"
-                task.enabled = False
-                task.next_run_at = None
+                active_status = "done"
+                active_enabled = False
+                active_next_run_at = None
             else:
                 # Ensure strictly after now for intervals
                 if nxt <= now:
                     nxt = now + timedelta(minutes=max(1, task.schedule.minutes or 1))
-                task.next_run_at = _iso(nxt)
+                active_status = "active"
+                active_enabled = True
+                active_next_run_at = _iso(nxt)
 
-        await self._store.update(task)
+        current = await self._complete_owned_claim(
+            task,
+            claim_token,
+            last_run_at=now_iso,
+            last_status="ok",
+            run_count_delta=1,
+            active_status=active_status,
+            active_enabled=active_enabled,
+            active_next_run_at=active_next_run_at,
+        )
         await self._store.append_run_log(
             task_id=task.id,
             status="ok",
@@ -587,9 +590,47 @@ class SchedulerService:
             "status": "completed",
             "task_id": task.id,
             "reply": reply,
-            "next_run_at": task.next_run_at,
-            "task_status": task.status,
+            "next_run_at": current.next_run_at if current is not None else active_next_run_at,
+            "task_status": current.status if current is not None else active_status,
         }
+
+    async def _complete_owned_claim(
+        self,
+        task: ScheduledTask,
+        claim_token: str,
+        *,
+        last_run_at: str,
+        last_status: str,
+        active_next_run_at: str | None,
+        run_count_delta: int = 0,
+        error_count_delta: int = 0,
+        active_status: str = "active",
+        active_enabled: bool = True,
+    ) -> ScheduledTask | None:
+        completed = await self._store.complete_claim(
+            task.id,
+            task.user_id,
+            claim_token,
+            last_run_at=last_run_at,
+            last_status=last_status,
+            run_count_delta=run_count_delta,
+            error_count_delta=error_count_delta,
+            active_status=active_status,
+            active_enabled=active_enabled,
+            active_next_run_at=active_next_run_at,
+        )
+        if not completed:
+            logger.warning(
+                "Scheduler claim completion skipped after concurrent modification task=%s",
+                task.id,
+            )
+            log_event(
+                "scheduler_claim_completion_skipped",
+                f"scheduler:{task.id}",
+                task_id=task.id,
+                reason="claim_token_mismatch",
+            )
+        return await self._store.get(task.id, user_id=task.user_id)
 
 
 def _parse_iso(value: str | None) -> datetime | None:

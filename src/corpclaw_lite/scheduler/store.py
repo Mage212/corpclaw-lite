@@ -455,6 +455,97 @@ class SchedulerStore:
             stale_before_iso,
         )
 
+    def _sync_complete_claim(
+        self,
+        task_id: str,
+        user_id: int,
+        claim_token: str,
+        *,
+        last_run_at: str,
+        last_status: str,
+        run_count_delta: int,
+        error_count_delta: int,
+        active_status: str,
+        active_enabled: bool,
+        active_next_run_at: str | None,
+    ) -> bool:
+        """Complete only the claim still owned by this worker.
+
+        Outcome counters and claim release are one atomic UPDATE.  Scheduling
+        fields are changed only while the row is still active; a concurrent
+        pause/dismiss therefore wins and is preserved.
+        """
+        now = _utcnow_iso()
+        with db_connect(self.db_path) as conn:
+            cur = conn.execute(
+                """
+                UPDATE scheduled_tasks SET
+                    last_run_at = ?,
+                    last_status = ?,
+                    run_count = run_count + ?,
+                    error_count = error_count + ?,
+                    status = CASE
+                        WHEN status = 'active' AND enabled = 1 THEN ?
+                        ELSE status
+                    END,
+                    enabled = CASE
+                        WHEN status = 'active' AND enabled = 1 THEN ?
+                        ELSE enabled
+                    END,
+                    next_run_at = CASE
+                        WHEN status = 'active' AND enabled = 1 THEN ?
+                        ELSE next_run_at
+                    END,
+                    claimed_at = NULL,
+                    claim_token = NULL,
+                    updated_at = ?
+                WHERE id = ? AND user_id = ? AND claim_token = ?
+                """,
+                (
+                    last_run_at,
+                    last_status,
+                    int(run_count_delta),
+                    int(error_count_delta),
+                    active_status,
+                    1 if active_enabled else 0,
+                    active_next_run_at,
+                    now,
+                    task_id,
+                    int(user_id),
+                    claim_token,
+                ),
+            )
+            return int(cur.rowcount) == 1
+
+    async def complete_claim(
+        self,
+        task_id: str,
+        user_id: int,
+        claim_token: str,
+        *,
+        last_run_at: str,
+        last_status: str,
+        active_next_run_at: str | None,
+        run_count_delta: int = 0,
+        error_count_delta: int = 0,
+        active_status: str = "active",
+        active_enabled: bool = True,
+    ) -> bool:
+        """Async token-guarded completion for a claimed execution."""
+        return await run_in_thread(
+            self._sync_complete_claim,
+            task_id,
+            int(user_id),
+            claim_token,
+            last_run_at=last_run_at,
+            last_status=last_status,
+            run_count_delta=int(run_count_delta),
+            error_count_delta=int(error_count_delta),
+            active_status=active_status,
+            active_enabled=active_enabled,
+            active_next_run_at=active_next_run_at,
+        )
+
     def _sync_insert_pending_if_allowed(self, task: ScheduledTask, max_n: int) -> ScheduledTask:
         """Atomic limit + dedup check + insert under one connection."""
         now = _utcnow_iso()

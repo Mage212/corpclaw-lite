@@ -1480,17 +1480,16 @@ class AgentLoop:
                             and len(response.tool_calls) == 1
                             and not result.startswith(TOOL_ERROR_PREFIX)
                         )
-                        # B-063 final-fix B1: for terminal tools, skip the tool-role
-                        # persist — _save_turn below persists the result as the
-                        # assistant's final answer, and duplicating it as tool-role
-                        # inflates the restored state.context.
-                        if not is_terminal:
-                            await self._persist_context_msg(
-                                role="tool",
-                                content=result,
-                                tool_call_id=tc.id,
-                                name=tc.name,
-                            )
+                        # A terminal tool still participates in the provider's tool-call
+                        # protocol.  Persist the result before the user-facing assistant
+                        # answer so a restored conversation never contains an orphaned
+                        # assistant(tool_calls) message.
+                        await self._persist_context_msg(
+                            role="tool",
+                            content=result,
+                            tool_call_id=tc.id,
+                            name=tc.name,
+                        )
                         state.stats.tools_used.append(tc.name)
                         state.current_turn_tools.append(tc.name)
                         action_results.append((tc.name, result))
