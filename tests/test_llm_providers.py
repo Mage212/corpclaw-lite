@@ -252,12 +252,48 @@ class TestOpenAIProvider:
             mock_mod.AsyncOpenAI.return_value = mock_client
             provider = OpenAIProvider(_openai_settings())
 
-        result = await provider.chat(messages=[])
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_files",
+                    "description": "List files",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
+        result = await provider.chat(messages=[], tools=tools)
 
         assert len(result.tool_calls) == 1
         assert result.tool_calls[0].name == "list_files"
         assert result.tool_calls[0].arguments == {"path": "/"}
         assert result.usage.total_tokens == 30
+
+    @pytest.mark.asyncio
+    async def test_native_tool_call_outside_offered_schema_is_rejected(self) -> None:
+        from corpclaw_lite.llm.openai import OpenAIProvider
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = AsyncMock(
+            return_value=self._tool_resp("exec_script", {"script": "id"})
+        )
+        with patch("corpclaw_lite.llm.openai.openai") as mock_mod:
+            mock_mod.AsyncOpenAI.return_value = mock_client
+            provider = OpenAIProvider(_openai_settings())
+
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_files",
+                    "description": "List files",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
+        result = await provider.chat(messages=[], tools=tools)
+
+        assert result.tool_calls == []
 
     @pytest.mark.asyncio
     async def test_empty_tool_calls_list(self) -> None:

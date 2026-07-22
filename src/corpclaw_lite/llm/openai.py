@@ -19,9 +19,11 @@ from corpclaw_lite.llm.base import (
     ToolCall,
     get_backend_request_options,
     get_request_options,
+    get_run_id,
 )
 from corpclaw_lite.llm.presets import ModelPreset, ModelProfile, SamplingProfile
 from corpclaw_lite.llm.xml_tool_calling import parse_xml_tool_calls
+from corpclaw_lite.logging.trace import log_event
 
 __all__ = [
     "OpenAIProvider",
@@ -587,12 +589,24 @@ class OpenAIProvider(Provider):
         extra_body.update(options.extra_body)
         kwargs["extra_body"] = extra_body
 
-    def _tool_calls_from_native(self, native_tool_calls: Any) -> list[ToolCall]:
+    def _tool_calls_from_native(
+        self, native_tool_calls: Any, allowed_tool_names: set[str]
+    ) -> list[ToolCall]:
         """Normalize OpenAI SDK tool calls into our ToolCall model."""
         tool_calls: list[ToolCall] = []
         if not native_tool_calls:
             return tool_calls
         for tc in native_tool_calls:
+            tool_name = str(tc.function.name)
+            if tool_name not in allowed_tool_names:
+                logger.warning("Rejected native tool call outside offered schema: %s", tool_name)
+                log_event(
+                    "native_tool_call_rejected",
+                    get_run_id() or "unknown",
+                    tool=tool_name,
+                    reason="not_in_offered_schema",
+                )
+                continue
             try:
                 args = json.loads(tc.function.arguments)
             except json.JSONDecodeError:
@@ -601,7 +615,7 @@ class OpenAIProvider(Provider):
             tool_calls.append(
                 ToolCall(
                     id=tc.id,
-                    name=tc.function.name,
+                    name=tool_name,
                     arguments=args,
                 )
             )
@@ -618,14 +632,16 @@ class OpenAIProvider(Provider):
         usage: TokenUsage,
     ) -> LLMResponse:
         """Apply the same post-processing to full and streamed responses."""
-        tool_calls = self._tool_calls_from_native(getattr(raw_message, "tool_calls", None))
+        allowed_names = {t["function"]["name"] for t in tools or [] if "function" in t}
+        tool_calls = self._tool_calls_from_native(
+            getattr(raw_message, "tool_calls", None), allowed_names
+        )
 
         content, tool_calls = self._resolve_reasoning_fallback(
             content, finish_reason, raw_message, tools, tool_calls
         )
 
         if not tool_calls and tools and content:
-            allowed_names = {t["function"]["name"] for t in tools if "function" in t}
             parse_result = parse_xml_tool_calls(content, allowed_tool_names=allowed_names)
             if parse_result.tool_calls:
                 logger.info(
