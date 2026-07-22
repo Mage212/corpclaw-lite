@@ -1176,8 +1176,8 @@ def _build_service(tmp_path: Path) -> tuple[AgentRequestService, UserManager]:
 
 
 @pytest.mark.asyncio
-async def test_build_system_prompt_injects_instructions_and_tone(tmp_path: Path) -> None:
-    """B-111: saved agent-context instructions + tone via loop.assemble_system_prompt."""
+async def test_build_system_prompt_excludes_persisted_user_preferences(tmp_path: Path) -> None:
+    """System preview contains trusted policy, not persisted user-controlled text."""
     service, user_manager = _build_service(tmp_path)
     user = User(id=3, name="Vadim", department="engineering")
 
@@ -1186,10 +1186,10 @@ async def test_build_system_prompt_injects_instructions_and_tone(tmp_path: Path)
 
     assert prompt is not None
     assert "BASE SOUL" in prompt
-    assert "Always cite sources." in prompt
-    assert "Be concise" in prompt
-    # Path A "You are talking to…" removed — identity is only in run() Current User Context.
+    assert "Always cite sources." not in prompt
+    assert "Be concise" not in prompt
     assert "You are talking to" not in prompt
+    assert "untrusted user-provided data" in prompt
 
 
 @pytest.mark.asyncio
@@ -1215,11 +1215,13 @@ async def test_tone_directive_reaches_agent_loop_via_service_run(tmp_path: Path)
     from corpclaw_lite.llm.base import LLMResponse, Provider
 
     captured_systems: list[str] = []
+    captured_messages: list[list[dict[str, Any]]] = []
 
     class SpyProvider(AsyncMock):
         async def chat(self, messages, tools=None, system=None, **kwargs):  # type: ignore[no-untyped-def]
             if system:
                 captured_systems.append(system)
+            captured_messages.append(messages)
             return LLMResponse(content="ok", tool_calls=[])
 
     user_manager = UserManager(db_path=str(tmp_path / "users.db"))
@@ -1257,10 +1259,14 @@ async def test_tone_directive_reaches_agent_loop_via_service_run(tmp_path: Path)
 
     assert captured_systems, "provider.chat must receive a system prompt"
     joined = "\n".join(captured_systems)
-    assert "Be precise." in joined
-    assert "Be thorough" in joined
-    assert "Current User Context:" in joined
-    assert "Vadim" in joined
+    assert "Be precise." not in joined
+    assert "Be thorough" not in joined
+    assert "Vadim" not in joined
+    current = str(captured_messages[0][-1]["content"])
+    assert '"personal_instructions": "Be precise."' in current
+    assert '"tone_preference": "Be thorough' in current
+    assert '"name": "Vadim"' in current
+    assert "Current user request:\nhi" in current
 
 
 @pytest.mark.asyncio

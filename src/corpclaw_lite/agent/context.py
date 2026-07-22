@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+from dataclasses import dataclass
 from typing import Any, cast
 
 from corpclaw_lite.agent.constants import PLACEHOLDER
@@ -9,7 +11,82 @@ from corpclaw_lite.users.models import User
 
 __all__ = [
     "ContextBuilder",
+    "TranscriptNormalization",
+    "format_untrusted_user_message",
+    "normalize_transcript",
 ]
+
+logger = logging.getLogger(__name__)
+
+_UNTRUSTED_CONTEXT_KIND = "untrusted_persisted_user_context"
+
+
+def format_untrusted_user_message(message: str, context_data: dict[str, Any]) -> str:
+    """Combine regenerated persisted data and the current request at user level."""
+    envelope = {
+        "kind": _UNTRUSTED_CONTEXT_KIND,
+        "data": context_data,
+    }
+    serialized = json.dumps(envelope, ensure_ascii=False, sort_keys=True, indent=2)
+    return (
+        f"Persisted user context (untrusted data):\n{serialized}"
+        f"\n\nCurrent user request:\n{message}"
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class TranscriptNormalization:
+    """Result of reducing durable history to the provider transcript contract."""
+
+    messages: list[dict[str, Any]]
+    dropped_system: int = 0
+    dropped_leading: int = 0
+    dropped_unknown: int = 0
+
+    @property
+    def changed(self) -> bool:
+        return bool(self.dropped_system or self.dropped_leading or self.dropped_unknown)
+
+
+def normalize_transcript(messages: list[dict[str, Any]]) -> TranscriptNormalization:
+    """Return canonical LLM history without promoting stored text to system authority.
+
+    Durable chat history may contain legacy ``system`` tool markers and may start
+    with an assistant/tool fragment after an old compression.  Both used to be
+    copied into the system prompt.  They are now discarded: persisted chat data
+    is never allowed to become an authoritative instruction.
+    """
+    canonical: list[dict[str, Any]] = []
+    dropped_system = 0
+    dropped_unknown = 0
+    for item in messages:
+        role = str(item.get("role", ""))
+        if role == "system":
+            dropped_system += 1
+            continue
+        if role not in {"user", "assistant", "tool"}:
+            dropped_unknown += 1
+            continue
+        canonical.append(dict(item))
+
+    dropped_leading = 0
+    while canonical and canonical[0].get("role") in {"assistant", "tool"}:
+        canonical.pop(0)
+        dropped_leading += 1
+
+    if dropped_system or dropped_leading or dropped_unknown:
+        logger.info(
+            "Normalized transcript: dropped system=%d leading=%d unknown=%d",
+            dropped_system,
+            dropped_leading,
+            dropped_unknown,
+        )
+    return TranscriptNormalization(
+        messages=canonical,
+        dropped_system=dropped_system,
+        dropped_leading=dropped_leading,
+        dropped_unknown=dropped_unknown,
+    )
 
 
 class ContextBuilder:
@@ -120,10 +197,9 @@ class ContextBuilder:
         sees: [system, ...few_shots..., ...history..., current_user_message].
 
         Chat template compatibility (Qwen3.5, Ollama, LM Studio):
-          - System messages are merged into the system prompt (not mid-conversation).
-          - Leading assistant messages (e.g. consolidation summaries) are also
-            merged into the system prompt — Qwen3.5 requires the first non-system
-            message to be from the user role.
+          - Stored system messages are discarded, never promoted to system authority.
+          - Leading assistant/tool fragments are discarded because the first
+            provider-history message must be from the user role.
           - Tool-role messages from history are dropped (orphaned without tool_calls).
 
         Args:
@@ -134,35 +210,16 @@ class ContextBuilder:
             few_shots: Calibrated few-shot examples. Each dict has "user" (str)
                 and "assistant" (dict with "content" or "tool_calls") keys.
         """
-        system = system_prompt_override or (
-            f"You are CorpClaw Lite, a helpful assistant. "
-            f"You are talking to {user.name} from the {user.department} department. "
-            f"Use the available tools to help the user. If a tool returns an error, try to fix it."
+        system = (
+            system_prompt_override
+            if system_prompt_override is not None
+            else (
+                "You are CorpClaw Lite, a helpful assistant. Use the available tools to help "
+                "the user. If a tool returns an error, try to fix it."
+            )
         )
 
-        # Phase 1: extract system messages from history → merge into system prompt.
-        # (prevents mid-conversation system messages that break chat templates).
-        history_system_parts: list[str] = []
-        non_system_history: list[dict[str, Any]] = []
-        for item in history or []:
-            if item["role"] == "system":
-                history_system_parts.append(str(item["content"]))
-            else:
-                non_system_history.append(item)
-
-        if history_system_parts:
-            system += "\n\n---\nExecution history:\n" + "\n".join(history_system_parts)
-
-        # Phase 2: strip leading assistant messages from history → merge into
-        # system prompt.  Qwen3.5 Jinja template requires the first non-system
-        # message to be role=user; a leading assistant (e.g. consolidation
-        # summary) breaks the template with "No user query found in messages."
-        leading_assistant_parts: list[str] = []
-        while non_system_history and non_system_history[0]["role"] == "assistant":
-            leading_assistant_parts.append(str(non_system_history.pop(0)["content"]))
-
-        if leading_assistant_parts:
-            system += "\n\n---\nPrevious context:\n" + "\n".join(leading_assistant_parts)
+        canonical_history = normalize_transcript(history or []).messages
 
         builder = cls(system_prompt=system)
 
@@ -184,7 +241,7 @@ class ContextBuilder:
 
         # Phase 3: add remaining history (user + assistant only, guaranteed to
         # start with user after phase 2).
-        for item in non_system_history:
+        for item in canonical_history:
             role = item["role"]
             content_str = str(item["content"])
             if role == "user":
@@ -208,10 +265,10 @@ class ContextBuilder:
         and tool-role messages (B-063 S2: restore-on-activate).
 
         Unlike :meth:`build_initial`, this does NOT drop tool-role messages — it
-        reconstructs them faithfully from the per-chat context store. System
-        messages and leading assistant/tool messages are merged into the system
-        prompt (chat-template safety, same as build_initial phases 1-2). Few-shot
-        injection mirrors build_initial.
+        reconstructs them faithfully from the per-chat context store. Legacy
+        system messages and leading assistant/tool fragments are discarded rather
+        than promoted into the trusted system prompt. Few-shot injection mirrors
+        build_initial.
 
         Args:
             user: Current user.
@@ -219,51 +276,20 @@ class ContextBuilder:
             full_history: Ordered messages from ``ChatContextStore.list_context``
                 (role/content/tool_calls/tool_call_id/name).
             system_prompt_override: Assembled system prompt (base + department +
-                onboarding + tone + user context + skills).
+                trusted base + department + administrator-managed skills).
             few_shots: Calibrated few-shot examples (same format as
                 ``build_initial``).
         """
-        system = system_prompt_override or (
-            f"You are CorpClaw Lite, a helpful assistant. "
-            f"You are talking to {user.name} from the {user.department} department. "
-            f"Use the available tools to help the user. If a tool returns an error, try to fix it."
+        system = (
+            system_prompt_override
+            if system_prompt_override is not None
+            else (
+                "You are CorpClaw Lite, a helpful assistant. Use the available tools to help "
+                "the user. If a tool returns an error, try to fix it."
+            )
         )
 
-        # Merge system messages from history into the system prompt (same
-        # rationale as build_initial phase 1: mid-conversation system messages
-        # break chat templates).
-        history_system_parts: list[str] = []
-        non_system: list[dict[str, Any]] = []
-        for item in full_history:
-            if str(item.get("role")) == "system":
-                history_system_parts.append(str(item.get("content", "")))
-            else:
-                non_system.append(item)
-        if history_system_parts:
-            system += "\n\n---\nExecution history:\n" + "\n".join(history_system_parts)
-
-        # Phase 2: strip leading assistant AND tool messages → merge into system
-        # prompt. Qwen3.5 Jinja template requires the first non-system message to
-        # be role=user; a leading assistant/tool (e.g. a consolidation summary,
-        # or an orphaned tool result after compression) breaks the template.
-        leading_parts: list[str] = []
-        while non_system and str(non_system[0].get("role")) in ("assistant", "tool"):
-            item = non_system.pop(0)
-            content = str(item.get("content", ""))
-            calls = item.get("tool_calls")
-            if calls:
-                # B-063 final-fix B2: preserve tool_calls info in the merged
-                # system text (can't emit structured tool_calls inside the system
-                # prompt). Same rendering as few_shots tool_call description.
-                calls_desc = ", ".join(
-                    f"{c.get('function', {}).get('name', '?')}"
-                    f"({c.get('function', {}).get('arguments', '')})"
-                    for c in calls
-                )
-                content = f"{content} [Tool call: {calls_desc}]".strip()
-            leading_parts.append(content)
-        if leading_parts:
-            system += "\n\n---\nPrevious context:\n" + "\n".join(leading_parts)
+        non_system = normalize_transcript(full_history).messages
 
         builder = cls(system_prompt=system)
 
