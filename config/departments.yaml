@@ -26,6 +26,9 @@ departments:
     # No host-side web egress; office subagents (document/data/execution/filesystem)
     # instead of research-only. send_file stays on main for two-step delivery.
     description: "Default department for unclassified users (office Work, no web egress)"
+    allowed_skills: ["*"]
+    allowed_plugins: ["*"]
+    allowed_mcp: ["*"]
     allowed_tools:
       - read_file
       - list_files
@@ -44,6 +47,9 @@ departments:
 
   engineering:
     description: "Software engineering and IT teams"
+    allowed_skills: ["*"]
+    allowed_plugins: ["*"]
+    allowed_mcp: ["*"]
     allowed_tools:
       - "*"
     allowed_subagents:
@@ -55,6 +61,9 @@ departments:
 
   it:
     description: "IT support and infrastructure"
+    allowed_skills: ["*"]
+    allowed_plugins: ["*"]
+    allowed_mcp: ["*"]
     allowed_tools:
       - read_file
       - list_files
@@ -74,6 +83,9 @@ departments:
 
   marketing:
     description: "Marketing and communications"
+    allowed_skills: ["*"]
+    allowed_plugins: ["*"]
+    allowed_mcp: ["*"]
     allowed_tools:
       - read_file
       - list_files
@@ -92,6 +104,9 @@ departments:
 
   finance:
     description: "Finance and accounting"
+    allowed_skills: ["*"]
+    allowed_plugins: ["*"]
+    allowed_mcp: ["*"]
     allowed_tools:
       - read_file
       - list_files
@@ -111,6 +126,9 @@ departments:
 
   hr:
     description: "Human resources"
+    allowed_skills: ["*"]
+    allowed_plugins: ["*"]
+    allowed_mcp: ["*"]
     allowed_tools:
       - read_file
       - list_files
@@ -129,6 +147,9 @@ departments:
 
   analytics:
     description: "Data analytics and BI"
+    allowed_skills: ["*"]
+    allowed_plugins: ["*"]
+    allowed_mcp: ["*"]
     allowed_tools:
       - read_file
       - list_files
@@ -148,6 +169,9 @@ departments:
 
   product:
     description: "Product management"
+    allowed_skills: ["*"]
+    allowed_plugins: ["*"]
+    allowed_mcp: ["*"]
     allowed_tools:
       - read_file
       - list_files
@@ -166,6 +190,9 @@ departments:
 
   admin:
     description: "System administrators — full access"
+    allowed_skills: ["*"]
+    allowed_plugins: ["*"]
+    allowed_mcp: ["*"]
     allowed_tools:
       - "*"
     allowed_subagents:
@@ -177,6 +204,9 @@ departments:
 
   development:
     description: "Software development team"
+    allowed_skills: ["*"]
+    allowed_plugins: ["*"]
+    allowed_mcp: ["*"]
     allowed_tools:
       - "*"
     allowed_subagents:

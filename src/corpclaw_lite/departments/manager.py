@@ -44,20 +44,61 @@ class DepartmentConfig:
     """RBAC configuration for a specific department."""
 
     def __init__(self, data: dict[str, Any]):
-        self.name: str = data.get("description", "Unknown")
-        self.profile: str = data.get("profile", "default")
-        self.allowed_tools: list[str] = data.get("allowed_tools", ["*"])
-        self.allowed_skills: list[str] = data.get("allowed_skills", ["*"])
-        self.allowed_plugins: list[str] = data.get("allowed_plugins", ["*"])
-        self.allowed_subagents: list[str] = data.get("allowed_subagents", [])
-        self.allowed_mcp: list[str] = data.get("allowed_mcp", ["*"])
+        name_obj: object = data.get("description", "Unknown")
+        profile_obj: object = data.get("profile", "default")
+        if not isinstance(name_obj, str) or not isinstance(profile_obj, str):
+            raise ValueError("Department description and profile must be strings")
+        self.name = name_obj
+        self.profile = profile_obj
+        self.allowed_tools = self._allowlist(data, "allowed_tools", ["*"])
+        self.allowed_skills = self._allowlist(data, "allowed_skills", ["*"])
+        self.allowed_plugins = self._allowlist(data, "allowed_plugins", ["*"])
+        self.allowed_subagents = self._allowlist(data, "allowed_subagents", [])
+        self.allowed_mcp = self._allowlist(data, "allowed_mcp", ["*"])
 
-        budget_data = data.get("budget", {})
+        budget_obj: object = data.get("budget", {})
+        if not isinstance(budget_obj, dict):
+            raise ValueError("Department field 'budget' must be a mapping")
+        budget_data = cast(dict[str, object], budget_obj)
+        max_iterations = budget_data.get("max_iterations", 15)
+        max_tool_calls = budget_data.get("max_tool_calls", 30)
+        if (
+            not isinstance(max_iterations, int)
+            or isinstance(max_iterations, bool)
+            or not isinstance(max_tool_calls, int)
+            or isinstance(max_tool_calls, bool)
+        ):
+            raise ValueError("Department budget values must be integers")
         self.budget = SimpleBudgetGuardConfig(
-            max_iterations=budget_data.get("max_iterations", 15),
-            max_tool_calls=budget_data.get("max_tool_calls", 30),
+            max_iterations=max_iterations,
+            max_tool_calls=max_tool_calls,
             max_time_ms=300000,
         )
+
+    @staticmethod
+    def _allowlist(data: dict[str, Any], field: str, default: list[str]) -> list[str]:
+        raw_obj: object = data.get(field, default)
+        if not isinstance(raw_obj, list):
+            raise ValueError(f"Department field '{field}' must be a list of strings")
+        raw = cast(list[object], raw_obj)
+        if any(not isinstance(item, str) for item in raw):
+            raise ValueError(f"Department field '{field}' must be a list of strings")
+        return [cast(str, item) for item in raw]
+
+    def to_data(self) -> dict[str, Any]:
+        return {
+            "description": self.name,
+            "profile": self.profile,
+            "allowed_tools": list(self.allowed_tools),
+            "allowed_skills": list(self.allowed_skills),
+            "allowed_plugins": list(self.allowed_plugins),
+            "allowed_subagents": list(self.allowed_subagents),
+            "allowed_mcp": list(self.allowed_mcp),
+            "budget": {
+                "max_iterations": self.budget.max_iterations,
+                "max_tool_calls": self.budget.max_tool_calls,
+            },
+        }
 
 
 class DepartmentManager:
@@ -93,14 +134,29 @@ class DepartmentManager:
                 data = cast(dict[str, Any], yaml.safe_load(f) or {})
 
             depts = cast(dict[str, Any], data.get("departments", {}))
+            pending = dict(self._departments)
             for slug, dept_data in depts.items():
                 slug_str = str(slug)
+                if not isinstance(dept_data, dict):
+                    raise ValueError(f"Department '{slug_str}' must be a mapping")
                 dept_dict = cast(dict[str, Any], dept_data)
-                existing = self._departments.get(slug_str)
+                existing = pending.get(slug_str)
                 if merge and existing is not None:
-                    self._departments[slug_str] = self._merge_department(existing, dept_dict)
+                    pending[slug_str] = self._merge_department(existing, dept_dict)
                 else:
-                    self._departments[slug_str] = DepartmentConfig(dept_dict)
+                    parsed = DepartmentConfig(dept_dict)
+                    pending[slug_str] = parsed
+                    for field in _ALLOWLIST_FIELDS:
+                        implicit_wildcard = "*" in cast(list[str], getattr(parsed, field))
+                        if field not in dept_dict and implicit_wildcard:
+                            logger.warning(
+                                "Department '%s' omits %s; compatibility default ['*'] applies",
+                                slug_str,
+                                field,
+                            )
+
+            # Replace only after every department in the file validated.
+            self._departments = pending
 
             logger.info("Loaded %d departments from %s", len(depts), file_path)
         except Exception as e:
@@ -110,34 +166,38 @@ class DepartmentManager:
         self, existing: DepartmentConfig, overlay_data: dict[str, Any]
     ) -> DepartmentConfig:
         """Merge an overlay department dict into an existing DepartmentConfig."""
-        overlay = DepartmentConfig(overlay_data)
-
-        merged = DepartmentConfig(overlay_data)
-        # description / profile: overlay wins (already set via DepartmentConfig).
+        # Start from the complete base. An omitted overlay field means inherit;
+        # it must never materialise DepartmentConfig's compatibility wildcard.
+        merged_data = existing.to_data()
+        if "description" in overlay_data:
+            merged_data["description"] = overlay_data["description"]
+        if "profile" in overlay_data:
+            merged_data["profile"] = overlay_data["profile"]
         for field in _ALLOWLIST_FIELDS:
-            setattr(
-                merged,
-                field,
-                _union_allowlists(
-                    cast(list[str], getattr(existing, field)),
-                    cast(list[str], getattr(overlay, field)),
-                ),
-            )
+            if field in overlay_data:
+                raw_obj: object = overlay_data[field]
+                if not isinstance(raw_obj, list):
+                    raise ValueError(f"Department field '{field}' must be a list of strings")
+                raw = cast(list[object], raw_obj)
+                if any(not isinstance(item, str) for item in raw):
+                    raise ValueError(f"Department field '{field}' must be a list of strings")
+                merged_data[field] = _union_allowlists(
+                    cast(list[str], getattr(existing, field)), [cast(str, item) for item in raw]
+                )
 
         # Budget: overlay overrides max_iterations / max_tool_calls only when
         # the overlay file actually specified a budget block; otherwise inherit.
         # max_time_ms is never merged (D-037: always from settings).
-        overlay_budget = overlay_data.get("budget")
+        overlay_budget: object = overlay_data.get("budget")
+        if "budget" in overlay_data and not isinstance(overlay_budget, dict):
+            raise ValueError("Department field 'budget' must be a mapping")
         if isinstance(overlay_budget, dict):
             budget_dict = cast(dict[str, Any], overlay_budget)
-            merged.budget = SimpleBudgetGuardConfig(
-                max_iterations=budget_dict.get("max_iterations", existing.budget.max_iterations),
-                max_tool_calls=budget_dict.get("max_tool_calls", existing.budget.max_tool_calls),
-                max_time_ms=300000,
-            )
-        else:
-            merged.budget = existing.budget
-        return merged
+            merged_data["budget"] = {
+                "max_iterations": budget_dict.get("max_iterations", existing.budget.max_iterations),
+                "max_tool_calls": budget_dict.get("max_tool_calls", existing.budget.max_tool_calls),
+            }
+        return DepartmentConfig(merged_data)
 
     def get_department(self, slug: str) -> DepartmentConfig | None:
         return self._departments.get(slug)

@@ -1,6 +1,7 @@
 # pyright: reportUnknownMemberType=false, reportUnknownVariableType=false, reportAttributeAccessIssue=false
 from __future__ import annotations
 
+import os
 import shutil
 from dataclasses import dataclass
 from datetime import datetime
@@ -252,6 +253,18 @@ def _unique_destination(parent: Path, name: str) -> Path:
     return destination
 
 
+def _reject_tree_symlinks(root: Path) -> None:
+    """Reject every symlink below *root* without following directory links."""
+    for dir_path, dir_names, file_names in os.walk(root, followlinks=False):
+        current = Path(dir_path)
+        for name in [*dir_names, *file_names]:
+            candidate = current / name
+            if candidate.is_symlink():
+                raise PermissionError(
+                    f"Symbolic links cannot be copied: {candidate.relative_to(root)}"
+                )
+
+
 async def move_paths(workspace: Path, raw_paths: list[str], target_dir: str | None) -> list[str]:
     parent = resolve_workspace_path(workspace, target_dir)
     if not parent.exists() or not parent.is_dir():
@@ -302,7 +315,21 @@ async def copy_paths(workspace: Path, raw_paths: list[str], target_dir: str | No
             validate_no_symlink_escape(ws_root, source.resolve(), raw_path)
             validate_no_symlink_escape(ws_root, destination.resolve(), destination.name)
             if source.is_dir():
-                shutil.copytree(source, destination, symlinks=False)
+                # Check before the operation for a clear error. copytree preserves
+                # links instead of dereferencing them, so a link introduced by a
+                # concurrent writer cannot disclose its target. The post-copy scan
+                # rejects and removes such a raced-in link as well.
+                _reject_tree_symlinks(source)
+                try:
+                    shutil.copytree(source, destination, symlinks=True)
+                    _reject_tree_symlinks(destination)
+                except BaseException:
+                    if destination.exists() or destination.is_symlink():
+                        if destination.is_dir() and not destination.is_symlink():
+                            shutil.rmtree(destination)
+                        else:
+                            destination.unlink()
+                    raise
             else:
                 shutil.copy2(source, destination)
             copied.append(_relative(workspace, destination))

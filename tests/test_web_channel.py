@@ -204,24 +204,34 @@ async def test_web_delete_rejects_symlink_escape(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_web_copy_dereferences_safe_symlinks(tmp_path: Path) -> None:
-    """B-072: copytree uses symlinks=False, so a symlink whose target is inside
-    the workspace is dereferenced (content copied, not the link)."""
+async def test_web_copy_rejects_nested_symlinks_and_cleans_destination(tmp_path: Path) -> None:
+    """Nested links are rejected even when their target is inside the workspace."""
     workspace = tmp_path / "ws"
     workspace.mkdir()
     await make_directory(workspace, "", "source")
     await make_directory(workspace, "", "destination")
     (workspace / "data.txt").write_text("inside")
-    # Symlink to an in-workspace file — allowed, dereferenced on copy.
     safe_link = workspace / "source" / "link_to_data"
     os.symlink(workspace / "data.txt", safe_link)
-    copied = await copy_paths(workspace, ["source"], "destination")
-    assert copied == ["destination/source"]
-    # The copy contains the dereferenced content, not a symlink.
-    copied_link = workspace / "destination" / "source" / "link_to_data"
-    assert copied_link.exists()
-    assert not copied_link.is_symlink()
-    assert copied_link.read_text() == "inside"
+    with pytest.raises(PermissionError, match="Symbolic links cannot be copied"):
+        await copy_paths(workspace, ["source"], "destination")
+    assert not (workspace / "destination" / "source").exists()
+
+
+@pytest.mark.asyncio
+async def test_web_copy_rejects_nested_external_symlink(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    source = workspace / "source"
+    destination = workspace / "destination"
+    source.mkdir(parents=True)
+    destination.mkdir()
+    secret = tmp_path / "host-secret.txt"
+    secret.write_text("must-not-copy")
+    os.symlink(secret, source / "leak.txt")
+
+    with pytest.raises(PermissionError, match="Symbolic links cannot be copied"):
+        await copy_paths(workspace, ["source"], "destination")
+    assert not (destination / "source").exists()
 
 
 @pytest.mark.asyncio

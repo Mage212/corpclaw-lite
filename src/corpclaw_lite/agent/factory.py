@@ -603,6 +603,7 @@ def build_agent_stack(
         registry,
         full_settings.skills,
         full_tool_registry=full_tool_reg,
+        permission_checker=permission_checker,
     )
 
     subagent_registry = _build_extensions_stack(
