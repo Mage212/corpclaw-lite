@@ -50,6 +50,20 @@ def _openai_settings(base_url: str = "http://localhost:11434/v1") -> ProviderSet
 
 
 class TestAnthropicProvider:
+    @staticmethod
+    def _tools(*names: str) -> list[dict[str, Any]]:
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": "test tool",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+            for name in names
+        ]
+
     def _text_response(self, text: str) -> MagicMock:
         block = MagicMock()
         block.type = "text"
@@ -107,7 +121,7 @@ class TestAnthropicProvider:
             mock_mod.AsyncAnthropic.return_value = mock_client
             provider = AnthropicProvider(_anthropic_settings())
 
-        result = await provider.chat(messages=[], tools=None)
+        result = await provider.chat(messages=[], tools=self._tools("read_file"))
 
         assert len(result.tool_calls) == 1
         tc = result.tool_calls[0]
@@ -142,7 +156,7 @@ class TestAnthropicProvider:
             mock_mod.AsyncAnthropic.return_value = mock_client
             provider = AnthropicProvider(_anthropic_settings())
 
-        result = await provider.chat(messages=[])
+        result = await provider.chat(messages=[], tools=self._tools("read_file"))
 
         assert result.content == "Читаю файл."
         assert len(result.tool_calls) == 1

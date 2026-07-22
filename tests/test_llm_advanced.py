@@ -357,11 +357,8 @@ async def test_anthropic_chat_with_image_applies_system_prompt_prefix() -> None:
 
 
 @pytest.mark.asyncio
-async def test_anthropic_stream_does_not_apply_preset() -> None:
-    """stream() must NOT apply preset (system_prompt_prefix, inference params).
-
-    Streaming is for cloud models that don't need preset tuning.
-    """
+async def test_anthropic_stream_applies_same_preset_as_chat() -> None:
+    """stream() and chat() must use the same request-building contract."""
 
     from corpclaw_lite.llm.presets import ModelPreset
 
@@ -395,6 +392,4 @@ async def test_anthropic_stream_does_not_apply_preset() -> None:
         ]
 
     call_kwargs = mock_client.messages.stream.call_args.kwargs
-    # Preset must NOT be applied to stream — system stays as-is
-    assert call_kwargs["system"] == "Base system"
-    assert "<|think|>" not in call_kwargs["system"]
+    assert call_kwargs["system"] == "<|think|>\nBase system"
