@@ -93,3 +93,34 @@ class TestIterationBudget:
         guard.consume_iteration()
         guard.consume_iteration()  # over limit, but no raise yet
         guard.consume_iteration()
+
+
+class TestToolCallReservation:
+    """A provider tool-call batch is admitted atomically."""
+
+    def test_exact_remaining_capacity_is_reserved(self) -> None:
+        guard = SimpleBudgetGuard(SimpleBudgetGuardConfig(max_tool_calls=3, max_time_ms=60_000))
+        guard.reserve_tool_calls(1)
+        guard.reserve_tool_calls(2)
+        assert guard.state.tool_calls_used == 3
+
+    def test_oversized_batch_is_rejected_without_mutation(self) -> None:
+        guard = SimpleBudgetGuard(SimpleBudgetGuardConfig(max_tool_calls=3, max_time_ms=60_000))
+        guard.reserve_tool_calls(2)
+
+        with pytest.raises(BudgetExceededError, match="4/3"):
+            guard.reserve_tool_calls(2)
+
+        assert guard.state.tool_calls_used == 2
+
+    def test_disabled_guard_still_accounts_batch(self) -> None:
+        guard = SimpleBudgetGuard(
+            SimpleBudgetGuardConfig(enabled=False, max_tool_calls=1, max_time_ms=60_000)
+        )
+        guard.reserve_tool_calls(3)
+        assert guard.state.tool_calls_used == 3
+
+    def test_negative_reservation_is_rejected(self) -> None:
+        guard = SimpleBudgetGuard(SimpleBudgetGuardConfig(max_time_ms=60_000))
+        with pytest.raises(ValueError, match="cannot be negative"):
+            guard.reserve_tool_calls(-1)

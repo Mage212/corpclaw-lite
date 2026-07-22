@@ -109,11 +109,12 @@ async def test_list_and_search(
 
 
 @pytest.mark.asyncio
-async def test_registry_execute_passes_user_kwarg(monkeypatch: pytest.MonkeyPatch) -> None:
-    """ToolRegistry.execute() must forward the user kwarg into tool.execute()."""
+async def test_registry_execute_exposes_runtime_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Registry metadata is task-local and absent from business arguments."""
     from typing import Any
 
     from corpclaw_lite.extensions.tools.base import RiskLevel, Tool
+    from corpclaw_lite.extensions.tools.context import get_tool_execution_context
     from corpclaw_lite.users.models import User
 
     received_user: list[Any] = []
@@ -125,9 +126,12 @@ async def test_registry_execute_passes_user_kwarg(monkeypatch: pytest.MonkeyPatc
         params = []
         risk_level = RiskLevel.LOW
 
-        async def execute(self, *, user: Any = None, **kwargs: Any) -> str:
-            received_user.append(user)
-            received_run_id.append(kwargs.get("run_id"))
+        async def execute(self, **kwargs: Any) -> str:
+            context = get_tool_execution_context()
+            assert context is not None
+            assert kwargs == {}
+            received_user.append(context.user)
+            received_run_id.append(context.run_id)
             return "ok"
 
     r = ToolRegistry()
@@ -137,8 +141,9 @@ async def test_registry_execute_passes_user_kwarg(monkeypatch: pytest.MonkeyPatc
     result = await r.execute("capture_user", {}, user=user, run_id="run-tool")
 
     assert result == "ok"
-    assert received_user == [user], "user kwarg was not forwarded to tool.execute()"
-    assert received_run_id == ["run-tool"], "run_id kwarg was not forwarded to tool.execute()"
+    assert received_user == [user]
+    assert received_run_id == ["run-tool"]
+    assert get_tool_execution_context() is None
 
 
 @pytest.mark.asyncio

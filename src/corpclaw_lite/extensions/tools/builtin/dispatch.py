@@ -5,6 +5,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
 from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
+from corpclaw_lite.extensions.tools.context import get_tool_execution_context
 
 __all__ = [
     "DispatchSubagentTool",
@@ -73,10 +74,17 @@ class DispatchSubagentTool(Tool):
         ]
 
     async def execute(self, *, user: User | None = None, **kwargs: Any) -> str:
+        context = get_tool_execution_context()
+        if user is None and context is not None:
+            user = context.user
         subagent_id = kwargs.get("subagent_id")
         task = kwargs.get("task")
-        run_id = kwargs.get("run_id")
-        parent_run_id = run_id if isinstance(run_id, str) else None
+        explicit_run_id = kwargs.get("run_id")
+        parent_run_id = (
+            explicit_run_id
+            if isinstance(explicit_run_id, str)
+            else (context.run_id if context is not None else None)
+        )
         raw_on_subagent_tool_start = kwargs.get("on_subagent_tool_start")
         raw_on_subagent_tool_batch_start = kwargs.get("on_subagent_tool_batch_start")
         raw_on_subagent_llm_stage = kwargs.get("on_subagent_llm_stage")
@@ -84,24 +92,29 @@ class DispatchSubagentTool(Tool):
         on_subagent_tool_start = (
             cast("Callable[[str, str], None]", raw_on_subagent_tool_start)
             if callable(raw_on_subagent_tool_start)
-            else None
+            else (context.on_subagent_tool_start if context is not None else None)
         )
         on_subagent_tool_batch_start = (
             cast("Callable[[str, list[str]], None]", raw_on_subagent_tool_batch_start)
             if callable(raw_on_subagent_tool_batch_start)
-            else None
+            else (context.on_subagent_tool_batch_start if context is not None else None)
         )
         on_subagent_llm_stage = (
             cast("Callable[[str, str], None]", raw_on_subagent_llm_stage)
             if callable(raw_on_subagent_llm_stage)
-            else None
+            else (context.on_subagent_llm_stage if context is not None else None)
         )
         on_subagent_llm_queue_status = (
             cast("Callable[[str, LLMQueueStatus], None]", raw_on_subagent_llm_queue_status)
             if callable(raw_on_subagent_llm_queue_status)
-            else None
+            else (context.on_subagent_llm_queue_status if context is not None else None)
         )
-        parent_trajectory_recorder = kwargs.get("parent_trajectory_recorder")
+        explicit_parent_trajectory = kwargs.get("parent_trajectory_recorder")
+        parent_trajectory_recorder = (
+            explicit_parent_trajectory
+            if explicit_parent_trajectory is not None
+            else (context.parent_trajectory_recorder if context is not None else None)
+        )
 
         if not isinstance(subagent_id, str) or not isinstance(task, str):
             return "Error: 'subagent_id' and 'task' are required string parameters."

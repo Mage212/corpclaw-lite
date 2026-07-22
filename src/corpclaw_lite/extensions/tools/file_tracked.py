@@ -28,6 +28,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from corpclaw_lite.extensions.tools.context import get_tool_execution_context
 from corpclaw_lite.extensions.tools.scoped import ScopedTool
 from corpclaw_lite.security.path_validator import resolve_and_validate_path
 
@@ -126,8 +127,15 @@ class FileTrackedTool(ScopedTool):
     # ─── execute ─────────────────────────────────────────────────────────────
 
     async def execute(self, **kwargs: Any) -> str:
-        user = kwargs.get("user")
-        run_id = kwargs.get("run_id")
+        context = get_tool_execution_context()
+        explicit_user = kwargs.get("user")
+        user = explicit_user if explicit_user is not None else (context.user if context else None)
+        explicit_run_id = kwargs.get("run_id")
+        run_id = (
+            explicit_run_id
+            if isinstance(explicit_run_id, str)
+            else (context.run_id if context else None)
+        )
         source_raw = kwargs.get(self._path_param)
 
         # No tracking context → pass through untouched.

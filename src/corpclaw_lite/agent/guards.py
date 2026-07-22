@@ -324,6 +324,25 @@ class SimpleBudgetGuard:
         if count > 0:
             self.state.tool_calls_used += count
 
+    def reserve_tool_calls(self, count: int) -> None:
+        """Atomically admit and account for a complete tool-call batch.
+
+        A model response is one protocol batch: executing only the prefix that
+        happens to fit would leave the remaining calls without results and
+        would change the model's requested action set.  Validate the projected
+        total before mutating state so callers can reject the whole batch.
+        """
+        if count < 0:
+            raise ValueError("Tool call reservation count cannot be negative")
+        if count == 0:
+            return
+        projected = self.state.tool_calls_used + count
+        if self.config.enabled and projected > self.config.max_tool_calls:
+            raise BudgetExceededError(
+                f"Tool call budget exceeded: {projected}/{self.config.max_tool_calls}"
+            )
+        self.state.tool_calls_used = projected
+
     def pause(self) -> None:
         """Pause the time budget (e.g., while waiting in an LLM queue)."""
         if self.state.paused_at is None:

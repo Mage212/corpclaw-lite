@@ -1373,7 +1373,10 @@ class AgentLoop:
 
                 # Model wants more work — check ALL state.budget limits before continuing.
                 state.budget.check()
-                state.budget.consume_tool_calls(len(response.tool_calls))
+                # Admit the complete provider batch before persisting or
+                # executing any call.  Partial execution would both exceed the
+                # configured limit and leave an invalid tool protocol history.
+                state.budget.reserve_tool_calls(len(response.tool_calls))
 
                 # Agent requested tools — emit a single assistant message
                 # containing both content (if any) and tool_calls.
@@ -1397,6 +1400,40 @@ class AgentLoop:
                     reasoning=response.reasoning,
                 )
                 health.increment("tool_calls", len(response.tool_calls))
+
+                terminal_calls = [
+                    tc
+                    for tc in response.tool_calls
+                    if (tool := self._registry.get(tc.name)) is not None
+                    and getattr(tool, "terminal", False)
+                ]
+                if terminal_calls and len(response.tool_calls) > 1:
+                    # A terminal call declares the response complete. Running
+                    # sibling actions before/after it makes completion and side
+                    # effects order-dependent, so reject the entire model batch
+                    # while still closing every protocol call with a result.
+                    result = (
+                        "Error: Terminal tools must be called alone; no tools in "
+                        "this batch were executed. Retry the terminal call by itself."
+                    )
+                    for tc in response.tool_calls:
+                        state.context.add_tool_result(tc.id, tc.name, result)
+                        await self._persist_context_msg(
+                            role="tool",
+                            content=result,
+                            tool_call_id=tc.id,
+                            name=tc.name,
+                        )
+                    state.context.add_user_message(
+                        "Retry the terminal tool in a separate tool-call response. "
+                        "Do not combine it with any other tool."
+                    )
+                    log_event(
+                        "mixed_terminal_batch_rejected",
+                        state.stats.run_id,
+                        tool_names=[tc.name for tc in response.tool_calls],
+                    )
+                    continue
 
                 if self._can_parallelize(response.tool_calls):
                     results = await self._execute_parallel(
@@ -1550,17 +1587,43 @@ class AgentLoop:
             if self._terminal_tool and not state.mandate.terminal_called(state.stats.tools_used):
 
                 async def _cascade_execute(tc: ToolCall, u: User, st: RunStats) -> str:
-                    return await self._execute_single_tool(
+                    state.context.add_tool_calls([tc])
+                    await self._persist_context_msg(
+                        role="assistant",
+                        content="",
+                        tool_calls=[
+                            {
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.name,
+                                    "arguments": json.dumps(tc.arguments),
+                                },
+                            }
+                        ],
+                    )
+                    result = await self._execute_single_tool(
                         tc,
                         u,
-                        None,
+                        _approval_cb,
                         sink,
-                        None,
+                        trajectory_recorder,
                         st,
-                        None,
+                        state.task_run,
                         emit_tool_start=False,
                         channel=state.channel,
                     )
+                    state.context.add_tool_result(tc.id, tc.name, result)
+                    await self._persist_context_msg(
+                        role="tool",
+                        content=result,
+                        tool_call_id=tc.id,
+                        name=tc.name,
+                    )
+                    if not result.startswith(TOOL_ERROR_PREFIX):
+                        state.stats.tools_used.append(tc.name)
+                        state.current_turn_tools.append(tc.name)
+                    return result
 
                 salvage = await auto_finalize_cascade(
                     state.context,
@@ -2026,7 +2089,11 @@ class AgentLoop:
 
         for tc in tool_calls:
             tool = self._registry.get(tc.name)
-            if tool is None or not getattr(tool, "parallel_safe", True):
+            if (
+                tool is None
+                or getattr(tool, "terminal", False)
+                or not getattr(tool, "parallel_safe", True)
+            ):
                 return False
         return True
 
@@ -2304,11 +2371,11 @@ class AgentLoop:
                     status = "ok"
                 else:
                     health.increment("approval_denied")
-                    result = f"Action '{e.action}' was denied by user."
+                    result = f"{TOOL_ERROR_PREFIX}: Action '{e.action}' was denied by user."
                     status = "approval_denied"
             else:
                 result = (
-                    f"Action Paused: approval required for '{e.action}' "
+                    f"{TOOL_ERROR_PREFIX}: Action paused; approval required for '{e.action}' "
                     f"but no approval channel is configured."
                 )
                 status = "approval_no_channel"
@@ -2331,7 +2398,7 @@ class AgentLoop:
                 decision="block",
                 details=str(e),
             )
-            result = str(e)
+            result = f"{TOOL_ERROR_PREFIX}: {e}"
             status = "guard_blocked"
         except ContainerIPCError as e:
             logger.error("[user=%s] Container IPC error for tool %s: %s", user.id, tc.name, e)

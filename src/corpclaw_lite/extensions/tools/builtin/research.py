@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from corpclaw_lite.config.settings import ResearchSettings
 from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
+from corpclaw_lite.extensions.tools.context import get_tool_execution_context
 from corpclaw_lite.logging.trace import log_event
 from corpclaw_lite.paths import PROJECT_ROOT
 
@@ -54,6 +55,24 @@ _FINALIZE_MAX_ATTEMPTS = 2
 # considered to have web search degraded, and the agent is steered toward a
 # knowledge-based answer with an explicit offline banner.
 _WEB_SEARCH_DEGRADED_THRESHOLD = 2
+
+
+def _runtime_context(
+    user: User | None,
+    kwargs: dict[str, Any],
+) -> tuple[User | None, str | None]:
+    """Resolve explicit direct-call metadata before task-local registry metadata."""
+
+    context = get_tool_execution_context()
+    if user is None and context is not None:
+        user = context.user
+    explicit_run_id = kwargs.get("run_id")
+    run_id = (
+        explicit_run_id
+        if isinstance(explicit_run_id, str)
+        else (context.run_id if context is not None else None)
+    )
+    return user, run_id
 
 
 def _is_usable_status(status: object) -> bool:
@@ -1200,12 +1219,12 @@ class ResearchSearchTool(Tool):
         self._search_tool = search_tool
 
     async def execute(self, *, user: User | None = None, **kwargs: Any) -> str:
+        user, run_id = _runtime_context(user, kwargs)
         if user is None:
             return "Error: User context is required for research_search."
         query = kwargs.get("query")
         if not isinstance(query, str) or not query.strip():
             return "Error: 'query' is a required non-empty string parameter."
-        run_id = kwargs.get("run_id") if isinstance(kwargs.get("run_id"), str) else None
         mode = self._runtime.resolve_mode(user, run_id, kwargs.get("mode"))
 
         # B-052: short-circuit cheaply if the budget is already exhausted (no web request).
@@ -1277,13 +1296,13 @@ class ResearchFetchSourceTool(Tool):
         self._fetch_tool = fetch_tool
 
     async def execute(self, *, user: User | None = None, **kwargs: Any) -> str:
+        user, run_id = _runtime_context(user, kwargs)
         if user is None:
             return "Error: User context is required for research_fetch_source."
         url = kwargs.get("url")
         if not isinstance(url, str) or not url.strip():
             return "Error: 'url' is a required non-empty string parameter."
         url = url.strip()
-        run_id = kwargs.get("run_id") if isinstance(kwargs.get("run_id"), str) else None
         mode = self._runtime.resolve_mode(user, run_id, kwargs.get("mode"))
         max_chars = _as_int(kwargs.get("max_chars"), self._runtime.settings.source_excerpt_chars)
 
@@ -1341,12 +1360,12 @@ class ResearchReadSourceTool(Tool):
         self._runtime = runtime
 
     async def execute(self, *, user: User | None = None, **kwargs: Any) -> str:
+        user, run_id = _runtime_context(user, kwargs)
         if user is None:
             return "Error: User context is required for research_read_source."
         source_id = kwargs.get("source_id")
         if not isinstance(source_id, str) or not source_id.strip():
             return "Error: 'source_id' is a required non-empty string parameter."
-        run_id = kwargs.get("run_id") if isinstance(kwargs.get("run_id"), str) else None
         mode = self._runtime.resolve_mode(user, run_id, kwargs.get("mode"))
         text = self._runtime.read_source_text(user, run_id, source_id.strip())
         if text is None:
@@ -1404,9 +1423,9 @@ class ResearchStoreFactTool(Tool):
         self._runtime = runtime
 
     async def execute(self, *, user: User | None = None, **kwargs: Any) -> str:
+        user, run_id = _runtime_context(user, kwargs)
         if user is None:
             return "Error: User context is required for research_store_fact."
-        run_id = kwargs.get("run_id") if isinstance(kwargs.get("run_id"), str) else None
         source_id = kwargs.get("source_id")
         fact_text = kwargs.get("fact")
         evidence = kwargs.get("evidence")
@@ -1480,9 +1499,9 @@ class ResearchListSourcesTool(Tool):
         self._runtime = runtime
 
     async def execute(self, *, user: User | None = None, **kwargs: Any) -> str:
+        user, run_id = _runtime_context(user, kwargs)
         if user is None:
             return "Error: User context is required for research_list_sources."
-        run_id = kwargs.get("run_id") if isinstance(kwargs.get("run_id"), str) else None
         self._runtime.mark_list_sources_called(user, run_id)
         return self._runtime.format_sources_list(
             user, run_id, _as_int(kwargs.get("max_sources"), 50)
@@ -1511,9 +1530,9 @@ class ResearchListFactsTool(Tool):
         self._runtime = runtime
 
     async def execute(self, *, user: User | None = None, **kwargs: Any) -> str:
+        user, run_id = _runtime_context(user, kwargs)
         if user is None:
             return "Error: User context is required for research_list_facts."
-        run_id = kwargs.get("run_id") if isinstance(kwargs.get("run_id"), str) else None
         self._runtime.mark_list_facts_called(user, run_id)
         return self._runtime.format_facts(user, run_id, _as_int(kwargs.get("max_facts"), 50))
 
@@ -1549,9 +1568,9 @@ class ResearchFinalizeTool(Tool):
         self._runtime = runtime
 
     async def execute(self, *, user: User | None = None, **kwargs: Any) -> str:
+        user, run_id = _runtime_context(user, kwargs)
         if user is None:
             return "Error: User context is required for research_finalize."
-        run_id = kwargs.get("run_id") if isinstance(kwargs.get("run_id"), str) else None
         mode = self._runtime.resolve_mode(user, run_id, kwargs.get("mode"))
         raw_answer = kwargs.get("answer")
         answer: str = raw_answer if isinstance(raw_answer, str) else ""

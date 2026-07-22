@@ -684,6 +684,7 @@ async def test_subagent_status_callbacks_passed_to_tool_runtime_context(
 ) -> None:
     """Subagent status callbacks should reach runtime-aware tools."""
     captured_kwargs: dict[str, Any] = {}
+    captured_context: list[Any] = []
 
     class FakeDispatchTool:
         name = "dispatch_subagent"
@@ -692,7 +693,10 @@ async def test_subagent_status_callbacks_passed_to_tool_runtime_context(
         parallel_safe = False
 
         async def execute(self, **kwargs: Any) -> str:
+            from corpclaw_lite.extensions.tools.context import get_tool_execution_context
+
             captured_kwargs.update(kwargs)
+            captured_context.append(get_tool_execution_context())
             return "subagent result"
 
     empty_registry._tools["dispatch_subagent"] = FakeDispatchTool()  # type: ignore
@@ -748,20 +752,23 @@ async def test_subagent_status_callbacks_passed_to_tool_runtime_context(
     assert result == "Done."
     assert started_tools == ["dispatch_subagent"]
     assert stats.tools_used == ["dispatch_subagent"]
-    # B-079: registry gets adapters that forward to EventSink (not the raw kwargs).
+    # Runtime callbacks live in the non-serialized execution context. Business
+    # kwargs remain exactly the model-declared arguments.
+    assert captured_kwargs == {"subagent_id": "worker", "task": "work"}
+    assert captured_context[0] is not None
+    runtime = captured_context[0]
     for key in (
         "on_subagent_tool_start",
         "on_subagent_tool_batch_start",
         "on_subagent_llm_stage",
         "on_subagent_llm_queue_status",
     ):
-        assert key in captured_kwargs
-        assert callable(captured_kwargs[key])
+        assert callable(getattr(runtime, key))
     # Functional path: adapters invoke user callbacks.
-    captured_kwargs["on_subagent_tool_start"]("worker", "read_file")
-    captured_kwargs["on_subagent_tool_batch_start"]("worker", ["a", "b"])
-    captured_kwargs["on_subagent_llm_stage"]("worker", "model_waiting")
-    captured_kwargs["on_subagent_llm_queue_status"](
+    runtime.on_subagent_tool_start("worker", "read_file")
+    runtime.on_subagent_tool_batch_start("worker", ["a", "b"])
+    runtime.on_subagent_llm_stage("worker", "model_waiting")
+    runtime.on_subagent_llm_queue_status(
         "worker",
         LLMQueueStatus(
             user_id="u",
@@ -1947,6 +1954,84 @@ async def test_auto_finalize_stage_c_programmatic(
     # Stage C: the text was passed as answer to research_finalize programmatically.
     assert "the answer is 42" in result
     assert stats.status == "ok"
+
+
+@pytest.mark.asyncio
+async def test_auto_finalize_stage_c_obeys_tool_guard(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    from corpclaw_lite.security.tool_guard import ApprovalRequest, ToolGuard
+
+    executions = 0
+
+    class SearchTool:
+        name = "research_search"
+        description = "search"
+        params: list[Any] = []
+        terminal = False
+        parallel_safe = True
+        risk_level = None
+
+        async def execute(self, **kwargs: Any) -> str:
+            return "results"
+
+    class FinalizeTool:
+        name = "research_finalize"
+        description = "finalize"
+        params: list[Any] = []
+        terminal = True
+        parallel_safe = True
+        risk_level = None
+
+        async def execute(self, **kwargs: Any) -> str:
+            nonlocal executions
+            executions += 1
+            return "should not execute"
+
+    class FinalizeApprovalGuard(ToolGuard):
+        async def check(  # type: ignore[override]
+            self, tool_name: str, arguments: Any, risk_level: str | None = None
+        ) -> None:
+            if tool_name == "research_finalize":
+                raise ApprovalRequest(action=tool_name, details="finalize approval")
+
+    empty_registry._tools["research_search"] = SearchTool()  # type: ignore[attr-defined]
+    empty_registry._tools["research_finalize"] = FinalizeTool()  # type: ignore[attr-defined]
+    provider = MockProvider(
+        responses=[
+            LLMResponse(
+                content="",
+                tool_calls=[ToolCall(id="1", name="research_search", arguments={})],
+            ),
+            LLMResponse(
+                content="",
+                tool_calls=[ToolCall(id="2", name="research_search", arguments={})],
+            ),
+            LLMResponse(content="partial report"),
+        ]
+    )
+    approvals: list[str] = []
+
+    async def deny(action: str, details: str) -> bool:
+        approvals.append(action)
+        return False
+
+    loop = AgentLoop(
+        AgentConfig(
+            provider,
+            empty_registry,
+            AgentSettings(max_steps=3, max_tool_calls=100),
+            terminal_tool="research_finalize",
+            tool_guard=FinalizeApprovalGuard(),
+        )
+    )
+
+    result, stats = await loop.run(test_user, "research", approval_callback=deny)
+
+    assert stats.status == "budget"
+    assert "resource limit" in result.lower()
+    assert approvals == ["research_finalize"]
+    assert executions == 0
 
 
 @pytest.mark.asyncio
