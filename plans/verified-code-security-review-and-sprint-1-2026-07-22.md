@@ -1,7 +1,7 @@
 # Verified Code & Security Review — Sprint 1
 
-> Date: 2026-07-22  
-> Baseline: `pre-release` at `975448a`  
+> Date: 2026-07-22
+> Baseline: `pre-release` at `975448a`
 > Purpose: canonical, code-traced register for the July 2026 review and its fixes.
 
 ## Reading and status rules
