@@ -1626,6 +1626,29 @@ class AgentLoop:
                             break
                         continue
 
+            # A normal ``break`` from the ReAct loop is still part of this
+            # request's persistence lifetime. Save the user-visible fallback
+            # before the ``finally`` epilogue resets the session target.
+            fallback = _LOOP_FALLBACK
+            await self._save_turn(state.mem_key, fallback, state.stats.tools_used)
+            state.stats.status = "loop"
+            state.stats.duration_ms = (time.monotonic() - state.t0) * 1000
+            logger.warning(
+                "[user=%s] loop detected after %d iterations",
+                user.id,
+                state.stats.iterations,
+            )
+            log_event(
+                "request_finished",
+                state.stats.run_id,
+                status=state.stats.status,
+                iterations=state.stats.iterations,
+                tools_used=state.stats.tools_used,
+                duration_ms=round(state.stats.duration_ms, 1),
+                final_answer_len=len(fallback),
+            )
+            return fallback, state.stats
+
         except BudgetExceededError as e:
             health.increment("errors")
             # Auto-finalize cascade: if this is a workflow subagent with a
@@ -1723,26 +1746,6 @@ class AgentLoop:
             return msg, state.stats
         finally:
             self._finalize_turn(tokens)
-
-        fallback = _LOOP_FALLBACK
-        await self._save_turn(state.mem_key, fallback, state.stats.tools_used)
-        state.stats.status = "loop"
-        state.stats.duration_ms = (time.monotonic() - state.t0) * 1000
-        logger.warning(
-            "[user=%s] loop detected after %d iterations",
-            user.id,
-            state.stats.iterations,
-        )
-        log_event(
-            "request_finished",
-            state.stats.run_id,
-            status=state.stats.status,
-            iterations=state.stats.iterations,
-            tools_used=state.stats.tools_used,
-            duration_ms=round(state.stats.duration_ms, 1),
-            final_answer_len=len(fallback),
-        )
-        return fallback, state.stats
 
     async def _build_turn_context(
         self,

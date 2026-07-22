@@ -525,6 +525,59 @@ async def test_loop_stops_on_progress_guard(test_user: User, empty_registry: Too
 
 
 @pytest.mark.asyncio
+async def test_loop_fallback_is_persisted_before_context_reset(
+    test_user: User, empty_registry: ToolRegistry, tmp_path: Path
+) -> None:
+    from corpclaw_lite.agent.context_target import (
+        get_context_session_id,
+        get_context_user_id,
+    )
+    from corpclaw_lite.channels.web.chat_context_store import ChatContextStore
+    from corpclaw_lite.channels.web.chat_store import WebChatStore
+
+    class FailingTool:
+        name = "fail_tool"
+        description = "fail"
+        params: list[Any] = []
+        terminal = False
+
+        async def execute(self, **kwargs: Any) -> str:
+            return "Error: repeated failure"
+
+    empty_registry._tools["fail_tool"] = FailingTool()  # type: ignore[attr-defined]
+    db = tmp_path / "loop-fallback.db"
+    web_store = WebChatStore(db)
+    context_store = ChatContextStore(db)
+    session_id = await web_store.create_session(user_id=str(test_user.id), section="chat")
+    provider = MockProvider(
+        responses=[
+            LLMResponse(
+                content="",
+                tool_calls=[ToolCall(id=str(i), name="fail_tool", arguments={})],
+            )
+            for i in range(20)
+        ]
+    )
+    loop = AgentLoop(
+        AgentConfig(
+            provider,
+            empty_registry,
+            AgentSettings(max_steps=20, max_tool_calls=100),
+            chat_context_store=context_store,
+        )
+    )
+
+    result, stats = await loop.run(test_user, "do it", session_id=session_id)
+
+    transcript = await context_store.list_context(session_id, user_id=str(test_user.id))
+    assert stats.status == "loop"
+    assert transcript[-1]["role"] == "assistant"
+    assert transcript[-1]["content"] == result
+    assert get_context_session_id() is None
+    assert get_context_user_id() is None
+
+
+@pytest.mark.asyncio
 async def test_approval_callback_per_call_takes_priority(
     test_user: User, empty_registry: ToolRegistry
 ) -> None:
