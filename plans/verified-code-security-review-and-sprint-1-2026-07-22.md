@@ -257,7 +257,8 @@ exploit was established and upgrades remain Sprint 3 work.
 - `uv run ruff format src/ tests/ --check`: passed.
 - `uv run ruff check src/ tests/`: passed.
 - `uv run pyright src/`: 0 errors; 16 pre-existing matplotlib typing warnings.
-- `uv run pytest tests/ -v`: 1952 passed, 1 skipped, 1 aiohttp warning in 397.44 seconds.
+- `uv run pytest tests/ -q`: 1952 passed, 1 skipped, 1 aiohttp warning in 362.85 seconds
+  on the final committed code tree.
   This is the actual branch result; the historical review snapshot above is retained separately.
 - `uvx bandit -r src/ -q -lll`: passed, zero High findings. The full Bandit scan contains only
   the already reviewed Low/Medium findings.
