@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import sys
 from typing import TYPE_CHECKING
 
@@ -91,9 +90,20 @@ def get_registry() -> ToolRegistry:
 def process_request() -> None:
     """Read from stdin, verify, execute tool, sign response, print to stdout."""
     _init_logging()
-    # sys.stdin.read() hangs indefinitely on Docker Desktop for Mac because of EOF handling issues.
-    # Since payload is sent as a single line JSON string, we use readline().
-    input_data = sys.stdin.readline().strip()
+    # Two-line stdin protocol (security-hardening sprint 3): line 1 is the IPC
+    # secret, line 2 is the signed JSON payload. Keeping the secret on stdin
+    # keeps it out of the docker exec argv (visible via ps/proc). We fall back to
+    # CORPCLAW_IPC_SECRET env only if the first line looks like JSON (legacy host
+    # callers that still send a single payload line and rely on env).
+    first_line = sys.stdin.readline()
+    second_line = sys.stdin.readline()
+    secret_from_stdin = first_line.strip()
+    input_data = second_line.strip()
+    if not input_data:
+        # Legacy single-line caller: the first line was actually the payload.
+        input_data = secret_from_stdin
+        secret_from_stdin = ""
+
     if not input_data:
         return
 
@@ -102,11 +112,9 @@ def process_request() -> None:
     try:
         req = json.loads(input_data)
 
-        # Verify — secret is injected only for this docker-exec process (-e),
-        # not the long-lived container create environment.
-        auth = IPCAuth()
-        # Clear secret from process environment after loading into IPCAuth.
-        os.environ.pop("CORPCLAW_IPC_SECRET", None)
+        # Verify — secret is provided on stdin for this docker-exec process only,
+        # not in the long-lived container create environment.
+        auth = IPCAuth(secret=secret_from_stdin or None)
         payload = auth.verify(req)
 
         if payload.get("type") != "tool_call":

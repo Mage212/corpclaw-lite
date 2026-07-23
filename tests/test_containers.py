@@ -164,3 +164,49 @@ def test_container_stop_no_docker():
     manager.network_policy = None
     manager._active_containers = {}
     manager.stop(user_id=999)  # should not raise
+
+
+# ── S3-02: seccomp fail-fast + generation labels ─────────────────────────────
+
+
+def test_build_docker_args_writes_generation_labels():
+    """build_docker_args labels containers for policy re-validation on reuse."""
+    from corpclaw_lite.container.policies import build_docker_args
+
+    args = build_docker_args(user_id=1, settings=ContainerSettings())
+    labels = args.get("labels", {})
+    assert labels["corpclaw.image"] == "corpclaw-agent-base:latest"
+    assert labels["corpclaw.strict_capabilities"] == "True"
+    assert labels["corpclaw.network"] == "default"
+
+
+def test_build_docker_args_seccomp_missing_fatal_raises(tmp_path, monkeypatch):
+    """Missing seccomp profile with seccomp_missing_fatal=True fails fast."""
+    from corpclaw_lite.container.policies import (
+        ContainerPolicyError,
+        build_docker_args,
+    )
+
+    settings = ContainerSettings(strict_capabilities=True, seccomp_missing_fatal=True)
+    # Point seccomp path at a non-existent file.
+    monkeypatch.setattr(
+        "corpclaw_lite.container.policies.seccomp_profile_path",
+        "definitely-missing-seccomp.json",
+        raising=False,
+    )
+    monkeypatch.setattr("corpclaw_lite.container.policies.PROJECT_ROOT", tmp_path, raising=False)
+    with pytest.raises(ContainerPolicyError, match="Seccomp profile not found"):
+        build_docker_args(user_id=1, settings=settings)
+
+
+def test_build_docker_args_seccomp_missing_non_fatal_skips(tmp_path, monkeypatch):
+    """Missing seccomp profile with seccomp_missing_fatal=False logs and skips."""
+    from corpclaw_lite.container.policies import build_docker_args
+
+    settings = ContainerSettings(strict_capabilities=True, seccomp_missing_fatal=False)
+    monkeypatch.setattr("corpclaw_lite.container.policies.PROJECT_ROOT", tmp_path, raising=False)
+    args = build_docker_args(user_id=1, settings=settings, seccomp_profile_path="missing.json")
+    # No seccomp entry in security_opt, but cap_drop/user still applied.
+    assert args["user"] == "agent"
+    assert args["cap_drop"] == ["ALL"]
+    assert not any(s.startswith("seccomp=") for s in args["security_opt"])

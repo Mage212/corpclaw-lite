@@ -126,6 +126,46 @@ class ContainerManager:
                 del self._user_locks[k]
         return lock
 
+    def _existing_matches_policy(self, container: Any) -> bool:
+        """Return True only if *container* was created under the current policy.
+
+        We compare the image tag and the generation labels written at create time
+        (strict_capabilities, network mode). A mismatch means the container was
+        pre-created by another actor, or is stale from a settings change, and must
+        not be silently reused as the sandbox.
+        """
+        try:
+            image_tags = getattr(getattr(container, "image", None), "tags", None) or []
+            image_name = image_tags[0] if image_tags else ""
+            if image_name != self.settings.image:
+                return False
+
+            labels = container.labels or {}
+            expected_strict = str(self.settings.strict_capabilities)
+            expected_net = "none" if self.network_policy is not None else "default"
+            if labels.get("corpclaw.strict_capabilities") != expected_strict:
+                return False
+            if labels.get("corpclaw.network") != expected_net:
+                return False
+            # An unlabelled container predates this check (or was made externally);
+            # treat as a mismatch so it is recreated with hardening labels applied.
+            return "corpclaw.strict_capabilities" in labels
+        except Exception:
+            # If we cannot inspect the container, do not trust it.
+            return False
+
+    def _remove_container(self, container: Any) -> None:
+        """Best-effort stop+remove of a container that failed policy validation."""
+        try:
+            if container.status == "running":
+                container.stop(timeout=5)
+        except Exception:
+            logger.warning("Failed to stop mismatched container, forcing remove.", exc_info=True)
+        try:
+            container.remove(force=True)
+        except Exception:
+            logger.warning("Failed to remove mismatched container.", exc_info=True)
+
     def ensure_running(self, user_id: int) -> str:
         """Ensure a container is running for a given user.
 
@@ -147,13 +187,25 @@ class ContainerManager:
         try:
             # Check if already running
             container = self._client.containers.get(name)
-            if container.status != "running":
+            if not self._existing_matches_policy(container):
+                # A container with this name exists but was created under a different
+                # image/network/capability policy (pre-created by another actor, or stale
+                # from a config change). Do not silently reuse it as the sandbox: stop and
+                # remove it, then fall through to a fresh create with current settings.
+                logger.warning(
+                    "Container %s exists but does not match current policy; recreating.",
+                    name,
+                )
+                self._remove_container(container)
+            elif container.status != "running":
                 logger.info("Container %s was stopped, restarting...", name)
                 container.restart()
+                self._managed_user_ids.add(user_id)
+                return name
             else:
                 logger.debug("Container %s already running.", name)
-            self._managed_user_ids.add(user_id)
-            return name
+                self._managed_user_ids.add(user_id)
+                return name
         except Exception as _e:
             # docker.errors.NotFound → container doesn't exist, fall through to create
             _is_not_found = docker is not None and isinstance(_e, docker.errors.NotFound)

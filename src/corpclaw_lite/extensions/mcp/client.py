@@ -52,12 +52,53 @@ class MCPClient:
         await client.disconnect()
     """
 
-    def __init__(self, timeout: float = 30.0, total_timeout: float = 60.0) -> None:
+    # Cap on a single JSON-RPC response line. A malicious or buggy MCP server
+    # could otherwise send an unbounded line to exhaust agent memory; this bound
+    # turns that into a clean error.
+    MAX_RESPONSE_BYTES = 8 * 1024 * 1024  # 8 MiB
+
+    def __init__(
+        self,
+        timeout: float = 30.0,
+        total_timeout: float = 60.0,
+        max_response_bytes: int = MAX_RESPONSE_BYTES,
+    ) -> None:
         self._timeout = timeout
         self._total_timeout = total_timeout
+        self._max_response_bytes = max_response_bytes
         self._process: asyncio.subprocess.Process | None = None
         self._request_id = 0
         self._request_lock = asyncio.Lock()
+
+    async def _read_bounded_line(self) -> bytes:
+        """Read one newline-terminated line, capped at ``_max_response_bytes``.
+
+        Raises :class:`asyncio.LimitOverrunError` when the line exceeds the bound,
+        which the caller turns into a clean MCPClientError. This prevents a
+        malicious/buggy MCP server from exhausting agent memory with a single
+        oversized line. Implemented as a manual chunked read because the asyncio
+        ``StreamReader.readuntil`` bound is not exposed in the type stubs.
+        """
+        if self._process is None or self._process.stdout is None:
+            raise MCPClientError("MCP client is not connected.")
+        buf = bytearray()
+        while True:
+            chunk = await self._process.stdout.read(4096)
+            if not chunk:
+                # EOF — return whatever we have so the caller can detect closure
+                # via an empty/short result, matching readline() semantics.
+                return bytes(buf)
+            buf.extend(chunk)
+            if b"\n" in buf:
+                nl = buf.index(b"\n")
+                # Push the remainder back; StreamReader has no unread, so we only
+                # return up to and including the newline and accept that trailing
+                # data after the newline is consumed here (single-line responses).
+                return bytes(buf[: nl + 1])
+            if len(buf) > self._max_response_bytes:
+                raise asyncio.LimitOverrunError(
+                    "MCP response exceeded byte limit", consumed=len(buf)
+                )
 
     async def connect(self, command: list[str], env: dict[str, str] | None = None) -> None:
         """Launch the MCP server subprocess and perform the initialization handshake.
@@ -179,9 +220,7 @@ class MCPClient:
         # Read response lines until we find the matching id
         try:
             while True:
-                line = await asyncio.wait_for(
-                    self._process.stdout.readline(), timeout=self._timeout
-                )
+                line = await asyncio.wait_for(self._read_bounded_line(), timeout=self._timeout)
                 if not line:
                     raise MCPClientError("MCP server closed connection unexpectedly.")
                 text = line.decode("utf-8").strip()
@@ -196,6 +235,10 @@ class MCPClient:
                     raise MCPClientError(f"MCP error {err.get('code')}: {err.get('message')}")
 
                 return dict(response.get("result", {}))
+        except asyncio.LimitOverrunError as e:
+            raise MCPClientError(
+                f"MCP response exceeded {self._max_response_bytes} byte limit"
+            ) from e
         except TimeoutError as e:
             raise MCPClientError(f"MCP server did not respond within {self._timeout}s") from e
 

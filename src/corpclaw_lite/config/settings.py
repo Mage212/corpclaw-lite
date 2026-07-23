@@ -211,6 +211,11 @@ class ContainerSettings(BaseModel):
     strict_capabilities: bool = (
         True  # cap_drop ALL + seccomp + explicit non-root user. Set False only for dev/debug.
     )
+    # When strict_capabilities is True, fail container creation if the seccomp
+    # profile is missing instead of silently running with Docker's wider default.
+    # Set False only for environments where the profile path is known-unavailable
+    # (e.g. minimal CI) and the operator accepts the reduced isolation.
+    seccomp_missing_fatal: bool = True
     # Timeout for the outer docker exec call (host-side IPC envelope)
     ipc_timeout_seconds: float = 120.0
 
@@ -248,6 +253,10 @@ class AgentSettings(BaseModel):
     max_wall_time_ms: int = 300000
     soft_deadline_ratio: float = 0.85
     max_history: int = 20
+    # Hard cap on orchestrator shutdown (SIGINT/SIGTERM). A hung MCP disconnect,
+    # container stop or websocket close cannot hold the process past this bound;
+    # a second signal force-exits. Keeps `await orchestrator.stop()` bounded.
+    shutdown_timeout_seconds: float = 30.0
     approval_mode: Literal["manual", "smart", "off"] = "manual"
     compression: CompressionSettings = CompressionSettings()
     llm_timeout_seconds: int = 120
@@ -396,6 +405,10 @@ class LoggingSettings(BaseModel):
     console_level: str = "INFO"
     log_dir: str = "logs"
     health_port: int = 8080
+    # Bind address for the /health HTTP server. Defaults to loopback only so the
+    # unauthenticated operational endpoint is not exposed on shared/Internet-facing
+    # hosts. Override to "0.0.0.0" only behind a restricting reverse proxy.
+    health_host: str = "127.0.0.1"
     trace_enabled: bool = True
     trace_level: Literal["metadata", "debug_preview", "full"] = "metadata"
     trace_preview_chars: int = 200
