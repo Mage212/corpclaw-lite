@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic_settings import BaseSettings
 
 from corpclaw_lite.agent.guards import (
@@ -186,6 +186,10 @@ class LLMSettings(BaseModel):
     This model only contains routing rules that map tasks to providers + models.
     """
 
+    # S3-16: a typo in a routing/concurrency/queue key silently changed agent
+    # behaviour; forbid unknown keys on safety-critical nested models.
+    model_config = ConfigDict(extra="forbid")
+
     routing: list[RoutingRule] = []
     max_concurrent_requests: int = 4
     queue: QueueSettings = QueueSettings()
@@ -193,6 +197,10 @@ class LLMSettings(BaseModel):
 
 class ContainerSettings(BaseModel):
     """Settings for Docker container sandboxes."""
+
+    # S3-16: typos in isolation/capability fields must surface, not silently drop
+    # hardening (e.g. a misspelled strict_capabilities would disable cap_drop).
+    model_config = ConfigDict(extra="forbid")
 
     # Set to false to disable container isolation (dev/test mode — runs on host)
     enabled: bool = True
@@ -248,6 +256,10 @@ class ToolSurfaceSettings(BaseModel):
 class AgentSettings(BaseModel):
     """Settings for the AgentLoop."""
 
+    # S3-16: a typo in a budget/guard/streaming key would silently change agent
+    # behaviour; forbid unknown keys on this safety-critical model.
+    model_config = ConfigDict(extra="forbid")
+
     max_steps: int = 15
     max_tool_calls: int = 30
     max_wall_time_ms: int = 300000
@@ -300,6 +312,10 @@ class WebSettings(BaseModel):
 
 class WebChannelSettings(BaseModel):
     """Settings for the browser-based user channel."""
+
+    # S3-16: typos in auth/upload/rate-limit keys silently weaken the channel;
+    # forbid unknown keys on this safety-critical model.
+    model_config = ConfigDict(extra="forbid")
 
     host: str = "127.0.0.1"
     port: int = 8090
@@ -398,6 +414,11 @@ class ExtensionsSettings(BaseModel):
     Empty/unset entries (e.g. from an unresolved ``${VAR}``) and non-existent
     paths are skipped by ``resolve_dirs``.
     """
+
+    # S3-16: a typo in extra_paths would silently disable the private overlay,
+    # loading public defaults instead of corporate extensions. Forbid unknown
+    # keys on this safety-critical model.
+    model_config = ConfigDict(extra="forbid")
 
     extra_paths: list[str] = []
 

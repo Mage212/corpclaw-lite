@@ -6,23 +6,24 @@ from corpclaw_lite.config.settings import ContainerSettings
 from corpclaw_lite.container.manager import ContainerManager
 
 
-def test_container_settings_ignores_legacy_max_per_user() -> None:
-    """A private overlay yaml that still carries ``max_per_user`` must not break.
+def test_container_settings_rejects_unknown_key() -> None:
+    """S3-16: ContainerSettings is extra=forbid, so a legacy/typo'd key is rejected.
 
-    Regression guard for S2.3: the dead ``max_per_user`` field was removed from the
-    model. Pydantic v2 defaults to ``extra="ignore"`` (ContainerSettings has no
-    model_config override), so an overlay retaining the legacy key is silently
-    dropped instead of raising ValidationError.
+    Supersedes the S2.3 guard: the dead ``max_per_user`` field was removed, and
+    ContainerSettings now forbids unknown keys so a typo cannot silently disable
+    hardening (e.g. a misspelled strict_capabilities would drop cap_drop).
+    Operators carrying a stale overlay must remove the legacy key.
     """
-    settings = ContainerSettings.model_validate(
-        {
-            "enabled": True,
-            "max_per_user": 1,  # legacy overlay key — must be ignored, not rejected
-            "max_concurrent_containers": 15,
-        }
-    )
-    assert settings.max_concurrent_containers == 15
-    assert not hasattr(settings, "max_per_user")
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        ContainerSettings.model_validate(
+            {
+                "enabled": True,
+                "max_per_user": 1,  # legacy overlay key — now rejected, not ignored
+                "max_concurrent_containers": 15,
+            }
+        )
 
 
 @pytest.fixture

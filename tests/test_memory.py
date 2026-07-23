@@ -184,3 +184,31 @@ async def test_cue_exact_score_not_doubled(tmp_path: Path) -> None:
     assert score < 12.0
     # Still above pure cue-only floor when FTS MATCH hits.
     assert score > _CUE_EXACT_WEIGHT
+
+
+# ── S3-14: memory value bound + fallback recall LIMIT ─────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_store_entry_truncates_oversized_value(memory: SQLiteMemory) -> None:
+    """An oversized memory_value is truncated to the cap, not stored unbounded."""
+    from corpclaw_lite.memory.sqlite import _MAX_VALUE_LEN
+
+    big = "y" * (_MAX_VALUE_LEN + 500)
+    await memory.store_entry("u1", primary_abstraction="big fact", memory_value=big, cues=[])
+
+    import sqlite3
+
+    with sqlite3.connect(str(memory.db_path)) as conn:
+        stored = conn.execute(
+            "SELECT memory_value FROM memory_entries WHERE user_id = ?", ("u1",)
+        ).fetchone()
+    assert stored is not None
+    assert len(stored[0]) == _MAX_VALUE_LEN
+
+
+def test_fallback_recall_limit_constant_is_bounded() -> None:
+    """The fallback full-scan is capped so a user with many entries is bounded."""
+    from corpclaw_lite.memory.sqlite import _FALLBACK_RECALL_LIMIT
+
+    assert _FALLBACK_RECALL_LIMIT <= 1000
