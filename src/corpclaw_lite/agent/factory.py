@@ -395,6 +395,9 @@ _OFFICE_TRACKED_TOOLS: dict[str, dict[str, Any]] = {
     "convert_format": {"path_param": "input_path", "tracks_output": False},
     "write_file": {"path_param": "path", "tracks_output": True},
     "edit_file": {"path_param": "path", "tracks_output": True},
+    # apply_fill_plan receives a JSON ``plan`` kwarg (not a direct path).
+    # FileTrackedTool resolves template/output_path from the plan internally.
+    "apply_fill_plan": {"path_param": "plan", "tracks_output": False},
 }
 
 
