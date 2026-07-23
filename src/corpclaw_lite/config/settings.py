@@ -357,6 +357,10 @@ class TelegramSettings(BaseModel):
     whitelist: list[int] = []
     default_department: str = "default"
     admin_ids: list[int] = []
+    # When False (default), the bot only answers in private chats so a group
+    # cannot observe another user's workflow, files or approval prompts.
+    # Set True only for a deliberately shared/group deployment.
+    allow_groups: bool = False
 
     # Fallback transport — manual IP overrides (empty = DoH auto-discovery)
     fallback_ips: list[str] = []

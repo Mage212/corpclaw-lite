@@ -456,7 +456,13 @@ class WebChannelOrchestrator:
             logger.debug("Web channel cleanup completed before full startup.")
 
     def _build_app(self) -> web.Application:
-        app = web.Application(middlewares=[self._error_middleware, self._auth_middleware])
+        # S3-09: honour the configured upload cap at the framework level so a
+        # body larger than upload_max_bytes is rejected (413) before it streams
+        # through, instead of aiohttp's 1 MiB default silently undercutting it.
+        app = web.Application(
+            middlewares=[self._error_middleware, self._auth_middleware],
+            client_max_size=self._web_settings.upload_max_bytes,
+        )
         app.router.add_get("/", self._handle_index)
         app.router.add_get("/favicon.svg", self._handle_favicon)
         app.router.add_get("/login", self._handle_login_page)
@@ -1544,6 +1550,10 @@ class WebChannelOrchestrator:
 
     async def _handle_upload(self, request: web.Request) -> web.Response:
         user = self._require_user(request)
+        # S3-09: apply the same per-user rate limit the WS path uses, so a REST
+        # upload flood cannot bypass it.
+        if not await self._rate_limiter.check(user.id):
+            raise web.HTTPTooManyRequests(text="Слишком много запросов.")
         reader = await request.multipart()
         target_dir = request.query.get("path")
         uploaded: list[dict[str, str]] = []

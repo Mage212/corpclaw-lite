@@ -475,3 +475,19 @@ def test_set_web_password(tmp_path) -> None:
     assert mgr.authenticate_web_user("bob", "old-password-123") is None
     assert mgr.authenticate_web_user("bob", "new-password-123") is not None
     assert mgr.set_web_password("missing", "new-password-123") is False
+
+
+def test_set_web_password_invalidates_existing_sessions(tmp_path) -> None:
+    """S3-08: changing the password must invalidate prior web sessions."""
+    db = str(tmp_path / "users.db")
+    mgr = UserManager(db_path=db)
+    user = mgr.create_web_user(username="bob", password="old-password-123", department="it")
+
+    # Establish a session before the password change.
+    token, _csrf = mgr.create_web_session(user.id, ttl_hours=1)
+    assert mgr.get_user_by_session(token) is not None
+
+    assert mgr.set_web_password("bob", "new-password-123") is True
+
+    # The pre-rotation session is no longer valid.
+    assert mgr.get_user_by_session(token) is None

@@ -205,17 +205,27 @@ class TelegramChannel(Channel):
         self._app = builder.build()
 
         # ── Register handlers ──────────────────────────────────────────────
-        self._app.add_handler(CommandHandler("start", self._handle_start))
-        self._app.add_handler(CommandHandler("help", self._handle_help))
-        self._app.add_handler(CommandHandler("new", self._handle_new))
-        self._app.add_handler(CommandHandler("delete", self._handle_delete))
-        self._app.add_handler(CommandHandler("chat", self._handle_chat))
-        self._app.add_handler(CommandHandler("execute", self._handle_execute))
-        self._app.add_handler(CommandHandler("setup", self._handle_setup))
+        # S3-06: by default the bot only operates in private chats, so a group
+        # cannot observe another user's workflow, files or approval prompts.
+        # telegram.allow_groups=True widens the scope for shared deployments.
+        allow_groups = bool(settings and settings.allow_groups)
+        chat_filter = filters.ALL if allow_groups else filters.ChatType.PRIVATE
 
-        self._app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_text))
-        self._app.add_handler(MessageHandler(filters.Document.ALL, self._handle_document))
-        self._app.add_handler(MessageHandler(filters.PHOTO, self._handle_photo))
+        self._app.add_handler(CommandHandler("start", self._handle_start, filters=chat_filter))
+        self._app.add_handler(CommandHandler("help", self._handle_help, filters=chat_filter))
+        self._app.add_handler(CommandHandler("new", self._handle_new, filters=chat_filter))
+        self._app.add_handler(CommandHandler("delete", self._handle_delete, filters=chat_filter))
+        self._app.add_handler(CommandHandler("chat", self._handle_chat, filters=chat_filter))
+        self._app.add_handler(CommandHandler("execute", self._handle_execute, filters=chat_filter))
+        self._app.add_handler(CommandHandler("setup", self._handle_setup, filters=chat_filter))
+
+        self._app.add_handler(
+            MessageHandler(chat_filter & filters.TEXT & ~filters.COMMAND, self._handle_text)
+        )
+        self._app.add_handler(
+            MessageHandler(chat_filter & filters.Document.ALL, self._handle_document)
+        )
+        self._app.add_handler(MessageHandler(chat_filter & filters.PHOTO, self._handle_photo))
 
         self._app.add_handler(CallbackQueryHandler(self._handle_callback))
         self._app.add_error_handler(self._on_error)

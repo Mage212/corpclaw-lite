@@ -50,8 +50,12 @@ def get_stats() -> dict[str, Any]:
     }
 
 
-async def run_health_server(host: str = "0.0.0.0", port: int = 8080) -> Any:
+async def run_health_server(host: str = "127.0.0.1", port: int = 8080) -> Any:
     """Start a minimal aiohttp server exposing GET /health.
+
+    Defaults to loopback so the unauthenticated operational endpoint is not
+    exposed on shared/Internet-facing hosts. Override to ``0.0.0.0`` only behind
+    a restricting reverse proxy.
 
     Returns the ``AppRunner`` so callers can call ``runner.cleanup()`` on shutdown.
     """

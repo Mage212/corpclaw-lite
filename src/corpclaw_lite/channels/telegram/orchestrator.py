@@ -277,8 +277,9 @@ class TelegramBotOrchestrator:
             from corpclaw_lite.logging import health
 
             health_port = self._settings.logging.health_port
-            self._health_runner = await health.run_health_server(port=health_port)
-            logger.info("Health endpoint started on :%d/health", health_port)
+            health_host = self._settings.logging.health_host
+            self._health_runner = await health.run_health_server(host=health_host, port=health_port)
+            logger.info("Health endpoint started on %s:%d/health", health_host, health_port)
         except ImportError:
             logger.info("aiohttp not installed — health endpoint disabled")
 
@@ -704,7 +705,10 @@ class TelegramBotOrchestrator:
             )
         except Exception as e:
             logger.error("AgentLoop error for user %d: %s", tid, e)
-            reply = f"❌ Произошла ошибка: {e}"
+            # S3-07: never surface raw exception text to the user — it can leak
+            # filesystem paths, upstream URLs or library internals. The detail
+            # already goes to admins below.
+            reply = "❌ Произошла внутренняя ошибка. Администратор уже уведомлён."
             if self._admin_notifier is not None:
                 error_summary = (
                     f"🔴 Agent error\n"

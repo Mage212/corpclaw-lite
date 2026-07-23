@@ -477,16 +477,27 @@ class UserManager:
         return user
 
     def set_web_password(self, username: str, password: str) -> bool:
-        """Set a local web user's password. Returns False if the user is missing."""
+        """Set a local web user's password. Returns False if the user is missing.
+
+        S3-08: all existing web sessions for the user are invalidated atomically,
+        so a session established before a password rotation (e.g. after suspected
+        compromise) cannot remain valid until its TTL.
+        """
         clean_username = self.normalize_username(username)
         self._validate_password(password)
         password_hash = self.hash_password(password)
         with db_connect(self._db) as conn:
-            cur = conn.execute(
+            row = conn.execute(
+                "SELECT id FROM users WHERE username = ?", (clean_username,)
+            ).fetchone()
+            if row is None:
+                return False
+            conn.execute(
                 "UPDATE users SET password_hash = ? WHERE username = ?",
                 (password_hash, clean_username),
             )
-        return bool(cur.rowcount)
+            conn.execute("DELETE FROM web_sessions WHERE user_id = ?", (int(row[0]),))
+        return True
 
     def merge_web_user(
         self,
