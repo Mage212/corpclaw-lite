@@ -125,7 +125,7 @@ def _parse_setup(raw: dict[str, Any] | None) -> ScenarioSetup | None:
         copy_from_corpus=copy_from_corpus,
         generated_images=generated_images,
         generated_workbooks=generated_workbooks,
-        generate_noisy_completed_month=bool(raw.get("generate_noisy_mdb", False)),
+        generate_noisy_completed_month=bool(raw.get("generate_noisy_completed_month", False)),
         generate_dual_type=bool(raw.get("generate_dual_type", False)),
     )
 
