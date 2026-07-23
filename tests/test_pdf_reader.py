@@ -215,3 +215,39 @@ class TestPdfReaderTool:
         result = await tool.execute(path="test.pdf", output_path="out/article.bin")
 
         assert "Error: output_path must end with one of" in result
+
+    @pytest.mark.asyncio
+    async def test_output_path_extracts_full_document_no_truncation(
+        self, tool: PdfReaderTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When output_path is given, the ENTIRE document is saved — max_chars
+        does not apply. Regression: a "convert PDF to .md" task looped 6
+        iterations re-extracting truncated chunks instead of one step."""
+        import pypdf
+
+        # Create a PDF that would be truncated by the default _MAX_CHARS (50k).
+        # Each page has ~10k chars, 6 pages = 60k > 50k default.
+        big_text = "A" * 10_000
+
+        class FakePage:
+            def extract_text(self) -> str:
+                return big_text
+
+        class FakeReader:
+            is_encrypted = False
+            pages = [FakePage() for _ in range(6)]
+
+            def __init__(self, _path: str) -> None:
+                pass
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(pypdf, "PdfReader", FakeReader)
+        (tmp_path / "test.pdf").write_bytes(b"%PDF fake")
+
+        result = await tool.execute(path="test.pdf", output_path="out.md")
+
+        assert "truncated" not in result.lower()
+        assert "Extracted pages: 6" in result
+        output = (tmp_path / "out.md").read_text(encoding="utf-8")
+        # Full document — all 6 pages worth of text present.
+        assert len(output) > 50_000

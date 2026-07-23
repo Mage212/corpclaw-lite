@@ -31,6 +31,7 @@ from pathlib import Path
 __all__ = [
     "PermissionDenied",
     "resolve_and_validate_path",
+    "validate_no_symlink_escape",
 ]
 
 
@@ -161,6 +162,18 @@ def _reject_symlink_ancestors(workspace_root: Path, resolved: Path, original: st
         current = candidate
 
 
+def validate_no_symlink_escape(workspace_root: Path, resolved: Path, original: str) -> None:
+    """Public wrapper around :func:`_reject_symlink_ancestors`.
+
+    Re-validate that ``resolved`` does not cross a symlink leaving the workspace,
+    using a literal-component ``lstat`` walk. Intended to be called right before
+    a destructive filesystem operation (delete/rename/move/copy) to close the
+    TOCTOU window between an earlier ``resolve()``-based boundary check and the
+    op itself (B-072).
+    """
+    _reject_symlink_ancestors(workspace_root, resolved, original)
+
+
 def _reject_hardlink(resolved: Path) -> None:
     """Reject existing regular files with multiple hard links (shared inodes).
 
@@ -206,6 +219,11 @@ def resolve_and_validate_path(
     """
     _reject_null_byte(path_str)
 
+    # DC-017: prefer explicit arg → per-run contextvar → process cwd (CLI/eval).
+    if workspace_root is None:
+        from corpclaw_lite.agent.workspace_context import get_workspace_root
+
+        workspace_root = get_workspace_root()
     ws = (workspace_root or Path.cwd()).resolve()
     target = Path(path_str)
     if not target.is_absolute():

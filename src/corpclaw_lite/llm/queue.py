@@ -137,6 +137,10 @@ class LLMRequestQueue:
         self._slot_affinity = slot_affinity or SlotAffinityConfig()
         self._slots: dict[int, _SlotState] = {}
         self._slot_affinity_provider_warnings: set[str] = set()
+        # Optional ambient load hook (e.g. web system_load broadcast). Invoked
+        # after successful acquire / release so observers see active_count change
+        # even when no waiting-position notify ran.
+        self._on_load_changed: Callable[[], None] | None = None
         if self._strategy == "slot_affinity" and self._slot_affinity.enabled:
             for slot_id in self._slot_affinity.sticky_slot_ids:
                 self._slots[slot_id] = _SlotState(slot_id=slot_id, kind="sticky")
@@ -150,6 +154,19 @@ class LLMRequestQueue:
             max_concurrent,
             self._strategy,
         )
+
+    def set_on_load_changed(self, callback: Callable[[], None] | None) -> None:
+        """Register a zero-arg callback for ambient load observers (acquire/release)."""
+        self._on_load_changed = callback
+
+    def _emit_load_changed(self) -> None:
+        callback = self._on_load_changed
+        if callback is None:
+            return
+        try:
+            callback()
+        except Exception as e:
+            logger.debug("[queue] on_load_changed failed: %s", e)
 
     async def acquire(
         self,
@@ -260,8 +277,8 @@ class LLMRequestQueue:
                 active_count = len(self._active)
             if semaphore_acquired:
                 self._semaphore.release()
-                if slot_lock_acquired and selected_slot is not None and selected_slot.lock.locked():
-                    selected_slot.lock.release()
+            if slot_lock_acquired and selected_slot is not None and selected_slot.lock.locked():
+                selected_slot.lock.release()
             health.increment("llm_queue_cancelled")
             log_event(
                 "llm_queue_cancelled",
@@ -273,6 +290,7 @@ class LLMRequestQueue:
                 active_count=active_count,
                 max_concurrent=self._max_concurrent,
             )
+            self._emit_load_changed()
             raise
         if notify_task is not None:
             await self._cancel_notify_task(notify_task)
@@ -324,6 +342,7 @@ class LLMRequestQueue:
             task_kind,
             load_class,
         )
+        self._emit_load_changed()
         return entry
 
     async def _notify_waiting_status_loop(
@@ -456,23 +475,30 @@ class LLMRequestQueue:
                     slot_kind=slot.kind,
                 )
 
-    async def release(self, user_id: str | QueueEntry, elapsed_seconds: float) -> None:
+    async def release(self, entry: QueueEntry, elapsed_seconds: float) -> None:
         """Release an inference slot after the LLM call completes.
 
         Updates the rolling average request duration used for wait estimates.
+
+        ``entry`` must be the ``QueueEntry`` returned by ``acquire()`` — the
+        queue never resolves releases by bare user id anymore, so a caller with
+        multiple concurrent entries cannot accidentally release the wrong one
+        (the prior str-tolerant path silently dropped all-but-one entry and could
+        leak the semaphore).
+
+        A double-release of the same entry is a no-op (matches the original's
+        defensive behavior): the semaphore is released only when the entry was
+        actually active. Without this guard, ``asyncio.Semaphore.release()``
+        would silently bump the counter above ``max_concurrent`` and over-grant
+        inference slots.
         """
-        entry: QueueEntry | None = user_id if isinstance(user_id, QueueEntry) else None
-        target_user_id = user_id.user_id if isinstance(user_id, QueueEntry) else user_id
         slot_to_release: _SlotState | None = None
+        was_active: bool
         async with self._lock:
-            if entry is None:
-                for active_entry in self._active:
-                    if active_entry.user_id == target_user_id:
-                        entry = active_entry
-                        break
-            if entry is not None and entry in self._active:
+            was_active = entry in self._active
+            if was_active:
                 self._active.remove(entry)
-            if entry is not None and entry.slot_id is not None:
+            if entry.slot_id is not None:
                 slot_to_release = self._slots.get(entry.slot_id)
                 if slot_to_release is not None:
                     slot_to_release.active = False
@@ -487,8 +513,9 @@ class LLMRequestQueue:
                         slot_to_release.lock.release()
             waiting_count = len(self._waiting)
             active_count = len(self._active)
-        if entry is None:
-            logger.warning("[queue] release requested for non-active user=%s", target_user_id)
+        if not was_active:
+            # Double-release (or release of a cancelled/expired entry): no-op.
+            logger.warning("[queue] release of non-active entry user=%s; ignoring", entry.user_id)
             return
         if elapsed_seconds > 0:
             self._avg_request_seconds = (
@@ -530,6 +557,7 @@ class LLMRequestQueue:
             elapsed_seconds,
             self._avg_request_seconds,
         )
+        self._emit_load_changed()
 
     def get_position(self, user_id: str) -> int | None:
         """Return 0-based queue position for *user_id*, or ``None`` if not queued."""

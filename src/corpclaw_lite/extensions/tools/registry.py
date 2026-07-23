@@ -8,6 +8,10 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 from corpclaw_lite.extensions.tools.base import Tool
+from corpclaw_lite.extensions.tools.context import (
+    ToolExecutionContext,
+    bind_tool_execution_context,
+)
 
 __all__ = [
     "ToolRegistry",
@@ -111,10 +115,10 @@ class ToolRegistry:
     ) -> str:
         """Execute a tool by name with arguments.
 
-        ``user`` and ``run_id`` are passed as keyword arguments so tools that need
-        runtime context (e.g. DispatchSubagentTool, ReadImageTool) can receive it
-        without the LLM having to supply it explicitly. Tools that do not need it
-        simply absorb it via ``**kwargs``.
+        Runtime metadata is exposed through :class:`ToolExecutionContext`, not
+        mixed into the model-provided business arguments.  This prevents
+        non-serializable or sensitive internal values from crossing plugin/MCP
+        boundaries while preserving the public ``Tool.execute`` signature.
 
         Results are scrubbed for credentials before being returned so that
         API keys or tokens inside read files never reach the LLM context or
@@ -138,21 +142,18 @@ class ToolRegistry:
                 f" cannot use tool '{name}'."
             )
 
+        context = ToolExecutionContext(
+            user=user,
+            run_id=run_id,
+            on_subagent_tool_start=on_subagent_tool_start,
+            on_subagent_tool_batch_start=on_subagent_tool_batch_start,
+            on_subagent_llm_stage=on_subagent_llm_stage,
+            on_subagent_llm_queue_status=on_subagent_llm_queue_status,
+            parent_trajectory_recorder=parent_trajectory_recorder,
+        )
         try:
-            tool_kwargs = dict(arguments)
-            tool_kwargs["user"] = user
-            tool_kwargs["run_id"] = run_id
-            if on_subagent_tool_start is not None:
-                tool_kwargs["on_subagent_tool_start"] = on_subagent_tool_start
-            if on_subagent_tool_batch_start is not None:
-                tool_kwargs["on_subagent_tool_batch_start"] = on_subagent_tool_batch_start
-            if on_subagent_llm_stage is not None:
-                tool_kwargs["on_subagent_llm_stage"] = on_subagent_llm_stage
-            if on_subagent_llm_queue_status is not None:
-                tool_kwargs["on_subagent_llm_queue_status"] = on_subagent_llm_queue_status
-            if parent_trajectory_recorder is not None:
-                tool_kwargs["parent_trajectory_recorder"] = parent_trajectory_recorder
-            result = await tool.execute(**tool_kwargs)
+            with bind_tool_execution_context(context):
+                result = await tool.execute(**dict(arguments))
         except Exception as e:
             logger.exception("Tool '%s' execution failed", name)
             return f"Error executing '{name}': {type(e).__name__}: {e}"

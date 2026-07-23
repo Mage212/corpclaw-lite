@@ -82,4 +82,4 @@ async def test_orchestrator_passes_settings_to_build_agent_stack(monkeypatch):
     await bot.start()
     await bot.stop()
 
-    build_agent_stack.assert_called_once_with(settings)
+    build_agent_stack.assert_called_once_with(settings, host_tools_surface="multiuser")

@@ -43,6 +43,10 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
+# Interval for the idle-container pruner background loop (seconds). Half the
+# default idle_timeout (600s) so a container is reaped within ~2 cycles.
+_CONTAINER_PRUNE_INTERVAL_SECONDS = 300
+
 
 class TelegramBotOrchestrator:
     """Orchestrates the full Telegram bot: startup, message handling, shutdown."""
@@ -56,6 +60,10 @@ class TelegramBotOrchestrator:
         self._onboarding_engine: OnboardingEngine | None = None
         self._rate_limiter: RateLimiter | None = None
         self._admin_notifier: AdminNotifier | None = None
+        # B-120 / DC-032: proactive user messages (separate from AdminNotifier).
+        self._user_notifier: Any | None = None
+        # B-143 PR2: store-backed scheduler for accept/dismiss callbacks (no poll).
+        self._scheduler: Any | None = None
         self._bootstrap: BootstrapLoader | None = None
         self._vision_processor: VisionProcessor | None = None
 
@@ -67,24 +75,22 @@ class TelegramBotOrchestrator:
         self._subagent_reloader: Any = None
         self._cleanup_task: asyncio.Task[None] | None = None
         self._queue_notify_task: asyncio.Task[None] | None = None
+        self._container_prune_task: asyncio.Task[None] | None = None
         self._shutdown_event = asyncio.Event()
         self._agent_activity_logger: AgentLogger | None = None
-        self._active_user_requests: set[int] = set()
-        self._active_user_requests_lock = asyncio.Lock()
+        # Process-wide gate shared with web/headless (Sprint 2 / C3).
+        from corpclaw_lite.runtime.user_run_gate import get_user_run_gate
+
+        self._run_gate = get_user_run_gate()
         self._started = False
 
-    async def _try_start_user_request(self, telegram_id: int) -> bool:
+    async def _try_start_user_request(self, user_id: int) -> bool:
         """Return False when the user already has an active workflow."""
-        async with self._active_user_requests_lock:
-            if telegram_id in self._active_user_requests:
-                return False
-            self._active_user_requests.add(telegram_id)
-            return True
+        return await self._run_gate.try_start(user_id)
 
-    async def _finish_user_request(self, telegram_id: int) -> None:
+    async def _finish_user_request(self, user_id: int) -> None:
         """Mark a user's active workflow as finished."""
-        async with self._active_user_requests_lock:
-            self._active_user_requests.discard(telegram_id)
+        await self._run_gate.finish(user_id)
 
     async def check_channel_access(self, telegram_id: int, action: str) -> bool:
         """Shared Telegram preflight for commands, callbacks and uploads."""
@@ -129,6 +135,30 @@ class TelegramBotOrchestrator:
         stack, _, _, _ = self._require_started()
         return await stack.user_manager.async_get_by_telegram_id(telegram_id)
 
+    async def _handle_schedule_action(self, telegram_id: int, action: str, task_id: str) -> str:
+        """B-143 PR2: accept/dismiss a pending schedule from TG inline buttons."""
+        from corpclaw_lite.scheduler.service import SchedulerError
+
+        if self._scheduler is None:
+            return "❌ Планировщик недоступен. Откройте «Задачи» в web."
+        user = await self._resolve_user_by_telegram_id(telegram_id)
+        if user is None:
+            return "❌ Пользователь не найден. Обратитесь к администратору."
+        try:
+            if action == "accept":
+                task = await self._scheduler.accept(user, task_id)
+                return (
+                    f"✅ Задача подтверждена и активна.\n"
+                    f"{task.title}\n"
+                    f"Следующий запуск (UTC): {task.next_run_at or '—'}"
+                )
+            if action == "dismiss":
+                task = await self._scheduler.dismiss(user, task_id)
+                return f"❌ Задача отклонена.\n{task.title}"
+            return "❌ Неизвестное действие."
+        except SchedulerError as exc:
+            return f"❌ {exc}"
+
     def _require_started(
         self,
     ) -> tuple[AgentStack, TelegramChannel, RateLimiter, BootstrapLoader]:
@@ -158,10 +188,13 @@ class TelegramBotOrchestrator:
             trace_enabled=log_cfg.trace_enabled,
             trace_level=log_cfg.trace_level,
             trace_preview_chars=log_cfg.trace_preview_chars,
+            capture_enabled=log_cfg.capture_enabled,
+            capture_fields=log_cfg.capture_fields,
+            capture_dir=PROJECT_ROOT / (log_cfg.capture_dir or log_cfg.log_dir),
         )
         self._agent_activity_logger = AgentLogger(log_dir=PROJECT_ROOT / log_cfg.log_dir)
 
-        stack = build_agent_stack(self._settings)
+        stack = build_agent_stack(self._settings, host_tools_surface="multiuser")
         self._stack = stack
         agent_loop = stack.loop
         user_manager = stack.user_manager
@@ -225,6 +258,7 @@ class TelegramBotOrchestrator:
             setup_handler=self.handle_setup,
             access_checker=self.check_channel_access,
             user_resolver=self._resolve_user_by_telegram_id,
+            session_reset_callback=self._reset_telegram_session,
             tg_settings=tg_settings,
         )
 
@@ -243,8 +277,9 @@ class TelegramBotOrchestrator:
             from corpclaw_lite.logging import health
 
             health_port = self._settings.logging.health_port
-            self._health_runner = await health.run_health_server(port=health_port)
-            logger.info("Health endpoint started on :%d/health", health_port)
+            health_host = self._settings.logging.health_host
+            self._health_runner = await health.run_health_server(host=health_host, port=health_port)
+            logger.info("Health endpoint started on %s:%d/health", health_host, health_port)
         except ImportError:
             logger.info("aiohttp not installed — health endpoint disabled")
 
@@ -304,6 +339,37 @@ class TelegramBotOrchestrator:
             )
             logger.info("Admin notifier active for %d admin(s)", len(tg_settings.admin_ids))
 
+        # B-120: UserNotifier with Telegram sink (DB = shared memory.db system session).
+        # B-143 PR2: schedule consent keyboard + callback accept/dismiss (store only; no poll).
+        chat_store = getattr(stack, "chat_store", None)
+        if chat_store is not None and self._channel.app is not None:
+            from corpclaw_lite.channels.telegram.schedule_markup import (
+                markup_from_notify_metadata,
+            )
+            from corpclaw_lite.channels.user_notifier import UserNotifier
+            from corpclaw_lite.scheduler.service import SchedulerService
+            from corpclaw_lite.scheduler.store import SchedulerStore
+
+            self._user_notifier = UserNotifier(chat_store)
+            self._user_notifier.register_telegram_bot(self._channel.app.bot)
+            self._user_notifier.register_telegram_markup_builder(markup_from_notify_metadata)
+            logger.info("UserNotifier Telegram sink registered (schedule markup enabled)")
+
+            sched_settings = self._settings.scheduler
+            sched_db = Path(sched_settings.db_path)
+            if not sched_db.is_absolute():
+                sched_db = (PROJECT_ROOT / sched_db).resolve()
+            # Accept/dismiss only — web owns the poll loop (DC-030).
+            self._scheduler = SchedulerService(
+                store=SchedulerStore(sched_db),
+                user_manager=user_manager,
+                agent_service=None,
+                notifier=self._user_notifier,
+                settings=sched_settings,
+            )
+            self._channel.set_schedule_action_handler(self._handle_schedule_action)
+            logger.info("Telegram schedule consent callbacks wired (store=%s)", sched_db)
+
         self._cleanup_task = asyncio.create_task(self._rate_limit_cleanup_loop())
 
         # Queue notification loop
@@ -324,6 +390,12 @@ class TelegramBotOrchestrator:
                 "Queue notification loop started (interval=%ds)",
                 self._settings.llm.queue.notify_interval_seconds,
             )
+        # Background idle-container pruner (prevents container accumulation in
+        # server mode — prune_idle was previously CLI-only). container_manager is
+        # None in dev mode (container.enabled=false), so guard on it directly.
+        if self._stack.container_manager is not None:
+            self._container_prune_task = asyncio.create_task(self._container_prune_loop())
+            logger.info("Container prune loop started (interval=300s)")
         self._started = True
 
     async def run_until_shutdown(self) -> None:
@@ -341,6 +413,8 @@ class TelegramBotOrchestrator:
             self._cleanup_task.cancel()
         if self._queue_notify_task is not None:
             self._queue_notify_task.cancel()
+        if self._container_prune_task is not None:
+            self._container_prune_task.cancel()
         for task in self._background_tasks:
             task.cancel()
         if self._reloader is not None:
@@ -434,7 +508,7 @@ class TelegramBotOrchestrator:
         prechecked_access: bool = False,
     ) -> None:
         """Main message handler — replaces nested _handle_and_reply."""
-        stack, channel, rate_limiter, bootstrap = self._require_started()
+        stack, channel, rate_limiter, _bootstrap = self._require_started()
 
         tid = int(telegram_id)
         user_manager = stack.user_manager
@@ -576,14 +650,8 @@ class TelegramBotOrchestrator:
         # Agent execution
         run_stats = None
         try:
-            base_prompt = bootstrap.get_system_prompt()
-            dept_prompt = bootstrap.get_department_prompt(user.department)
-            user_prompt = bootstrap.get_user_prompt(user.id, user.telegram_id)
-            user_ctx = f"You are talking to {user.name} from the {user.department} department."
-            parts_list = [p for p in [base_prompt, dept_prompt, user_prompt, user_ctx] if p]
-            system_prompt: str | None = "\n\n".join(parts_list) if parts_list else None
-
-            # Inject only relevant skill instructions into system prompt
+            # B-111: user-context (dept/onboarding/tone/…) assembled inside AgentLoop.
+            # Channel only matches skills and passes them as system_prompt extras.
             skill_registry = stack.skill_registry
             plugin_registry = stack.plugin_registry
             allowed_skills = (
@@ -604,11 +672,20 @@ class TelegramBotOrchestrator:
             else:
                 matched_skills = main_scoped
             skill_block = build_skill_block(matched_skills, [])
-            if skill_block:
-                system_prompt = (system_prompt or "") + skill_block
+            system_prompt: str | None = skill_block if skill_block else None
 
             async def approval_cb(action: str, details: str) -> bool:
                 return await channel.request_approval(user, action, details)
+
+            # B-102: virtual per-user Telegram session → ChatContextStore path.
+            session_id: int | None = None
+            if stack.chat_store is not None:
+                from corpclaw_lite.channels.web.chat_store import CHANNEL_TELEGRAM
+
+                session_id = await stack.chat_store.ensure_channel_session(
+                    user.memory_key(),
+                    channel=CHANNEL_TELEGRAM,
+                )
 
             reply, run_stats = await agent_loop.run(
                 user,
@@ -624,10 +701,14 @@ class TelegramBotOrchestrator:
                 tools_enabled=(mode == "execute"),
                 few_shots=stack.few_shots,
                 channel="telegram",
+                session_id=session_id,
             )
         except Exception as e:
             logger.error("AgentLoop error for user %d: %s", tid, e)
-            reply = f"❌ Произошла ошибка: {e}"
+            # S3-07: never surface raw exception text to the user — it can leak
+            # filesystem paths, upstream URLs or library internals. The detail
+            # already goes to admins below.
+            reply = "❌ Произошла внутренняя ошибка. Администратор уже уведомлён."
             if self._admin_notifier is not None:
                 error_summary = (
                     f"🔴 Agent error\n"
@@ -772,17 +853,27 @@ class TelegramBotOrchestrator:
             await self._finish_user_request(user.id)
             raise
 
-        # Persist in agent memory — non-critical, don't block user response
-        mem = stack.loop.memory
-        if mem is not None:
-            mem_key = user.memory_key()
-            user_msg = f"[Пользователь отправил изображение: {image_path.name}] {prompt}"
+        # B-103: persist image turn to ChatContextStore (telegram virtual session).
+        user_msg = f"[Пользователь отправил изображение: {image_path.name}] {prompt}"
+        if stack.chat_store is not None and stack.chat_context_store is not None:
             try:
-                await mem.add_message(mem_key, "user", user_msg)
-                await mem.add_message(mem_key, "assistant", result)
+                from corpclaw_lite.channels.web.chat_store import CHANNEL_TELEGRAM
+
+                session_id = await stack.chat_store.ensure_channel_session(
+                    user.memory_key(),
+                    channel=CHANNEL_TELEGRAM,
+                )
+                uid = str(user.id)
+                await stack.chat_context_store.append_context(
+                    session_id=session_id, user_id=uid, role="user", content=user_msg
+                )
+                await stack.chat_context_store.append_context(
+                    session_id=session_id, user_id=uid, role="assistant", content=result
+                )
             except Exception:
                 logger.error(
-                    "Failed to persist image interaction in memory for user %s", telegram_id
+                    "Failed to persist image interaction in context store for user %s",
+                    telegram_id,
                 )
 
         try:
@@ -829,6 +920,21 @@ class TelegramBotOrchestrator:
         if isinstance(provider, LLMRouter):
             await provider.mark_user_cache_reset(telegram_id)
 
+    async def _reset_telegram_session(self, user: User) -> None:
+        """B-102: end Telegram virtual session and open a fresh one (/new).
+
+        Does not touch web channel sessions for the same user.
+        """
+        if self._stack is None or self._stack.chat_store is None:
+            return
+        from corpclaw_lite.channels.web.chat_store import CHANNEL_TELEGRAM
+
+        await self._stack.chat_store.reset_channel_session(
+            user.memory_key(),
+            channel=CHANNEL_TELEGRAM,
+            reason="telegram_/new",
+        )
+
     async def _rate_limit_cleanup_loop(self) -> None:
         """Periodic rate limiter cleanup."""
         if self._rate_limiter is None:
@@ -836,6 +942,26 @@ class TelegramBotOrchestrator:
         while True:
             await asyncio.sleep(300)
             await self._rate_limiter.cleanup()
+
+    async def _container_prune_loop(self) -> None:
+        """Periodic idle-container pruning (server-mode reaper).
+
+        prune_idle was previously CLI-only, so containers accumulated for the
+        lifetime of a Telegram/web process. Each pass is wrapped in try/except so
+        a transient Docker hiccup never kills the reaper. Idempotent against
+        concurrent ensure_running/stop at the Docker level.
+        """
+        if self._stack is None or self._stack.container_manager is None:
+            return
+        cm = self._stack.container_manager
+        while True:
+            await asyncio.sleep(_CONTAINER_PRUNE_INTERVAL_SECONDS)
+            try:
+                removed = await cm.prune_idle()
+                if removed:
+                    logger.info("Pruned %d idle container(s)", removed)
+            except Exception as exc:
+                logger.warning("Container prune pass failed: %s", exc)
 
     async def _queue_notification_loop(
         self,

@@ -144,26 +144,44 @@ def test_process_request_tool_timeout():
         assert resp_payload.get("result") is None
 
 
-def test_process_request_clears_ipc_secret():
-    """P0-1: IPC secret is removed from environment after IPCAuth initialization."""
+def test_process_request_reads_secret_from_stdin():
+    """S3-03: the IPC secret arrives on stdin (line 1), not in process env/argv.
+
+    The worker constructs IPCAuth with the stdin secret, and never reads
+    CORPCLAW_IPC_SECRET from the environment.
+    """
     import os
 
-    os.environ["CORPCLAW_IPC_SECRET"] = "test-secret-at-least-16-chars"
-    req = '{"payload": "test"}'
+    # Ensure env does NOT carry the secret — worker must get it from stdin only.
+    os.environ.pop("CORPCLAW_IPC_SECRET", None)
+    secret = "test-secret-at-least-16-chars"
+    payload = '{"payload": "test"}'
+
+    readline_returns = iter([secret + "\n", payload + "\n"])
 
     with (
-        patch("sys.stdin.readline", return_value=req),
+        patch("sys.stdin.readline", side_effect=lambda: next(readline_returns)),
         patch("builtins.print"),
-        patch("corpclaw_lite.security.ipc_auth.IPCAuth.verify") as mock_verify,
-        patch("corpclaw_lite.security.ipc_auth.IPCAuth.sign") as mock_sign,
+        patch("corpclaw_lite.container.agent_worker.IPCAuth") as mock_auth_cls,
+        patch("corpclaw_lite.container.agent_worker.get_registry") as mock_registry,
     ):
-        mock_verify.return_value = {"type": "tool_call", "tool": "t", "args": {}}
-        mock_sign.return_value = {"signed": "r"}
+        mock_auth = MagicMock()
+        mock_auth.verify.return_value = {"type": "tool_call", "tool": "t", "args": {}}
+        mock_auth.sign.return_value = {"signed": "r"}
+        mock_auth_cls.return_value = mock_auth
+
+        mock_tool = MagicMock()
+
+        async def dummy_execute(**kwargs):
+            return "ok"
+
+        mock_tool.execute = dummy_execute
+        mock_registry.return_value.get.return_value = mock_tool
 
         process_request()
 
-        # The env var should have been popped during process_request
-        assert "CORPCLAW_IPC_SECRET" not in os.environ
+        # IPCAuth was constructed with the stdin secret, not None/env.
+        mock_auth_cls.assert_called_once_with(secret=secret)
 
 
 def test_process_request_uses_tool_timeout_from_payload():

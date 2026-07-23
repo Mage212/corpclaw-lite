@@ -23,11 +23,13 @@ when a :class:`FileStateRegistry` is wired in (see B-058 commit).
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
+from corpclaw_lite.extensions.tools.context import get_tool_execution_context
 from corpclaw_lite.extensions.tools.scoped import ScopedTool
 from corpclaw_lite.security.path_validator import resolve_and_validate_path
 
@@ -123,27 +125,110 @@ class FileTrackedTool(ScopedTool):
             return source_path.with_name(default_name)
         return None
 
+    # ─── plan-based path resolution (apply_fill_plan) ─────────────────────────
+
+    def _resolve_plan_paths(
+        self, kwargs: dict[str, Any]
+    ) -> tuple[Path | None, Path | None, list[Path]]:
+        """Extract template (input), output_path, and source paths from a plan kwarg.
+
+        ``apply_fill_plan`` receives a JSON ``plan`` string/dict where the file
+        paths live inside (``template``, ``output_path``, ``sheets[].sources[].file``)
+        rather than as top-level kwargs. This method parses the plan and resolves
+        the paths so FileTrackedTool can hash/backup/stale-check them.
+
+        Returns ``(template_path, output_path, source_paths)`` — any may be None/[]
+        if parsing fails or the field is absent.
+        """
+        if self._tool.name != "apply_fill_plan":
+            return None, None, []
+        raw_plan = kwargs.get("plan")
+        if raw_plan is None:
+            return None, None, []
+        try:
+            import json
+
+            parsed: object = json.loads(raw_plan) if isinstance(raw_plan, str) else raw_plan
+            if not isinstance(parsed, dict):
+                return None, None, []
+        except Exception:
+            return None, None, []
+
+        data: dict[str, Any] = cast(dict[str, Any], parsed)
+        template_raw: object = data.get("template")
+        output_raw: object = data.get("output_path")
+        template = (
+            resolve_and_validate_path(str(template_raw))
+            if isinstance(template_raw, str) and template_raw
+            else None
+        )
+        output = (
+            resolve_and_validate_path(str(output_raw))
+            if isinstance(output_raw, str) and output_raw
+            else None
+        )
+        # Collect all source file paths for implicit-read registration.
+        sources: list[Path] = []
+        sheets_raw: object = data.get("sheets", [])
+        if isinstance(sheets_raw, list):
+            for sheet in cast(list[object], sheets_raw):
+                if not isinstance(sheet, dict):
+                    continue
+                sheet_dict = cast(dict[str, Any], sheet)
+                srcs_raw: object = sheet_dict.get("sources", [])
+                if not isinstance(srcs_raw, list):
+                    continue
+                for src in cast(list[object], srcs_raw):
+                    if not isinstance(src, dict):
+                        continue
+                    src_file = cast(dict[str, Any], src).get("file")
+                    if isinstance(src_file, str) and src_file:
+                        with contextlib.suppress(Exception):
+                            sources.append(resolve_and_validate_path(src_file))
+        return template, output, sources
+
     # ─── execute ─────────────────────────────────────────────────────────────
 
     async def execute(self, **kwargs: Any) -> str:
-        user = kwargs.get("user")
-        run_id = kwargs.get("run_id")
+        context = get_tool_execution_context()
+        explicit_user = kwargs.get("user")
+        user = explicit_user if explicit_user is not None else (context.user if context else None)
+        explicit_run_id = kwargs.get("run_id")
+        run_id = (
+            explicit_run_id
+            if isinstance(explicit_run_id, str)
+            else (context.run_id if context else None)
+        )
         source_raw = kwargs.get(self._path_param)
 
-        # No tracking context → pass through untouched.
-        if not (
+        # Plan-based tools (apply_fill_plan): the "path" is a JSON plan, not a
+        # filesystem path. Resolve template/output/sources from the plan instead.
+        plan_template, plan_output, plan_sources = self._resolve_plan_paths(kwargs)
+        if plan_template is not None:
+            source_path = plan_template
+        elif not (
             user is not None
             and isinstance(run_id, str)
             and isinstance(source_raw, str)
             and source_raw
         ):
+            # No tracking context → pass through untouched.
+            return await self._tool.execute(**kwargs)
+        else:
+            try:
+                source_path = resolve_and_validate_path(source_raw)
+            except Exception:
+                # Invalid path → let the wrapped tool surface its own error.
+                return await self._tool.execute(**kwargs)
+
+        # For plan-based tools, user/run_id must still be present for tracking.
+        if plan_template is not None and not (user is not None and isinstance(run_id, str)):
             return await self._tool.execute(**kwargs)
 
-        try:
-            source_path = resolve_and_validate_path(source_raw)
-        except Exception:
-            # Invalid path → let the wrapped tool surface its own error.
-            return await self._tool.execute(**kwargs)
+        # At this point user and run_id are guaranteed non-None for tracking
+        # (either via the standard source_raw path or the plan-based guard above).
+        assert user is not None
+        assert isinstance(run_id, str)
 
         before_hash: str | None = None
         if source_path.exists():
@@ -156,9 +241,14 @@ class FileTrackedTool(ScopedTool):
         # convert, fill-default), determine that output path up front so we can
         # (a) take a backup of the pre-existing output if any, and (b) compute
         # op='create' vs 'modify' based on whether the output existed before.
-        output_path_pre = (
-            source_path if self._tracks_output else self._resolve_output_path(source_path, kwargs)
-        )
+        if plan_output is not None:
+            output_path_pre = plan_output
+        else:
+            output_path_pre = (
+                source_path
+                if self._tracks_output
+                else self._resolve_output_path(source_path, kwargs)
+            )
         output_existed_before = output_path_pre is not None and output_path_pre.exists()
         output_before_hash: str | None = None
         if output_existed_before and output_path_pre is not None:
@@ -195,6 +285,31 @@ class FileTrackedTool(ScopedTool):
         # mirroring the existing excel_workbook read-before-write warning.
         stale_warning: str | None = None
         if self._file_state is not None:
+            # excel_workbook fill / fill_by_date load the full workbook themselves,
+            # so treat the call as an implicit read of the source path and avoid a
+            # false "have not read it in this run" warning that triggers model retries.
+            action = kwargs.get("action")
+            if self._tool.name == "excel_workbook" and action in ("fill", "fill_by_date"):
+                try:
+                    self._file_state.record_read_path(source_path, task_id=run_id)
+                except (ValueError, OSError, TypeError) as exc:
+                    # CR-24: record_read_path swallows OSError internally; anything
+                    # escaping is a logic bug or a broken file_state. Narrow the
+                    # catch so unexpected exceptions still surface to the caller.
+                    logger.debug("file_tracked: record_read_path skipped: %s", exc, exc_info=True)
+
+            # apply_fill_plan reads the template and all source files internally,
+            # so treat them as implicit reads to avoid a false "have not read"
+            # warning that would trigger unnecessary model retries.
+            if plan_template is not None:
+                for read_path in [plan_template, *plan_sources]:
+                    try:
+                        self._file_state.record_read_path(read_path, task_id=run_id)
+                    except (ValueError, OSError, TypeError) as exc:
+                        logger.debug(
+                            "file_tracked: record_read_path skipped: %s", exc, exc_info=True
+                        )
+
             check_path = (
                 str(source_path)
                 if self._tracks_output
@@ -208,18 +323,28 @@ class FileTrackedTool(ScopedTool):
         # B-058: record this write as the latest writer for the output path.
         if self._file_state is not None:
             try:
-                after_path_for_note = self._resolve_output_path(source_path, kwargs)
+                after_path_for_note = (
+                    plan_output
+                    if plan_output is not None
+                    else self._resolve_output_path(source_path, kwargs)
+                )
                 if after_path_for_note is not None:
                     self._file_state.note_write(path=str(after_path_for_note), task_id=run_id)
-            except Exception:
-                logger.debug("file_tracked: note_write skipped", exc_info=True)
+            except (ValueError, OSError, TypeError) as exc:
+                # CR-24: note_write is best-effort bookkeeping. Narrow the catch
+                # so unexpected exceptions surface to the caller.
+                logger.debug("file_tracked: note_write skipped: %s", exc, exc_info=True)
 
         if stale_warning is not None:
             result = f"[File state warning] {stale_warning}\n\n{result}"
 
         # Record the change. Best-effort: never let journaling break the tool.
         try:
-            after_path = self._resolve_output_path(source_path, kwargs)
+            after_path = (
+                plan_output
+                if plan_output is not None
+                else self._resolve_output_path(source_path, kwargs)
+            )
             if after_path is not None and after_path.exists():
                 after_hash = _sha256_file(after_path)
                 # op is decided by whether the *output* file existed before the

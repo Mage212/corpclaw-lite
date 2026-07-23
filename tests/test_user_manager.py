@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
+
 from corpclaw_lite.users.manager import UserManager
 
 PASSWORD = "secret-password-123"
@@ -182,12 +184,13 @@ def test_merge_web_user_moves_credentials_workspace_and_memory(tmp_path) -> None
         )
         conn.execute(
             """
-            CREATE TABLE memory_facts (
+            CREATE TABLE memory_entries (
                 id INTEGER PRIMARY KEY,
                 user_id TEXT NOT NULL,
-                key TEXT NOT NULL,
-                value TEXT NOT NULL,
-                UNIQUE(user_id, key)
+                primary_abstraction TEXT NOT NULL,
+                memory_value TEXT NOT NULL,
+                cue_indices_json TEXT NOT NULL DEFAULT '[]',
+                UNIQUE(user_id, primary_abstraction)
             )
             """
         )
@@ -216,7 +219,11 @@ def test_merge_web_user_moves_credentials_workspace_and_memory(tmp_path) -> None
             (str(source.id), "user", "hello"),
         )
         conn.execute(
-            "INSERT INTO memory_facts (user_id, key, value) VALUES (?, ?, ?)",
+            """
+            INSERT INTO memory_entries (
+                user_id, primary_abstraction, memory_value, cue_indices_json
+            ) VALUES (?, ?, ?, '[]')
+            """,
             (str(source.id), "source_fact", "yes"),
         )
         conn.execute(
@@ -260,13 +267,97 @@ def test_merge_web_user_moves_credentials_workspace_and_memory(tmp_path) -> None
 
     with sqlite3.connect(memory_db) as conn:
         message_user_ids = conn.execute("SELECT user_id FROM messages").fetchall()
-        fact_user_ids = conn.execute("SELECT user_id FROM memory_facts").fetchall()
+        fact_user_ids = conn.execute("SELECT user_id FROM memory_entries").fetchall()
         web_session_user_ids = conn.execute("SELECT user_id FROM web_chat_sessions").fetchall()
         web_message_user_ids = conn.execute("SELECT user_id FROM web_chat_messages").fetchall()
     assert message_user_ids == [(str(target.id),)]
     assert fact_user_ids == [(str(target.id),)]
     assert web_session_user_ids == [(str(target.id),)]
     assert web_message_user_ids == [(str(target.id),)]
+
+
+def test_merge_memory_facts_only_moves_non_conflicting(tmp_path) -> None:
+    """Entries DB (no messages): non-conflicting abstractions move to target."""
+    memory_db = tmp_path / "memory.db"
+    with sqlite3.connect(memory_db) as conn:
+        conn.execute(
+            """
+            CREATE TABLE memory_entries (
+                id INTEGER PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                primary_abstraction TEXT NOT NULL,
+                memory_value TEXT NOT NULL,
+                cue_indices_json TEXT NOT NULL DEFAULT '[]',
+                UNIQUE(user_id, primary_abstraction)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO memory_entries (
+                user_id, primary_abstraction, memory_value, cue_indices_json
+            ) VALUES (?, ?, ?, '[]')
+            """,
+            ("10", "source_only", "yes"),
+        )
+        conn.execute(
+            """
+            INSERT INTO memory_entries (
+                user_id, primary_abstraction, memory_value, cue_indices_json
+            ) VALUES (?, ?, ?, '[]')
+            """,
+            ("20", "target_only", "keep"),
+        )
+
+    moved_messages, moved_facts = UserManager._merge_memory(
+        memory_db_path=memory_db,
+        source_key="10",
+        target_key="20",
+    )
+    assert moved_messages == 0
+    assert moved_facts == 1
+
+    with sqlite3.connect(memory_db) as conn:
+        rows = {
+            (str(r[0]), str(r[1]), str(r[2]))
+            for r in conn.execute(
+                "SELECT user_id, primary_abstraction, memory_value FROM memory_entries"
+            ).fetchall()
+        }
+    assert rows == {("20", "source_only", "yes"), ("20", "target_only", "keep")}
+
+
+def test_merge_web_user_failure_does_not_disable_source(tmp_path, monkeypatch) -> None:
+    """B-074/M4: if a sub-migration (workspace/memory) fails mid-merge, the
+    source user must NOT be left disabled. Credentials are moved and the
+    source's username/password nulled (so it can't log in), but disabled=0
+    keeps the row recoverable instead of a half-moved disabled user."""
+    db = tmp_path / "users.db"
+    memory_db = tmp_path / "memory.db"
+    workspace_base = tmp_path / "workspaces"
+    mgr = UserManager(db_path=str(db))
+    target = mgr.create_user(telegram_id=278278319, department="engineering", name="Vadim")
+    source = mgr.create_web_user(username="vadim", password=PASSWORD, department="engineering")
+    (workspace_base / f"user_{source.id}").mkdir(parents=True)
+
+    # Force _merge_memory to fail mid-merge.
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated memory-merge failure")
+
+    monkeypatch.setattr(mgr, "_merge_memory", boom)
+
+    with pytest.raises(RuntimeError, match="simulated memory-merge failure"):
+        mgr.merge_web_user(
+            source_user_id=source.id,
+            target_user_id=target.id,
+            workspace_base=workspace_base,
+            memory_db_path=memory_db,
+        )
+
+    # Source is NOT disabled (disabled flag stays 0) — recoverable.
+    source_after = mgr.get_by_id(source.id)
+    assert source_after is not None
+    assert not source_after.disabled
 
 
 def test_migrate_canonical_ids_moves_legacy_telegram_data(tmp_path) -> None:
@@ -299,12 +390,13 @@ def test_migrate_canonical_ids_moves_legacy_telegram_data(tmp_path) -> None:
         )
         conn.execute(
             """
-            CREATE TABLE memory_facts (
+            CREATE TABLE memory_entries (
                 id INTEGER PRIMARY KEY,
                 user_id TEXT NOT NULL,
-                key TEXT NOT NULL,
-                value TEXT NOT NULL,
-                UNIQUE(user_id, key)
+                primary_abstraction TEXT NOT NULL,
+                memory_value TEXT NOT NULL,
+                cue_indices_json TEXT NOT NULL DEFAULT '[]',
+                UNIQUE(user_id, primary_abstraction)
             )
             """
         )
@@ -313,7 +405,11 @@ def test_migrate_canonical_ids_moves_legacy_telegram_data(tmp_path) -> None:
             ("278278319", "user", "hello"),
         )
         conn.execute(
-            "INSERT INTO memory_facts (user_id, key, value) VALUES (?, ?, ?)",
+            """
+            INSERT INTO memory_entries (
+                user_id, primary_abstraction, memory_value, cue_indices_json
+            ) VALUES (?, ?, ?, '[]')
+            """,
             ("278278319", "role", "architect"),
         )
 
@@ -351,7 +447,7 @@ def test_migrate_canonical_ids_moves_legacy_telegram_data(tmp_path) -> None:
 
     with sqlite3.connect(memory_db) as conn:
         message_user_ids = conn.execute("SELECT user_id FROM messages").fetchall()
-        fact_user_ids = conn.execute("SELECT user_id FROM memory_facts").fetchall()
+        fact_user_ids = conn.execute("SELECT user_id FROM memory_entries").fetchall()
     with sqlite3.connect(db) as conn:
         onboarding_ids = conn.execute("SELECT user_id FROM onboarding_state").fetchall()
     assert message_user_ids == [(str(user.id),)]
@@ -379,3 +475,19 @@ def test_set_web_password(tmp_path) -> None:
     assert mgr.authenticate_web_user("bob", "old-password-123") is None
     assert mgr.authenticate_web_user("bob", "new-password-123") is not None
     assert mgr.set_web_password("missing", "new-password-123") is False
+
+
+def test_set_web_password_invalidates_existing_sessions(tmp_path) -> None:
+    """S3-08: changing the password must invalidate prior web sessions."""
+    db = str(tmp_path / "users.db")
+    mgr = UserManager(db_path=db)
+    user = mgr.create_web_user(username="bob", password="old-password-123", department="it")
+
+    # Establish a session before the password change.
+    token, _csrf = mgr.create_web_session(user.id, ttl_hours=1)
+    assert mgr.get_user_by_session(token) is not None
+
+    assert mgr.set_web_password("bob", "new-password-123") is True
+
+    # The pre-rotation session is no longer valid.
+    assert mgr.get_user_by_session(token) is None

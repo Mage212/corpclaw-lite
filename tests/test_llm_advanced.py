@@ -234,11 +234,19 @@ def test_resolve_reasoning_fallback_no_op_content_present() -> None:
 
 
 def test_resolve_reasoning_fallback_plain_text_no_tools() -> None:
-    """Empty content + reasoning_content + no tools → reasoning becomes answer."""
+    """Empty content + substantial reasoning_content + no tools → reasoning becomes answer.
+
+    Note: the reasoning must be >= _REASONING_FALLBACK_MIN_CHARS (100) — short
+    fragments (e.g. gemma4 garbage) are NOT copied to avoid false crashes.
+    """
     provider = _make_provider()
-    msg = _raw_msg(reasoning_content="Here is my answer.")
+    answer = (
+        "Here is my detailed answer that explains the topic thoroughly. "
+        "It must exceed the reasoning fallback threshold to be treated as content."
+    )
+    msg = _raw_msg(reasoning_content=answer)
     content, tool_calls = provider._resolve_reasoning_fallback("", "stop", msg, None, [])
-    assert content == "Here is my answer."
+    assert content == answer
     assert tool_calls == []
 
 
@@ -276,9 +284,17 @@ def test_resolve_reasoning_fallback_multiple_xml_tool_calls_extracted() -> None:
 
 
 def test_resolve_reasoning_fallback_unparseable_xml_falls_back_to_text() -> None:
-    """XML markers present but parse fails → treat reasoning as text content."""
+    """Substantial XML markers present but parse fails → treat reasoning as text content.
+
+    Note: the fragment must be >= _REASONING_FALLBACK_MIN_CHARS (100) — short
+    unparseable fragments are NOT copied to avoid false malformed_xml crashes.
+    """
     provider = _make_provider()
-    bad_xml = "<tool_call>BROKEN XML</tool_call>"
+    bad_xml = (
+        "<tool_call>BROKEN XML that is long enough to pass the length threshold "
+        + "x" * 80
+        + "</tool_call>"
+    )
     msg = _raw_msg(reasoning_content=bad_xml)
     tools = [{"function": {"name": "some_tool", "parameters": {}}}]
     content, tool_calls = provider._resolve_reasoning_fallback("", "stop", msg, tools, [])
@@ -341,11 +357,8 @@ async def test_anthropic_chat_with_image_applies_system_prompt_prefix() -> None:
 
 
 @pytest.mark.asyncio
-async def test_anthropic_stream_does_not_apply_preset() -> None:
-    """stream() must NOT apply preset (system_prompt_prefix, inference params).
-
-    Streaming is for cloud models that don't need preset tuning.
-    """
+async def test_anthropic_stream_applies_same_preset_as_chat() -> None:
+    """stream() and chat() must use the same request-building contract."""
 
     from corpclaw_lite.llm.presets import ModelPreset
 
@@ -379,6 +392,4 @@ async def test_anthropic_stream_does_not_apply_preset() -> None:
         ]
 
     call_kwargs = mock_client.messages.stream.call_args.kwargs
-    # Preset must NOT be applied to stream — system stays as-is
-    assert call_kwargs["system"] == "Base system"
-    assert "<|think|>" not in call_kwargs["system"]
+    assert call_kwargs["system"] == "<|think|>\nBase system"

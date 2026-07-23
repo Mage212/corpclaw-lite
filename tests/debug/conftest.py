@@ -75,6 +75,8 @@ def agent_stack_no_container() -> tuple[AgentLoop, ToolRegistry]:
     )
 
     os.environ.setdefault("CORPCLAW_IPC_SECRET", "debug-test-secret")
+    # DC-016: host tools require explicit opt-in when container.enabled=false.
+    os.environ.setdefault("CORPCLAW_ALLOW_HOST_TOOLS", "1")
 
     try:
         stack = build_agent_stack(settings=patched_settings)
@@ -128,23 +130,18 @@ def test_user() -> User:
 def _clear_test_user_memory(
     agent_stack_no_container: tuple[AgentLoop, ToolRegistry],
 ) -> None:
-    """Clear conversation memory for the test user before each test.
+    """Clear cross-chat facts for the test user before each test (B-106).
 
-    Without this, history from prior test runs accumulates in SQLiteMemory
-    and pollutes the LLM context — the model sees previous responses (including
-    refusals, security blocks, wrong tool calls) and repeats those patterns
-    instead of handling the current request fresh.
+    Transcript isolation is per ChatContextStore session; facts on SQLiteMemory
+    would otherwise leak between live debug scenarios.
     """
     import asyncio
 
     loop, _ = agent_stack_no_container
     memory = loop.memory
     if memory is not None:
-        asyncio.run(memory.clear(str(_TEST_USER_ID)))
-        asyncio.run(memory.clear(str(_TEST_TELEGRAM_ID)))
-        if hasattr(memory, "clear_facts"):
-            asyncio.run(memory.clear_facts(str(_TEST_USER_ID)))
-            asyncio.run(memory.clear_facts(str(_TEST_TELEGRAM_ID)))
+        asyncio.run(memory.clear_facts(str(_TEST_USER_ID)))
+        asyncio.run(memory.clear_facts(str(_TEST_TELEGRAM_ID)))
 
 
 _WORKSPACE_ROOT = _PROJECT_ROOT / "tests" / "debug" / ".workspace"

@@ -13,14 +13,22 @@ __all__ = [
     "LLMStreamEvent",
     "LLMStreamStage",
     "Provider",
+    "RequestOptions",
     "StreamChunk",
     "StreamingProvider",
+    "ThinkingOverride",
     "TokenUsage",
     "ToolCall",
     "VisionProvider",
     "get_backend_request_options",
+    "get_request_options",
+    "get_run_id",
     "reset_backend_request_options",
+    "reset_request_options",
+    "reset_run_id",
     "set_backend_request_options",
+    "set_request_options",
+    "set_run_id",
 ]
 
 LLMStreamStage = Literal[
@@ -40,6 +48,10 @@ class ToolCall(BaseModel):
     id: str
     name: str
     arguments: dict[str, Any]
+    # Provider-private protocol state that must survive a durable tool round-trip
+    # but must never be sent to tools, shown in UI, or included in model_dump/logs.
+    # Providers opt in explicitly when serializing the canonical transcript.
+    provider_metadata: dict[str, Any] | None = Field(default=None, exclude=True, repr=False)
 
 
 class TokenUsage(BaseModel):
@@ -87,6 +99,147 @@ def reset_backend_request_options(token: contextvars.Token[BackendRequestOptions
 def get_backend_request_options() -> BackendRequestOptions | None:
     """Return backend-specific request options for the current async context."""
     return _backend_request_options.get()
+
+
+@dataclass(frozen=True)
+class ThinkingOverride:
+    """Per-call override of model thinking/reasoning behaviour.
+
+    Independent of :class:`ModelProfile`/SamplingProfile: it overrides whatever
+    the routing-resolved profiles would produce, for a single LLM call.
+
+    Modes:
+        default:  the model's natural thinking (do not override).
+        off:      disable thinking entirely (e.g. ``chat_template_kwargs.
+                  enable_thinking=false`` for Qwen/gemma, or no ``<|think|>``
+                  prefix for gemma4). Fast extraction-style calls.
+        budget:   soft-cap reasoning output to ``budget`` tokens (sets
+                  ``thinking_budget_tokens`` semantics, model-dependent).
+    """
+
+    mode: Literal["default", "off", "budget"] = "default"
+    budget: int | None = None
+
+
+@dataclass(frozen=True)
+class RequestOptions:
+    """Per-call LLM request overrides, set via an async-context contextvar.
+
+    This is the second, independent rail next to :class:`BackendRequestOptions`.
+    ``BackendRequestOptions`` carries transport-level keys (``id_slot``,
+    ``cache_prompt``) set by the LLM queue/cache layer; ``RequestOptions``
+    carries inference + thinking overrides set per-call (e.g. by PhasePolicy).
+    Both are merged by the provider in ``_build_chat_kwargs`` with deterministic
+    priority::
+
+        model_profile defaults  (lowest)
+          < SamplingProfile overrides
+            < RequestOptions.inference / RequestOptions.thinking
+              (per-call, highest among inference)
+            < BackendRequestOptions.extra_body
+              (transport, lowest of its own layer)
+
+    Merge order is implemented in ``OpenAIProvider._build_chat_kwargs``; see
+    ``tests/test_request_options.py`` for the contract.
+
+    All fields are optional — ``None`` means "do not override".
+    """
+
+    inference: dict[str, Any] | None = None
+    thinking: ThinkingOverride | None = None
+
+
+_call_options: contextvars.ContextVar[RequestOptions | None] = contextvars.ContextVar(
+    "llm_call_options", default=None
+)
+
+
+def set_request_options(
+    options: RequestOptions | None,
+) -> contextvars.Token[RequestOptions | None]:
+    """Set per-call LLM request overrides for the current async context.
+
+    Use as a context manager replacement::
+
+        token = set_request_options(RequestOptions(thinking=ThinkingOverride(mode="off")))
+        try:
+            response = await provider.chat(...)
+        finally:
+            reset_request_options(token)
+
+    Independent of :func:`set_backend_request_options` — both contextvars may
+    be active simultaneously and are merged by the provider.
+    """
+    return _call_options.set(options)
+
+
+def reset_request_options(token: contextvars.Token[RequestOptions | None]) -> None:
+    """Reset per-call request overrides to the previous value."""
+    _call_options.reset(token)
+
+
+def get_request_options() -> RequestOptions | None:
+    """Return per-call request overrides for the current async context."""
+    return _call_options.get()
+
+
+# ── Run-id contextvar (D-056 post-0.2.0: payload capture) ──────────────────────
+# Set by AgentLoop.run() so providers can tag raw-payload captures with the
+# originating run_id without threading it through every call signature.
+# Defaults to None — capture still works without it (run_id field is null).
+_run_id_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar("llm_run_id", default=None)
+
+
+def set_run_id(run_id: str | None) -> contextvars.Token[str | None]:
+    """Set the current agent run id for payload-capture tagging."""
+    return _run_id_ctx.set(run_id)
+
+
+def reset_run_id(token: contextvars.Token[str | None]) -> None:
+    """Reset the run-id contextvar."""
+    _run_id_ctx.reset(token)
+
+
+def get_run_id() -> str | None:
+    """Return the current agent run id, or None if not in a run context."""
+    return _run_id_ctx.get()
+
+
+# ── Capture-correlation contextvars (B-063 S4) ──────────────────────────────
+# Set by AgentLoop.run() so providers can tag raw-payload captures with the
+# originating user_id + session_id without threading them through call
+# signatures. Mirrors the run_id pattern above.
+_capture_user_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "llm_capture_user_id", default=None
+)
+_capture_session_id: contextvars.ContextVar[int | None] = contextvars.ContextVar(
+    "llm_capture_session_id", default=None
+)
+
+
+def set_capture_context(
+    user_id: str | None, session_id: int | None
+) -> tuple[contextvars.Token[str | None], contextvars.Token[int | None]]:
+    """Bind user_id + session_id for payload-capture tagging (B-063 S4)."""
+    return (_capture_user_id.set(user_id), _capture_session_id.set(session_id))
+
+
+def reset_capture_context(
+    tokens: tuple[contextvars.Token[str | None], contextvars.Token[int | None]],
+) -> None:
+    """Reset the capture-correlation contextvars."""
+    _capture_user_id.reset(tokens[0])
+    _capture_session_id.reset(tokens[1])
+
+
+def get_capture_user_id() -> str | None:
+    """Return the user_id bound for capture, or None."""
+    return _capture_user_id.get()
+
+
+def get_capture_session_id() -> int | None:
+    """Return the session_id bound for capture, or None."""
+    return _capture_session_id.get()
 
 
 class LLMResponse(BaseModel):

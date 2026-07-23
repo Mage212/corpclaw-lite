@@ -1,12 +1,29 @@
 import type {
+  AgentFileChange,
+  AgentFileChangesPayload,
+  AgentFileDiffPayload,
+  AgentFileRevertPayload,
   AgentMode,
   ChatMessage,
+  ChatSummary,
+  ContextAttachment,
   ContextUsage,
+  DepthMode,
   DirectoryPayload,
+  ExtensionSummary,
+  ExtensionsPayload,
   FileEntry,
   PanelLayoutState,
+  PinsPayload,
+  PendingContextPayload,
   PreviewPayload,
+  ScheduleKind,
+  ScheduleSpec,
+  ScheduleTask,
+  ScheduleTaskStatus,
   SessionPayload,
+  SystemLoad,
+  SystemLoadLevel,
   TreeNode,
   User,
   WebSocketTicketPayload,
@@ -19,7 +36,7 @@ export type UploadPayload = {
 };
 
 export type ServerWsEvent =
-  | { type: "chat_history"; messages: ChatMessage[]; has_more: boolean; session_id?: number }
+  | { type: "chat_history"; messages: ChatMessage[]; has_more: boolean; session_id?: number; read_only?: boolean }
   | { type: "history_page"; messages: ChatMessage[]; has_more: boolean; session_id?: number }
   | { type: "chat_message"; message: ChatMessage }
   | { type: "request_started"; request_id: string; label: string; phase?: string; key?: string }
@@ -36,13 +53,40 @@ export type ServerWsEvent =
     }
   | { type: "context_usage"; usage: ContextUsage }
   | { type: "context_reset"; message: string; usage?: ContextUsage }
+  | { type: "compress_done"; message: string; usage?: ContextUsage }
   | { type: "warning"; message: string; request_id?: string }
-  | { type: "error"; message: string; request_id?: string; usage?: ContextUsage }
+  | {
+      type: "error";
+      message: string;
+      request_id?: string;
+      usage?: ContextUsage;
+      running_session_id?: number;
+      running_session_title?: string | null;
+    }
   | { type: "file_ready"; name: string; url: string; caption: string; path?: string | null }
-  | { type: "approval_required"; approval_id: string; action: string; details: string }
-  | { type: "approval_resolved"; approval_id: string }
+  | { type: "approval_required"; approval_id: string; action: string; details: string; request_id?: string }
+  | { type: "approval_resolved"; approval_id: string; request_id?: string }
   | { type: "llm_status"; status: string }
-  | { type: "mode"; mode: AgentMode };
+  | { type: "mode"; mode: AgentMode }
+  | { type: "depth_mode"; depth_mode: DepthMode }
+  | { type: "chat_renamed"; session_id: number; title: string }
+  | { type: "chat_activated"; session_id: number; section: string; mode: AgentMode }
+  | { type: "chat_list_changed" }
+  | {
+      type: "proactive_message";
+      session_id: number;
+      source: string;
+      title: string | null;
+      message: ChatMessage;
+    }
+  | ({ type: "system_load" } & SystemLoad)
+  | {
+      type: "session_running_state";
+      session_id: number;
+      is_running: boolean;
+      title?: string;
+    }
+  | { type: "web_access"; web_access: boolean };
 
 type JsonRecord = Record<string, unknown>;
 
@@ -68,6 +112,25 @@ function record(value: unknown, label: string): JsonRecord {
 
 function optionalString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+/**
+ * Defense-in-depth: bound a backend/WS-provided URL to a safe scheme.
+ *
+ * Today the backend only ever produces same-origin relative URLs
+ * (`/api/download/{token}`, `/api/files/inline?...`), so this is a safety net
+ * against a future backend change or a compromised backend emitting
+ * `javascript:`/`data:text/html` (which would be XSS in an `<a href>`).
+ * Returns the URL unchanged when safe, `undefined` otherwise.
+ */
+function safeUrl(value: unknown): string | undefined {
+  if (typeof value !== "string" || value === "") return undefined;
+  // Relative (starts with `/`) or protocol-relative — same-origin, safe.
+  if (value.startsWith("/") || value.startsWith("./")) return value;
+  const lower = value.toLowerCase();
+  if (lower.startsWith("http://") || lower.startsWith("https://")) return value;
+  // Reject everything else (javascript:, data:, vbscript:, file:, …).
+  return undefined;
 }
 
 function stringValue(value: unknown, fallback: string): string {
@@ -182,6 +245,139 @@ export function parseFileEntry(value: unknown): FileEntry {
   };
 }
 
+/** Parse a chat summary object from GET /api/chats (or embedded in WS events). */
+export function parseChatSummary(value: unknown): ChatSummary {
+  const source = record(value, "chat summary");
+  const rawSection = requiredString(source, "section", "chat summary");
+  const titleValue = source.title;
+  const updatedAt = optionalString(source.updated_at);
+  const folderId = optionalNumber(source.folder_id);
+  const section =
+    rawSection === "work" ? "work" : rawSection === "system" ? "system" : "chat";
+  return {
+    id: requiredNumber(source, "id", "chat summary"),
+    section,
+    title: typeof titleValue === "string" && titleValue.length > 0 ? titleValue : null,
+    created_at: requiredString(source, "created_at", "chat summary"),
+    active: requiredBoolean(source, "active", "chat summary"),
+    msg_count: requiredNumber(source, "msg_count", "chat summary"),
+    updated_at: updatedAt ?? null,
+    folder_id: folderId ?? null,
+    is_running: source.is_running === true
+  };
+}
+
+export function parseChatSummaries(value: unknown): ChatSummary[] {
+  if (!Array.isArray(value)) return [];
+  return value.map(parseChatSummary);
+}
+
+// --- Etap 4: Extensions payload parsing ---
+
+export function parseExtensionSummary(value: unknown): ExtensionSummary {
+  const source = record(value, "extension summary");
+  return {
+    id: requiredString(source, "id", "extension summary"),
+    name: requiredString(source, "name", "extension summary"),
+    description: nullableString(source, "description", "extension summary"),
+    version: nullableString(source, "version", "extension summary"),
+    status: requiredString(source, "status", "extension summary"),
+    ...(typeof source.type === "string" ? { type: source.type } : {}),
+    ...(typeof source.always === "boolean" ? { always: source.always } : {}),
+    ...(Array.isArray(source.keywords) ? { keywords: source.keywords as string[] } : {}),
+    ...(Array.isArray(source.capabilities)
+      ? { capabilities: source.capabilities as string[] }
+      : {}),
+    ...(Array.isArray(source.tools) ? { tools: source.tools as string[] } : {})
+  };
+}
+
+export function parseExtensionsPayload(value: unknown): ExtensionsPayload {
+  const source = record(value, "extensions payload");
+  const parseList = (key: string): ExtensionSummary[] => {
+    const arr = (source as Record<string, unknown>)[key];
+    return Array.isArray(arr) ? arr.map(parseExtensionSummary) : [];
+  };
+  return {
+    skills: parseList("skills"),
+    subagents: parseList("subagents"),
+    mcp: parseList("mcp"),
+    plugins: parseList("plugins")
+  };
+}
+
+// --- B-140 / B-141: schedule REST payload parsing ---
+
+const SCHEDULE_STATUSES: ReadonlySet<string> = new Set([
+  "pending",
+  "active",
+  "paused",
+  "done",
+  "dismissed"
+]);
+
+const SCHEDULE_KINDS: ReadonlySet<string> = new Set(["once", "interval", "cron", "unset"]);
+
+function parseScheduleSpec(value: unknown): ScheduleSpec {
+  if (!isRecord(value)) {
+    return { kind: "unset" };
+  }
+  const kindRaw = typeof value.kind === "string" ? value.kind : "unset";
+  const kind: ScheduleKind = SCHEDULE_KINDS.has(kindRaw)
+    ? (kindRaw as ScheduleKind)
+    : "unset";
+  const spec: ScheduleSpec = { kind };
+  if (typeof value.run_at === "string") spec.run_at = value.run_at;
+  else if (value.run_at === null) spec.run_at = null;
+  if (typeof value.minutes === "number" && Number.isFinite(value.minutes)) {
+    spec.minutes = value.minutes;
+  } else if (value.minutes === null) {
+    spec.minutes = null;
+  }
+  if (typeof value.expr === "string") spec.expr = value.expr;
+  else if (value.expr === null) spec.expr = null;
+  return spec;
+}
+
+export function parseScheduleTask(value: unknown): ScheduleTask {
+  const source = record(value, "schedule task");
+  const statusRaw = requiredString(source, "status", "schedule task");
+  const status: ScheduleTaskStatus = SCHEDULE_STATUSES.has(statusRaw)
+    ? (statusRaw as ScheduleTaskStatus)
+    : "pending";
+  return {
+    id: requiredString(source, "id", "schedule task"),
+    user_id: requiredNumber(source, "user_id", "schedule task"),
+    title: requiredString(source, "title", "schedule task"),
+    task_text: requiredString(source, "task_text", "schedule task"),
+    schedule_text: requiredString(source, "schedule_text", "schedule task"),
+    schedule: parseScheduleSpec(source.schedule),
+    timezone: stringValue(source.timezone, "UTC"),
+    status,
+    enabled: typeof source.enabled === "boolean" ? source.enabled : true,
+    next_run_at: nullableString(source, "next_run_at", "schedule task"),
+    last_run_at: nullableString(source, "last_run_at", "schedule task"),
+    last_status: nullableString(source, "last_status", "schedule task"),
+    run_count: typeof source.run_count === "number" ? source.run_count : 0,
+    error_count: typeof source.error_count === "number" ? source.error_count : 0,
+    created_at: stringValue(source.created_at, ""),
+    updated_at: stringValue(source.updated_at, ""),
+    accepted_at: nullableString(source, "accepted_at", "schedule task")
+  };
+}
+
+export function parseScheduleTaskList(value: unknown): ScheduleTask[] {
+  const source = record(value, "schedule list");
+  const tasks = source.tasks;
+  if (!Array.isArray(tasks)) return [];
+  return tasks.map(parseScheduleTask);
+}
+
+export function parseScheduleTaskEnvelope(value: unknown): ScheduleTask {
+  const source = record(value, "schedule task envelope");
+  return parseScheduleTask(source.task);
+}
+
 function parseWorkspaceOutput(value: unknown): WorkspaceOutputSummary {
   const source = record(value, "workspace output");
   return {
@@ -253,7 +449,11 @@ export function parsePreviewPayload(value: unknown): PreviewPayload {
   const type = requiredString(source, "type", "preview");
   const entry = parseFileEntry(source.entry);
   if (type === "image") {
-    return { type, entry, url: requiredString(source, "url", "preview") };
+    const url = safeUrl(source.url);
+    if (url === undefined) {
+      throw invalid("preview.url");
+    }
+    return { type, entry, url };
   }
   if (type === "text") {
     const preview: PreviewPayload = {
@@ -306,6 +506,97 @@ export function parseUploadPayload(value: unknown): UploadPayload {
   };
 }
 
+export function parseContextAttachment(value: unknown): ContextAttachment {
+  const source = record(value, "attachment");
+  const path = requiredString(source, "path", "attachment");
+  return {
+    path,
+    kind: requiredString(source, "kind", "attachment"),
+    tokens: optionalNumber(source.tokens) ?? 0,
+    approximate: Boolean(source.approximate),
+    mode: optionalString(source.mode) ?? "full",
+    label: optionalString(source.label) ?? path
+  };
+}
+
+export function parsePendingContextPayload(value: unknown): PendingContextPayload {
+  const source = record(value, "pending");
+  const raw = source.attachments;
+  const attachments = Array.isArray(raw)
+    ? raw.map((item) => parseContextAttachment(item))
+    : [];
+  return {
+    session_id: optionalNumber(source.session_id) ?? 0,
+    pending_count: optionalNumber(source.pending_count) ?? attachments.length,
+    attachments
+  };
+}
+
+export function parsePinsPayload(value: unknown): PinsPayload {
+  const source = record(value, "pins");
+  const raw = source.pins;
+  const pins = Array.isArray(raw) ? raw.map((item) => parseContextAttachment(item)) : [];
+  const pinRaw = source.pin;
+  return {
+    session_id: optionalNumber(source.session_id) ?? 0,
+    pins,
+    pin_tokens: optionalNumber(source.pin_tokens) ?? 0,
+    pin_budget: optionalNumber(source.pin_budget) ?? 0,
+    pin_ratio: optionalNumber(source.pin_ratio) ?? 0.25,
+    context_limit_tokens: optionalNumber(source.context_limit_tokens) ?? 0,
+    ...(pinRaw !== undefined && pinRaw !== null
+      ? { pin: parseContextAttachment(pinRaw) }
+      : {}),
+    ...(typeof source.reason === "string" ? { reason: source.reason } : {})
+  };
+}
+
+export function parseAgentFileChange(value: unknown): AgentFileChange {
+  const source = record(value, "agent file change");
+  const changeId = requiredString(source, "change_id", "agent file change");
+  return {
+    change_id: changeId,
+    run_id: optionalString(source.run_id) ?? "",
+    path: requiredString(source, "path", "agent file change"),
+    op: optionalString(source.op) ?? "modify",
+    tool_name: optionalString(source.tool_name) ?? "",
+    status: optionalString(source.status) ?? "open",
+    size_bytes: optionalNumber(source.size_bytes) ?? 0,
+    created_at: optionalNumber(source.created_at) ?? 0,
+    has_backup: Boolean(source.has_backup)
+  };
+}
+
+export function parseAgentFileChangesPayload(value: unknown): AgentFileChangesPayload {
+  const source = record(value, "agent file changes");
+  const raw = source.changes;
+  const changes = Array.isArray(raw) ? raw.map((item) => parseAgentFileChange(item)) : [];
+  return { changes };
+}
+
+export function parseAgentFileDiffPayload(value: unknown): AgentFileDiffPayload {
+  const source = record(value, "agent file diff");
+  return {
+    change_id: requiredString(source, "change_id", "agent file diff"),
+    path: requiredString(source, "path", "agent file diff"),
+    kind: optionalString(source.kind) ?? "text",
+    ...(typeof source.unified_diff === "string" ? { unified_diff: source.unified_diff } : {}),
+    ...(source.truncated !== undefined ? { truncated: Boolean(source.truncated) } : {}),
+    ...(typeof source.before_hash === "string" ? { before_hash: source.before_hash } : {}),
+    ...(typeof source.after_hash === "string" ? { after_hash: source.after_hash } : {}),
+    ...(typeof source.message === "string" ? { message: source.message } : {})
+  };
+}
+
+export function parseAgentFileRevertPayload(value: unknown): AgentFileRevertPayload {
+  const source = record(value, "agent file revert");
+  return {
+    ok: Boolean(source.ok),
+    change_id: optionalString(source.change_id) ?? "",
+    action: optionalString(source.action) ?? ""
+  };
+}
+
 export function parseContextUsage(value: unknown): ContextUsage | null {
   if (!isRecord(value)) return null;
   const latest = optionalNumber(value.latest_total_tokens) ?? 0;
@@ -351,11 +642,14 @@ export function parseChatMessage(value: unknown): ChatMessage | null {
   if (tone === "warning" || tone === "error" || tone === "file" || tone === "normal") {
     message.tone = tone;
   }
+  if (isRecord(value.metadata)) {
+    message.metadata = value.metadata;
+  }
   if (isRecord(value.file)) {
     const file: NonNullable<ChatMessage["file"]> = {
       name: stringValue(value.file.name, "файл")
     };
-    const url = optionalString(value.file.url);
+    const url = safeUrl(value.file.url);
     const path = value.file.path === null ? null : optionalString(value.file.path);
     const caption = optionalString(value.file.caption);
     const available = typeof value.file.available === "boolean" ? value.file.available : undefined;
@@ -402,6 +696,9 @@ export function parseServerWsEvent(value: unknown): ServerWsEvent | null {
       const sessionId = optionalNumber(value.session_id);
       if (sessionId !== undefined) {
         event.session_id = sessionId;
+      }
+      if (value.read_only === true) {
+        event.read_only = true;
       }
       return event;
     }
@@ -488,6 +785,17 @@ export function parseServerWsEvent(value: unknown): ServerWsEvent | null {
       }
       return event;
     }
+    case "compress_done": {
+      const event: Extract<ServerWsEvent, { type: "compress_done" }> = {
+        type: "compress_done",
+        message: stringValue(value.message, "Контекст сжат")
+      };
+      const usage = parseContextUsage(value.usage);
+      if (usage !== null) {
+        event.usage = usage;
+      }
+      return event;
+    }
     case "warning": {
       const event: Extract<ServerWsEvent, { type: "warning" }> = {
         type: "warning",
@@ -512,13 +820,25 @@ export function parseServerWsEvent(value: unknown): ServerWsEvent | null {
       if (usage !== null) {
         event.usage = usage;
       }
+      const runningId = optionalNumber(value.running_session_id);
+      if (runningId !== undefined) {
+        event.running_session_id = runningId;
+      }
+      if (value.running_session_title === null) {
+        event.running_session_title = null;
+      } else {
+        const runningTitle = optionalString(value.running_session_title);
+        if (runningTitle !== undefined) {
+          event.running_session_title = runningTitle;
+        }
+      }
       return event;
     }
     case "file_ready": {
       const event: Extract<ServerWsEvent, { type: "file_ready" }> = {
         type: "file_ready",
         name: stringValue(value.name, "файл"),
-        url: stringValue(value.url, ""),
+        url: safeUrl(value.url) ?? "",
         caption: stringValue(value.caption, "")
       };
       if (value.path === null) {
@@ -531,22 +851,118 @@ export function parseServerWsEvent(value: unknown): ServerWsEvent | null {
       }
       return event;
     }
-    case "approval_required":
-      return {
+    case "approval_required": {
+      const approvalRequired: Extract<
+        ServerWsEvent,
+        { type: "approval_required" }
+      > = {
         type: "approval_required",
         approval_id: stringValue(value.approval_id, ""),
         action: stringValue(value.action, "Подтверждение"),
         details: stringValue(value.details, "")
       };
-    case "approval_resolved":
-      return {
+      // Defensive: the wire payload currently omits request_id (the orchestrator's
+      // approval_cb has no request in scope), but a future backend fix may add it.
+      // If present, prefer it over the client-side heuristic stamp.
+      const approvalRequestId = optionalString(value.request_id);
+      if (approvalRequestId !== undefined) {
+        approvalRequired.request_id = approvalRequestId;
+      }
+      return approvalRequired;
+    }
+    case "approval_resolved": {
+      const approvalResolved: Extract<
+        ServerWsEvent,
+        { type: "approval_resolved" }
+      > = {
         type: "approval_resolved",
         approval_id: stringValue(value.approval_id, "")
       };
+      const resolvedRequestId = optionalString(value.request_id);
+      if (resolvedRequestId !== undefined) {
+        approvalResolved.request_id = resolvedRequestId;
+      }
+      return approvalResolved;
+    }
     case "llm_status":
       return { type: "llm_status", status: stringValue(value.status, "unknown") };
     case "mode":
       return { type: "mode", mode: modeValue(value.mode) };
+    case "depth_mode": {
+      const raw = value.depth_mode;
+      return {
+        type: "depth_mode",
+        depth_mode: raw === "fast" ? "fast" : raw === "research" ? "research" : "think"
+      };
+    }
+    case "chat_renamed": {
+      const renamedId = optionalNumber(value.session_id);
+      if (renamedId === undefined) return null;
+      return {
+        type: "chat_renamed",
+        session_id: renamedId,
+        title: stringValue(value.title, "")
+      };
+    }
+    case "chat_activated": {
+      const activatedId = optionalNumber(value.session_id);
+      if (activatedId === undefined) return null;
+      const sectionValue = stringValue(value.section, "chat");
+      const section =
+        sectionValue === "work" ? "work" : sectionValue === "system" ? "system" : "chat";
+      return {
+        type: "chat_activated",
+        session_id: activatedId,
+        section,
+        mode: modeValue(value.mode)
+      };
+    }
+    case "chat_list_changed":
+      return { type: "chat_list_changed" };
+    case "proactive_message": {
+      const sessionId = optionalNumber(value.session_id);
+      if (sessionId === undefined) return null;
+      const message = parseChatMessage(value.message);
+      if (message === null) return null;
+      const titleRaw = value.title;
+      return {
+        type: "proactive_message",
+        session_id: sessionId,
+        source: stringValue(value.source, "manual"),
+        title: typeof titleRaw === "string" && titleRaw.length > 0 ? titleRaw : null,
+        message
+      };
+    }
+    case "system_load": {
+      const levelRaw = stringValue(value.load_level, "idle");
+      const load_level: SystemLoadLevel =
+        levelRaw === "busy" || levelRaw === "saturated" ? levelRaw : "idle";
+      return {
+        type: "system_load",
+        active_count: requiredNumber(value, "active_count", "system_load"),
+        max_concurrent: requiredNumber(value, "max_concurrent", "system_load"),
+        waiting_count: requiredNumber(value, "waiting_count", "system_load"),
+        active_users: requiredNumber(value, "active_users", "system_load"),
+        load_level,
+        updated_at: requiredNumber(value, "updated_at", "system_load")
+      };
+    }
+    case "session_running_state": {
+      const sessionId = optionalNumber(value.session_id);
+      if (sessionId === undefined) return null;
+      const event: Extract<ServerWsEvent, { type: "session_running_state" }> = {
+        type: "session_running_state",
+        session_id: sessionId,
+        is_running: value.is_running === true
+      };
+      const title = optionalString(value.title);
+      if (title !== undefined) {
+        event.title = title;
+      }
+      return event;
+    }
+    case "web_access":
+      return { type: "web_access", web_access: value.web_access === true };
     default:
       return null;
   }
@@ -563,10 +979,18 @@ export function parseDraggedPaths(value: string): string[] {
 
 export function parsePanelLayoutState(value: unknown): PanelLayoutState | null {
   if (!isRecord(value)) return null;
-  const filesWidth = optionalNumber(value.filesWidth);
+
+  // Etap 1A back-compat: legacy layout stored `filesWidth`; migrate to `sidebarWidth`.
+  // New writes use `sidebarWidth`; both are accepted so existing users don't lose their width.
+  const sidebarWidth =
+    optionalNumber(value.sidebarWidth) ?? optionalNumber(value.filesWidth);
   const previewWidth = optionalNumber(value.previewWidth);
-  if (filesWidth === undefined || previewWidth === undefined) {
+  if (sidebarWidth === undefined || previewWidth === undefined) {
     return null;
   }
-  return { filesWidth, previewWidth };
+  // `drawerHeight` is optional: absent/null → drawer collapsed (peek-bar only).
+  const rawDrawerHeight = optionalNumber(value.drawerHeight);
+  const drawerHeight =
+    rawDrawerHeight === undefined || rawDrawerHeight <= 0 ? null : rawDrawerHeight;
+  return { sidebarWidth, previewWidth, drawerHeight };
 }

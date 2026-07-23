@@ -375,6 +375,106 @@ def test_preset_applied_from_routing_rule(tmp_path: None) -> None:  # type: igno
         preset_path.unlink(missing_ok=True)
 
 
+def test_sampling_rule_resolves_split_profiles(tmp_path: None) -> None:  # type: ignore[misc]
+    """D-056 PR2: routing rule with sampling: → SamplingProfile resolved on provider."""
+    import textwrap
+    from pathlib import Path
+
+    registry = _make_registry()
+
+    # New split format: a sampling profile referencing a model profile.
+    from corpclaw_lite.llm.presets import PresetRegistry
+
+    preset_yaml = textwrap.dedent("""\
+        models:
+          qwen-test:
+            default_inference:
+              temperature: 0.7
+              top_k: 20
+        sampling:
+          fast-off:
+            model: qwen-test
+            thinking_mode: off
+            inference_overrides:
+              temperature: 0.2
+    """)
+    preset_path = Path("/tmp/_test_sampling_router.yaml")
+    preset_path.write_text(preset_yaml, encoding="utf-8")
+    try:
+        preset_reg = PresetRegistry.from_yaml(preset_path)
+        settings = _make_settings(
+            [
+                RoutingRule(
+                    task_kind="default",
+                    provider="ollama",
+                    model="qwen-test",
+                    sampling="fast-off",
+                ),
+            ]
+        )
+        router = LLMRouter.from_settings(settings, registry, preset_reg)
+        provider = router.default
+        assert provider is not None
+        # Model profile resolved from the sampling profile's model reference.
+        assert provider._model_profile is not None  # type: ignore[attr-defined]
+        assert provider._model_profile.default_inference["temperature"] == 0.7  # type: ignore[attr-defined]
+        # Sampling profile resolved with the configured thinking_mode.
+        assert provider._sampling is not None  # type: ignore[attr-defined]
+        assert provider._sampling.thinking_mode == "off"  # type: ignore[attr-defined]
+        assert provider._sampling.inference_overrides["temperature"] == 0.2  # type: ignore[attr-defined]
+        # No legacy preset (new-style rule).
+        assert provider._preset is None  # type: ignore[attr-defined]
+    finally:
+        preset_path.unlink(missing_ok=True)
+
+
+def test_sampling_wins_over_legacy_preset_field() -> None:
+    """When a rule has both sampling and preset, sampling wins (D-056)."""
+    import textwrap
+    from pathlib import Path
+
+    from corpclaw_lite.llm.presets import PresetRegistry
+
+    registry = _make_registry()
+    preset_yaml = textwrap.dedent("""\
+        models:
+          qwen-test:
+            default_inference:
+              temperature: 0.7
+        sampling:
+          sampling-rule:
+            model: qwen-test
+            thinking_mode: off
+        presets:
+          legacy-rule:
+            inference_params:
+              temperature: 0.9
+    """)
+    preset_path = Path("/tmp/_test_sampling_wins.yaml")
+    preset_path.write_text(preset_yaml, encoding="utf-8")
+    try:
+        preset_reg = PresetRegistry.from_yaml(preset_path)
+        settings = _make_settings(
+            [
+                RoutingRule(
+                    task_kind="default",
+                    provider="ollama",
+                    model="qwen3.5-4b",
+                    sampling="sampling-rule",
+                    preset="legacy-rule",  # legacy, ignored in favor of sampling
+                ),
+            ]
+        )
+        router = LLMRouter.from_settings(settings, registry, preset_reg)
+        provider = router.default
+        assert provider is not None
+        # Sampling resolved → thinking off.
+        assert provider._sampling is not None  # type: ignore[attr-defined]
+        assert provider._sampling.thinking_mode == "off"  # type: ignore[attr-defined]
+    finally:
+        preset_path.unlink(missing_ok=True)
+
+
 def test_unknown_preset_name_ignored() -> None:
     """Routing rule with unknown preset name → preset is None, provider still built."""
     registry = _make_registry()
@@ -606,3 +706,394 @@ def test_unknown_task_kind_falls_back_gracefully() -> None:
     assert router.for_task("compress") is router.default
     assert router.for_task("calibration") is router.default
     assert router.for_task("nonexistent") is router.default
+
+
+# ── with_overrides (D-056 PR3) ──────────────────────────────────────────────
+
+
+def _agent_routes_settings() -> LLMSettings:
+    """Settings with default + vision + compress + consolidate + a non-agent route."""
+    return _make_settings(
+        [
+            RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b"),
+            RoutingRule(task_kind="vision", provider="ollama", model="qwen3.5-4b"),
+            RoutingRule(task_kind="compress", provider="ollama", model="qwen3.5-4b"),
+            RoutingRule(task_kind="consolidate", provider="ollama", model="qwen3.5-4b"),
+            RoutingRule(task_kind="eval", provider="anthropic", model="claude-3-haiku"),
+        ]
+    )
+
+
+def _preset_registry_for_overrides() -> PresetRegistry:
+    """A split-format registry with a model profile and two sampling profiles."""
+    import textwrap
+    from pathlib import Path
+
+    yaml = textwrap.dedent("""\
+        models:
+          qwen3.5-4b:
+            default_inference:
+              temperature: 0.7
+          gemma-alt:
+            default_inference:
+              temperature: 0.7
+        sampling:
+          base-default:
+            model: qwen3.5-4b
+            thinking_mode: default
+          off-profile:
+            model: qwen3.5-4b
+            thinking_mode: off
+    """)
+    p = Path("/tmp/_test_overrides_presets.yaml")
+    p.write_text(yaml, encoding="utf-8")
+    return PresetRegistry.from_yaml(p)
+
+
+def test_with_overrides_applies_to_all_agent_routes() -> None:
+    """with_overrides(apply_to=all_agent_routes) overrides default/vision/compress/consolidate,
+    leaving the non-agent 'eval' route untouched."""
+    registry = _make_registry()
+    settings = _agent_routes_settings()
+    preset_reg = _preset_registry_for_overrides()
+    router = LLMRouter.from_settings(settings, registry, preset_reg)
+
+    overridden = router.with_overrides(
+        provider_registry=registry,
+        preset_registry=preset_reg,
+        sampling_name="off-profile",
+        apply_to="all_agent_routes",
+    )
+
+    # Queue is disabled in _make_settings → for_task returns the raw provider.
+    # Agent-facing routes got new providers (different objects).
+    assert overridden.for_task("default") is not router.for_task("default")
+    assert overridden.for_task("vision") is not router.for_task("vision")
+    # Non-agent route preserved (same underlying provider object).
+    assert overridden.for_task("eval") is router.for_task("eval")
+
+
+def test_with_overrides_default_only_preserves_others() -> None:
+    """apply_to=default_only overrides just default; vision/compress preserved."""
+    registry = _make_registry()
+    settings = _agent_routes_settings()
+    preset_reg = _preset_registry_for_overrides()
+    router = LLMRouter.from_settings(settings, registry, preset_reg)
+
+    overridden = router.with_overrides(
+        provider_registry=registry,
+        preset_registry=preset_reg,
+        sampling_name="off-profile",
+        apply_to="default_only",
+    )
+
+    assert overridden.for_task("default") is not router.for_task("default")
+    # vision/compress/consolidate preserved.
+    assert overridden.for_task("vision") is router.for_task("vision")
+    assert overridden.for_task("compress") is router.for_task("compress")
+
+
+def test_with_overrides_thinking_off_via_override() -> None:
+    """thinking=ThinkingOverride(mode='off') produces an off SamplingProfile on default."""
+    from corpclaw_lite.llm.base import ThinkingOverride
+
+    registry = _make_registry()
+    settings = _agent_routes_settings()
+    preset_reg = _preset_registry_for_overrides()
+    router = LLMRouter.from_settings(settings, registry, preset_reg)
+
+    overridden = router.with_overrides(
+        provider_registry=registry,
+        preset_registry=preset_reg,
+        thinking=ThinkingOverride(mode="off"),
+        apply_to="default_only",
+    )
+    default_provider = overridden.for_task("default")
+    assert default_provider._sampling is not None  # type: ignore[attr-defined]
+    assert default_provider._sampling.thinking_mode == "off"  # type: ignore[attr-defined]
+
+
+def test_with_overrides_model_swap() -> None:
+    """model= override swaps the model and looks up its ModelProfile."""
+    registry = _make_registry()
+    settings = _agent_routes_settings()
+    preset_reg = _preset_registry_for_overrides()
+    router = LLMRouter.from_settings(settings, registry, preset_reg)
+
+    overridden = router.with_overrides(
+        provider_registry=registry,
+        preset_registry=preset_reg,
+        model="gemma-alt",
+        apply_to="default_only",
+    )
+    default_provider = overridden.for_task("default")
+    assert default_provider._model == "gemma-alt"  # type: ignore[attr-defined]
+    # ModelProfile resolved by the new model name.
+    assert default_provider._model_profile is not None  # type: ignore[attr-defined]
+
+
+def test_with_overrides_shares_queue_and_cache() -> None:
+    """with_overrides shares the parent's queue and cache_manager instances."""
+    settings = LLMSettings(
+        routing=[RoutingRule(task_kind="default", provider="ollama", model="qwen3.5-4b")],
+        max_concurrent_requests=1,
+        queue={"enabled": True},
+    )
+    registry = _make_registry()
+    preset_reg = _preset_registry_for_overrides()
+    router = LLMRouter.from_settings(settings, registry, preset_reg)
+
+    overridden = router.with_overrides(
+        provider_registry=registry,
+        preset_registry=preset_reg,
+        sampling_name="off-profile",
+        apply_to="default_only",
+    )
+    assert overridden.queue is router.queue
+    assert overridden._cache_manager is router._cache_manager  # type: ignore[attr-defined]
+
+
+def test_with_overrides_provider_meta_populated() -> None:
+    """provider_meta contains an entry for the new provider's id (cache-scope)."""
+    registry = _make_registry()
+    settings = _agent_routes_settings()
+    preset_reg = _preset_registry_for_overrides()
+    router = LLMRouter.from_settings(settings, registry, preset_reg)
+
+    overridden = router.with_overrides(
+        provider_registry=registry,
+        preset_registry=preset_reg,
+        sampling_name="off-profile",
+        apply_to="default_only",
+    )
+    default_provider = overridden.for_task("default")
+    assert id(default_provider) in overridden._provider_meta  # type: ignore[attr-defined]
+    meta = overridden._provider_meta[id(default_provider)]  # type: ignore[attr-defined]
+    assert meta[1] == "qwen3.5-4b"  # model preserved
+    assert meta[2] == "off-profile"  # profile label = override sampling name
+
+
+def test_with_overrides_unknown_sampling_name_falls_back() -> None:
+    """Unknown sampling_name logs a warning and keeps the route's existing profile."""
+    registry = _make_registry()
+    settings = _agent_routes_settings()
+    preset_reg = _preset_registry_for_overrides()
+    router = LLMRouter.from_settings(settings, registry, preset_reg)
+
+    overridden = router.with_overrides(
+        provider_registry=registry,
+        preset_registry=preset_reg,
+        sampling_name="does-not-exist",
+        apply_to="default_only",
+    )
+    # Override still applied (route rebuilt), but sampling falls back to None-derived.
+    default_provider = overridden.for_task("default")
+    # No crash; the route got a new provider.
+    assert default_provider is not router.for_task("default")
+
+
+def test_with_overrides_default_thinking_is_noop() -> None:
+    """thinking=ThinkingOverride(mode='default') does not change the sampling profile."""
+    from corpclaw_lite.llm.base import ThinkingOverride
+
+    registry = _make_registry()
+    settings = _agent_routes_settings()
+    preset_reg = _preset_registry_for_overrides()
+    router = LLMRouter.from_settings(settings, registry, preset_reg)
+
+    overridden = router.with_overrides(
+        provider_registry=registry,
+        preset_registry=preset_reg,
+        thinking=ThinkingOverride(mode="default"),
+        apply_to="default_only",
+    )
+    default_provider = overridden.for_task("default")
+    # 'default' thinking = no override → sampling carries base profile's mode.
+    if default_provider._sampling is not None:  # type: ignore[attr-defined]
+        assert default_provider._sampling.thinking_mode == "default"  # type: ignore[attr-defined]
+
+
+# ── Model-match guard (D-056 model-scoped sampling) ──────────────────────────
+
+
+def test_model_match_guard_strips_inference_on_mismatch(tmp_path: None) -> None:
+    """A sampling profile authored for model A on a route using model B:
+    inference_overrides are stripped, thinking_mode preserved, warning logged."""
+    import textwrap
+    from pathlib import Path
+
+    from corpclaw_lite.llm.presets import PresetRegistry
+
+    registry = _make_registry()
+    preset_yaml = textwrap.dedent("""\
+        models:
+          qwen-test:
+            default_inference:
+              temperature: 1.0
+          gemma-test:
+            default_inference:
+              temperature: 1.0
+        sampling:
+          qwen-fast:
+            model: qwen-test
+            thinking_mode: off
+            inference_overrides:
+              temperature: 0.4
+    """)
+    preset_path = Path("/tmp/_test_model_match.yaml")
+    preset_path.write_text(preset_yaml, encoding="utf-8")
+    try:
+        preset_reg = PresetRegistry.from_yaml(preset_path)
+        # Route uses gemma-test, but sampling profile declares model: qwen-test.
+        settings = _make_settings(
+            [
+                RoutingRule(
+                    task_kind="default",
+                    provider="ollama",
+                    model="gemma-test",
+                    sampling="qwen-fast",
+                ),
+            ]
+        )
+        router = LLMRouter.from_settings(settings, registry, preset_reg)
+        provider = router.default
+        assert provider is not None
+        # inference_overrides MUST be stripped (model mismatch).
+        assert provider._sampling is not None  # type: ignore[attr-defined]
+        assert provider._sampling.inference_overrides == {}  # type: ignore[attr-defined]
+        # thinking_mode MUST be preserved (model-agnostic).
+        assert provider._sampling.thinking_mode == "off"  # type: ignore[attr-defined]
+    finally:
+        preset_path.unlink(missing_ok=True)
+
+
+def test_model_match_guard_passes_on_match(tmp_path: None) -> None:
+    """When sampling.model == route model, inference_overrides are applied normally."""
+    import textwrap
+    from pathlib import Path
+
+    from corpclaw_lite.llm.presets import PresetRegistry
+
+    registry = _make_registry()
+    preset_yaml = textwrap.dedent("""\
+        models:
+          qwen-test:
+            default_inference:
+              temperature: 1.0
+        sampling:
+          qwen-fast:
+            model: qwen-test
+            thinking_mode: off
+            inference_overrides:
+              temperature: 0.4
+    """)
+    preset_path = Path("/tmp/_test_model_match_ok.yaml")
+    preset_path.write_text(preset_yaml, encoding="utf-8")
+    try:
+        preset_reg = PresetRegistry.from_yaml(preset_path)
+        settings = _make_settings(
+            [
+                RoutingRule(
+                    task_kind="default",
+                    provider="ollama",
+                    model="qwen-test",
+                    sampling="qwen-fast",
+                ),
+            ]
+        )
+        router = LLMRouter.from_settings(settings, registry, preset_reg)
+        provider = router.default
+        assert provider is not None
+        assert provider._sampling is not None  # type: ignore[attr-defined]
+        # Models match → inference_overrides applied.
+        assert provider._sampling.inference_overrides["temperature"] == 0.4  # type: ignore[attr-defined]
+    finally:
+        preset_path.unlink(missing_ok=True)
+
+
+def test_model_match_guard_allows_no_model_field(tmp_path: None) -> None:
+    """A sampling profile with no `model:` field (legacy-split) is left untouched."""
+    import textwrap
+    from pathlib import Path
+
+    from corpclaw_lite.llm.presets import PresetRegistry
+
+    registry = _make_registry()
+    preset_yaml = textwrap.dedent("""\
+        models:
+          any-model:
+            default_inference:
+              temperature: 1.0
+        sampling:
+          modelless-profile:
+            thinking_mode: off
+            inference_overrides:
+              temperature: 0.3
+    """)
+    preset_path = Path("/tmp/_test_model_match_none.yaml")
+    preset_path.write_text(preset_yaml, encoding="utf-8")
+    try:
+        preset_reg = PresetRegistry.from_yaml(preset_path)
+        settings = _make_settings(
+            [
+                RoutingRule(
+                    task_kind="default",
+                    provider="ollama",
+                    model="any-model",
+                    sampling="modelless-profile",
+                ),
+            ]
+        )
+        router = LLMRouter.from_settings(settings, registry, preset_reg)
+        provider = router.default
+        assert provider is not None
+        assert provider._sampling is not None  # type: ignore[attr-defined]
+        # No model field → no mismatch check → overrides preserved.
+        assert provider._sampling.inference_overrides["temperature"] == 0.3  # type: ignore[attr-defined]
+    finally:
+        preset_path.unlink(missing_ok=True)
+
+
+def test_with_overrides_model_match_guard(tmp_path: None) -> None:
+    """with_overrides(sampling_name=...) also enforces model-match."""
+    import textwrap
+    from pathlib import Path
+
+    from corpclaw_lite.llm.presets import PresetRegistry
+
+    registry = _make_registry()
+    preset_yaml = textwrap.dedent("""\
+        models:
+          qwen3.5-4b:
+            default_inference:
+              temperature: 0.7
+        sampling:
+          cross-model-profile:
+            model: qwen3.5-4b
+            thinking_mode: off
+            inference_overrides:
+              temperature: 0.4
+    """)
+    preset_path = Path("/tmp/_test_overrides_match.yaml")
+    preset_path.write_text(preset_yaml, encoding="utf-8")
+    try:
+        preset_reg = PresetRegistry.from_yaml(preset_path)
+        # Route uses qwen3.5-4b (matches), but we override with a profile that
+        # ALSO declares qwen3.5-4b — should pass. Then test a mismatch.
+        settings = _agent_routes_settings()
+        router = LLMRouter.from_settings(settings, registry, preset_reg)
+
+        # Match case: override with cross-model-profile (declares qwen3.5-4b,
+        # route also qwen3.5-4b) → overrides applied.
+        overridden = router.with_overrides(
+            provider_registry=registry,
+            preset_registry=preset_reg,
+            sampling_name="cross-model-profile",
+            apply_to="default_only",
+        )
+        dp = overridden.for_task("default")
+        assert dp is not None
+        assert dp._sampling is not None  # type: ignore[attr-defined]
+        assert dp._sampling.inference_overrides["temperature"] == 0.4  # type: ignore[attr-defined]
+    finally:
+        preset_path.unlink(missing_ok=True)

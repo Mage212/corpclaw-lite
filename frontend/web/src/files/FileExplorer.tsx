@@ -7,9 +7,7 @@ import {
   FolderPlus,
   Grid3X3,
   List,
-  Maximize2,
   MoreVertical,
-  Minimize2,
   MoveRight,
   PanelLeftOpen,
   RefreshCw,
@@ -22,18 +20,31 @@ import {
 import type { DragEvent, FormEvent, MouseEvent } from "react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
+  attachContext,
   copyFiles,
   deleteFiles,
   downloadUrl,
+  getAgentFileDiff,
+  listAgentFileChanges,
   listFiles,
+  listPins,
   loadTree,
   makeDirectory,
   moveFiles,
+  pinContext,
   previewFile,
   renameFile,
+  revertAgentFileChange,
   searchFiles,
+  unpinContext,
   uploadFiles
 } from "../api";
+import type {
+  AgentFileChange,
+  AgentFileDiffPayload,
+  ContextAttachment,
+  PinsPayload
+} from "../types";
 import { Modal } from "../components/Modal";
 import { parseDraggedPaths } from "../contracts";
 import { displayPath, fileEntryKindLabel, ROOT_LABEL, UPLOAD_FAILED_LABEL } from "../i18n/ru";
@@ -56,6 +67,11 @@ type FileExplorerProps = {
   onModeChange: (mode: FileExplorerMode) => void;
   onPreview: (preview: PreviewPayload, mode: PreviewMode) => void;
   onWorkspaceChanged?: () => void;
+  /** Active chat id for attach/pin (B-094/B-095). */
+  sessionId?: number | null;
+  /** Latest context usage tokens for attach baseline. */
+  baselineTokens?: number;
+  onContextFilesChanged?: () => void;
 };
 
 type FileAction =
@@ -77,7 +93,10 @@ export function FileExplorer({
   mode,
   onModeChange,
   onPreview,
-  onWorkspaceChanged
+  onWorkspaceChanged,
+  sessionId = null,
+  baselineTokens = 0,
+  onContextFilesChanged
 }: FileExplorerProps) {
   const [cwd, setCwd] = useState("");
   const [directory, setDirectory] = useState<DirectoryPayload>({ path: "", entries: [] });
@@ -93,7 +112,55 @@ export function FileExplorer({
   const [foldersDrawerOpen, setFoldersDrawerOpen] = useState(false);
   const [context, setContext] = useState<{ x: number; y: number; entry: FileEntry } | null>(null);
   const [action, setAction] = useState<FileAction | null>(null);
+  const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const [pins, setPins] = useState<ContextAttachment[]>([]);
+  const [pinBudget, setPinBudget] = useState<{ tokens: number; budget: number; ratio: number }>({
+    tokens: 0,
+    budget: 0,
+    ratio: 0.25
+  });
+  const [agentChanges, setAgentChanges] = useState<AgentFileChange[]>([]);
+  const [diffView, setDiffView] = useState<{
+    change: AgentFileChange;
+    diff: AgentFileDiffPayload;
+  } | null>(null);
   const entries = query.trim() ? searchResults : directory.entries;
+
+  const refreshPins = useCallback(async () => {
+    if (sessionId == null || sessionId <= 0) {
+      setPins([]);
+      return;
+    }
+    try {
+      const payload: PinsPayload = await listPins(sessionId);
+      setPins(payload.pins);
+      setPinBudget({
+        tokens: payload.pin_tokens,
+        budget: payload.pin_budget,
+        ratio: payload.pin_ratio
+      });
+    } catch {
+      setPins([]);
+    }
+  }, [sessionId]);
+
+  useEffect(() => {
+    refreshPins().catch(console.error);
+  }, [refreshPins]);
+
+  const refreshAgentChanges = useCallback(async () => {
+    try {
+      const payload = await listAgentFileChanges({ limit: 30, status: "open" });
+      setAgentChanges(payload.changes);
+    } catch {
+      setAgentChanges([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    refreshAgentChanges().catch(console.error);
+  }, [open, refreshAgentChanges]);
 
   const refresh = useCallback(async () => {
     setBusy(true);
@@ -101,10 +168,11 @@ export function FileExplorer({
       const [listing, loadedTree] = await Promise.all([listFiles(cwd), loadTree()]);
       setDirectory(listing);
       setTree(loadedTree);
+      await refreshAgentChanges();
     } finally {
       setBusy(false);
     }
-  }, [cwd]);
+  }, [cwd, refreshAgentChanges]);
 
   useEffect(() => {
     refresh().catch(console.error);
@@ -289,15 +357,7 @@ export function FileExplorer({
           <strong>Рабочая область</strong>
           <span title={displayPath(cwd)}>{displayPath(cwd)}</span>
         </div>
-        <div className="files-header-actions">
-          <button
-            className="icon-button"
-            onClick={() => onModeChange(mode === "side" ? "expanded" : "side")}
-            title={mode === "side" ? "Открыть на весь экран" : "Вернуть сбоку"}
-          >
-            {mode === "side" ? <Maximize2 size={18} /> : <Minimize2 size={18} />}
-          </button>
-        </div>
+        <div className="files-header-actions" />
       </header>
 
       <div className="file-toolbar">
@@ -415,6 +475,133 @@ export function FileExplorer({
 
       <UploadQueue uploads={uploads} />
 
+      {pins.length > 0 && sessionId != null && (
+        <div className="context-pins-bar" title="Закреплённые в контексте файлы (до 25%)">
+          <span className="context-pins-label">
+            📌 {pinBudget.tokens}/{pinBudget.budget} ток. ({Math.round(pinBudget.ratio * 100)}%)
+          </span>
+          <div className="context-pins-chips">
+            {pins.map((pin) => (
+              <button
+                key={pin.path}
+                type="button"
+                className="context-pin-chip"
+                title={`${pin.path} (~${pin.tokens} ток.)`}
+                onClick={() => {
+                  if (sessionId == null) return;
+                  unpinContext(csrf, sessionId, pin.path)
+                    .then((payload) => {
+                      setPins(payload.pins);
+                      setPinBudget({
+                        tokens: payload.pin_tokens,
+                        budget: payload.pin_budget,
+                        ratio: payload.pin_ratio
+                      });
+                      setStatusMsg(`Снято: ${pin.label}`);
+                      onContextFilesChanged?.();
+                    })
+                    .catch((error: unknown) => {
+                      setStatusMsg(error instanceof Error ? error.message : "Ошибка unpin");
+                    });
+                }}
+              >
+                {pin.label} ×
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {agentChanges.length > 0 && (
+        <div className="agent-changes-panel" title="Изменения файлов, сделанные агентом">
+          <div className="agent-changes-header">
+            <span>Изменения агента ({agentChanges.length})</span>
+            <button type="button" className="icon-button" onClick={() => refreshAgentChanges()}>
+              Обновить
+            </button>
+          </div>
+          <ul className="agent-changes-list">
+            {agentChanges.map((change) => (
+              <li key={change.change_id}>
+                <button
+                  type="button"
+                  className="agent-change-item"
+                  onClick={() => {
+                    getAgentFileDiff(change.change_id)
+                      .then((diff) => setDiffView({ change, diff }))
+                      .catch((error: unknown) => {
+                        setStatusMsg(
+                          error instanceof Error ? error.message : "Не удалось загрузить diff"
+                        );
+                      });
+                  }}
+                >
+                  <span className="agent-change-path">{change.path}</span>
+                  <span className="agent-change-meta">
+                    {change.op} · {change.tool_name}
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {statusMsg && <div className="context-files-status">{statusMsg}</div>}
+
+      {diffView && (
+        <Modal
+          title={`Diff: ${diffView.change.path}`}
+          onClose={() => setDiffView(null)}
+          footer={
+            <div className="agent-diff-actions">
+              <button type="button" className="icon-button" onClick={() => setDiffView(null)}>
+                Закрыть
+              </button>
+              <button
+                type="button"
+                className="icon-button"
+                onClick={() => {
+                  if (!window.confirm(`Откатить ${diffView.change.path}?`)) return;
+                  revertAgentFileChange(csrf, diffView.change.change_id)
+                    .then((result) => {
+                      setStatusMsg(
+                        result.action === "restored"
+                          ? `Откат: ${diffView.change.path}`
+                          : result.action === "deleted"
+                            ? `Удалён: ${diffView.change.path}`
+                            : `Уже откачено: ${diffView.change.path}`
+                      );
+                      setDiffView(null);
+                      refreshAgentChanges().catch(console.error);
+                      refresh().catch(console.error);
+                      onWorkspaceChanged?.();
+                    })
+                    .catch((error: unknown) => {
+                      setStatusMsg(error instanceof Error ? error.message : "Ошибка отката");
+                    });
+                }}
+              >
+                Откатить
+              </button>
+            </div>
+          }
+        >
+          {diffView.diff.kind === "text" || diffView.diff.kind === "create" ? (
+            <pre className="agent-diff-pre">{diffView.diff.unified_diff ?? ""}</pre>
+          ) : (
+            <p className="agent-diff-binary">
+              {diffView.diff.message ?? "Binary file — use Revert to restore backup."}
+              {diffView.diff.before_hash && (
+                <>
+                  <br />
+                  before: {diffView.diff.before_hash} → after: {diffView.diff.after_hash}
+                </>
+              )}
+            </p>
+          )}
+        </Modal>
+      )}
+
       {context && (
         <ContextMenu
           context={context}
@@ -422,6 +609,48 @@ export function FileExplorer({
           onOpen={() => openEntry(context.entry)}
           onPreview={() => openFilePreview(context.entry, "side")}
           onFullPreview={() => openFilePreview(context.entry, "expanded")}
+          onAttachOnce={() => {
+            if (sessionId == null || sessionId <= 0) {
+              setStatusMsg("Выберите чат, чтобы добавить файл в контекст.");
+              return;
+            }
+            attachContext(csrf, context.entry.path, sessionId, {
+              baselineTokens,
+              chunked: null
+            })
+              .then((payload) => {
+                setStatusMsg(
+                  `В контекст (1 раз): ${context.entry.name} (${payload.pending_count} в очереди)`
+                );
+                onContextFilesChanged?.();
+              })
+              .catch((error: unknown) => {
+                setStatusMsg(error instanceof Error ? error.message : "Не удалось добавить");
+              });
+          }}
+          onPin={() => {
+            if (sessionId == null || sessionId <= 0) {
+              setStatusMsg("Выберите чат, чтобы закрепить файл.");
+              return;
+            }
+            pinContext(csrf, context.entry.path, sessionId, { chunked: null })
+              .then((payload) => {
+                setPins(payload.pins);
+                setPinBudget({
+                  tokens: payload.pin_tokens,
+                  budget: payload.pin_budget,
+                  ratio: payload.pin_ratio
+                });
+                setStatusMsg(
+                  `Закреплено: ${context.entry.name} (${payload.pin_tokens}/${payload.pin_budget})`
+                );
+                onContextFilesChanged?.();
+              })
+              .catch((error: unknown) => {
+                setStatusMsg(error instanceof Error ? error.message : "Не удалось закрепить");
+              });
+          }}
+          canUseContext={sessionId != null && sessionId > 0}
           onRename={() => setAction({ type: "rename", entry: context.entry })}
           onCopy={() => setAction({ type: "copy", paths: selectedPaths(context.entry) })}
           onMove={() => setAction({ type: "move", paths: selectedPaths(context.entry) })}
@@ -750,6 +979,9 @@ function ContextMenu({
   onOpen,
   onPreview,
   onFullPreview,
+  onAttachOnce,
+  onPin,
+  canUseContext,
   onRename,
   onCopy,
   onMove,
@@ -760,6 +992,9 @@ function ContextMenu({
   onOpen: () => void;
   onPreview: () => void;
   onFullPreview: () => void;
+  onAttachOnce: () => void;
+  onPin: () => void;
+  canUseContext: boolean;
   onRename: () => void;
   onCopy: () => void;
   onMove: () => void;
@@ -822,6 +1057,26 @@ function ContextMenu({
           >
             Предпросмотр
           </button>
+          {canUseContext && (
+            <>
+              <button
+                onClick={() => {
+                  onAttachOnce();
+                  onClose();
+                }}
+              >
+                В контекст (один раз)
+              </button>
+              <button
+                onClick={() => {
+                  onPin();
+                  onClose();
+                }}
+              >
+                Закрепить в контексте
+              </button>
+            </>
+          )}
         </>
       )}
       {!context.entry.is_dir && (

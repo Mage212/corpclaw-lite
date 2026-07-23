@@ -21,7 +21,7 @@ from corpclaw_lite.agent.guards import (
     PlanningTextGuardConfig,
     ResultDedupGuardConfig,
 )
-from corpclaw_lite.eval.report import ABReport, PassReport
+from corpclaw_lite.eval.report import ABReport, MultiSeedReport, PassReport
 from corpclaw_lite.eval.runner import EvalRunner
 from corpclaw_lite.eval.scenarios import load_scenarios
 from corpclaw_lite.paths import PROJECT_ROOT
@@ -47,6 +47,16 @@ class EvalLoop:
             compare. When False, run one pass with guards on.
         settings_path: path to settings.yaml (default config/settings.yaml).
         workspace_base: parent dir for the per-pass eval workspace.
+        seeds: number of A/B seed runs for median aggregation (D-052). Default 1
+            (single seed, backward-compatible). Seeds > 1 only take effect in
+            A/B mode; in single-pass mode they are ignored. Each seed is a full
+            A/B (2 passes) with isolated workspace and memory; the aggregation
+            takes the per-scenario median to filter sampling noise.
+        inject_few_shots: when True (default), pass stack.few_shots into
+            EvalRunner. Set False for auto-debug / skilled scenarios so
+            cross-topic calibrated examples (e.g. weather) do not contaminate
+            the turn.
+        auto_approve_high_risk: opt-in approval callback for headless runs.
     """
 
     def __init__(
@@ -59,39 +69,64 @@ class EvalLoop:
         settings_path: Path | str | None = None,
         workspace_base: Path | str | None = None,
         on_scenario_progress: Callable[[str, bool, int, int], None] | None = None,
+        seeds: int = 1,
+        inject_few_shots: bool = True,
+        auto_approve_high_risk: bool = False,
     ) -> None:
         self._scenarios_path = (
-            Path(scenarios_path)
+            Path(scenarios_path).expanduser().resolve()
             if scenarios_path
-            else (PROJECT_ROOT / "config" / "eval_scenarios.yaml")
+            else (PROJECT_ROOT / "config" / "eval_scenarios.yaml").resolve()
         )
         self._judge = judge
-        self._corpus_dir = Path(corpus_dir) if corpus_dir else None
-        self._output_dir = Path(output_dir) if output_dir else (PROJECT_ROOT / "reports" / "eval")
+        self._corpus_dir = Path(corpus_dir).expanduser().resolve() if corpus_dir else None
+        self._output_dir = (
+            Path(output_dir).expanduser().resolve()
+            if output_dir
+            else (PROJECT_ROOT / "reports" / "eval").resolve()
+        )
         self._ab_guards = ab_guards
         self._settings_path = (
-            Path(settings_path) if settings_path else (PROJECT_ROOT / "config" / "settings.yaml")
+            Path(settings_path).expanduser().resolve()
+            if settings_path
+            else (PROJECT_ROOT / "config" / "settings.yaml").resolve()
         )
         self._workspace_base = (
-            Path(workspace_base) if workspace_base else (PROJECT_ROOT / ".eval_workspace")
+            Path(workspace_base).expanduser().resolve()
+            if workspace_base
+            else (PROJECT_ROOT / ".eval_workspace").resolve()
         )
         self._on_progress = on_scenario_progress
+        self._seeds = max(1, seeds)
+        # Auto-debug / skilled Excel runs: calibrated few-shots (e.g. Moscow weather)
+        # contaminate the turn and can pull the model into unrelated web_fetch.
+        self._inject_few_shots = inject_few_shots
+        self._auto_approve_high_risk = auto_approve_high_risk
 
-    async def run(self) -> ABReport | PassReport:
+    async def run(self) -> ABReport | PassReport | MultiSeedReport:
         """Run the eval and return the report.
 
-        Returns an :class:`ABReport` in A/B mode, otherwise a :class:`PassReport`.
+        Returns a :class:`MultiSeedReport` in multi-seed A/B mode (seeds > 1),
+        an :class:`ABReport` in single-seed A/B mode, otherwise a
+        :class:`PassReport`.
         """
         scenarios = load_scenarios(self._scenarios_path)
         logger.info("[eval] Loaded %d scenarios from %s", len(scenarios), self._scenarios_path)
 
-        on_report = await self._run_pass(scenarios, guards_enabled=True, label="guards_on")
-        self._print_pass(on_report)
+        # Multi-seed A/B runs each seed as a full on/off pair (no upfront pass).
+        if self._ab_guards and self._seeds > 1:
+            return await self._run_multi_seed(scenarios)
 
+        # Single-pass mode (guards on only).
         if not self._ab_guards:
+            on_report = await self._run_pass(scenarios, guards_enabled=True, label="guards_on")
+            self._print_pass(on_report)
             _write_pass(on_report, self._output_dir)
             return on_report
 
+        # Single-seed A/B.
+        on_report = await self._run_pass(scenarios, guards_enabled=True, label="guards_on")
+        self._print_pass(on_report)
         off_report = await self._run_pass(scenarios, guards_enabled=False, label="guards_off")
         self._print_pass(off_report)
 
@@ -99,6 +134,55 @@ class EvalLoop:
         ab.write(self._output_dir)
         self._print_verdict(ab)
         return ab
+
+    async def _run_single_ab(
+        self,
+        scenarios: list[Any],
+        *,
+        output_override: Path | None = None,
+        workspace_override: Path | None = None,
+    ) -> ABReport:
+        """Run one guards-on vs guards-off A/B comparison.
+
+        ``output_override`` redirects the ABReport JSON/MD to a subdirectory
+        (used by multi-seed to keep per-seed reports). ``workspace_override``
+        isolates the per-seed workspace so seeds do not collide on files/memory.
+        """
+        saved_workspace = self._workspace_base
+        if workspace_override is not None:
+            self._workspace_base = workspace_override
+        try:
+            on_report = await self._run_pass(scenarios, guards_enabled=True, label="guards_on")
+            self._print_pass(on_report)
+            off_report = await self._run_pass(scenarios, guards_enabled=False, label="guards_off")
+            self._print_pass(off_report)
+        finally:
+            self._workspace_base = saved_workspace
+
+        ab = ABReport.compare(on_report, off_report)
+        if output_override is not None:
+            ab.write(output_override)
+        return ab
+
+    async def _run_multi_seed(self, scenarios: list[Any]) -> MultiSeedReport:
+        """Run N A/B seeds, aggregate per-scenario medians (D-052)."""
+        ab_reports: list[ABReport] = []
+        for n in range(1, self._seeds + 1):
+            print(f"\n═══ Seed {n}/{self._seeds} ═══")
+            logger.info("[eval] Starting seed %d/%d", n, self._seeds)
+            seed_dir = self._output_dir / f"seed_{n}"
+            seed_workspace = self._workspace_base / f"seed_{n}"
+            ab = await self._run_single_ab(
+                scenarios,
+                output_override=seed_dir,
+                workspace_override=seed_workspace,
+            )
+            ab_reports.append(ab)
+
+        ms = MultiSeedReport.from_ab_reports(ab_reports)
+        ms.write(self._output_dir)
+        self._print_multiseed_verdict(ms)
+        return ms
 
     # ──────────────────────────── one pass ───────────────────────────────
 
@@ -110,7 +194,6 @@ class EvalLoop:
     ) -> PassReport:
         """Build a stack with the requested guard state and run the corpus."""
         from corpclaw_lite.agent.factory import build_agent_stack
-        from corpclaw_lite.config.bootstrap import BootstrapLoader
         from corpclaw_lite.config.loader import load_settings
         from corpclaw_lite.users.models import User
 
@@ -119,7 +202,19 @@ class EvalLoop:
             settings.agent.result_dedup_guard = ResultDedupGuardConfig(enabled=False)
             settings.agent.planning_text_guard = PlanningTextGuardConfig(enabled=False)
 
-        stack = build_agent_stack(settings)
+        pass_root = self._workspace_base / label
+
+        async def _eval_auto_approve(action: str, details: str) -> bool:
+            del details
+            logger.info("[eval] auto-approving high-risk action: %s", action)
+            return True
+
+        approval_callback = _eval_auto_approve if self._auto_approve_high_risk else None
+        stack = build_agent_stack(
+            settings,
+            workspace_override=pass_root,
+            approval_callback=approval_callback,
+        )
         agent_loop = stack.loop
 
         # Enrich the judge with the main agent's actual tool surface so it does
@@ -135,27 +230,29 @@ class EvalLoop:
             name="Eval Runner",
             department="engineering",
         )
-        bootstrap = BootstrapLoader(PROJECT_ROOT / "config" / "bootstrap")
-        system_prompt = bootstrap.get_system_prompt() or ""
+        # B-111: AgentLoop assembles base + user layers; do not pass a second SOUL.
+        from corpclaw_lite.extensions.tools.builtin._path_utils import user_workspace_path
 
-        workspace = self._workspace_base / label
+        pass_root.mkdir(parents=True, exist_ok=True)
+        workspace = user_workspace_path(pass_root, eval_user)
+        if workspace.exists():
+            import shutil
+
+            shutil.rmtree(workspace)
         workspace.mkdir(parents=True, exist_ok=True)
-        # Clear any leftover files from a previous run of this pass.
-        for child in workspace.iterdir():
-            if child.is_file():
-                child.unlink()
 
         runner = EvalRunner(
             agent_loop=agent_loop,
             user=eval_user,
-            system_prompt=system_prompt,
+            system_prompt=None,
             workspace_dir=workspace,
             corpus_dir=self._corpus_dir,
-            few_shots=stack.few_shots,
+            few_shots=stack.few_shots if self._inject_few_shots else None,
             judge=self._judge,
         )
         logger.info("[eval] Starting pass '%s' (guards=%s)", label, guards_enabled)
         scores = await runner.run_all(scenarios, on_progress=self._on_progress)
+
         return PassReport(label=label, scenario_scores=scores)
 
     # ─────────────────────────── reporting ───────────────────────────────
@@ -184,6 +281,23 @@ class EvalLoop:
             f"{ab.guards_off.mean_overall:.2f} (off) → {ab.mean_overall_delta:+.2f}"
         )
         print(f"  improved: {ab.improved_count}, regressed: {ab.regressed_count}")
+        print(f"  reports written to {self._output_dir}/")
+
+    def _print_multiseed_verdict(self, ms: MultiSeedReport) -> None:
+        labels = {
+            "guards_help": "✅ Phase 0 guards HELPED (stable across seeds)",
+            "guards_hurt": "⚠️ Phase 0 guards HURT (stable across seeds)",
+            "guards_neutral": "➖ Guards made no significant difference (stable)",
+        }
+        print()
+        print(f"═══ Multi-seed verdict ({ms.seeds} seeds, D-052) ═══")
+        print(f"{labels[ms.verdict]}")
+        print(
+            f"  mean overall (median): {ms.mean_on_median:.2f} (on) vs "
+            f"{ms.mean_off_median:.2f} (off) → {ms.mean_delta:+.2f}"
+        )
+        print(f"  improved: {ms.improved_count}, regressed: {ms.regressed_count}")
+        print(f"  stable: {ms.stable_count}, noisy: {ms.noisy_count}")
         print(f"  reports written to {self._output_dir}/")
 
 

@@ -25,8 +25,8 @@ async def test_mcp_client_connect_disconnect(mock_process):
     client = MCPClient(timeout=1.0)
 
     with patch("asyncio.create_subprocess_exec", return_value=mock_process) as mock_exec:
-        # Mock the response for the initialization
-        mock_process.stdout.readline.return_value = (
+        # Mock the response for the initialization (read returns the full line)
+        mock_process.stdout.read.return_value = (
             json.dumps(
                 {"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": "2024-11-05"}}
             ).encode("utf-8")
@@ -54,9 +54,7 @@ async def test_mcp_client_list_tools(mock_process):
             "tools": [{"name": "my_tool", "description": "desc", "inputSchema": {"type": "object"}}]
         },
     }
-    mock_process.stdout.readline.return_value = (
-        json.dumps(tools_call_result).encode("utf-8") + b"\n"
-    )
+    mock_process.stdout.read.return_value = json.dumps(tools_call_result).encode("utf-8") + b"\n"
 
     tools = await client.list_tools()
     assert len(tools) == 1
@@ -73,7 +71,7 @@ async def test_mcp_client_call_tool(mock_process):
         "id": 1,
         "result": {"content": [{"type": "text", "text": "result text!"}]},
     }
-    mock_process.stdout.readline.return_value = json.dumps(call_result).encode("utf-8") + b"\n"
+    mock_process.stdout.read.return_value = json.dumps(call_result).encode("utf-8") + b"\n"
 
     res = await client.call_tool("my_tool", {})
     assert res == "result text!"
@@ -87,13 +85,29 @@ async def test_mcp_client_timeout():
     process.stdin.drain = AsyncMock()
     process.stdout = AsyncMock()
 
-    # Simulate a timeout on readline
-    async def slow_readline():
+    # Simulate a timeout on read (the bounded-line reader)
+    async def slow_read(n):  # noqa: ARG001
         await asyncio.sleep(0.5)
         return b""
 
-    process.stdout.readline.side_effect = slow_readline
+    process.stdout.read.side_effect = slow_read
     client._process = process
 
     with pytest.raises(MCPClientError, match="did not respond within"):
+        await client.call_tool("tool", {})
+
+
+@pytest.mark.asyncio
+async def test_mcp_client_oversize_response_rejected(mock_process):
+    """S3-04: a response line exceeding the byte cap is rejected, not buffered unbounded."""
+    client = MCPClient(timeout=1.0, max_response_bytes=64)
+    client._process = mock_process
+
+    # read() keeps returning non-newline data past the cap.
+    async def feed_no_newline(n):  # noqa: ARG001
+        return b"x" * 4096
+
+    mock_process.stdout.read.side_effect = feed_no_newline
+
+    with pytest.raises(MCPClientError, match="exceeded"):
         await client.call_tool("tool", {})

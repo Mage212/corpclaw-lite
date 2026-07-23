@@ -27,8 +27,10 @@ __all__ = [
     "_sanitize_table_name",
 ]
 
-_MAX_RESULT_ROWS = 10_000
-_MAX_RESULT_CHARS = 50_000
+_MAX_RESULT_ROWS = 500
+_MAX_RESULT_CHARS = 8_000
+# Threshold for the advisory note nudging the model towards aggregation/pagination.
+_LARGE_RESULT_ROWS = 50
 _SQL_READ_ONLY_ERROR = (
     "Error: table_query only supports read-only SELECT/WITH queries against loaded tables. "
     "Use the 'path' parameter to load files; file-reading SQL functions and DDL/DML are blocked."
@@ -245,10 +247,25 @@ def _format_results(columns: list[str], rows: list[tuple[Any, ...]]) -> str:
     lines.append(sep)
 
     result = "\n".join(lines)
+    # Apply char-truncation to the table body first, then append a single
+    # consolidated truncation note. Previously these two limits competed: the
+    # char-truncation could slice the table mid-row and overwrite the row-count
+    # message, leaving the model with a dangling partial line and no explanation.
+    original_len = len(result)
+    if original_len > _MAX_RESULT_CHARS:
+        # Leave room for the truncation note.
+        result = result[: _MAX_RESULT_CHARS - len("\n... (truncated)")]
+        char_truncated = True
+    else:
+        char_truncated = False
+
+    notes: list[str] = []
     if truncated:
-        result += f"\n... (showing first {_MAX_RESULT_ROWS} rows)"
-    if len(result) > _MAX_RESULT_CHARS:
-        result = result[:_MAX_RESULT_CHARS] + "\n... (truncated)"
+        notes.append(f"showing first {_MAX_RESULT_ROWS} rows")
+    if char_truncated:
+        notes.append(f"truncated at {_MAX_RESULT_CHARS} chars (original {original_len})")
+    if notes:
+        result += "\n... (" + "; ".join(notes) + ")"
     return result
 
 
@@ -344,11 +361,25 @@ def _run_query(
         result = conn.execute(query)
         columns = [desc[0] for desc in result.description] if result.description else []
         rows = result.fetchall()
+        original_row_count = len(rows)
 
         output = _format_results(columns, rows)
-        output = f"Source: {path.name} ({count_str} rows)\n\n{output}"
 
-        # Save to CSV if requested.
+        # Advisory note for large results: nudge the model towards aggregation or
+        # saving to a file instead of flooding the context with raw rows. This is
+        # especially important for local LLMs (26-35B) where a 10K-row dump causes
+        # attention collapse. Only shown when the result is genuinely large.
+        advisory = ""
+        if original_row_count > _LARGE_RESULT_ROWS:
+            advisory = (
+                f"⚠ Large result ({original_row_count} rows). Consider GROUP BY, "
+                f"LIMIT, or output_path to save to a file instead of loading into context.\n\n"
+            )
+
+        output = f"{advisory}Source: {path.name} ({count_str} rows)\n\n{output}"
+
+        # Save to CSV if requested. Use the full (pre-truncation) rows so the saved
+        # file is complete even when the in-context output was truncated.
         if output_path is not None:
             with open(output_path, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)

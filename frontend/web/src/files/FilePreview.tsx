@@ -21,6 +21,7 @@ export function FilePreview({ preview, mode, onModeChange, onClose, embedded = f
       ? "preview-drawer expanded"
       : "preview-drawer";
   const canCopy = preview.type === "text" && !preview.error;
+  const isEmpty = preview.type === "empty";
 
   async function copyText() {
     if (preview.type === "text" && !preview.error) {
@@ -32,11 +33,11 @@ export function FilePreview({ preview, mode, onModeChange, onClose, embedded = f
     <aside className={shellClass}>
       <header>
         <div>
-          <strong title={preview.entry.name}>{preview.entry.name}</strong>
-          <span title={preview.entry.path}>{preview.entry.path}</span>
+          <strong>{isEmpty ? "Просмотр" : preview.entry.name}</strong>
+          {!isEmpty && <span title={preview.entry.path}>{preview.entry.path}</span>}
         </div>
         <div className="preview-actions">
-          {preview.type === "image" && (
+          {!isEmpty && preview.type === "image" && (
             <button
               className="icon-button"
               onClick={() => setImageFit((value) => (value === "fit" ? "original" : "fit"))}
@@ -45,19 +46,21 @@ export function FilePreview({ preview, mode, onModeChange, onClose, embedded = f
               <ZoomIn size={18} />
             </button>
           )}
-          {canCopy && (
+          {!isEmpty && canCopy && (
             <button className="icon-button" onClick={copyText} title="Скопировать текст">
               <Copy size={18} />
             </button>
           )}
-          <a
-            className="icon-button"
-            href={downloadUrl(preview.entry.path)}
-            download={preview.entry.name}
-            title="Скачать"
-          >
-            <Download size={18} />
-          </a>
+          {!isEmpty && (
+            <a
+              className="icon-button"
+              href={downloadUrl(preview.entry.path)}
+              download={preview.entry.name}
+              title="Скачать"
+            >
+              <Download size={18} />
+            </a>
+          )}
           <button
             className="icon-button"
             onClick={() => onModeChange(mode === "side" ? "expanded" : "side")}
@@ -82,6 +85,16 @@ function PreviewContent({
   preview: PreviewPayload;
   imageFit: "fit" | "original";
 }) {
+  if (preview.type === "empty") {
+    return (
+      <div className="preview-empty">
+        Нет активного просматриваемого файла.
+        <br />
+        Откройте файл в проводнике, чтобы увидеть его здесь.
+      </div>
+    );
+  }
+
   if (preview.type === "image") {
     return (
       <div className={`image-preview ${imageFit}`}>

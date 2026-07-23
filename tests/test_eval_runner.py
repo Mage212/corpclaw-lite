@@ -21,11 +21,7 @@ from corpclaw_lite.users.models import User
 
 class _FakeMemory:
     def __init__(self) -> None:
-        self.cleared: list[str] = []
         self.facts_cleared: list[str] = []
-
-    async def clear(self, user_id: str) -> None:
-        self.cleared.append(user_id)
 
     async def clear_facts(self, user_id: str) -> None:
         self.facts_cleared.append(user_id)
@@ -283,7 +279,10 @@ async def test_corpus_fixture_copied(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_missing_corpus_fixture_warned_not_fatal(tmp_path: Path) -> None:
+async def test_missing_corpus_fixture_raises(tmp_path: Path) -> None:
+    """Fail-fast: a missing corpus fixture raises FileNotFoundError at setup,
+    rather than silently skipping and producing a misleading 'file not found'
+    eval result."""
     loop = _FakeAgentLoop(answers=["done"], tools_per_call=[])
     runner = EvalRunner(loop, _user(), "sys", tmp_path, corpus_dir=tmp_path / "corpus")
     scenario = EvalScenario(
@@ -292,9 +291,47 @@ async def test_missing_corpus_fixture_warned_not_fatal(tmp_path: Path) -> None:
         setup=ScenarioSetup(copy_from_corpus=[("blob.xlsx", "missing.xlsx")]),
         turns=[ScenarioTurn(user_message="x")],
     )
-    # Should not raise even though the fixture is absent.
+    # The crash is caught by run_all's per-scenario try/except → crash score.
     scores = await runner.run_all([scenario])
     assert len(scores) == 1
+    assert not scores[0].passed  # crash → zero overall
+
+
+@pytest.mark.asyncio
+async def test_missing_corpus_fixture_no_corpus_dir_raises(tmp_path: Path) -> None:
+    """When corpus_dir is None and a scenario needs copy_from_corpus, it raises."""
+    loop = _FakeAgentLoop(answers=["done"], tools_per_call=[])
+    runner = EvalRunner(loop, _user(), "sys", tmp_path, corpus_dir=None)
+    scenario = EvalScenario(
+        id="s1",
+        category="office",
+        setup=ScenarioSetup(copy_from_corpus=[("blob.xlsx", "src.xlsx")]),
+        turns=[ScenarioTurn(user_message="x")],
+    )
+    scores = await runner.run_all([scenario])
+    assert len(scores) == 1
+    assert not scores[0].passed
+
+
+def test_generated_workbooks_materialised(tmp_path: Path) -> None:
+    """generated_workbooks produces a valid xlsx in the workspace via _setup_workspace."""
+    loop = _FakeAgentLoop(answers=["done"], tools_per_call=[])
+    runner = EvalRunner(loop, _user(), "sys", tmp_path)
+    scenario = EvalScenario(
+        id="s1",
+        category="office",
+        setup=ScenarioSetup(generated_workbooks=[("messy.xlsx", "messy_headers")]),
+        turns=[ScenarioTurn(user_message="x")],
+    )
+    # _setup_workspace creates the file directly (no agent run needed).
+    runner._setup_workspace(scenario)
+    assert (tmp_path / "messy.xlsx").exists()
+    # Verify it's a valid xlsx with messy headers.
+    from openpyxl import load_workbook
+
+    wb = load_workbook(tmp_path / "messy.xlsx")
+    headers = [c.value for c in wb.active[1]]
+    assert "  Name  " in headers
 
 
 # ──────────────────────────── isolation ────────────────────────────────────
@@ -309,25 +346,8 @@ async def test_memory_cleared_between_scenarios(tmp_path: Path) -> None:
         EvalScenario(id="s2", category="c", turns=[ScenarioTurn(user_message="m2")]),
     ]
     await runner.run_all(scenarios)
-    # Both conversation (clear) and stored facts (clear_facts) are wiped between
-    # scenarios so a memory_store in s1 cannot leak into s2's recall.
-    assert loop.memory.cleared == ["99", "99"]
+    # B-106: facts-only isolation between scenarios (memory_store must not leak).
     assert loop.memory.facts_cleared == ["99", "99"]
-
-
-@pytest.mark.asyncio
-async def test_clear_facts_skipped_when_memory_lacks_it(tmp_path: Path) -> None:
-    """A memory backend without clear_facts (e.g. a minimal mock) must not crash
-    the runner — the hasattr guard skips the call gracefully."""
-    loop = _FakeAgentLoop(answers=["a"], tools_per_call=[[]])
-    # Remove clear_facts to simulate a backend that doesn't implement it.
-    delattr(loop.memory, "facts_cleared")
-    del type(loop.memory).clear_facts  # type: ignore[attr-defined]
-    runner = EvalRunner(loop, _user(), "sys", tmp_path)
-    scenarios = [EvalScenario(id="s1", category="c", turns=[ScenarioTurn(user_message="m")])]
-    # Should not raise.
-    await runner.run_all(scenarios)
-    assert loop.memory.cleared == ["99"]
 
 
 @pytest.mark.asyncio

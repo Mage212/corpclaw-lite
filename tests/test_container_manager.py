@@ -5,6 +5,7 @@ All tests mock the docker SDK so Docker daemon is NOT required.
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -29,12 +30,29 @@ def _make_mock_container(
     name: str = "corpclaw_agent_1",
     status: str = "running",
     started_at: str = "2020-01-01T00:00:00Z",
+    *,
+    image: str = "corpclaw-agent-base:latest",
+    labels: dict[str, str] | None = None,
 ) -> MagicMock:
-    """Create a mock Docker container with common attributes."""
+    """Create a mock Docker container with common attributes.
+
+    By default the container carries the policy labels written at create time,
+    so it satisfies ``_existing_matches_policy`` (the happy-path reuse/restart
+    tests). Tests that exercise mismatch detection override *image*/*labels*.
+    """
     c = MagicMock()
     c.name = name
     c.status = status
     c.attrs = {"State": {"StartedAt": started_at}}
+    c.image.tags = [image] if image else []
+    default_labels = {
+        "corpclaw.image": image,
+        "corpclaw.strict_capabilities": "True",
+        "corpclaw.network": "default",
+    }
+    if labels is not None:
+        default_labels.update(labels)
+    c.labels = default_labels
     return c
 
 
@@ -129,6 +147,51 @@ def test_ensure_running_stopped_restarts(manager) -> None:
     assert manager.managed_container_names() == ["corpclaw_agent_10"]
 
 
+# ── S3-01: container reuse re-validation ──────────────────────────────────────
+
+
+def test_ensure_running_recreates_on_image_mismatch(manager) -> None:
+    """A container whose image differs from settings must be recreated, not reused."""
+    stale = _make_mock_container(
+        name="corpclaw_agent_10", status="running", image="evil-image:latest"
+    )
+    manager._client.containers.get.return_value = stale
+    manager._client.containers.run.return_value = MagicMock()
+
+    name = manager.ensure_running(user_id=10)
+    assert name == "corpclaw_agent_10"
+    # Stale container was force-removed, then a fresh one created with policy.
+    stale.stop.assert_called_once()
+    stale.remove.assert_called_once_with(force=True)
+    manager._client.containers.run.assert_called_once()
+
+
+def test_ensure_running_recreates_on_unlabelled_container(manager) -> None:
+    """A container without corpclaw generation labels (externally created) is recreated."""
+    external = _make_mock_container(name="corpclaw_agent_10", status="running")
+    # No corpclaw labels — simulates `docker run` by another actor.
+    external.labels = {}
+    manager._client.containers.get.return_value = external
+    manager._client.containers.run.return_value = MagicMock()
+
+    manager.ensure_running(user_id=10)
+    external.remove.assert_called_once_with(force=True)
+    manager._client.containers.run.assert_called_once()
+
+
+def test_existing_matches_policy_strict_capabilities_mismatch(manager) -> None:
+    """A strict_capabilities label mismatch returns False (recreate needed)."""
+    c = _make_mock_container(labels={"corpclaw.strict_capabilities": "False"})
+    manager.settings.strict_capabilities = True
+    assert manager._existing_matches_policy(c) is False
+
+
+def test_existing_matches_policy_matches(manager) -> None:
+    """A fully-matching container returns True (reuse/restart path)."""
+    c = _make_mock_container()
+    assert manager._existing_matches_policy(c) is True
+
+
 # ── Test 19: ensure_running non-NotFound error ────────────────────────────────
 
 
@@ -160,6 +223,85 @@ def test_ensure_running_new_container_is_tracked(manager, mock_docker) -> None:
 
     assert name == "corpclaw_agent_11"
     assert manager.managed_container_names() == ["corpclaw_agent_11"]
+
+
+def test_concurrent_container_creation_is_bounded(mock_docker, tmp_path: Path) -> None:
+    """Path B (creation) is globally bounded by max_concurrent_containers.
+
+    A burst of new users all creating containers concurrently must not exceed the
+    semaphore cap. The hot-path idempotent check (Path A) is unaffected (separate test).
+    """
+    mock_client = MagicMock()
+    mock_client.ping.return_value = True
+    mock_client.containers.list.return_value = []
+    mock_docker.from_env.return_value = mock_client
+    # Every user misses (NotFound) → all hit Path B (creation).
+    mock_client.containers.get.side_effect = FakeNotFound("404")
+
+    current_concurrent = 0
+    max_concurrent = 0
+    lock = threading.Lock()
+
+    def _slow_run(**_kwargs: object) -> MagicMock:
+        nonlocal current_concurrent, max_concurrent
+        with lock:
+            current_concurrent += 1
+            max_concurrent = max(max_concurrent, current_concurrent)
+        time.sleep(0.05)  # hold the slot briefly so overlap is observable
+        with lock:
+            current_concurrent -= 1
+        return MagicMock()
+
+    mock_client.containers.run.side_effect = _slow_run
+
+    manager = ContainerManager(
+        settings=ContainerSettings(max_concurrent_containers=2), workspace_base=tmp_path
+    )
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        list(pool.map(lambda uid: manager.ensure_running(user_id=uid), range(6)))
+
+    assert max_concurrent <= 2, f"Semaphore leaked: {max_concurrent} > 2"
+
+
+def test_ensure_running_path_a_bypasses_semaphore(mock_docker, tmp_path: Path) -> None:
+    """Path A (already-running) must NOT acquire the creation semaphore.
+
+    ensure_running fires on every message; serializing the idempotent check on a
+    global cap would stall the per-message hot path. Verify the semaphore is never
+    touched when the container is already running.
+    """
+    mock_client = MagicMock()
+    mock_client.ping.return_value = True
+    mock_client.containers.list.return_value = []
+    mock_docker.from_env.return_value = mock_client
+    # Container exists and is running → Path A fast return.
+    mock_client.containers.get.return_value = _make_mock_container(status="running")
+
+    manager = ContainerManager(
+        settings=ContainerSettings(max_concurrent_containers=1), workspace_base=tmp_path
+    )
+    # Wrap the semaphore so we can observe acquisitions.
+    acquired = []
+    real_acquire = manager._create_semaphore.acquire
+    real_release = manager._create_semaphore.release
+
+    def _spy_acquire(*a: object, **k: object) -> bool:
+        acquired.append(True)
+        return real_acquire()
+
+    def _spy_release(*a: object, **k: object) -> None:
+        return real_release()
+
+    manager._create_semaphore.acquire = _spy_acquire  # type: ignore[method-assign]
+    manager._create_semaphore.release = _spy_release  # type: ignore[method-assign]
+
+    for uid in range(5):
+        manager.ensure_running(user_id=uid)
+
+    assert acquired == [], "Path A (already-running) must not touch the semaphore"
 
 
 def test_stop_managed_stops_only_tracked_containers(manager) -> None:

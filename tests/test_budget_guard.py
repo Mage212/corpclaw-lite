@@ -61,3 +61,66 @@ class TestPauseResume:
         guard = SimpleBudgetGuard(SimpleBudgetGuardConfig(max_time_ms=5000))
         guard.resume()  # Should not raise or change state
         guard.check()
+
+
+class TestIterationBudget:
+    """Iteration-budget enforcement via consume_iteration() → check() (B-066).
+
+    The loop calls consume_iteration() then check() at the top of every
+    iteration so retry ``continue`` paths cannot burn extra LLM calls past the
+    limit. check() uses ``>=``, so reaching the limit trips BEFORE the
+    iteration's work.
+    """
+
+    def test_check_passes_below_limit(self) -> None:
+        guard = SimpleBudgetGuard(SimpleBudgetGuardConfig(max_iterations=3, max_time_ms=60_000))
+        guard.consume_iteration()  # iterations_used = 1
+        guard.check()  # 1 < 3 → ok
+        guard.consume_iteration()  # iterations_used = 2
+        guard.check()  # 2 < 3 → ok
+
+    def test_check_raises_at_limit(self) -> None:
+        guard = SimpleBudgetGuard(SimpleBudgetGuardConfig(max_iterations=2, max_time_ms=60_000))
+        guard.consume_iteration()  # 1
+        guard.check()  # 1 < 2 → ok
+        guard.consume_iteration()  # 2
+        with pytest.raises(BudgetExceededError, match="Iteration budget"):
+            guard.check()  # 2 >= 2 → raises
+
+    def test_consume_without_check_does_not_raise(self) -> None:
+        """consume_iteration() alone never raises — only check() enforces."""
+        guard = SimpleBudgetGuard(SimpleBudgetGuardConfig(max_iterations=1, max_time_ms=60_000))
+        guard.consume_iteration()
+        guard.consume_iteration()  # over limit, but no raise yet
+        guard.consume_iteration()
+
+
+class TestToolCallReservation:
+    """A provider tool-call batch is admitted atomically."""
+
+    def test_exact_remaining_capacity_is_reserved(self) -> None:
+        guard = SimpleBudgetGuard(SimpleBudgetGuardConfig(max_tool_calls=3, max_time_ms=60_000))
+        guard.reserve_tool_calls(1)
+        guard.reserve_tool_calls(2)
+        assert guard.state.tool_calls_used == 3
+
+    def test_oversized_batch_is_rejected_without_mutation(self) -> None:
+        guard = SimpleBudgetGuard(SimpleBudgetGuardConfig(max_tool_calls=3, max_time_ms=60_000))
+        guard.reserve_tool_calls(2)
+
+        with pytest.raises(BudgetExceededError, match="4/3"):
+            guard.reserve_tool_calls(2)
+
+        assert guard.state.tool_calls_used == 2
+
+    def test_disabled_guard_still_accounts_batch(self) -> None:
+        guard = SimpleBudgetGuard(
+            SimpleBudgetGuardConfig(enabled=False, max_tool_calls=1, max_time_ms=60_000)
+        )
+        guard.reserve_tool_calls(3)
+        assert guard.state.tool_calls_used == 3
+
+    def test_negative_reservation_is_rejected(self) -> None:
+        guard = SimpleBudgetGuard(SimpleBudgetGuardConfig(max_time_ms=60_000))
+        with pytest.raises(ValueError, match="cannot be negative"):
+            guard.reserve_tool_calls(-1)

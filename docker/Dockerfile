@@ -34,8 +34,12 @@ WORKDIR /app
 COPY pyproject.toml ./
 COPY src/ ./src/
 
-# the Docker image extremely lightweight.
-RUN pip install --no-cache-dir pydantic anyio openpyxl PyYAML duckdb matplotlib pypdf && \
+# Hash-pinned dependencies. requirements-docker.txt is generated from uv.lock via
+# `uv export --frozen --no-dev --format requirements-txt`, so the same commit always
+# builds identical, verified dependencies (no unpinned pip resolution, no drift
+# from uv.lock). --require-hashes makes any hash mismatch fail the build.
+COPY docker/requirements-docker.txt ./requirements-docker.txt
+RUN pip install --no-cache-dir --require-hashes -r requirements-docker.txt && \
     find /usr/local/lib/python* -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
 
 # Create non-root agent user
@@ -48,7 +52,8 @@ RUN mkdir -p /workspace && chown agent:agent /workspace
 USER agent
 ENV PYTHONPATH=/app/src
 
-# Default command — runs as the IPC worker for docker exec
-# In practice, docker exec overrides this with:
-#   docker exec -i corpclaw_agent_{user_id} python -m corpclaw_lite.container.agent_worker
-CMD ["python", "-m", "corpclaw_lite.container.agent_worker"]
+# Idle keep-alive. Tool calls use a fresh process via:
+#   docker exec -e CORPCLAW_IPC_SECRET=… -i corpclaw_agent_{id} \
+#     python -m corpclaw_lite.container.agent_worker
+# Secret is NOT in the image/create env — only injected on each exec.
+CMD ["sleep", "infinity"]

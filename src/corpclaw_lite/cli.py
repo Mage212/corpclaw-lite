@@ -29,7 +29,10 @@ import logging
 import os
 import sys
 import threading
-from typing import TYPE_CHECKING, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 from corpclaw_lite.exceptions import StartupConfigurationError
 
@@ -301,6 +304,100 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Clear previous calibration before starting",
     )
 
+    # B-119 / DC-031: headless agent entry (no inbound chat)
+    headless_p = sub.add_parser(
+        "headless-run",
+        help="Run an agent task without inbound message (system session)",
+    )
+    headless_p.add_argument(
+        "-u",
+        "--user-id",
+        type=int,
+        required=True,
+        help="Canonical users.id",
+    )
+    headless_p.add_argument(
+        "-t",
+        "--task",
+        required=True,
+        help="Task text (synthetic user message)",
+    )
+    headless_p.add_argument(
+        "--source",
+        default="manual",
+        help="Source tag: manual|scheduled|memory_worker|mission|test (default: manual)",
+    )
+
+    # B-118 / DC-030: schedule management (consent accept/dismiss + ops)
+    sched_p = sub.add_parser("schedule", help="Manage scheduled agent tasks (B-118)")
+    sched_sub = sched_p.add_subparsers(dest="schedule_cmd", required=True)
+    sched_list = sched_sub.add_parser("list", help="List tasks for a user")
+    sched_list.add_argument("-u", "--user-id", type=int, required=True)
+    sched_accept = sched_sub.add_parser("accept", help="Accept a pending proposal")
+    sched_accept.add_argument("-u", "--user-id", type=int, required=True)
+    sched_accept.add_argument("-i", "--task-id", required=True)
+    sched_accept.add_argument("--title", default=None)
+    sched_accept.add_argument("--task", default=None, help="Override task_text")
+    sched_accept.add_argument("--schedule", default=None, help="Override schedule_text")
+    sched_dismiss = sched_sub.add_parser("dismiss", help="Dismiss pending/active task")
+    sched_dismiss.add_argument("-u", "--user-id", type=int, required=True)
+    sched_dismiss.add_argument("-i", "--task-id", required=True)
+    sched_pause = sched_sub.add_parser("pause", help="Pause an active task")
+    sched_pause.add_argument("-u", "--user-id", type=int, required=True)
+    sched_pause.add_argument("-i", "--task-id", required=True)
+    sched_resume = sched_sub.add_parser("resume", help="Resume a paused task")
+    sched_resume.add_argument("-u", "--user-id", type=int, required=True)
+    sched_resume.add_argument("-i", "--task-id", required=True)
+    sched_run = sched_sub.add_parser("run-now", help="Force-run an active/paused task")
+    sched_run.add_argument("-u", "--user-id", type=int, required=True)
+    sched_run.add_argument("-i", "--task-id", required=True)
+    sched_propose = sched_sub.add_parser("propose", help="Create pending proposal (ops)")
+    sched_propose.add_argument("-u", "--user-id", type=int, required=True)
+    sched_propose.add_argument("--title", required=True)
+    sched_propose.add_argument("--task", required=True)
+    sched_propose.add_argument("--schedule", required=True)
+
+    # B-109 / DC-027 Layer 2+3: memory worker opt-in + ops.
+    mw_p = sub.add_parser("memory-worker", help="Manage background memory worker (B-109)")
+    mw_sub = mw_p.add_subparsers(dest="memory_worker_cmd", required=True)
+    mw_enable = mw_sub.add_parser("enable", help="Opt a user in to the memory worker")
+    mw_enable.add_argument("-u", "--user-id", type=int, required=True)
+    mw_disable = mw_sub.add_parser("disable", help="Opt a user out of the memory worker")
+    mw_disable.add_argument("-u", "--user-id", type=int, required=True)
+    mw_status = mw_sub.add_parser("status", help="Show memory-worker state for a user")
+    mw_status.add_argument("-u", "--user-id", type=int, required=True)
+    mw_run = mw_sub.add_parser("run", help="Run memory worker once for a user (ops/debug)")
+    mw_run.add_argument("-u", "--user-id", type=int, required=True)
+
+    # B-120 / DC-032: proactive notify (system session + optional TG)
+    notify_p = sub.add_parser(
+        "notify-user",
+        help="Send a proactive message to a user's system inbox (DC-032)",
+    )
+    notify_p.add_argument(
+        "-u",
+        "--user-id",
+        type=int,
+        required=True,
+        help="Canonical users.id",
+    )
+    notify_p.add_argument(
+        "-m",
+        "--message",
+        required=True,
+        help="Message text to deliver",
+    )
+    notify_p.add_argument(
+        "--source",
+        default="manual",
+        help="Source tag: manual|scheduled|memory_worker|mission|test (default: manual)",
+    )
+    notify_p.add_argument(
+        "--title",
+        default=None,
+        help="Optional short label stored in message metadata",
+    )
+
     # eval (B-060): GAIA-style eval harness with A/B guard toggling
     eval_p = sub.add_parser("eval", help="Run the eval harness (B-060) over a scenario corpus")
     eval_p.add_argument(
@@ -333,6 +430,26 @@ def _build_parser() -> argparse.ArgumentParser:
         default="reports/eval",
         help="Directory to write eval reports (default: reports/eval)",
     )
+    eval_p.add_argument(
+        "--seeds",
+        type=int,
+        default=1,
+        help=(
+            "Number of A/B seed runs with median aggregation (D-052). "
+            "Default 1 (single seed). Recommended 3 for stable guard-impact "
+            "verdicts on local LLMs. Only takes effect in A/B mode."
+        ),
+    )
+    eval_p.add_argument(
+        "--judge-ensemble",
+        type=int,
+        default=1,
+        help=(
+            "Number of judge samples per turn, aggregated by per-dimension "
+            "median. Default 1. Recommended 3 to reduce judge variance on "
+            "borderline answers."
+        ),
+    )
 
     return parser
 
@@ -357,6 +474,9 @@ def cmd_chat(telegram_id: int, *, setup_mode: bool = False) -> None:
         trace_enabled=_log.trace_enabled,
         trace_level=_log.trace_level,
         trace_preview_chars=_log.trace_preview_chars,
+        capture_enabled=_log.capture_enabled,
+        capture_fields=_log.capture_fields,
+        capture_dir=PROJECT_ROOT / (_log.capture_dir or _log.log_dir),
     )
 
     shutdown: asyncio.Event = asyncio.Event()
@@ -373,7 +493,6 @@ def cmd_chat(telegram_id: int, *, setup_mode: bool = False) -> None:
 
         from corpclaw_lite.agent.factory import build_agent_stack
         from corpclaw_lite.channels.cli import CLIChannel
-        from corpclaw_lite.config.bootstrap import BootstrapLoader
         from corpclaw_lite.runtime.shutdown import install_signal_handlers
         from corpclaw_lite.users.manager import UserManager
 
@@ -387,9 +506,6 @@ def cmd_chat(telegram_id: int, *, setup_mode: bool = False) -> None:
         skill_registry = stack.skill_registry
         plugin_registry = stack.plugin_registry
         skill_matcher = stack.skill_matcher
-        bootstrap = BootstrapLoader(Path("config/bootstrap"))
-        system_prompt = bootstrap.get_system_prompt() or None
-
         # Load user from DB — same flow as Telegram bot
         standalone_manager = UserManager()
         user = standalone_manager.get_by_telegram_id(telegram_id)
@@ -450,15 +566,8 @@ def cmd_chat(telegram_id: int, *, setup_mode: bool = False) -> None:
             user = standalone_manager.get_by_telegram_id(telegram_id) or user
             print(f"\n✅ Настройка завершена, {user.name}!\n")
 
-        # Per-user prompt (static, set once)
+        # B-111: SOUL/dept/onboarding assembled inside AgentLoop; CLI only injects skills.
         from corpclaw_lite.agent.prompt import build_skill_block
-
-        user_prompt = bootstrap.get_user_prompt(user.id, user.telegram_id)
-        if user_prompt:
-            system_prompt = (system_prompt or "") + "\n\n" + user_prompt
-
-        # Base system prompt without skills — skills are injected per-message
-        base_system_prompt = system_prompt
 
         # Connect MCP servers (no hot-reload — CLI session is short-lived)
         if mcp_manager is not None:
@@ -520,9 +629,7 @@ def cmd_chat(telegram_id: int, *, setup_mode: bool = False) -> None:
                     else:
                         matched_skills = main_scoped
                     skill_block = build_skill_block(matched_skills, [])
-                    system_prompt = base_system_prompt
-                    if skill_block:
-                        system_prompt = (system_prompt or "") + skill_block
+                    system_prompt = skill_block if skill_block else None
 
                     async def approval_cb(action: str, details: str) -> bool:
                         return await channel.request_approval(user, action, details)
@@ -620,11 +727,319 @@ def cmd_telegram() -> None:
         trace_enabled=_log.trace_enabled,
         trace_level=_log.trace_level,
         trace_preview_chars=_log.trace_preview_chars,
+        capture_enabled=_log.capture_enabled,
+        capture_fields=_log.capture_fields,
+        capture_dir=PROJECT_ROOT / (_log.capture_dir or _log.log_dir),
     )
 
     from corpclaw_lite.channels.telegram.runner import run_telegram_bot
 
     asyncio.run(run_telegram_bot(token))
+
+
+def cmd_headless_run(*, user_id: int, task: str, source: str = "manual") -> None:
+    """B-119: run one headless agent task into the user system session."""
+    import asyncio
+    import json
+    from pathlib import Path
+
+    from corpclaw_lite.agent.factory import build_agent_stack
+    from corpclaw_lite.channels.service import AgentRequestService
+    from corpclaw_lite.config.loader import load_settings
+    from corpclaw_lite.logging.agent_logger import setup_logging
+    from corpclaw_lite.paths import PROJECT_ROOT
+    from corpclaw_lite.users.manager import UserManager
+    from corpclaw_lite.users.models import User
+
+    settings = load_settings(PROJECT_ROOT / "config" / "settings.yaml")
+    log_cfg = settings.logging
+    setup_logging(
+        log_dir=PROJECT_ROOT / log_cfg.log_dir,
+        level=log_cfg.level,
+        console_level=log_cfg.console_level,
+        trace_enabled=log_cfg.trace_enabled,
+        trace_level=log_cfg.trace_level,
+        trace_preview_chars=log_cfg.trace_preview_chars,
+        capture_enabled=log_cfg.capture_enabled,
+        capture_fields=log_cfg.capture_fields,
+        capture_dir=PROJECT_ROOT / (log_cfg.capture_dir or log_cfg.log_dir),
+    )
+    um = UserManager()
+    user: User | None = um.get_by_id(user_id)
+    if user is None:
+        raise SystemExit(f"User id={user_id} not found")
+    stack = build_agent_stack(settings)
+    ws_base = settings.web_channel.workspace_base
+    workspace = Path(ws_base) if not Path(ws_base).is_absolute() else Path(ws_base)
+    if not workspace.is_absolute():
+        workspace = PROJECT_ROOT / workspace
+    service = AgentRequestService(stack=stack, workspace_base=workspace)
+
+    async def _run() -> None:
+        assert user is not None
+        result = await service.run_headless(user=user, task=task, source=source)
+        print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+        if result.status == "skipped":
+            raise SystemExit(2)
+
+    asyncio.run(_run())
+
+
+def _build_scheduler_cli(*, with_agent: bool = False) -> tuple[Any, Any, Any]:
+    """Return (settings, UserManager, SchedulerService) for CLI schedule cmds."""
+    from pathlib import Path
+
+    from corpclaw_lite.config.loader import load_settings
+    from corpclaw_lite.logging.agent_logger import setup_logging
+    from corpclaw_lite.paths import PROJECT_ROOT
+    from corpclaw_lite.scheduler.service import SchedulerService
+    from corpclaw_lite.scheduler.store import SchedulerStore
+    from corpclaw_lite.users.manager import UserManager
+
+    settings = load_settings(PROJECT_ROOT / "config" / "settings.yaml")
+    log_cfg = settings.logging
+    setup_logging(
+        log_dir=PROJECT_ROOT / log_cfg.log_dir,
+        level=log_cfg.level,
+        console_level=log_cfg.console_level,
+        trace_enabled=log_cfg.trace_enabled,
+        trace_level=log_cfg.trace_level,
+        trace_preview_chars=log_cfg.trace_preview_chars,
+        capture_enabled=log_cfg.capture_enabled,
+        capture_fields=log_cfg.capture_fields,
+        capture_dir=PROJECT_ROOT / (log_cfg.capture_dir or log_cfg.log_dir),
+    )
+    um = UserManager()
+    db_path = Path(settings.scheduler.db_path)
+    if not db_path.is_absolute():
+        db_path = (PROJECT_ROOT / db_path).resolve()
+    agent_service = None
+    if with_agent:
+        from corpclaw_lite.agent.factory import build_agent_stack
+        from corpclaw_lite.channels.service import AgentRequestService
+
+        stack = build_agent_stack(settings)
+        ws_base = settings.web_channel.workspace_base
+        workspace = Path(ws_base)
+        if not workspace.is_absolute():
+            workspace = PROJECT_ROOT / workspace
+        agent_service = AgentRequestService(stack=stack, workspace_base=workspace)
+    service = SchedulerService(
+        store=SchedulerStore(db_path),
+        user_manager=um,
+        agent_service=agent_service,
+        notifier=None,
+        settings=settings.scheduler,
+    )
+    return settings, um, service
+
+
+def cmd_schedule(args: Any) -> None:
+    """B-118: schedule list/accept/dismiss/pause/resume/run-now/propose."""
+    import asyncio
+    import json
+
+    from corpclaw_lite.scheduler.service import SchedulerError
+
+    need_agent = args.schedule_cmd == "run-now"
+    _settings, um, service = _build_scheduler_cli(with_agent=need_agent)
+    user = um.get_by_id(args.user_id)
+    if user is None:
+        raise SystemExit(f"User id={args.user_id} not found")
+
+    async def _run() -> None:
+        assert user is not None
+        try:
+            if args.schedule_cmd == "list":
+                tasks = await service.list_for_user(user)
+                print(
+                    json.dumps(
+                        [t.to_dict() for t in tasks],
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+            elif args.schedule_cmd == "propose":
+                task = await service.propose(
+                    user,
+                    title=args.title,
+                    task_text=args.task,
+                    schedule_text=args.schedule,
+                    notify=False,
+                )
+                print(json.dumps(task.to_dict(), ensure_ascii=False, indent=2))
+            elif args.schedule_cmd == "accept":
+                task = await service.accept(
+                    user,
+                    args.task_id,
+                    title=args.title,
+                    task_text=args.task,
+                    schedule_text=args.schedule,
+                )
+                print(json.dumps(task.to_dict(), ensure_ascii=False, indent=2))
+            elif args.schedule_cmd == "dismiss":
+                task = await service.dismiss(user, args.task_id)
+                print(json.dumps(task.to_dict(), ensure_ascii=False, indent=2))
+            elif args.schedule_cmd == "pause":
+                task = await service.pause(user, args.task_id)
+                print(json.dumps(task.to_dict(), ensure_ascii=False, indent=2))
+            elif args.schedule_cmd == "resume":
+                task = await service.resume(user, args.task_id)
+                print(json.dumps(task.to_dict(), ensure_ascii=False, indent=2))
+            elif args.schedule_cmd == "run-now":
+                result = await service.run_now(user, args.task_id)
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+                if result.get("status") == "skipped":
+                    raise SystemExit(2)
+            else:
+                raise SystemExit(f"Unknown schedule command: {args.schedule_cmd}")
+        except SchedulerError as exc:
+            raise SystemExit(str(exc)) from exc
+
+    asyncio.run(_run())
+
+
+def cmd_memory_worker(args: Any) -> None:
+    """B-109: memory-worker enable/disable/status/run."""
+    from corpclaw_lite.users.manager import UserManager
+
+    um = UserManager()
+    user_id = int(args.user_id)
+    cmd = str(args.memory_worker_cmd)
+    if cmd == "enable":
+        um.set_memory_worker_enabled(user_id, True)
+        print(f"User {user_id}: memory worker ENABLED.")
+    elif cmd == "disable":
+        um.set_memory_worker_enabled(user_id, False)
+        print(f"User {user_id}: memory worker DISABLED.")
+    elif cmd == "status":
+        state = um.get_memory_worker_state(user_id)
+        if state is None:
+            print(f"User {user_id}: no memory-worker row (not opted in).")
+        else:
+            print(f"User {user_id}:")
+            print(f"  enabled:     {state.enabled}")
+            print(f"  last_run_at: {state.last_run_at or '—'}")
+            print(f"  last_status: {state.last_status or '—'}")
+            if state.last_error:
+                print(f"  last_error:  {state.last_error[:200]}")
+    elif cmd == "run":
+        cmd_memory_worker_run(user_id)
+    else:
+        raise SystemExit(f"Unknown memory-worker command: {cmd}")
+
+
+def cmd_memory_worker_run(user_id: int) -> None:
+    """Run the memory worker once for a specific user (ops/debug)."""
+    from corpclaw_lite.agent.factory import build_agent_stack
+    from corpclaw_lite.config.bootstrap import BootstrapLoader
+    from corpclaw_lite.config.loader import load_settings
+    from corpclaw_lite.extensions.paths import resolve_dirs
+    from corpclaw_lite.memory.worker import MemoryWorkerService
+    from corpclaw_lite.paths import PROJECT_ROOT
+
+    # S3-15: load the full Settings (not AgentSettings) so resolve_dirs can read
+    # extensions.extra_paths and the worker can read settings.memory_worker. The
+    # previous code indexed stack.loop._settings (an AgentSettings), which lacks
+    # those fields — the command always raised AttributeError, masked by two
+    # `type: ignore[attr-defined]` directives.
+    settings = load_settings(PROJECT_ROOT / "config" / "settings.yaml")
+    stack = build_agent_stack(settings)
+    um = stack.user_manager
+    user = um.get_by_id(user_id)
+    if user is None:
+        raise SystemExit(f"User {user_id} not found.")
+
+    if stack.loop.memory is None or stack.chat_store is None or stack.chat_context_store is None:
+        raise SystemExit("Agent stack missing memory/chat stores.")
+
+    bootstrap_dirs = resolve_dirs("bootstrap", settings, PROJECT_ROOT)
+    worker = MemoryWorkerService(
+        settings=settings.memory_worker,
+        user_manager=um,
+        memory=stack.loop.memory,
+        chat_store=stack.chat_store,
+        context_store=stack.chat_context_store,
+        bootstrap=BootstrapLoader(list(bootstrap_dirs)),
+        provider=stack.loop.provider,
+    )
+
+    status = asyncio.run(worker.run_user(user))
+    print(f"User {user_id}: memory worker run → {status}.")
+
+
+def cmd_notify_user(
+    *,
+    user_id: int,
+    message: str,
+    source: str = "manual",
+    title: str | None = None,
+) -> None:
+    """B-120: deliver a proactive message into the user's system session."""
+    import asyncio
+    import json
+    import os
+
+    from corpclaw_lite.agent.factory import build_agent_stack
+    from corpclaw_lite.channels.user_notifier import UserNotifier
+    from corpclaw_lite.channels.web.chat_store import WebChatStore
+    from corpclaw_lite.config.loader import load_settings
+    from corpclaw_lite.logging.agent_logger import setup_logging
+    from corpclaw_lite.paths import PROJECT_ROOT
+    from corpclaw_lite.users.manager import UserManager
+    from corpclaw_lite.users.models import User
+
+    settings = load_settings(PROJECT_ROOT / "config" / "settings.yaml")
+    log_cfg = settings.logging
+    setup_logging(
+        log_dir=PROJECT_ROOT / log_cfg.log_dir,
+        level=log_cfg.level,
+        console_level=log_cfg.console_level,
+        trace_enabled=log_cfg.trace_enabled,
+        trace_level=log_cfg.trace_level,
+        trace_preview_chars=log_cfg.trace_preview_chars,
+        capture_enabled=log_cfg.capture_enabled,
+        capture_fields=log_cfg.capture_fields,
+        capture_dir=PROJECT_ROOT / (log_cfg.capture_dir or log_cfg.log_dir),
+    )
+    um = UserManager()
+    user: User | None = um.get_by_id(user_id)
+    if user is None:
+        raise SystemExit(f"User id={user_id} not found")
+    stack = build_agent_stack(settings)
+    chat_store = stack.chat_store
+    if chat_store is None:
+        memory = stack.loop.memory
+        memory_db_path = getattr(memory, "db_path", PROJECT_ROOT / "data" / "memory.db")
+        chat_store = WebChatStore(memory_db_path)
+    notifier = UserNotifier(chat_store)
+
+    # Optional one-shot Telegram path when the bot token is available.
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    if token:
+
+        async def _with_bot() -> None:
+            from telegram import Bot as TelegramBot
+
+            bot = TelegramBot(token=token)
+            notifier.register_telegram_bot(bot)
+            assert user is not None
+            result = await notifier.notify(user, message, source=source, title=title)
+            print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+            if not result.ok:
+                raise SystemExit(1)
+
+        asyncio.run(_with_bot())
+        return
+
+    async def _run() -> None:
+        assert user is not None
+        result = await notifier.notify(user, message, source=source, title=title)
+        print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+        if not result.ok:
+            raise SystemExit(1)
+
+    asyncio.run(_run())
 
 
 def cmd_web() -> None:
@@ -958,6 +1373,9 @@ def cmd_calibrate(
         trace_enabled=_log.trace_enabled,
         trace_level=_log.trace_level,
         trace_preview_chars=_log.trace_preview_chars,
+        capture_enabled=_log.capture_enabled,
+        capture_fields=_log.capture_fields,
+        capture_dir=PROJECT_ROOT / (_log.capture_dir or _log.log_dir),
     )
 
     if reset:
@@ -987,11 +1405,22 @@ def cmd_eval(
     ab_guards: bool,
     corpus_dir: str | None,
     output_dir: str,
+    seeds: int = 1,
+    judge_ensemble: int = 1,
 ) -> None:
     """Run the eval harness (B-060) over a scenario corpus."""
     from corpclaw_lite.config.loader import load_settings
     from corpclaw_lite.logging.agent_logger import setup_logging
     from corpclaw_lite.paths import PROJECT_ROOT
+
+    # Multi-seed only applies in A/B mode; warn and fall back in single-pass.
+    effective_seeds = seeds
+    if seeds > 1 and not ab_guards:
+        print(
+            f"\n⚠️  --seeds {seeds} requires A/B mode; ignoring in single-pass (--no-ab).",
+            file=sys.stderr,
+        )
+        effective_seeds = 1
 
     _settings = load_settings(PROJECT_ROOT / "config" / "settings.yaml")
     _log = _settings.logging
@@ -1002,11 +1431,14 @@ def cmd_eval(
         trace_enabled=_log.trace_enabled,
         trace_level=_log.trace_level,
         trace_preview_chars=_log.trace_preview_chars,
+        capture_enabled=_log.capture_enabled,
+        capture_fields=_log.capture_fields,
+        capture_dir=PROJECT_ROOT / (_log.capture_dir or _log.log_dir),
     )
 
     judge: LLMJudge | None = None
     if not no_judge:
-        judge = _resolve_judge(judge_provider)
+        judge = _resolve_judge(judge_provider, ensemble=judge_ensemble)
         if judge is None:
             print(
                 f"\n⚠️  Judge provider '{judge_provider}' not available; "
@@ -1022,17 +1454,32 @@ def cmd_eval(
         corpus_dir=corpus_dir,
         output_dir=output_dir,
         ab_guards=ab_guards,
+        seeds=effective_seeds,
     )
     asyncio.run(loop.run())
 
 
-def _resolve_judge(provider_name: str) -> LLMJudge | None:
+def _resolve_judge(
+    provider_name: str,
+    settings_path: Path | str | None = None,
+    ensemble: int = 1,
+) -> LLMJudge | None:
     """Resolve a cloud provider for the LLM judge.
 
     Returns None (gracefully) if the provider isn't registered — the eval loop
     then falls back to deterministic-only scoring. This keeps the command usable
     in closed-circuit deployments without cloud access.
+
+    ``settings_path`` defaults to ``config/settings.yaml`` but can be overridden
+    so the judge respects the same routing rules as the eval (e.g. an explicit
+    ``eval`` route pointing at a cloud model, rather than falling back to the
+    local ``default`` route).
+
+    ``ensemble`` (default 1) queries the judge N times per turn and aggregates
+    by per-dimension median, reducing judge variance.
     """
+    from pathlib import Path
+
     from corpclaw_lite.config.loader import load_settings
     from corpclaw_lite.config.providers import ProviderRegistry
     from corpclaw_lite.eval.judge import LLMJudge
@@ -1043,12 +1490,13 @@ def _resolve_judge(provider_name: str) -> LLMJudge | None:
     cloud_conn = provider_registry.get(provider_name)
     if not cloud_conn:
         return None
-    settings = load_settings(PROJECT_ROOT / "config" / "settings.yaml")
+    path = Path(settings_path) if settings_path else (PROJECT_ROOT / "config" / "settings.yaml")
+    settings = load_settings(path)
     router = LLMRouter.from_settings(settings.llm, provider_registry)
     # Prefer an explicit 'eval' routing rule, else fall back to the default rule.
     task = "eval" if router.has_task_route("eval") else "default"
     provider = router.for_task(task)
-    return LLMJudge(provider)
+    return LLMJudge(provider, ensemble=ensemble)
 
 
 def cmd_generate(ext_type: str, name: str) -> None:
@@ -1215,7 +1663,26 @@ def main() -> None:
                 ab_guards=not args.no_ab,
                 corpus_dir=args.corpus_dir,
                 output_dir=args.output,
+                seeds=args.seeds,
+                judge_ensemble=args.judge_ensemble,
             )
+        elif args.command == "headless-run":
+            cmd_headless_run(
+                user_id=args.user_id,
+                task=args.task,
+                source=args.source,
+            )
+        elif args.command == "notify-user":
+            cmd_notify_user(
+                user_id=args.user_id,
+                message=args.message,
+                source=args.source,
+                title=args.title,
+            )
+        elif args.command == "schedule":
+            cmd_schedule(args)
+        elif args.command == "memory-worker":
+            cmd_memory_worker(args)
         else:
             parser.print_help()
     except StartupConfigurationError as e:

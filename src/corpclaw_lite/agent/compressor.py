@@ -10,10 +10,12 @@ Key differences:
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from corpclaw_lite.agent.constants import PLACEHOLDER
+from corpclaw_lite.agent.context import normalize_transcript
 from corpclaw_lite.config.settings import CompressionSettings
+from corpclaw_lite.llm.tokenizer_client import estimate_tokens_heuristic
 
 __all__ = [
     "ContextCompressor",
@@ -59,6 +61,32 @@ class ContextCompressor:
         effective_tokens = max(estimated_tokens, actual_tokens or 0)
         return estimated_tokens, effective_tokens
 
+    @staticmethod
+    def _tool_batch_incomplete(messages: list[dict[str, Any]]) -> bool:
+        """True when some assistant tool_calls lack a matching tool result.
+
+        A *complete* batch ending with role=tool is safe to compress mid-run
+        (before the next LLM call). Incomplete pairs must never be compressed.
+        """
+        tool_call_ids: set[str] = set()
+        tool_result_ids: set[str] = set()
+        for msg in messages:
+            if msg.get("role") == "assistant":
+                raw_calls = msg.get("tool_calls")
+                if isinstance(raw_calls, list):
+                    for item in cast(list[object], raw_calls):
+                        if not isinstance(item, dict):
+                            continue
+                        tc_map = cast(dict[str, object], item)
+                        raw_id_obj = tc_map.get("id")
+                        if isinstance(raw_id_obj, str) and raw_id_obj:
+                            tool_call_ids.add(raw_id_obj)
+            if msg.get("role") == "tool":
+                raw_tid = msg.get("tool_call_id")
+                if isinstance(raw_tid, str) and raw_tid:
+                    tool_result_ids.add(raw_tid)
+        return bool(tool_call_ids - tool_result_ids)
+
     def should_compress(
         self,
         messages: list[dict[str, Any]],
@@ -66,22 +94,20 @@ class ContextCompressor:
     ) -> bool:
         """Check if compression is needed based on token threshold.
 
-        Returns False if a tool result is the last message — compressing mid-ReAct
-        iteration (between tool execution and the next LLM call) corrupts the agent
-        context and causes tasks to be abandoned. ``actual_tokens`` is the latest
-        backend-reported total_tokens value and is used as a conservative signal
-        when available.
+        Blocks compression only while a tool *batch is incomplete* (assistant
+        ``tool_calls`` without matching ``tool`` results). A completed batch
+        that ends with role=tool is allowed so mid-run multi-step ReAct can
+        compress before the next LLM call (Sprint 2 / C2).
+
+        ``actual_tokens`` is the latest backend-reported total_tokens value and
+        is used as a conservative signal when available.
         """
         if not self._settings.enabled:
             return False
 
-        # Safety guard: never compress while a tool call is still "in flight".
-        # The last message being a tool result means the agent hasn't yet processed
-        # the output — compressing here would produce a summary *instead of* the
-        # actual answer and lose the task context entirely.
-        if messages and messages[-1].get("role") == "tool":
+        if messages and self._tool_batch_incomplete(messages):
             logger.debug(
-                "ContextCompressor: skipping compression — last message is a pending tool result"
+                "ContextCompressor: skipping compression — incomplete tool_call/result pairs"
             )
             return False
 
@@ -108,13 +134,14 @@ class ContextCompressor:
         """Multi-phase compression pipeline.
 
         1. Prune old tool results (cheap, no LLM)
-        2. Protect head (system + first exchange)
+        2. Protect the first canonical exchange
         3. Protect tail by token budget
         4. Summarize middle with structured prompt
         5. Sanitize tool pairs (fix orphaned tool_call/result)
         """
+        messages = normalize_transcript(messages).messages
         if len(messages) < 5:
-            return messages
+            return self._sanitize_tool_pairs(messages)
 
         # Note: prune_old_tool_results is already called by the loop before compress(),
         # so we skip it here to avoid double-pruning.
@@ -158,7 +185,9 @@ class ContextCompressor:
             len(messages),
             len(result),
         )
-        return result
+        # A provider response is data, not authority.  Keep the invariant even
+        # when a custom compressor accidentally emits a system-role summary.
+        return normalize_transcript(result).messages
 
     def _sanitize_tool_pairs(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Fix orphaned tool_call/result pairs.
@@ -290,26 +319,46 @@ Summary:"""
         return "\n".join(lines)
 
     def _find_tail_boundary(self, messages: list[dict[str, Any]], tail_budget_tokens: int) -> int:
-        """Find where tail protection should start to preserve token budget."""
+        """Find where tail protection should start to preserve token budget.
+
+        B-074/M3: after the token-budget point is found, walk the boundary
+        backward so it never lands between an ``assistant`` message carrying
+        ``tool_calls`` and its trailing ``tool`` result messages. Severing a
+        pair would force ``_sanitize_tool_pairs`` to replace real tool output
+        with a placeholder (lossy). Keeping the pair intact in the tail avoids
+        the data loss while still respecting the token budget approximately.
+        """
         tokens = 0
         for i in range(len(messages) - 1, -1, -1):
             tokens += self._estimate_tokens([messages[i]])
             if tokens >= tail_budget_tokens:
-                return i
+                return self._align_boundary_to_tool_pair(messages, i)
         return 0
 
     @staticmethod
-    def _bytes_to_tokens(text: str) -> int:
-        """Estimate token count for a string.
+    def _align_boundary_to_tool_pair(messages: list[dict[str, Any]], i: int) -> int:
+        """If ``messages[i]`` is a ``tool`` result, move the boundary back to
+        include its originating ``assistant`` tool_calls message (and any other
+        consecutive tool results from the same batch) so the pair is not split.
 
-        - Mostly ASCII (English): len_bytes / 4 ≈ tokens (accurate for BPE)
-        - Non-ASCII heavy (Cyrillic/CJK): len_bytes / 2 (conservative — prevents
-          underestimation that causes unexpected context limit hits)
+        ``i`` is the candidate tail_start. Returns an adjusted index <= ``i``
+        that does not begin in the middle of a tool_call/result pair. Bounded
+        by head_count (the caller rejects boundaries too close to the head).
         """
-        encoded = text.encode("utf-8")
-        # ratio > 1.3 means significant non-ASCII content
-        divisor = 2 if len(encoded) > len(text) * 1.3 else 4
-        return len(encoded) // max(divisor, 1)
+        # Walk back while the current boundary message is a tool-role result:
+        # its assistant caller must also be in the tail.
+        boundary = i
+        while boundary > 0 and str(messages[boundary].get("role", "")) == "tool":
+            boundary -= 1
+        # If we stopped on an assistant that issued tool_calls, it is now the
+        # tail start (the pair is fully inside the tail). Otherwise boundary
+        # landed on a non-tool message and is unchanged.
+        return boundary
+
+    @staticmethod
+    def _bytes_to_tokens(text: str) -> int:
+        """Estimate token count for a string (shared B-092 heuristic)."""
+        return estimate_tokens_heuristic(text)
 
     def _estimate_tokens(self, messages: list[dict[str, Any]]) -> int:
         """Rough token estimate using utf-8 byte count heuristic."""

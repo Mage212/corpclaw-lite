@@ -61,7 +61,7 @@ class TestExcelWorkbookRead:
     async def test_read_default(
         self, tool: ExcelWorkbookTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Read without specifying cells returns first 50 rows."""
+        """Read without specifying cells returns first 25 rows (default limit)."""
         monkeypatch.chdir(tmp_path)
         headers = ["Name", "Age", "City"]
         rows = [[f"user{i}", 20 + i, f"city{i}"] for i in range(1, 55)]
@@ -69,10 +69,10 @@ class TestExcelWorkbookRead:
 
         result = await tool.execute(path="data.xlsx", action="read")
         assert "Sheet:" in result
-        # Default limit is 50, so rows 1-50 visible
+        # Default limit is 25, so rows 1-25 visible
         assert "Row 1:" in result
-        assert "Row 50:" in result
-        assert "Row 52:" not in result
+        assert "Row 25:" in result
+        assert "Row 26:" not in result
         assert "Name" in result
         assert "user1" in result
 
@@ -159,8 +159,10 @@ class TestExcelWorkbookRead:
         ws["C1"] = "=A1+B1"
         wb.save(str(tmp_path / "formula.xlsx"))
 
-        # Default read shows formula plus cached value status.
-        result_values = await tool.execute(path="formula.xlsx", action="read", cells="C1")
+        # formula_mode=both shows formula plus cached value status.
+        result_values = await tool.execute(
+            path="formula.xlsx", action="read", cells="C1", formula_mode="both"
+        )
         assert "C1" in result_values
         assert "formula:=A1+B1" in result_values
         assert "cached_value=<unavailable>" in result_values
@@ -188,7 +190,9 @@ class TestExcelWorkbookRead:
         wb.close()
         _inject_cached_formula_value(tmp_path / "cached_formula.xlsx", "C1", "A1+B1", "30")
 
-        result = await tool.execute(path="cached_formula.xlsx", action="read", cells="C1")
+        result = await tool.execute(
+            path="cached_formula.xlsx", action="read", cells="C1", formula_mode="both"
+        )
 
         assert "C1" in result
         assert "formula:=A1+B1" in result
@@ -230,7 +234,9 @@ class TestExcelWorkbookRead:
         wb.save(str(tmp_path / "missing_cached.xlsx"))
         wb.close()
 
-        result = await tool.execute(path="missing_cached.xlsx", action="read", cells="A1:A2")
+        result = await tool.execute(
+            path="missing_cached.xlsx", action="read", cells="A1:A2", formula_mode="both"
+        )
 
         assert "Row 2:" in result
         assert "A2=formula:=A1+1" in result
@@ -373,18 +379,18 @@ class TestExcelWorkbookRead:
         assert "More rows may exist" in result
 
     @pytest.mark.asyncio
-    async def test_max_limit_capped_at_100(
+    async def test_max_limit_capped_at_50(
         self, tool: ExcelWorkbookTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Limit > 100 is capped to 100."""
+        """Limit > 50 is capped to 50."""
         monkeypatch.chdir(tmp_path)
         headers = ["Val"]
         rows = [[i] for i in range(1, 201)]
         _create_basic_xlsx(tmp_path / "big.xlsx", headers, rows)
 
         result = await tool.execute(path="big.xlsx", action="read", limit=999)
-        assert "Row 100:" in result
-        assert "Row 101:" not in result
+        assert "Row 50:" in result
+        assert "Row 51:" not in result
         assert "More rows may exist" in result
 
     @pytest.mark.asyncio
@@ -453,7 +459,7 @@ class TestExcelWorkbookRead:
     async def test_both_mode_loads_workbook_twice(
         self, tool: ExcelWorkbookTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """formula_mode=both (default) still loads two workbooks."""
+        """formula_mode=both explicitly loads two workbooks (formula + data_only)."""
         import openpyxl
 
         monkeypatch.chdir(tmp_path)
@@ -472,10 +478,39 @@ class TestExcelWorkbookRead:
             return real_load(*args, **kwargs)  # type: ignore[arg-type]
 
         monkeypatch.setattr(openpyxl, "load_workbook", _spy_load)
-        await tool.execute(path="data.xlsx", action="read", cells="B1")
+        await tool.execute(path="data.xlsx", action="read", cells="B1", formula_mode="both")
 
         assert len(calls) == 2
         assert calls == [False, True]
+
+    @pytest.mark.asyncio
+    async def test_default_formula_mode_is_values(
+        self, tool: ExcelWorkbookTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Default formula_mode is 'values' — loads one data_only workbook."""
+        import openpyxl
+
+        monkeypatch.chdir(tmp_path)
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = 1
+        ws["B1"] = "=A1+1"
+        wb.save(str(tmp_path / "data.xlsx"))
+        wb.close()
+
+        calls: list[bool] = []
+        real_load = openpyxl.load_workbook
+
+        def _spy_load(*args: object, **kwargs: object) -> object:
+            calls.append(bool(kwargs.get("data_only", False)))
+            return real_load(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(openpyxl, "load_workbook", _spy_load)
+        # No explicit formula_mode → defaults to 'values'
+        await tool.execute(path="data.xlsx", action="read", cells="B1")
+
+        assert len(calls) == 1
+        assert calls == [True]
 
 
 class TestExcelWorkbookFill:

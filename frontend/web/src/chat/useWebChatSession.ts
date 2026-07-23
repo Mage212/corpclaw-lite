@@ -1,15 +1,16 @@
 import type { Dispatch, SetStateAction } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createWebSocketTicket } from "../api";
-import { parseServerWsEvent } from "../contracts";
-import type { ServerWsEvent } from "../contracts";
+import { parseServerWsEvent, type ServerWsEvent } from "../contracts";
 import type {
   AgentMode,
   ApprovalRequest,
   ChatMessage,
   ContextUsage,
+  DepthMode,
   RunTimelineEvent,
-  StatusLine
+  StatusLine,
+  SystemLoad
 } from "../types";
 
 const emptyStatus: StatusLine = {
@@ -20,7 +21,8 @@ const emptyStatus: StatusLine = {
   tone: "idle"
 };
 
-const MAX_TIMELINE_EVENTS = 80;
+/** Per-request cap so a chatty run can't evict other requests' timelines. */
+const MAX_EVENTS_PER_REQUEST = 60;
 
 function id(prefix: string): string {
   return `${prefix}_${Math.random().toString(36).slice(2)}_${Date.now()}`;
@@ -51,6 +53,7 @@ function timelineType(phase: string): RunTimelineEvent["type"] {
   if (phase === "queue") return "queue";
   if (phase === "llm") return "llm";
   if (phase === "tool") return "tool";
+  if (phase === "subagent") return "subagent";
   return "request";
 }
 
@@ -83,15 +86,69 @@ function appendTimeline(
   ) {
     return events;
   }
-  return [...events, makeTimelineEvent(event)].slice(-MAX_TIMELINE_EVENTS);
+  return [...events, makeTimelineEvent(event)].slice(-MAX_EVENTS_PER_REQUEST);
+}
+
+/**
+ * Timeline events scoped per-request. A flat capped array would evict older
+ * requests' events once the global cap filled, making their ActivityCards
+ * vanish. Scoping by requestId (capped per-request) keeps each card populated.
+ * Events with `requestId === null` (global: file_ready, ws-down) are bucketed
+ * under "" and shown in no ActivityCard (they render as system bubbles).
+ */
+type TimelineByRequest = Map<string, RunTimelineEvent[]>;
+
+const GLOBAL_BUCKET = "";
+
+function appendScoped(
+  byRequest: TimelineByRequest,
+  event: Omit<RunTimelineEvent, "id" | "createdAt">
+): TimelineByRequest {
+  const key = event.requestId ?? GLOBAL_BUCKET;
+  const next = new Map(byRequest);
+  next.set(key, appendTimeline(byRequest.get(key) ?? [], event));
+  return next;
 }
 
 type UseWebChatSessionOptions = {
   csrf: string;
-  mode: AgentMode;
+  /** @deprecated Mode is now derived server-side from the chat's section. Kept
+   * for back-compat; when omitted, no mode_change WS events are sent. */
+  mode?: AgentMode;
+  /** Processing depth (Etap 3): Fast = no thinking, Think = reasoning on. */
+  depthMode: DepthMode;
   resetSignal: number;
   onContextUsage: (usage: ContextUsage) => void;
   onWorkspaceChanged?: (() => void) | undefined;
+  /**
+   * The chat to view. `null` = follow the active chat (load the active session
+   * on connect). A specific id = load that chat's transcript read-only (the
+   * client activates it separately via POST /api/chats/{id}/activate).
+   */
+  chatId?: number | null;
+  /**
+   * Activate-on-send: when the user sends a message while viewing a read-only
+   * chat (chatId !== null), this callback activates it (REST) before the WS
+   * message is sent. Returns true on success, false on conflict (409).
+   */
+  onActivateViewedChat?: (chatId: number) => Promise<boolean>;
+  /** Called when activation succeeds (to reset chatId to null = follow active). */
+  onChatActivated?: () => void;
+  /** Fired when the server signals a chat was renamed (to refresh the list). */
+  onChatRenamed?: (() => void) | undefined;
+  /** Fired when the server signals the chat list changed (create/activate/rename). */
+  onChatListChanged?: (() => void) | undefined;
+  /** B-120: proactive system-inbox message (refresh sidebar + optional badge). */
+  onProactiveMessage?: ((sessionId: number) => void) | undefined;
+  /** Ambient GPU/system load (DC-008). Counts only; not request timeline. */
+  onSystemLoad?: ((load: SystemLoad) => void) | undefined;
+  /** B-090: agent run started/stopped on a chat session (badge + list). */
+  onSessionRunningState?:
+    | ((state: { session_id: number; is_running: boolean; title?: string }) => void)
+    | undefined;
+  /** B-091: main-agent web_fetch allow (Work toggle). Default true. */
+  webAccess?: boolean;
+  onWebAccessChange?: ((enabled: boolean) => void) | undefined;
 };
 
 export type WebChatSession = {
@@ -102,20 +159,37 @@ export type WebChatSession = {
   connected: boolean;
   historyHasMore: boolean;
   loadingHistory: boolean;
-  runEvents: RunTimelineEvent[];
+  /** Timeline events grouped by request id. Use `.get(requestId)` for a card. */
+  runEventsByRequest: TimelineByRequest;
+  /** True when viewing a non-active chat (composer should be disabled). */
+  readOnly: boolean;
+  /** True while a compression request is in-flight (button shows "сжимаю…"). */
+  compressing: boolean;
   setInput: (value: string) => void;
   send: () => void;
   loadOlder: () => void;
   answerApproval: (approvalId: string, approved: boolean) => void;
   resetContext: () => void;
+  compress: () => void;
 };
 
 export function useWebChatSession({
   csrf,
   mode,
+  depthMode,
   resetSignal,
   onContextUsage,
-  onWorkspaceChanged
+  onWorkspaceChanged,
+  chatId = null,
+  onActivateViewedChat,
+  onChatActivated,
+  onChatRenamed,
+  onChatListChanged,
+  onProactiveMessage,
+  onSystemLoad,
+  onSessionRunningState,
+  webAccess = true,
+  onWebAccessChange
 }: UseWebChatSessionOptions): WebChatSession {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [status, setStatus] = useState<StatusLine>(emptyStatus);
@@ -124,17 +198,31 @@ export function useWebChatSession({
   const [connected, setConnected] = useState(false);
   const [historyHasMore, setHistoryHasMore] = useState(false);
   const [loadingHistory, setLoadingHistory] = useState(false);
-  const [runEvents, setRunEvents] = useState<RunTimelineEvent[]>([]);
+  const [readOnly, setReadOnly] = useState(false);
+  const [compressing, setCompressing] = useState(false);
+  const [runEventsByRequest, setRunEventsByRequest] = useState<TimelineByRequest>(
+    () => new Map()
+  );
   const wsRef = useRef<WebSocket | null>(null);
   const resetSignalRef = useRef(resetSignal);
-  const modeRef = useRef(mode);
+  const depthModeRef = useRef(depthMode);
+  const webAccessRef = useRef(webAccess);
+  /**
+   * Tracks the most recently seen request_id (from request_started/state/finished/
+   * status_update). Used to stamp `request_id` onto approvals that arrive without
+   * one on the wire — the orchestrator's approval_cb has no request in scope, but
+   * approvals always fire mid-run while this ref holds the active id. Deliberately
+   * NOT cleared on request_finished so approvals arriving in the (up to 300s)
+   * approval window still get stamped, even after status auto-clears at 1.4s.
+   */
+  const lastActiveRequestIdRef = useRef<string | null>(null);
 
   const addMessage = useCallback((message: ChatMessage) => {
     setMessages((items) => appendUnique(items, message));
   }, []);
 
   const addRunEvent = useCallback((event: Omit<RunTimelineEvent, "id" | "createdAt">) => {
-    setRunEvents((items) => appendTimeline(items, event));
+    setRunEventsByRequest((items) => appendScoped(items, event));
   }, []);
 
   const resetContext = useCallback(() => {
@@ -157,12 +245,43 @@ export function useWebChatSession({
     });
   }, [addMessage, addRunEvent]);
 
-  const send = useCallback(() => {
+  const compress = useCallback(() => {
+    // Confirm before compressing — old turns get summarized (destructive to history).
+    if (!window.confirm("Сжать контекст текущего чата? Старые сообщения будут суммированы.")) {
+      return;
+    }
+    if (wsRef.current?.readyState !== WebSocket.OPEN) {
+      addMessage({
+        id: id("compress_warning"),
+        role: "system",
+        text: "Нет соединения с web-каналом. Контекст не сжат.",
+        tone: "warning"
+      });
+      return;
+    }
+    setCompressing(true);
+    // B-063 S3: send the viewed chat's session_id so the server compresses
+    // that chat's context-store, not just the active one. When chatId is null
+    // (following the active chat), omit it — the server resolves the active.
+    const payload: Record<string, unknown> = { type: "compress" };
+    if (chatId != null) payload.session_id = chatId;
+    wsRef.current.send(JSON.stringify(payload));
+  }, [addMessage, chatId]);
+
+  const send = useCallback(async () => {
     const text = input.trim();
     if (!text || wsRef.current?.readyState !== WebSocket.OPEN) return;
+    // Activate-on-send: if viewing a read-only chat (chatId !== null), activate
+    // it first via REST. On success, the active chat changes server-side and we
+    // follow it (chatId=null). On 409 (agent busy in another chat), abort.
+    if (chatId !== null && onActivateViewedChat) {
+      const ok = await onActivateViewedChat(chatId);
+      if (!ok) return; // 409 — agent busy, activation refused
+      onChatActivated?.();
+    }
     wsRef.current.send(JSON.stringify({ type: "message", message: text }));
     setInput("");
-  }, [input]);
+  }, [input, chatId, onActivateViewedChat, onChatActivated]);
 
   const loadOlder = useCallback(() => {
     if (!historyHasMore || loadingHistory || wsRef.current?.readyState !== WebSocket.OPEN) return;
@@ -182,8 +301,12 @@ export function useWebChatSession({
   }, []);
 
   useEffect(() => {
-    modeRef.current = mode;
-  }, [mode]);
+    depthModeRef.current = depthMode;
+  }, [depthMode]);
+
+  useEffect(() => {
+    webAccessRef.current = webAccess;
+  }, [webAccess]);
 
   useEffect(() => {
     let ws: WebSocket | null = null;
@@ -199,7 +322,15 @@ export function useWebChatSession({
         wsRef.current = ws;
         ws.onopen = () => {
           setConnected(true);
-          ws?.send(JSON.stringify({ type: "mode_change", mode: modeRef.current }));
+          if (mode !== undefined) {
+            ws?.send(JSON.stringify({ type: "mode_change", mode }));
+          }
+          ws?.send(
+            JSON.stringify({ type: "depth_mode_change", depth_mode: depthModeRef.current })
+          );
+          ws?.send(
+            JSON.stringify({ type: "web_access_change", web_access: webAccessRef.current })
+          );
         };
         ws.onclose = () => {
           setConnected(false);
@@ -221,7 +352,14 @@ export function useWebChatSession({
             console.warn("Ignored invalid WebSocket JSON", error);
             return;
           }
-          const wsEvent = parseServerWsEvent(parsed);
+          let wsEvent: ServerWsEvent | null = null;
+          try {
+            wsEvent = parseServerWsEvent(parsed);
+          } catch (error) {
+            // requiredNumber/etc. throw on malformed payloads; never break the socket handler
+            console.warn("Ignored malformed WebSocket event", parsed, error);
+            return;
+          }
           if (wsEvent === null) {
             console.warn("Ignored unknown WebSocket event", parsed);
             return;
@@ -234,8 +372,21 @@ export function useWebChatSession({
             onContextUsage,
             setHistoryHasMore,
             setLoadingHistory,
-            setRunEvents,
-            onWorkspaceChanged
+            setRunEventsByRequest,
+            onWorkspaceChanged,
+            getActiveRequestId: () => lastActiveRequestIdRef.current,
+            setActiveRequestId: (requestId) => {
+              lastActiveRequestIdRef.current = requestId;
+            },
+            setReadOnly,
+            setCompressing,
+            onChatRenamed,
+            onChatListChanged,
+            onProactiveMessage,
+            onSystemLoad,
+            onSessionRunningState,
+            onWebAccessChange,
+            viewedChatId: chatId
           });
         };
       })
@@ -266,19 +417,50 @@ export function useWebChatSession({
         wsRef.current = null;
       }
     };
-  }, [addMessage, addRunEvent, csrf, onContextUsage, onWorkspaceChanged]);
+  }, [
+    addMessage,
+    addRunEvent,
+    csrf,
+    chatId,
+    onContextUsage,
+    onWorkspaceChanged,
+    onChatRenamed,
+    onChatListChanged,
+    onProactiveMessage,
+    onSystemLoad,
+    onSessionRunningState,
+    onWebAccessChange
+  ]);
 
   useEffect(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: "mode_change", mode }));
+      wsRef.current.send(JSON.stringify({ type: "depth_mode_change", depth_mode: depthMode }));
     }
-  }, [mode]);
+  }, [depthMode]);
+
+  useEffect(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "web_access_change", web_access: webAccess }));
+    }
+  }, [webAccess]);
 
   useEffect(() => {
     if (resetSignal === resetSignalRef.current) return;
     resetSignalRef.current = resetSignal;
     resetContext();
   }, [resetContext, resetSignal]);
+
+  // Etap 2: when the viewed chat changes, request its transcript read-only.
+  // chatId === null means "follow the active chat" (loaded on connect); a
+  // specific id triggers a WS load_chat. Activation (making it the active chat
+  // the agent writes to) is a separate REST call done by the caller.
+  useEffect(() => {
+    if (chatId == null) return;
+    const ws = wsRef.current;
+    if (ws?.readyState !== WebSocket.OPEN) return;
+    setLoadingHistory(true);
+    ws.send(JSON.stringify({ type: "load_chat", session_id: chatId }));
+  }, [chatId]);
 
   return {
     messages,
@@ -288,12 +470,15 @@ export function useWebChatSession({
     connected,
     historyHasMore,
     loadingHistory,
-    runEvents,
+    runEventsByRequest,
+    readOnly,
+    compressing,
     setInput,
     send,
     loadOlder,
     answerApproval,
-    resetContext
+    resetContext,
+    compress
   };
 }
 
@@ -305,15 +490,35 @@ type WsEventHandlers = {
   onContextUsage: (usage: ContextUsage) => void;
   setHistoryHasMore: Dispatch<SetStateAction<boolean>>;
   setLoadingHistory: Dispatch<SetStateAction<boolean>>;
-  setRunEvents: Dispatch<SetStateAction<RunTimelineEvent[]>>;
+  setRunEventsByRequest: Dispatch<SetStateAction<TimelineByRequest>>;
   onWorkspaceChanged: (() => void) | undefined;
+  /** Read the last-known active request id (for stamping approvals). */
+  getActiveRequestId: () => string | null;
+  /** Record a request id as the active one (called on request_started/state/finished/status_update). */
+  setActiveRequestId: (requestId: string) => void;
+  /** Set the read-only flag (true when viewing a non-active chat transcript). */
+  setReadOnly: Dispatch<SetStateAction<boolean>>;
+  /** Set the in-flight compression flag (cleared on compress_done / error). */
+  setCompressing: Dispatch<SetStateAction<boolean>>;
+  /** Fired when a chat was renamed or the chat list changed (refresh sidebar). */
+  onChatRenamed: (() => void) | undefined;
+  /** Ambient system load (top bar); never mixed into request timeline. */
+  onSystemLoad: ((load: SystemLoad) => void) | undefined;
+  onSessionRunningState:
+    | ((state: { session_id: number; is_running: boolean; title?: string }) => void)
+    | undefined;
+  onWebAccessChange: ((enabled: boolean) => void) | undefined;
+  onChatListChanged: (() => void) | undefined;
+  onProactiveMessage: ((sessionId: number) => void) | undefined;
+  /** Currently viewed chat id (null = follow active). Used for live proactive append. */
+  viewedChatId: number | null;
 };
 
 function pushRunEvent(
-  handlers: Pick<WsEventHandlers, "setRunEvents">,
+  handlers: Pick<WsEventHandlers, "setRunEventsByRequest">,
   event: Omit<RunTimelineEvent, "id" | "createdAt">
 ) {
-  handlers.setRunEvents((items) => appendTimeline(items, event));
+  handlers.setRunEventsByRequest((items) => appendScoped(items, event));
 }
 
 function handleWsEvent(event: ServerWsEvent, handlers: WsEventHandlers) {
@@ -325,12 +530,22 @@ function handleWsEvent(event: ServerWsEvent, handlers: WsEventHandlers) {
     onContextUsage,
     setHistoryHasMore,
     setLoadingHistory,
-    onWorkspaceChanged
+    onWorkspaceChanged,
+    setReadOnly,
+    setCompressing,
+    onChatRenamed,
+    onChatListChanged,
+    onProactiveMessage,
+    onSystemLoad,
+    onSessionRunningState,
+    onWebAccessChange,
+    viewedChatId
   } = handlers;
   if (event.type === "chat_history") {
     setMessages(event.messages);
     setHistoryHasMore(event.has_more);
     setLoadingHistory(false);
+    setReadOnly(event.read_only === true);
   } else if (event.type === "history_page") {
     setMessages((items) => prependUnique(items, event.messages));
     setHistoryHasMore(event.has_more);
@@ -349,6 +564,7 @@ function handleWsEvent(event: ServerWsEvent, handlers: WsEventHandlers) {
     }
   } else if (event.type === "request_started" || event.type === "request_state") {
     const phase = event.phase || "request";
+    handlers.setActiveRequestId(event.request_id);
     setStatus({
       active: true,
       requestId: event.request_id,
@@ -356,24 +572,16 @@ function handleWsEvent(event: ServerWsEvent, handlers: WsEventHandlers) {
       phase,
       tone: "running"
     });
-    if (event.type === "request_started") {
-      handlers.setRunEvents([
-        makeTimelineEvent({
-          requestId: event.request_id,
-          type: timelineType(phase),
-          label: event.label,
-          tone: "running"
-        })
-      ]);
-    } else {
-      pushRunEvent(handlers, {
-        requestId: event.request_id,
-        type: timelineType(phase),
-        label: event.label,
-        tone: "running"
-      });
-    }
+    // Accumulate (don't reset): a fresh request_started now just appends its first
+    // event so prior requests' timelines remain populated for their ActivityCards.
+    pushRunEvent(handlers, {
+      requestId: event.request_id,
+      type: timelineType(phase),
+      label: event.label,
+      tone: "running"
+    });
   } else if (event.type === "status_update") {
+    handlers.setActiveRequestId(event.request_id);
     setStatus({
       active: true,
       requestId: event.request_id,
@@ -403,6 +611,7 @@ function handleWsEvent(event: ServerWsEvent, handlers: WsEventHandlers) {
     });
   } else if (event.type === "request_finished") {
     const tone = event.status === "error" ? "error" : event.status === "warning" ? "warning" : "done";
+    handlers.setActiveRequestId(event.request_id);
     if (event.usage) {
       onContextUsage(event.usage);
     }
@@ -438,15 +647,39 @@ function handleWsEvent(event: ServerWsEvent, handlers: WsEventHandlers) {
       phase: "done",
       tone: "done"
     });
-    handlers.setRunEvents([
-      makeTimelineEvent({
-        requestId: null,
-        type: "reset",
-        label: event.message,
-        tone: "done"
-      })
-    ]);
+    handlers.setRunEventsByRequest(() => {
+      // Reset clears all per-request timelines and leaves only the reset marker.
+      const reset = new Map<string, RunTimelineEvent[]>();
+      reset.set(GLOBAL_BUCKET, [
+        makeTimelineEvent({
+          requestId: null,
+          type: "reset",
+          label: event.message,
+          tone: "done"
+        })
+      ]);
+      return reset;
+    });
     onWorkspaceChanged?.();
+    window.setTimeout(() => setStatus(emptyStatus), 1600);
+  } else if (event.type === "compress_done") {
+    if (event.usage) {
+      onContextUsage(event.usage);
+    }
+    setCompressing(false);
+    addMessage({
+      id: id("compress_done"),
+      role: "system",
+      text: event.message,
+      tone: "normal"
+    });
+    setStatus({
+      active: true,
+      requestId: null,
+      label: event.message,
+      phase: "done",
+      tone: "done"
+    });
     window.setTimeout(() => setStatus(emptyStatus), 1600);
   } else if (event.type === "warning") {
     if (!event.request_id) {
@@ -473,6 +706,9 @@ function handleWsEvent(event: ServerWsEvent, handlers: WsEventHandlers) {
     });
   } else if (event.type === "error") {
     setLoadingHistory(false);
+    // A failed compress sends {type:"error"} (not compress_done); clear the
+    // compressing flag so the button stops showing "сжимаю…".
+    setCompressing(false);
     if (event.usage) {
       onContextUsage(event.usage);
     }
@@ -513,14 +749,18 @@ function handleWsEvent(event: ServerWsEvent, handlers: WsEventHandlers) {
     });
     onWorkspaceChanged?.();
   } else if (event.type === "approval_required") {
-    const approval = event;
+    // The wire payload omits request_id (orchestrator approval_cb has no request
+    // in scope). Prefer a backend-provided one if present; otherwise stamp the
+    // last-known active request so the approval groups inside its ActivityCard.
+    const requestId = event.request_id ?? handlers.getActiveRequestId();
+    const approval: ApprovalRequest = { ...event, request_id: requestId };
     setApprovals((items) =>
       items.some((item) => item.approval_id === approval.approval_id)
         ? items.map((item) => (item.approval_id === approval.approval_id ? approval : item))
         : [...items, approval]
     );
     pushRunEvent(handlers, {
-      requestId: null,
+      requestId,
       type: "approval",
       label: approval.action,
       detail: approval.details,
@@ -529,10 +769,48 @@ function handleWsEvent(event: ServerWsEvent, handlers: WsEventHandlers) {
   } else if (event.type === "approval_resolved") {
     setApprovals((items) => items.filter((item) => item.approval_id !== event.approval_id));
     pushRunEvent(handlers, {
-      requestId: null,
+      requestId: event.request_id ?? handlers.getActiveRequestId(),
       type: "done",
       label: "Подтверждение обработано",
       tone: "done"
     });
+  } else if (event.type === "chat_renamed") {
+    // A chat got an auto-generated title (or was renamed). Refresh the sidebar list.
+    onChatRenamed?.();
+  } else if (event.type === "chat_activated") {
+    // The active chat changed (via POST .../activate, or as a replacement after
+    // deleting the active chat). Drop read-only, and clear messages: if this
+    // was a delete-replacement, the old transcript is gone; for a normal
+    // activation the transcript was already loaded by load_chat, but clearing
+    // is harmless and avoids showing a stale transcript from a viewed chat.
+    setReadOnly(false);
+    setMessages([]);
+    onChatListChanged?.();
+  } else if (event.type === "chat_list_changed") {
+    onChatListChanged?.();
+  } else if (event.type === "proactive_message") {
+    // Live-append when viewing the system session; always refresh sidebar badge.
+    if (viewedChatId === event.session_id) {
+      addMessage(event.message);
+    }
+    onProactiveMessage?.(event.session_id);
+    onChatListChanged?.();
+  } else if (event.type === "system_load") {
+    onSystemLoad?.({
+      active_count: event.active_count,
+      max_concurrent: event.max_concurrent,
+      waiting_count: event.waiting_count,
+      active_users: event.active_users,
+      load_level: event.load_level,
+      updated_at: event.updated_at
+    });
+  } else if (event.type === "session_running_state") {
+    onSessionRunningState?.({
+      session_id: event.session_id,
+      is_running: event.is_running,
+      ...(event.title !== undefined ? { title: event.title } : {})
+    });
+  } else if (event.type === "web_access") {
+    onWebAccessChange?.(event.web_access);
   }
 }

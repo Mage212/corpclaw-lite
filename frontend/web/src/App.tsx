@@ -1,33 +1,42 @@
-import {
-  Activity,
-  Bot,
-  ChevronDown,
-  LogOut,
-  MessageSquare,
-  MessageSquarePlus,
-  PanelLeftClose,
-  PanelLeftOpen,
-  PanelRightOpen
-} from "lucide-react";
+import { ChevronDown, ChevronUp, Eye, MessageSquare, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import type { FormEvent } from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
-import { getSession, getWorkspaceOverview, login, logout, previewFile } from "./api";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  activateChat,
+  createChat,
+  deleteChat as apiDeleteChat,
+  getChats,
+  getExtensions,
+  getSession,
+  listPins,
+  listSchedule,
+  login,
+  logout,
+  previewFile,
+  reloadExtensions,
+  renameChat as apiRenameChat
+} from "./api";
 import { ChatPanel } from "./chat/ChatPanel";
+import { SystemLoadBar } from "./chat/SystemLoadBar";
 import { useWebChatSession } from "./chat/useWebChatSession";
 import { FileExplorer } from "./files/FileExplorer";
-import { FilePreview } from "./files/FilePreview";
 import { useResizablePanels } from "./hooks/useResizablePanels";
-import { agentModeLabel } from "./i18n/ru";
-import { InspectorPanel } from "./inspector/InspectorPanel";
+import { BottomDrawer } from "./layout/BottomDrawer";
+import { AgentContextView } from "./layout/AgentContextView";
+import { ExtensionsView } from "./layout/ExtensionsView";
+import { PreviewOverlay } from "./layout/PreviewOverlay";
+import { ScheduleView } from "./layout/ScheduleView";
+import { Sidebar } from "./layout/Sidebar";
 import type {
-  AgentMode,
+  ChatSummary,
   ContextUsage,
-  FileExplorerMode,
-  InspectorTab,
-  PreviewMode,
+  DepthMode,
+  ExtensionsPayload,
+  PreviewOverlayMode,
   PreviewPayload,
   SessionPayload,
-  WorkspaceOverviewPayload
+  SidebarSection,
+  SystemLoad
 } from "./types";
 
 export function App() {
@@ -75,7 +84,7 @@ function LoginView({ onLogin }: { onLogin: (session: SessionPayload) => void }) 
     <main className="login-page">
       <form className="login-card" onSubmit={submit}>
         <div className="brand-mark">
-          <Bot size={24} />
+          <MessageSquare size={24} />
           <span>CorpClaw Lite</span>
         </div>
         <label>
@@ -115,68 +124,255 @@ function Workspace({
   session: SessionPayload;
   onSessionChange: (session: SessionPayload) => void;
 }) {
-  const [mode, setMode] = useState<AgentMode>("execute");
-  const [filesOpen, setFilesOpen] = useState(true);
-  const [filesMode, setFilesMode] = useState<FileExplorerMode>("side");
+  // --- Mode is derived server-side from the active chat's section. The FE no
+  // longer sends mode_change (vestigial after Etap 2 — the hook still accepts
+  // it for back-compat with older builds, but we pass a constant default). ---
+  const [section, setSection] = useState<SidebarSection>("chat");
+  // Etap 3: depth mode (Fast/Think) — orthogonal to section (tools on/off).
+  const [depthMode, setDepthMode] = useState<DepthMode>("think");
+  const [webAccess, setWebAccess] = useState(true);
+
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+
   const [preview, setPreview] = useState<PreviewPayload | null>(null);
-  const [previewMode, setPreviewMode] = useState<PreviewMode>("side");
-  const [inspectorTab, setInspectorTab] = useState<InspectorTab>("overview");
-  const [inspectorOpen, setInspectorOpen] = useState(true);
+  const [previewMode, setPreviewMode] = useState<PreviewOverlayMode>("side");
+
   const [contextUsage, setContextUsage] = useState<ContextUsage | null>(null);
-  const [overview, setOverview] = useState<WorkspaceOverviewPayload | null>(null);
-  const [overviewLoading, setOverviewLoading] = useState(false);
+  const [systemLoad, setSystemLoad] = useState<SystemLoad | null>(null);
   const [resetSignal, setResetSignal] = useState(0);
-  const [userMenuOpen, setUserMenuOpen] = useState(false);
-  const userMenuRef = useRef<HTMLDivElement | null>(null);
-  const { cssVars, prepareSidePreview, startResize } = useResizablePanels();
+  const [pinTokens, setPinTokens] = useState(0);
+  const [pinBudget, setPinBudget] = useState(0);
+
+  // Etap 2: multi-chat. chatId=null = follow the active chat (loaded on connect).
+  const [chatId, setChatId] = useState<number | null>(null);
+  const [chats, setChats] = useState<ChatSummary[]>([]);
+  const [chatsLoading, setChatsLoading] = useState(false);
+  // B-120: durable system inbox (section=system), separate from Chat/Work tabs.
+  const [systemChat, setSystemChat] = useState<ChatSummary | null>(null);
+  const [systemHasUnread, setSystemHasUnread] = useState(false);
+
+  // Etap 4/5 + B-140: view state ("chat" | "extensions" | "agent-context" | "schedule").
+  const [view, setView] = useState<"chat" | "extensions" | "agent-context" | "schedule">("chat");
+  const [extensions, setExtensions] = useState<ExtensionsPayload | null>(null);
+  const [extensionsLoading, setExtensionsLoading] = useState(false);
+  const [schedulePendingCount, setSchedulePendingCount] = useState(0);
+
+  const { cssVars, layout, startResize, setDrawerHeight } = useResizablePanels();
   const user = session.user;
 
-  const refreshOverview = useCallback(() => {
-    setOverviewLoading(true);
-    getWorkspaceOverview()
-      .then(setOverview)
-      .catch((error) => console.warn("Failed to load workspace overview", error))
-      .finally(() => setOverviewLoading(false));
+  const refreshSystemChat = useCallback(() => {
+    getChats(session.csrf_token, "system")
+      .then((items) => {
+        setSystemChat(items[0] ?? null);
+      })
+      .catch((error) => console.warn("Failed to load system inbox", error));
+  }, [session.csrf_token]);
+
+  const refreshChats = useCallback(() => {
+    setChatsLoading(true);
+    getChats(session.csrf_token, section)
+      .then(setChats)
+      .catch((error) => console.warn("Failed to load chats", error))
+      .finally(() => setChatsLoading(false));
+    refreshSystemChat();
+  }, [session.csrf_token, section, refreshSystemChat]);
+
+  // H1: attach/pin must work when chatId is null (follow-active after send / new chat).
+  // Prefer explicitly viewed chat; else the server-side active chat from the list.
+  const contextSessionId =
+    chatId != null && chatId > 0
+      ? chatId
+      : (chats.find((chat) => chat.active)?.id ?? null);
+
+  const refreshPinBudget = useCallback(() => {
+    if (contextSessionId == null || contextSessionId <= 0) {
+      setPinTokens(0);
+      setPinBudget(0);
+      return;
+    }
+    listPins(contextSessionId)
+      .then((payload) => {
+        setPinTokens(payload.pin_tokens);
+        setPinBudget(payload.pin_budget);
+      })
+      .catch(() => {
+        setPinTokens(0);
+        setPinBudget(0);
+      });
+  }, [contextSessionId]);
+
+  useEffect(() => {
+    refreshPinBudget();
+  }, [refreshPinBudget]);
+
+  // Etap 4: extensions list (loaded on demand when view opens or reload clicked).
+  const refreshExtensions = useCallback(() => {
+    setExtensionsLoading(true);
+    getExtensions()
+      .then(setExtensions)
+      .catch((error) => console.warn("Failed to load extensions", error))
+      .finally(() => setExtensionsLoading(false));
   }, []);
+
+  const handleOpenExtensions = useCallback(() => {
+    setView("extensions");
+    refreshExtensions();
+  }, [refreshExtensions]);
+
+  const handleReloadExtensions = useCallback(() => {
+    reloadExtensions(session.csrf_token)
+      .then(() => refreshExtensions())
+      .catch((error) => console.warn("Failed to reload extensions", error));
+  }, [session.csrf_token, refreshExtensions]);
+
+  const refreshSchedulePending = useCallback(() => {
+    listSchedule(session.csrf_token, ["pending"])
+      .then((items) => setSchedulePendingCount(items.length))
+      .catch((error) => console.warn("Failed to load schedule pending count", error));
+  }, [session.csrf_token]);
+
+  useEffect(() => {
+    refreshSchedulePending();
+  }, [refreshSchedulePending]);
+
+  const handleActivateViewedChat = useCallback(
+    async (targetChatId: number): Promise<boolean> => {
+      try {
+        await activateChat(session.csrf_token, targetChatId);
+        return true;
+      } catch (error) {
+        console.warn("Failed to activate viewed chat", error);
+        return false;
+      }
+    },
+    [session.csrf_token]
+  );
+
+  const handleSessionRunningState = useCallback(
+    (state: { session_id: number; is_running: boolean; title?: string }) => {
+      setChats((current) =>
+        current.map((chat) => {
+          if (state.is_running) {
+            // Only one agent run per user — clear other badges, set this one.
+            if (chat.id === state.session_id) {
+              return {
+                ...chat,
+                is_running: true,
+                title: state.title !== undefined && state.title.length > 0 ? state.title : chat.title
+              };
+            }
+            return chat.is_running ? { ...chat, is_running: false } : chat;
+          }
+          if (chat.id === state.session_id && chat.is_running) {
+            return { ...chat, is_running: false };
+          }
+          return chat;
+        })
+      );
+    },
+    []
+  );
+
+  const handleProactiveMessage = useCallback(
+    (sessionId: number) => {
+      refreshSystemChat();
+      // B-140: schedule_propose lands in system inbox — refresh pending badge.
+      refreshSchedulePending();
+      if (chatId !== sessionId) {
+        setSystemHasUnread(true);
+      }
+    },
+    [chatId, refreshSystemChat, refreshSchedulePending]
+  );
 
   const chatSession = useWebChatSession({
     csrf: session.csrf_token,
-    mode,
+    depthMode,
     resetSignal,
     onContextUsage: setContextUsage,
-    onWorkspaceChanged: refreshOverview
+    chatId,
+    onActivateViewedChat: handleActivateViewedChat,
+    onChatActivated: () => setChatId(null),
+    onChatRenamed: refreshChats,
+    onChatListChanged: refreshChats,
+    onProactiveMessage: handleProactiveMessage,
+    onSystemLoad: setSystemLoad,
+    onSessionRunningState: handleSessionRunningState,
+    webAccess,
+    onWebAccessChange: setWebAccess
   });
 
   useEffect(() => {
-    refreshOverview();
-  }, [refreshOverview]);
+    refreshChats();
+  }, [refreshChats]);
 
+  // Etap 3B: Research mode requires tools (dispatch_subagent), which are off in
+  // the Chat section. If the user switches to Chat while Research is selected,
+  // fall back to Think so the depth stays meaningful.
   useEffect(() => {
-    if (!userMenuOpen) return;
-
-    function onPointerDown(event: PointerEvent) {
-      const node = userMenuRef.current;
-      if (node && !node.contains(event.target as Node)) {
-        setUserMenuOpen(false);
-      }
+    if (section === "chat" && depthMode === "research") {
+      setDepthMode("think");
     }
-
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        setUserMenuOpen(false);
-      }
-    }
-
-    window.addEventListener("pointerdown", onPointerDown);
-    window.addEventListener("keydown", onKeyDown);
-    return () => {
-      window.removeEventListener("pointerdown", onPointerDown);
-      window.removeEventListener("keydown", onKeyDown);
-    };
-  }, [userMenuOpen]);
+  }, [section, depthMode]);
 
   if (!user) {
     return <LoginView onLogin={onSessionChange} />;
+  }
+
+  function selectChat(chat: ChatSummary) {
+    // Load the chat's transcript. The active chat loads as editable
+    // (read_only=false on the server, since it's the chat the agent writes to);
+    // any other chat loads read-only until the user sends (activate-on-send).
+    // Previously clicking the active chat did setChatId(null) ("follow"), but
+    // null means "no chat viewed → empty panel", which made returning to the
+    // active chat's transcript impossible after viewing another one.
+    setChatId(chat.id);
+    if (chat.section === "system") {
+      setSystemHasUnread(false);
+    }
+  }
+
+  async function startNewChat() {
+    setChatsLoading(true);
+    try {
+      const created = await createChat(session.csrf_token, section);
+      // New chat is active server-side; follow it (chatId=null). Keep local
+      // active flags consistent so contextSessionId resolves for attach/pin.
+      setChatId(null);
+      setChats((current) => [
+        created,
+        ...current
+          .filter((chat) => chat.id !== created.id)
+          .map((chat) => (chat.active ? { ...chat, active: false } : chat))
+      ]);
+    } catch (error) {
+      console.warn("Failed to create chat", error);
+    } finally {
+      setChatsLoading(false);
+    }
+  }
+
+  async function renameChat(id: number, title: string) {
+    try {
+      await apiRenameChat(session.csrf_token, id, title);
+      refreshChats();
+    } catch (error) {
+      console.warn("Failed to rename chat", error);
+    }
+  }
+
+  async function deleteChat(id: number) {
+    try {
+      await apiDeleteChat(session.csrf_token, id);
+      // If the deleted chat was being viewed, fall back to the active one.
+      if (chatId === id) {
+        setChatId(null);
+      }
+      refreshChats();
+    } catch (error) {
+      console.warn("Failed to delete chat", error);
+    }
   }
 
   async function doLogout() {
@@ -184,21 +380,9 @@ function Workspace({
     onSessionChange({ authenticated: false, user: null, csrf_token: "" });
   }
 
-  function startNewSession() {
-    if (!window.confirm("Сбросить контекст и начать новую сессию?")) {
-      return;
-    }
-    setResetSignal((value) => value + 1);
-  }
-
-  function openPreview(next: PreviewPayload, nextMode: PreviewMode = "side") {
-    if (nextMode === "side") {
-      prepareSidePreview(filesOpen && filesMode === "side");
-    }
+  function openPreview(next: PreviewPayload, nextMode: PreviewOverlayMode = "side") {
     setPreview(next);
     setPreviewMode(nextMode);
-    setInspectorTab("preview");
-    setInspectorOpen(true);
   }
 
   async function openPreviewPath(path: string) {
@@ -206,205 +390,170 @@ function Workspace({
     openPreview(next, "side");
   }
 
-  function toggleFiles() {
-    setFilesOpen((value) => {
-      if (value) {
-        setFilesMode("side");
-      }
-      return !value;
-    });
+  function toggleDrawer() {
+    setDrawerOpen((open) => !open);
   }
 
+  // Seed a sensible default drawer height the first time the drawer is opened
+  // (when none is persisted). Subsequent open/close cycles reuse the persisted
+  // height. Lives in an effect (not inside the setDrawerOpen updater) so the
+  // state update stays pure and survives StrictMode double-invocation.
+  useEffect(() => {
+    if (drawerOpen && layout.drawerHeight === null) {
+      setDrawerHeight(Math.round((window.innerHeight || 720) * 0.4));
+    }
+  }, [drawerOpen, layout.drawerHeight, setDrawerHeight]);
+
+  const workspaceClass = useMemo(() => {
+    return [
+      "workspace",
+      sidebarOpen ? "sidebar-open" : "",
+      drawerOpen ? "drawer-open-root" : ""
+    ]
+      .filter(Boolean)
+      .join(" ");
+  }, [sidebarOpen, drawerOpen]);
+
   return (
-    <div
-      className={`workspace ${filesOpen ? "files-open" : "files-closed"} ${
-        inspectorOpen ? "inspector-open" : "inspector-closed"
-      } ${filesMode === "expanded" ? "files-expanded" : ""}`}
-      style={cssVars}
-    >
-      <FileExplorer
-        csrf={session.csrf_token}
-        open={filesOpen}
-        mode={filesMode}
-        onModeChange={setFilesMode}
-        onPreview={openPreview}
-        onWorkspaceChanged={refreshOverview}
+    <div className={workspaceClass} style={cssVars} data-sidebar-open={sidebarOpen ? "1" : "0"}>
+      <Sidebar
+        user={user}
+        section={section}
+        onSectionChange={setSection}
+        chats={chats}
+        activeChatId={chatId}
+        chatsLoading={chatsLoading}
+        systemChat={systemChat}
+        systemHasUnread={systemHasUnread}
+        onSelectChat={selectChat}
+        onNewChat={startNewChat}
+        onRenameChat={renameChat}
+        onDeleteChat={deleteChat}
+        onLogout={doLogout}
+        onOpenExtensions={handleOpenExtensions}
+        onOpenAgentContext={() => setView("agent-context")}
+        onOpenSchedule={() => setView("schedule")}
+        schedulePendingCount={schedulePendingCount}
       />
-      {filesOpen && filesMode === "side" && (
-        <div
-          className="resize-handle files-resize"
-          onPointerDown={(event) =>
-            startResize("files", event, {
-              filesOpen: true,
-              previewOpen: inspectorOpen
-            })
-          }
-          role="separator"
-          aria-orientation="vertical"
-        />
-      )}
-      <section className="main-pane">
+
+      <section className={`main-area ${drawerOpen ? "drawer-open" : ""}`}>
         <header className="topbar">
-          <button className="icon-button topbar-files-toggle" onClick={toggleFiles} title="Файлы">
-            {filesOpen ? <PanelLeftClose size={18} /> : <PanelLeftOpen size={18} />}
-          </button>
+          <div className="topbar-actions topbar-leading">
+            <button
+              className="icon-button"
+              onClick={() => setSidebarOpen((value) => !value)}
+              title={sidebarOpen ? "Скрыть боковую панель" : "Показать боковую панель"}
+            >
+              {sidebarOpen ? <PanelLeftClose size={18} /> : <PanelLeftOpen size={18} />}
+            </button>
+            <button
+              className="icon-button"
+              onClick={toggleDrawer}
+              title="Файлы"
+            >
+              {drawerOpen ? <ChevronDown size={18} /> : <ChevronUp size={18} />}
+            </button>
+          </div>
           <div className="topbar-center">
             <div className="topbar-title">
               <MessageSquare size={18} />
               <span>CorpClaw Lite</span>
             </div>
-            <ContextMeter usage={contextUsage} />
           </div>
-          <div className="topbar-mode">
-            <SegmentedMode mode={mode} onModeChange={setMode} />
-          </div>
-          <div className="topbar-actions">
+          <div className="topbar-actions topbar-trailing">
             <button
-              className="new-session-button"
-              onClick={startNewSession}
-              title="Сбросить контекст и начать новую сессию"
+              className="icon-button"
+              onClick={() => {
+                if (!preview) {
+                  // No file open — open the overlay with an empty state so the
+                  // user sees where previews will appear (and that the panel works).
+                  setPreview({ type: "empty" });
+                } else if (previewMode === "expanded") {
+                  setPreviewMode("side");
+                } else {
+                  setPreview(null);
+                }
+              }}
+              title="Просмотр"
             >
-              <MessageSquarePlus size={16} />
-              <span>Новая сессия</span>
+              <Eye size={18} />
             </button>
-            <div className="user-menu" ref={userMenuRef}>
-              <button
-                className="user-pill"
-                onClick={() => setUserMenuOpen((value) => !value)}
-                aria-expanded={userMenuOpen}
-                aria-haspopup="menu"
-              >
-                <span>{user.name}</span>
-                <ChevronDown size={14} />
-              </button>
-              {userMenuOpen && (
-                <div className="user-menu-popover" role="menu">
-                  <div className="user-menu-header">
-                    <strong>{user.name}</strong>
-                    <span>{user.department}</span>
-                  </div>
-                  <button
-                    className="user-menu-item danger"
-                    onClick={() => {
-                      setUserMenuOpen(false);
-                      void doLogout();
-                    }}
-                    role="menuitem"
-                  >
-                    <LogOut size={16} />
-                    <span>Выйти</span>
-                  </button>
-                </div>
-              )}
-            </div>
           </div>
         </header>
-        <ChatPanel
-          session={chatSession}
-          user={user}
-          onPreviewFile={openPreviewPath}
-        />
-      </section>
-      {!inspectorOpen && (
-        <button
-          className="operation-center-rail"
-          onClick={() => setInspectorOpen(true)}
-          title="Показать операционный центр"
+        <SystemLoadBar load={systemLoad} connected={chatSession.connected} />
+
+        <div className="main-pane">
+          <div className={`view-pane ${view === "chat" ? "" : "view-hidden"}`}>
+            <ChatPanel
+              session={chatSession}
+              user={user}
+              onPreviewFile={openPreviewPath}
+              contextUsage={contextUsage}
+              depthMode={depthMode}
+              onDepthModeChange={setDepthMode}
+              webAccess={webAccess}
+              onWebAccessChange={setWebAccess}
+              section={section}
+              pinTokens={pinTokens}
+              pinBudget={pinBudget}
+              csrf={session.csrf_token}
+              onOpenSchedule={() => setView("schedule")}
+              onScheduleResolved={refreshSchedulePending}
+            />
+          </div>
+          {view === "extensions" && (
+            <ExtensionsView
+              extensions={extensions}
+              loading={extensionsLoading}
+              onReload={handleReloadExtensions}
+              onBack={() => setView("chat")}
+            />
+          )}
+          {view === "agent-context" && (
+            <AgentContextView
+              csrf={session.csrf_token}
+              onBack={() => setView("chat")}
+            />
+          )}
+          {view === "schedule" && (
+            <ScheduleView
+              csrf={session.csrf_token}
+              onBack={() => {
+                setView("chat");
+                refreshSchedulePending();
+              }}
+              onPendingCountChange={setSchedulePendingCount}
+            />
+          )}
+        </div>
+
+        <BottomDrawer
+          open={drawerOpen}
+          onToggle={toggleDrawer}
+          onStartResize={(event) => startResize("drawer", event)}
         >
-          <PanelRightOpen size={17} />
-          <span>Операционный центр</span>
-        </button>
-      )}
-      {inspectorOpen && (
-        <div
-          className="resize-handle preview-resize"
-          onPointerDown={(event) =>
-            startResize("preview", event, {
-              filesOpen: filesOpen && filesMode === "side",
-              previewOpen: true
-            })
-          }
-          role="separator"
-          aria-orientation="vertical"
-        />
-      )}
-      {inspectorOpen && (
-        <InspectorPanel
-          activeTab={inspectorTab}
-          onTabChange={setInspectorTab}
-          overview={overview}
-          overviewLoading={overviewLoading}
-          status={chatSession.status}
-          runEvents={chatSession.runEvents}
-          approvals={chatSession.approvals}
-          contextUsage={contextUsage}
-          preview={preview}
-          previewMode={previewMode}
-          onPreviewModeChange={setPreviewMode}
-          onClose={() => setInspectorOpen(false)}
-          onClosePreview={() => {
-            setPreview(null);
-            setInspectorTab("overview");
-          }}
-          onRefreshOverview={refreshOverview}
-          onPreviewPath={openPreviewPath}
-          onAnswerApproval={chatSession.answerApproval}
-        />
-      )}
-      {preview && previewMode === "expanded" && (
-        <FilePreview
+          <FileExplorer
+            csrf={session.csrf_token}
+            open={drawerOpen}
+            mode="side"
+            onModeChange={() => undefined}
+            onPreview={openPreview}
+            sessionId={contextSessionId}
+            baselineTokens={contextUsage?.latest_total_tokens ?? 0}
+            onContextFilesChanged={refreshPinBudget}
+          />
+        </BottomDrawer>
+      </section>
+
+      {preview && (
+        <PreviewOverlay
           preview={preview}
           mode={previewMode}
           onModeChange={setPreviewMode}
           onClose={() => setPreview(null)}
+          onStartResize={(event) => startResize("preview", event)}
         />
       )}
-    </div>
-  );
-}
-
-function formatTokenCount(value: number): string {
-  if (value >= 1000) {
-    return `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)} тыс.`;
-  }
-  return String(value);
-}
-
-function ContextMeter({ usage }: { usage: ContextUsage | null }) {
-  const latest = usage?.latest_total_tokens ?? 0;
-  const limit = usage?.context_limit_tokens ?? 0;
-  const ratio = usage?.context_ratio ?? 0;
-  const tone = ratio >= 0.8 ? "danger" : ratio >= 0.6 ? "warning" : "normal";
-  const percent = Math.round(ratio * 100);
-  const label = limit ? `${formatTokenCount(latest)} / ${formatTokenCount(limit)}` : "—";
-
-  return (
-    <div className={`context-meter ${tone}`} title={`Контекст: ${percent}%`}>
-      <Activity size={15} />
-      <span>Контекст</span>
-      <strong>{label}</strong>
-      <i>
-        <b style={{ width: `${Math.min(100, Math.max(0, percent))}%` }} />
-      </i>
-    </div>
-  );
-}
-
-function SegmentedMode({
-  mode,
-  onModeChange
-}: {
-  mode: AgentMode;
-  onModeChange: (mode: AgentMode) => void;
-}) {
-  return (
-    <div className="segmented">
-      <button className={mode === "execute" ? "active" : ""} onClick={() => onModeChange("execute")}>
-        {agentModeLabel("execute")}
-      </button>
-      <button className={mode === "chat" ? "active" : ""} onClick={() => onModeChange("chat")}>
-        {agentModeLabel("chat")}
-      </button>
     </div>
   );
 }

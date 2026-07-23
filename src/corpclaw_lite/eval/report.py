@@ -4,11 +4,16 @@ A :class:`PassReport` aggregates one run over the full corpus (guards on OR
 off). :class:`ABReport` compares two passes (guards on vs off) and answers the
 central B-060 question: did the Phase 0 guards improve outcomes? Both render to
 JSON and Markdown for human review.
+
+:class:`MultiSeedReport` (D-052) aggregates N A/B runs to filter sampling noise
+on local LLMs — median per scenario, stability flags, and a verdict that does
+not flip between runs.
 """
 
 from __future__ import annotations
 
 import json
+import statistics
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -17,9 +22,19 @@ from corpclaw_lite.eval.scores import ScenarioScore
 
 __all__ = [
     "ABReport",
+    "MultiSeedReport",
     "PassReport",
     "ScenarioDelta",
+    "ScenarioMultiSeed",
 ]
+
+# D-052 verdict thresholds: per-scenario swing < 0.5 and mean delta < 0.25 are
+# treated as sampling noise (within judge variance on local LLMs).
+_VERDICT_DELTA_THRESHOLD = 0.25
+_VERDICT_SCENARIO_THRESHOLD = 0.5
+# A scenario is "stable" across seeds when the spread of its scores is within
+# this band (two seeds differing by < 0.1 are effectively identical).
+_STABILITY_SPREAD = 0.1
 
 
 @dataclass
@@ -224,3 +239,224 @@ class ABReport:
             json.dumps(self.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8"
         )
         (out / "eval_report.md").write_text(self.to_markdown(), encoding="utf-8")
+
+
+# ───────────────────────── Multi-seed (D-052) ─────────────────────────────
+
+
+def _is_stable(scores: list[float]) -> bool:
+    """True when the spread of ``scores`` is within the stability band."""
+    if not scores:
+        return True
+    if len(scores) == 1:
+        return True
+    return max(scores) - min(scores) <= _STABILITY_SPREAD
+
+
+@dataclass
+class ScenarioMultiSeed:
+    """Per-scenario median across N seeds, for the on/off passes.
+
+    A "noisy" scenario (where the on or off scores vary across seeds) is a
+    candidate for corpus revision — either the scenario is ill-defined or the
+    model is genuinely unstable on it.
+    """
+
+    scenario_id: str
+    on_scores: list[float] = field(default_factory=lambda: list[float]())
+    off_scores: list[float] = field(default_factory=lambda: list[float]())
+
+    @property
+    def on_median(self) -> float:
+        return round(statistics.median(self.on_scores), 4) if self.on_scores else 0.0
+
+    @property
+    def off_median(self) -> float:
+        return round(statistics.median(self.off_scores), 4) if self.off_scores else 0.0
+
+    @property
+    def delta(self) -> float:
+        """on_median − off_median (positive = guards helped this scenario)."""
+        return round(self.on_median - self.off_median, 4)
+
+    @property
+    def on_stable(self) -> bool:
+        return _is_stable(self.on_scores)
+
+    @property
+    def off_stable(self) -> bool:
+        return _is_stable(self.off_scores)
+
+    @property
+    def noisy(self) -> bool:
+        """True if either pass varies across seeds beyond the stability band."""
+        return not self.on_stable or not self.off_stable
+
+    @property
+    def improved(self) -> bool:
+        return self.delta >= _VERDICT_SCENARIO_THRESHOLD
+
+    @property
+    def regressed(self) -> bool:
+        return self.delta <= -_VERDICT_SCENARIO_THRESHOLD
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "scenario_id": self.scenario_id,
+            "on_scores": self.on_scores,
+            "off_scores": self.off_scores,
+            "on_median": self.on_median,
+            "off_median": self.off_median,
+            "delta": self.delta,
+            "on_stable": self.on_stable,
+            "off_stable": self.off_stable,
+            "noisy": self.noisy,
+        }
+
+
+@dataclass
+class MultiSeedReport:
+    """Aggregated A/B report across N seeds (D-052).
+
+    Each seed is a full :class:`ABReport` (guards on vs off). The aggregation
+    takes the per-scenario median for on and off passes, then derives a stable
+    verdict that does not flip on re-run.
+    """
+
+    seeds: int
+    ab_reports: list[ABReport] = field(default_factory=lambda: list[ABReport]())
+    per_scenario: list[ScenarioMultiSeed] = field(default_factory=lambda: list[ScenarioMultiSeed]())
+
+    @classmethod
+    def from_ab_reports(cls, reports: list[ABReport]) -> MultiSeedReport:
+        """Aggregate N single-seed A/B reports into a multi-seed report.
+
+        Scenarios that appear in only some seeds are still aggregated from the
+        seeds that produced them (a crash in one seed does not drop the
+        scenario).
+        """
+        if not reports:
+            return cls(seeds=0)
+        # Collect per-scenario on/off score lists across seeds.
+        on_by_id: dict[str, list[float]] = {}
+        off_by_id: dict[str, list[float]] = {}
+        for ab in reports:
+            for d in ab.deltas:
+                on_by_id.setdefault(d.scenario_id, []).append(d.overall_on)
+                off_by_id.setdefault(d.scenario_id, []).append(d.overall_off)
+        per_scenario = [
+            ScenarioMultiSeed(
+                scenario_id=sid,
+                on_scores=on_by_id[sid],
+                off_scores=off_by_id.get(sid, []),
+            )
+            for sid in sorted(on_by_id)
+        ]
+        return cls(seeds=len(reports), ab_reports=reports, per_scenario=per_scenario)
+
+    @property
+    def mean_on_median(self) -> float:
+        if not self.per_scenario:
+            return 0.0
+        return round(sum(s.on_median for s in self.per_scenario) / len(self.per_scenario), 4)
+
+    @property
+    def mean_off_median(self) -> float:
+        if not self.per_scenario:
+            return 0.0
+        return round(sum(s.off_median for s in self.per_scenario) / len(self.per_scenario), 4)
+
+    @property
+    def mean_delta(self) -> float:
+        return round(self.mean_on_median - self.mean_off_median, 4)
+
+    @property
+    def improved_count(self) -> int:
+        return sum(1 for s in self.per_scenario if s.improved)
+
+    @property
+    def regressed_count(self) -> int:
+        return sum(1 for s in self.per_scenario if s.regressed)
+
+    @property
+    def stable_count(self) -> int:
+        return sum(1 for s in self.per_scenario if not s.noisy)
+
+    @property
+    def noisy_count(self) -> int:
+        return sum(1 for s in self.per_scenario if s.noisy)
+
+    @property
+    def verdict(self) -> str:
+        """Stable verdict across seeds (D-052 thresholds).
+
+        - ``guards_help``: mean delta > +0.25 AND improved > regressed
+        - ``guards_hurt``: mean delta < −0.25 AND regressed > improved
+        - ``guards_neutral``: otherwise
+        """
+        if (
+            self.mean_delta > _VERDICT_DELTA_THRESHOLD
+            and self.improved_count > self.regressed_count
+        ):
+            return "guards_help"
+        if (
+            self.mean_delta < -_VERDICT_DELTA_THRESHOLD
+            and self.regressed_count > self.improved_count
+        ):
+            return "guards_hurt"
+        return "guards_neutral"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "seeds": self.seeds,
+            "summary": {
+                "mean_on_median": self.mean_on_median,
+                "mean_off_median": self.mean_off_median,
+                "mean_delta": self.mean_delta,
+                "verdict": self.verdict,
+                "improved_count": self.improved_count,
+                "regressed_count": self.regressed_count,
+            },
+            "stability": {
+                "stable_count": self.stable_count,
+                "noisy_count": self.noisy_count,
+            },
+            "per_scenario": [s.to_dict() for s in self.per_scenario],
+        }
+
+    def to_markdown(self) -> str:
+        labels = {
+            "guards_help": "✅ Guards HELPED (stable across seeds)",
+            "guards_hurt": "⚠️ Guards HURT (stable across seeds)",
+            "guards_neutral": "➖ Guards made no significant difference (stable)",
+        }
+        lines: list[str] = [
+            f"# Eval Multi-Seed Report ({self.seeds} seeds, D-052)\n",
+            f"**Verdict:** {labels[self.verdict]}\n",
+            "## Summary (per-scenario medians)\n",
+            "| Metric | Guards ON | Guards OFF | Delta |",
+            "|---|---|---|---|",
+            f"| Mean overall (median) | {self.mean_on_median:.2f} | "
+            f"{self.mean_off_median:.2f} | {self.mean_delta:+.2f} |",
+            f"| Improved / Regressed | | | {self.improved_count} / {self.regressed_count} |",
+            f"| Stable / Noisy scenarios | | | {self.stable_count} / {self.noisy_count} |",
+            "\n## Per-scenario (sorted by delta)\n",
+            "| Scenario | ON median | OFF median | Delta | Noisy |",
+            "|---|---|---|---|---|",
+        ]
+        for s in sorted(self.per_scenario, key=lambda x: x.delta, reverse=True):
+            flag = "🔊" if s.noisy else "—"
+            lines.append(
+                f"| {s.scenario_id} | {s.on_median:.2f} | {s.off_median:.2f} | "
+                f"{s.delta:+.2f} | {flag} |"
+            )
+        return "\n".join(lines) + "\n"
+
+    def write(self, out_dir: Path | str) -> None:
+        """Write multi_seed_report.json + .md to ``out_dir`` (top level)."""
+        out = Path(out_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "multi_seed_report.json").write_text(
+            json.dumps(self.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        (out / "multi_seed_report.md").write_text(self.to_markdown(), encoding="utf-8")

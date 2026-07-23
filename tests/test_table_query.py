@@ -221,6 +221,30 @@ class TestTableQueryTool:
         assert "0 rows" in result
 
     @pytest.mark.asyncio
+    async def test_large_result_advisory_note(
+        self, tool: TableQueryTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Results with more than 50 rows include an advisory note about context usage."""
+        monkeypatch.chdir(tmp_path)
+        rows = "\n".join(f"item{i},{i}" for i in range(1, 61))
+        _create_csv(tmp_path / "data.csv", f"name,val\n{rows}\n")
+
+        result = await tool.execute(path="data.csv", query="SELECT * FROM data")
+        assert "Large result" in result
+        assert "GROUP BY" in result or "output_path" in result
+
+    @pytest.mark.asyncio
+    async def test_small_result_no_advisory_note(
+        self, tool: TableQueryTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Small results do not trigger the advisory note."""
+        monkeypatch.chdir(tmp_path)
+        _create_csv(tmp_path / "data.csv", "name,val\nAlice,1\nBob,2\nCarol,3\n")
+
+        result = await tool.execute(path="data.csv", query="SELECT * FROM data")
+        assert "Large result" not in result
+
+    @pytest.mark.asyncio
     async def test_missing_params(self, tool: TableQueryTool) -> None:
         result = await tool.execute()
         assert "Error" in result

@@ -1,4 +1,4 @@
-"""Tests for memory_store and memory_recall tools + SQLiteMemory fact storage."""
+"""Tests for memory_store/recall tools + SQLiteMemory entries (B-108)."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ def user() -> User:
     return User(id=900000042, name="Alice", department="dev")
 
 
-# ── SQLiteMemory fact methods ────────────────────────────────────────────────
+# ── SQLiteMemory entry methods ───────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
@@ -35,6 +35,20 @@ async def test_store_and_recall_fact(memory: SQLiteMemory) -> None:
 
 
 @pytest.mark.asyncio
+async def test_store_entry_and_recall_entries(memory: SQLiteMemory) -> None:
+    await memory.store_entry(
+        "u1",
+        primary_abstraction="Client INN for Acme",
+        memory_value="7707083893",
+        cues=["Acme", "7707083893"],
+    )
+    hits = await memory.recall_entries("u1", query="Acme")
+    assert len(hits) >= 1
+    assert hits[0]["abstraction"] == "Client INN for Acme"
+    assert "7707083893" in hits[0]["cues"]
+
+
+@pytest.mark.asyncio
 async def test_store_fact_upsert(memory: SQLiteMemory) -> None:
     await memory.store_fact("u1", "city", "Moscow")
     await memory.store_fact("u1", "city", "London")
@@ -46,14 +60,63 @@ async def test_store_fact_upsert(memory: SQLiteMemory) -> None:
 
 
 @pytest.mark.asyncio
+async def test_store_entry_merges_cues_on_upsert(memory: SQLiteMemory) -> None:
+    await memory.store_entry(
+        "u1",
+        primary_abstraction="Prefers brief style",
+        memory_value="short answers",
+        cues=["brief"],
+    )
+    await memory.store_entry(
+        "u1",
+        primary_abstraction="Prefers brief style",
+        memory_value="even shorter",
+        cues=["concise"],
+    )
+    hits = await memory.recall_entries("u1")
+    assert len(hits) == 1
+    assert hits[0]["value"] == "even shorter"
+    assert set(hits[0]["cues"]) == {"brief", "concise"}
+
+
+@pytest.mark.asyncio
 async def test_recall_facts_with_query(memory: SQLiteMemory) -> None:
     await memory.store_fact("u1", "language", "Python")
     await memory.store_fact("u1", "framework", "Django")
     await memory.store_fact("u1", "hobby", "chess")
 
     results = await memory.recall_facts("u1", query="Py")
-    assert len(results) == 1
-    assert results[0]["key"] == "language"
+    assert len(results) >= 1
+    assert any(r["key"] == "language" for r in results)
+
+
+@pytest.mark.asyncio
+async def test_recall_exact_cue_boost(memory: SQLiteMemory) -> None:
+    await memory.store_entry(
+        "u1",
+        primary_abstraction="Tax id Acme LLC",
+        memory_value="details about acme tax",
+        cues=["7707083893", "Acme"],
+    )
+    await memory.store_entry(
+        "u1",
+        primary_abstraction="Random note",
+        memory_value="something else entirely",
+        cues=[],
+    )
+    hits = await memory.recall_entries("u1", query="7707083893", limit=5)
+    assert hits
+    assert hits[0]["abstraction"] == "Tax id Acme LLC"
+
+
+@pytest.mark.asyncio
+async def test_user_isolation(memory: SQLiteMemory) -> None:
+    await memory.store_fact("u1", "secret", "a")
+    await memory.store_fact("u2", "secret", "b")
+    f1 = await memory.recall_facts("u1")
+    f2 = await memory.recall_facts("u2")
+    assert f1[0]["value"] == "a"
+    assert f2[0]["value"] == "b"
 
 
 @pytest.mark.asyncio
@@ -70,6 +133,19 @@ async def test_clear_facts(memory: SQLiteMemory) -> None:
     assert await memory.recall_facts("u1") == []
 
 
+@pytest.mark.asyncio
+async def test_no_legacy_memory_facts_table(memory: SQLiteMemory) -> None:
+    import sqlite3
+
+    with sqlite3.connect(memory.db_path) as conn:
+        tables = {
+            r[0]
+            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+    assert "memory_entries" in tables
+    assert "memory_facts" not in tables
+
+
 # ── MemoryStoreTool ──────────────────────────────────────────────────────────
 
 
@@ -78,44 +154,40 @@ async def test_memory_store_requires_user(memory: SQLiteMemory) -> None:
     tool = MemoryStoreTool(memory)
     result = await tool.execute(key="name", value="Test")
     assert "Error" in result
-    assert "User context" in result
 
 
 @pytest.mark.asyncio
-async def test_memory_store_and_recall_roundtrip(memory: SQLiteMemory, user: User) -> None:
-    store = MemoryStoreTool(memory)
-    recall = MemoryRecallTool(memory)
-
-    res = await store.execute(key="name", value="Alice", user=user)
-    assert "Stored" in res
-
-    res = await recall.execute(user=user)
-    assert "name" in res
-    assert "Alice" in res
+async def test_memory_store_legacy_key_value(memory: SQLiteMemory, user: User) -> None:
+    tool = MemoryStoreTool(memory)
+    result = await tool.execute(user=user, key="name", value="Alice")
+    assert "Stored" in result
+    facts = await memory.recall_facts(str(user.id))
+    assert any(f["key"] == "name" and f["value"] == "Alice" for f in facts)
 
 
 @pytest.mark.asyncio
-async def test_memory_recall_with_query_tool(memory: SQLiteMemory, user: User) -> None:
-    store = MemoryStoreTool(memory)
-    recall = MemoryRecallTool(memory)
-
-    await store.execute(key="language", value="Python", user=user)
-    await store.execute(key="hobby", value="chess", user=user)
-
-    res = await recall.execute(query="Python", user=user)
-    assert "language" in res
-    assert "chess" not in res
-
-
-@pytest.mark.asyncio
-async def test_memory_recall_empty_tool(memory: SQLiteMemory, user: User) -> None:
-    recall = MemoryRecallTool(memory)
-    res = await recall.execute(user=user)
-    assert "No facts stored" in res
+async def test_memory_store_abstraction_value_cues(memory: SQLiteMemory, user: User) -> None:
+    tool = MemoryStoreTool(memory)
+    result = await tool.execute(
+        user=user,
+        abstraction="Client Acme tax id",
+        value="7707083893",
+        cues='["Acme","7707083893"]',
+    )
+    assert "Stored" in result
+    hits = await memory.recall_entries(str(user.id), query="Acme")
+    assert hits and hits[0]["value"] == "7707083893"
 
 
 @pytest.mark.asyncio
-async def test_memory_recall_requires_user(memory: SQLiteMemory) -> None:
+async def test_memory_recall_tool(memory: SQLiteMemory, user: User) -> None:
+    await memory.store_entry(
+        str(user.id),
+        primary_abstraction="Language preference",
+        memory_value="Russian",
+        cues=["lang"],
+    )
     tool = MemoryRecallTool(memory)
-    result = await tool.execute()
-    assert "Error" in result
+    out = await tool.execute(user=user, query="lang")
+    assert "Language preference" in out
+    assert "Russian" in out

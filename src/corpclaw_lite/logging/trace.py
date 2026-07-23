@@ -7,7 +7,11 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from corpclaw_lite.security.credential_scrubber import CredentialScrubber, scrub_text
+from corpclaw_lite.security.credential_scrubber import (
+    CredentialScrubber,
+    CredentialScrubbingFormatter,
+    scrub_text,
+)
 
 __all__ = [
     "TraceLogger",
@@ -52,6 +56,7 @@ class TraceLogger:
             backupCount=5,
             encoding="utf-8",
         )
+        handler.setFormatter(CredentialScrubbingFormatter("%(message)s"))
         handler.addFilter(CredentialScrubber())
         self._logger.addHandler(handler)
 

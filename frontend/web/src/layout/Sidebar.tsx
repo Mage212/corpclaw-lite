@@ -1,0 +1,195 @@
+import { useEffect, useRef, useState } from "react";
+import { Bell, CalendarClock, ChevronDown, LogOut, Settings2, Sparkles } from "lucide-react";
+import {
+  AGENT_CONTEXT_LABEL,
+  EXTENSIONS_LABEL,
+  SCHEDULE_LABEL,
+  SYSTEM_INBOX_LABEL,
+  sidebarSectionLabel
+} from "../i18n/ru";
+import type { ChatSummary, SidebarSection, User } from "../types";
+import { ChatList } from "./ChatList";
+
+export type SidebarProps = {
+  user: User;
+  section: SidebarSection;
+  onSectionChange: (section: SidebarSection) => void;
+  chats: ChatSummary[];
+  activeChatId: number | null;
+  chatsLoading: boolean;
+  /** B-120: durable system inbox entry (may be null before first proactive/headless). */
+  systemChat: ChatSummary | null;
+  systemHasUnread?: boolean;
+  onSelectChat: (chat: ChatSummary) => void;
+  onNewChat: () => void;
+  onRenameChat: (id: number, title: string) => void;
+  onDeleteChat: (id: number) => void;
+  onOpenExtensions: () => void;
+  onOpenAgentContext: () => void;
+  /** B-140: open scheduled tasks management view. */
+  onOpenSchedule: () => void;
+  schedulePendingCount?: number;
+  onLogout: () => void;
+};
+
+export function Sidebar({
+  user,
+  section,
+  onSectionChange,
+  chats,
+  activeChatId,
+  chatsLoading,
+  systemChat,
+  systemHasUnread = false,
+  onSelectChat,
+  onNewChat,
+  onRenameChat,
+  onDeleteChat,
+  onOpenExtensions,
+  onOpenAgentContext,
+  onOpenSchedule,
+  schedulePendingCount = 0,
+  onLogout
+}: SidebarProps) {
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const userMenuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!userMenuOpen) return;
+
+    function onPointerDown(event: PointerEvent) {
+      const node = userMenuRef.current;
+      if (node && !node.contains(event.target as Node)) {
+        setUserMenuOpen(false);
+      }
+    }
+
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setUserMenuOpen(false);
+      }
+    }
+
+    window.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [userMenuOpen]);
+
+  return (
+    <aside className="sidebar" aria-label="Навигация">
+      <SectionSwitcher value={section} onChange={onSectionChange} />
+
+      <nav className="sidebar-management" aria-label="Управление агентом">
+        <button onClick={onOpenSchedule} title={SCHEDULE_LABEL}>
+          <CalendarClock size={16} />
+          <span>{SCHEDULE_LABEL}</span>
+          {schedulePendingCount > 0 && (
+            <span className="schedule-nav-badge" aria-label={`${schedulePendingCount} ожидают`}>
+              {schedulePendingCount}
+            </span>
+          )}
+        </button>
+        <button onClick={onOpenExtensions} title={EXTENSIONS_LABEL}>
+          <Settings2 size={16} />
+          <span>{EXTENSIONS_LABEL}</span>
+        </button>
+        <button onClick={onOpenAgentContext} title={AGENT_CONTEXT_LABEL}>
+          <Sparkles size={16} />
+          <span>{AGENT_CONTEXT_LABEL}</span>
+        </button>
+      </nav>
+
+      {systemChat !== null && (
+        <div className="sidebar-system-inbox" aria-label={SYSTEM_INBOX_LABEL}>
+          <button
+            type="button"
+            className={
+              activeChatId === systemChat.id
+                ? "system-inbox-btn active"
+                : "system-inbox-btn"
+            }
+            onClick={() => onSelectChat(systemChat)}
+            title={SYSTEM_INBOX_LABEL}
+          >
+            <Bell size={16} />
+            <span>{SYSTEM_INBOX_LABEL}</span>
+            {systemChat.msg_count > 0 && (
+              <span className="system-inbox-count">{systemChat.msg_count}</span>
+            )}
+            {systemHasUnread && <span className="system-inbox-badge" aria-label="новое" />}
+          </button>
+        </div>
+      )}
+
+      <ChatList
+        chats={chats}
+        activeChatId={activeChatId}
+        onSelectChat={onSelectChat}
+        onNewChat={onNewChat}
+        onRenameChat={onRenameChat}
+        onDeleteChat={onDeleteChat}
+        loading={chatsLoading}
+      />
+
+      <div className="sidebar-user-profile" ref={userMenuRef}>
+        <div className="user-menu">
+          <button
+            className="user-pill"
+            onClick={() => setUserMenuOpen((value) => !value)}
+            aria-expanded={userMenuOpen}
+            aria-haspopup="menu"
+          >
+            <span>{user.name}</span>
+            <ChevronDown size={14} />
+          </button>
+          {userMenuOpen && (
+            <div className="user-menu-popover" role="menu">
+              <div className="user-menu-header">
+                <strong>{user.name}</strong>
+                <span>{user.department}</span>
+              </div>
+              <button
+                className="user-menu-item danger"
+                onClick={() => {
+                  setUserMenuOpen(false);
+                  onLogout();
+                }}
+                role="menuitem"
+              >
+                <LogOut size={16} />
+                <span>Выйти</span>
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    </aside>
+  );
+}
+
+function SectionSwitcher({
+  value,
+  onChange
+}: {
+  value: SidebarSection;
+  onChange: (section: SidebarSection) => void;
+}) {
+  return (
+    <div className="sidebar-section-switcher" role="tablist" aria-label="Раздел работы">
+      {(["chat", "work"] as const).map((section) => (
+        <button
+          key={section}
+          role="tab"
+          aria-selected={value === section}
+          className={value === section ? "active" : ""}
+          onClick={() => onChange(section)}
+        >
+          {sidebarSectionLabel(section)}
+        </button>
+      ))}
+    </div>
+  );
+}

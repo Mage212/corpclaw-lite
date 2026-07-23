@@ -1,4 +1,5 @@
 import json
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -344,3 +345,57 @@ async def test_smart_approval_sanitizes_tool_name(tmp_path: Path) -> None:
     # Guarantee 2: Angle brackets must be HTML-escaped, not raw
     assert "<injected>" not in prompt, "Raw angle brackets survived sanitization"
     assert "&lt;injected&gt;" in prompt, "Angle brackets not escaped in prompt"
+
+
+@pytest.mark.asyncio
+async def test_smart_evaluate_uses_real_user_id(tmp_path: Path) -> None:
+    """Smart-eval must acquire the LLM slot under the REAL user, not _router_chat.
+
+    Regression guard for S3.2: LLMRouter.chat() hardcodes user_id="_router_chat",
+    which broke per-user slot affinity for smart-approval evaluations. The fix makes
+    _smart_evaluate call acquire_slot(user_id=<real>) + default.chat directly.
+    """
+    from unittest.mock import MagicMock
+
+    from corpclaw_lite.llm.router import LLMRouter
+
+    rules_file = tmp_path / "rules.yaml"
+    rules_file.write_text(
+        "rules:\n"
+        "  - id: NEEDS_APPROVAL\n"
+        "    severity: MEDIUM\n"
+        "    tool: exec_script\n"
+        "    match_param: script\n"
+        "    match_pattern: python\n"
+        "    require_approval: true\n"
+    )
+
+    acquired_user_ids: list[str] = []
+    acquired_run_ids: list[str | None] = []
+
+    # MagicMock(spec=LLMRouter) makes isinstance(provider, LLMRouter) True, so the
+    # smart-eval takes the acquire_slot + default.chat branch.
+    router = MagicMock(spec=LLMRouter)
+    router.default = MockSmartProvider("APPROVE - this is safe")
+
+    @asynccontextmanager
+    async def fake_acquire_slot(user_id: str, *, run_id: str | None = None, **_: Any):
+        acquired_user_ids.append(user_id)
+        acquired_run_ids.append(run_id)
+        yield
+
+    router.acquire_slot = fake_acquire_slot
+
+    guard = ToolGuard(provider=router, approval_mode="smart")  # type: ignore[arg-type]
+    guard.load_file(rules_file)
+
+    await guard.check(
+        "exec_script",
+        {"script": "python -c 'print(1)'"},
+        run_id="run-42",
+        user_id="real-user-7",
+    )
+
+    assert acquired_user_ids == ["real-user-7"], "slot must be acquired under the real user_id"
+    assert acquired_run_ids == ["run-42"], "run_id must be propagated for tracing"
+    assert "_router_chat" not in acquired_user_ids

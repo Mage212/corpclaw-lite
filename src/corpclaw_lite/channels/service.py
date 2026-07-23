@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-import asyncio
 import logging
+import secrets
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING, Literal
 
 from corpclaw_lite.agent.loop import RunStats
 from corpclaw_lite.config.bootstrap import BootstrapLoader
@@ -13,8 +14,12 @@ from corpclaw_lite.exceptions import LLMBackendUnavailableError
 from corpclaw_lite.extensions.tools.builtin._path_utils import user_workspace_path
 from corpclaw_lite.llm.queue import LLMQueueStatus
 from corpclaw_lite.logging.agent_logger import AgentLogger
+from corpclaw_lite.logging.trace import log_event
 from corpclaw_lite.paths import PROJECT_ROOT
 from corpclaw_lite.users.models import User
+
+if TYPE_CHECKING:
+    from corpclaw_lite.channels.user_notifier import UserNotifier
 
 logger = logging.getLogger(__name__)
 
@@ -22,8 +27,24 @@ __all__ = [
     "AgentRequestCallbacks",
     "AgentRequestResult",
     "AgentRequestService",
+    "HeadlessResult",
+    "RunningRequest",
     "is_llm_transport_error",
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class RunningRequest:
+    """In-flight workflow metadata for a single user (B-090 / DC-011).
+
+    ``session_id`` is set only for long agent runs (badge + reject title).
+    Short mutations (create/activate/delete/reset/compress) hold the mutex with
+    ``session_id=None`` so the chat-list badge does not flicker.
+    """
+
+    session_id: int | None = None
+    title: str | None = None
+
 
 _LLM_TRANSPORT_ERROR_NAMES = {
     "APIConnectionError",
@@ -95,6 +116,34 @@ class AgentRequestResult:
     stats: RunStats
 
 
+@dataclass(frozen=True, slots=True)
+class HeadlessResult:
+    """Outcome of :meth:`AgentRequestService.run_headless` (B-119 / DC-031)."""
+
+    status: Literal["completed", "skipped"]
+    reply: str | None = None
+    session_id: int | None = None
+    stats: RunStats | None = None
+    skip_reason: str | None = None
+    source: str = "manual"
+
+    def to_dict(self) -> dict[str, object]:
+        body: dict[str, object] = {
+            "status": self.status,
+            "source": self.source,
+        }
+        if self.reply is not None:
+            body["reply"] = self.reply
+        if self.session_id is not None:
+            body["session_id"] = self.session_id
+        if self.skip_reason is not None:
+            body["skip_reason"] = self.skip_reason
+        if self.stats is not None:
+            body["run_id"] = self.stats.run_id
+            body["status_detail"] = self.stats.status
+        return body
+
+
 class AgentRequestService:
     """Shared channel-neutral request orchestration for AgentLoop."""
 
@@ -107,19 +156,28 @@ class AgentRequestService:
         activity_logger: AgentLogger | None = None,
         llm_provider_name: str | None = None,
         llm_base_url: str | None = None,
+        user_notifier: UserNotifier | None = None,
     ) -> None:
         from corpclaw_lite.agent.factory import AgentStack
 
         if not isinstance(stack, AgentStack):
             raise TypeError("stack must be AgentStack")
         self._stack = stack
-        self._bootstrap = bootstrap or BootstrapLoader(PROJECT_ROOT / "config" / "bootstrap")
+        # bootstrap retained for constructor back-compat; prompt assembly is on the loop (B-111).
+        _ = bootstrap or BootstrapLoader(PROJECT_ROOT / "config" / "bootstrap")
         self._workspace_base = (workspace_base or PROJECT_ROOT / "workspaces").resolve()
         self._activity_logger = activity_logger
         self._llm_provider_name = llm_provider_name
         self._llm_base_url = llm_base_url
-        self._active_user_requests: set[int] = set()
-        self._active_user_requests_lock = asyncio.Lock()
+        self._user_notifier = user_notifier
+        # Process-wide gate shared with Telegram (Sprint 2 / C3).
+        from corpclaw_lite.runtime.user_run_gate import get_user_run_gate
+
+        self._run_gate = get_user_run_gate()
+
+    def set_user_notifier(self, notifier: UserNotifier | None) -> None:
+        """Attach or clear the B-120 proactive delivery sink (optional)."""
+        self._user_notifier = notifier
 
     def get_user_workspace(self, user: User) -> Path:
         """Return the host workspace for a user, creating it if needed."""
@@ -127,30 +185,130 @@ class AgentRequestService:
         workspace.mkdir(parents=True, exist_ok=True)
         return workspace
 
-    async def try_start_user_request(self, user_id: int) -> bool:
-        """Return False when the user already has an active workflow."""
-        async with self._active_user_requests_lock:
-            if user_id in self._active_user_requests:
-                return False
-            self._active_user_requests.add(user_id)
-            return True
+    async def try_start_user_request(
+        self,
+        user_id: int,
+        *,
+        session_id: int | None = None,
+        title: str | None = None,
+    ) -> bool:
+        """Return False when the user already has an active workflow.
 
-    async def finish_user_request(self, user_id: int) -> None:
-        """Mark a user's active workflow as finished."""
-        async with self._active_user_requests_lock:
-            self._active_user_requests.discard(user_id)
+        Pass ``session_id`` (and optional ``title``) only for long agent runs so
+        B-090 can expose is_running + reject reason. Short mutations omit them.
+        """
+        return await self._run_gate.try_start(user_id, session_id=session_id, title=title)
+
+    async def finish_user_request(self, user_id: int) -> RunningRequest | None:
+        """Mark a user's active workflow as finished; return what was held (if any)."""
+        info = await self._run_gate.finish(user_id)
+        if info is None:
+            return None
+        return RunningRequest(session_id=info.session_id, title=info.title)
+
+    async def get_running_request(self, user_id: int) -> RunningRequest | None:
+        """Return in-flight metadata for *user_id*, or None if idle."""
+        info = await self._run_gate.get(user_id)
+        if info is None:
+            return None
+        return RunningRequest(session_id=info.session_id, title=info.title)
+
+    async def active_user_count(self) -> int:
+        """Number of users with an in-flight workflow (not LLM slot count)."""
+        return await self._run_gate.active_count()
 
     async def reset_user_context(self, user: User) -> None:
-        """Clear conversation memory and invalidate LLM cache state for a user."""
-        memory = self._stack.loop.memory
-        if memory is not None:
-            await memory.clear(user.memory_key())
+        """Invalidate LLM KV-cache after a session reset (B-106).
 
+        Transcript lives in ``ChatContextStore`` / ``WebChatStore`` — callers
+        archive the chat session separately (CASCADE clears context rows).
+        ``SQLiteMemory`` is facts-only and is intentionally not cleared here
+        (facts are cross-chat personalization).
+        """
         from corpclaw_lite.llm.router import LLMRouter
 
         provider = self._stack.loop.provider
         if isinstance(provider, LLMRouter):
             await provider.mark_user_cache_reset(user.memory_key())
+
+    async def restore_user_context(self, user: User, session_id: int) -> bool:
+        """Validate session ownership and that context-store has transcript (B-104).
+
+        The store is the sole LLM transcript source — ``AgentLoop.run`` loads full
+        tool_calls/tool-role via ``list_context``. This method only:
+        1. IDOR-checks ownership (B-067)
+        2. Confirms the store has messages for ``session_id``
+        3. Invalidates slot KV-cache for the user
+
+        Returns True if context is available; False if empty / missing / unauthorized
+        (caller falls back to ``reset_user_context``).
+        """
+        store = self._stack.chat_context_store
+        if store is None:
+            return False
+        chat_store = self._stack.chat_store
+        if chat_store is not None:
+            session = await chat_store.get_session(user.memory_key(), session_id)
+            if session is None:
+                logger.warning(
+                    "[session=%s] restore_user_context: not owned by user %s (IDOR blocked)",
+                    session_id,
+                    user.id,
+                )
+                return False
+        try:
+            messages = await store.list_context(session_id, user_id=user.memory_key())
+        except Exception:
+            logger.warning(
+                "[session=%s] restore_user_context: context-store load failed",
+                session_id,
+                exc_info=True,
+            )
+            return False
+        if not messages:
+            return False
+        from corpclaw_lite.llm.router import LLMRouter
+
+        provider = self._stack.loop.provider
+        if isinstance(provider, LLMRouter):
+            await provider.mark_user_cache_reset(user.memory_key())
+        return True
+
+    async def compress_user_context(
+        self, user: User, session_id: int | None = None
+    ) -> tuple[bool, str]:
+        """On-demand compression of a chat's full LLM context (B-105).
+
+        Thin wrapper over ``AgentLoop.compress_now``; requires ``session_id`` and
+        a configured ChatContextStore. The caller (orchestrator) holds the
+        single-in-flight lock so this never races an active run.
+        Returns ``(ok, message)``.
+        """
+        # B-067: verify ownership at the service layer (not just in the
+        # orchestrator) so the public method cannot be used to compress — and
+        # thereby re-attribute via replace_context — another user's chat.
+        if session_id is not None:
+            chat_store = self._stack.chat_store
+            if chat_store is not None:
+                session = await chat_store.get_session(user.memory_key(), session_id)
+                if session is None:
+                    logger.warning(
+                        "[session=%s] compress_user_context: session not owned by"
+                        " user %s (IDOR blocked)",
+                        session_id,
+                        user.id,
+                    )
+                    return False, "Чат не найден или нет доступа."
+        return await self._stack.loop.compress_now(user, session_id=session_id)
+
+    async def build_system_prompt(self, user: User) -> str | None:
+        """Static system prompt for web preview (B-111).
+
+        Delegates to ``AgentLoop.assemble_system_prompt`` so preview matches the
+        layers ``run()`` uses (base + dept + onboarding + instructions + tone).
+        Per-turn facts/recent-files are not included (they need an active run).
+        """
+        return await self._stack.loop.assemble_system_prompt(user)
 
     async def run(
         self,
@@ -160,8 +318,15 @@ class AgentRequestService:
         mode: str = "execute",
         channel: str,
         callbacks: AgentRequestCallbacks | None = None,
+        depth_mode: str | None = None,
+        session_id: int | None = None,
+        web_access: bool = True,
     ) -> AgentRequestResult:
-        """Run an agent request with shared prompt, skill, container and logging setup."""
+        """Run an agent request with shared skill matching, container and logging.
+
+        B-111: user-context prompt layers are assembled inside ``AgentLoop.run``;
+        this service only matches skills and passes the skill block as extras.
+        """
         callbacks = callbacks or AgentRequestCallbacks()
         stack = self._stack
         agent_loop = stack.loop
@@ -174,13 +339,6 @@ class AgentRequestService:
             except ContainerManagerError:
                 logger.exception("Container failed for user %s", user.memory_key())
                 raise
-
-        base_prompt = self._bootstrap.get_system_prompt()
-        dept_prompt = self._bootstrap.get_department_prompt(user.department)
-        user_prompt = self._bootstrap.get_user_prompt(user.id, user.telegram_id)
-        user_ctx = f"You are talking to {user.name} from the {user.department} department."
-        parts = [p for p in [base_prompt, dept_prompt, user_prompt, user_ctx] if p]
-        system_prompt: str | None = "\n\n".join(parts) if parts else None
 
         skill_registry = stack.skill_registry
         plugin_registry = stack.plugin_registry
@@ -201,8 +359,8 @@ class AgentRequestService:
         from corpclaw_lite.agent.prompt import build_skill_block
 
         skill_block = build_skill_block(matched_skills, [])
-        if skill_block:
-            system_prompt = (system_prompt or "") + skill_block
+        # B-111: only skills as system_prompt extras — loop owns user-context.
+        system_prompt = skill_block if skill_block else None
 
         try:
             reply, run_stats = await agent_loop.run(
@@ -221,6 +379,9 @@ class AgentRequestService:
                 tools_enabled=(mode == "execute"),
                 few_shots=stack.few_shots,
                 channel=channel,
+                depth_mode=depth_mode,  # type: ignore[arg-type]
+                session_id=session_id,
+                web_access=web_access,
             )
         except Exception as e:
             if is_llm_transport_error(e):
@@ -273,3 +434,135 @@ class AgentRequestService:
 
         assert run_stats is not None
         return AgentRequestResult(reply=reply, stats=run_stats)
+
+    async def run_headless(
+        self,
+        *,
+        user: User,
+        task: str,
+        source: str = "manual",
+        depth_mode: str | None = None,
+        web_access: bool = True,
+        callbacks: AgentRequestCallbacks | None = None,
+    ) -> HeadlessResult:
+        """B-119 / DC-031: start an agent task without inbound user message.
+
+        - Skips when the user already has an interactive/in-flight workflow (DC-011).
+        - Persists transcript into the durable per-user **system** session.
+        - Does not rewrite :meth:`AgentLoop.run`; uses ``channel=\"system\"``.
+        """
+        task_text = task.strip()
+        if not task_text:
+            raise ValueError("task must be a non-empty string")
+        safe_source = (source or "manual").strip() or "manual"
+        title = f"[{safe_source}] {task_text[:80]}"
+
+        started = await self.try_start_user_request(user.id, session_id=None, title=title)
+        if not started:
+            log_event(
+                "headless_skipped",
+                "",
+                user_id=user.id,
+                source=safe_source,
+                reason="user_busy",
+            )
+            logger.info(
+                "headless skipped user=%s source=%s reason=user_busy",
+                user.memory_key(),
+                safe_source,
+            )
+            return HeadlessResult(
+                status="skipped",
+                skip_reason="user_busy",
+                source=safe_source,
+            )
+
+        chat_store = getattr(self._stack, "chat_store", None)
+        if chat_store is None:
+            await self.finish_user_request(user.id)
+            raise RuntimeError("chat_store is required for headless runs")
+
+        session_id: int | None = None
+        try:
+            session_id = await chat_store.ensure_system_session(user.memory_key())
+            # Refresh gate metadata for B-090 badge (system session).
+            await self._run_gate.update(user.id, session_id=session_id, title=title)
+
+            request_id = secrets.token_urlsafe(10)
+            meta_user: dict[str, object] = {"source": safe_source, "headless": True}
+            await chat_store.append_message(
+                user_id=user.memory_key(),
+                role="user",
+                content=task_text,
+                request_id=request_id,
+                metadata=meta_user,
+                session_id=session_id,
+            )
+
+            log_event(
+                "headless_started",
+                "",
+                user_id=user.id,
+                source=safe_source,
+                session_id=session_id,
+                task_len=len(task_text),
+            )
+
+            result = await self.run(
+                user=user,
+                message=task_text,
+                mode="execute",
+                channel="system",
+                callbacks=callbacks,
+                depth_mode=depth_mode,
+                session_id=session_id,
+                web_access=web_access,
+            )
+
+            await chat_store.append_message(
+                user_id=user.memory_key(),
+                role="assistant",
+                content=result.reply,
+                request_id=request_id,
+                metadata={
+                    "source": safe_source,
+                    "headless": True,
+                    "status": result.stats.status,
+                    "tools_used": result.stats.tools_used,
+                },
+                session_id=session_id,
+            )
+
+            # B-120: push-only notify (persist=False — assistant already written).
+            if self._user_notifier is not None and result.reply.strip():
+                try:
+                    await self._user_notifier.notify(
+                        user,
+                        result.reply,
+                        source=f"headless:{safe_source}",
+                        persist=False,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "headless proactive notify failed user=%s: %s",
+                        user.id,
+                        exc,
+                    )
+
+            log_event(
+                "headless_finished",
+                result.stats.run_id,
+                user_id=user.id,
+                source=safe_source,
+                session_id=session_id,
+                status=result.stats.status,
+            )
+            return HeadlessResult(
+                status="completed",
+                reply=result.reply,
+                session_id=session_id,
+                stats=result.stats,
+                source=safe_source,
+            )
+        finally:
+            await self.finish_user_request(user.id)

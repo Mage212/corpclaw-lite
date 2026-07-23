@@ -7,7 +7,7 @@ transparently alongside built-in tools.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from corpclaw_lite.extensions.mcp.client import MCPClient, MCPToolDef
 from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
@@ -15,9 +15,6 @@ from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
 __all__ = [
     "MCPToolAdapter",
 ]
-
-if TYPE_CHECKING:
-    from corpclaw_lite.users.models import User
 
 
 class MCPToolAdapter(Tool):
@@ -62,7 +59,7 @@ class MCPToolAdapter(Tool):
             )
         return result
 
-    async def execute(self, user: User | None = None, **kwargs: Any) -> str:
+    async def execute(self, **kwargs: Any) -> str:
         try:
             return await self._client.call_tool(self._tool_def.name, kwargs)
         except Exception as e:

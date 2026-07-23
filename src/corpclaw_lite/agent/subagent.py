@@ -5,7 +5,7 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -70,8 +70,12 @@ def _research_mode_for_task(spec: SubagentSpec, task_context: str) -> str | None
     return "research"
 
 
-def _prepare_research_task_context(spec: SubagentSpec, task_context: str) -> str:
-    mode = _research_mode_for_task(spec, task_context)
+def _prepare_research_task_context(
+    spec: SubagentSpec, task_context: str, *, research_mode: str | None = None
+) -> str:
+    mode = (
+        research_mode if research_mode is not None else _research_mode_for_task(spec, task_context)
+    )
     if mode is None:
         return task_context
     language = detect_language(task_context)
@@ -111,6 +115,7 @@ class SubagentDispatcher:
         skill_registry: SkillRegistry | None = None,
         research_runtime: ResearchRuntime | None = None,
         workspace_base: Path | None = None,
+        approval_callback: Callable[[str, str], Awaitable[bool]] | None = None,
     ) -> None:
         self._provider = provider
         self._main_registry = main_registry
@@ -121,6 +126,7 @@ class SubagentDispatcher:
         self._skill_registry = skill_registry
         self._research_runtime = research_runtime
         self._workspace_base = workspace_base
+        self._approval_callback = approval_callback
 
     async def dispatch(
         self,
@@ -134,6 +140,7 @@ class SubagentDispatcher:
         on_subagent_tool_batch_start: Callable[[str, list[str]], None] | None = None,
         on_subagent_llm_stage: Callable[[str, str], None] | None = None,
         on_subagent_llm_queue_status: Callable[[str, LLMQueueStatus], None] | None = None,
+        forced_research_mode: str | None = None,
     ) -> str:
         """Run the subagent on a specific task.
 
@@ -208,7 +215,11 @@ class SubagentDispatcher:
 
             from corpclaw_lite.paths import PROJECT_ROOT
 
+            # Resolve relative prompt_path against PROJECT_ROOT so eval/chdir into
+            # a per-run workspace still finds config/bootstrap/subagents/*.md.
             prompt_file = Path(spec.prompt_path)
+            if not prompt_file.is_absolute():
+                prompt_file = PROJECT_ROOT / prompt_file
 
             # Check for calibrated override first
             calibrated_prompt = (
@@ -263,7 +274,21 @@ class SubagentDispatcher:
                 update={"max_wall_time_ms": spec.max_wall_time_ms}
             )
 
-        # Setup isolated loop — pass security guards through from parent
+        # B-107: map subagent id → tool-surface profile (research skips hard filter).
+        if spec.terminal_tool:
+            surface_profile = "none"  # mandate owns funnel
+        elif spec.id in {
+            "document-agent",
+            "data-agent",
+            "filesystem-agent",
+        }:
+            surface_profile = "office"
+        elif spec.id == "execution-agent":
+            surface_profile = "execution"
+        else:
+            surface_profile = "office"
+
+        # Setup isolated loop — pass security guards + approval channel from parent
         loop = AgentLoop(
             AgentConfig(
                 provider=effective_provider,
@@ -273,11 +298,13 @@ class SubagentDispatcher:
                 tool_guard=self._tool_guard,
                 permission_checker=self._permission_checker,
                 workspace_base=self._workspace_base,
+                approval_callback=self._approval_callback,
                 # B-047: workflow-finalize guard wiring. When the spec declares a
                 # terminal tool (research-agent → research_finalize), the inner loop
                 # nudges/restricts toward it as the budget runs out.
                 terminal_tool=spec.terminal_tool,
                 required_before_terminal=list(spec.required_before_terminal),
+                tool_surface_profile=surface_profile,
             )
         )
 
@@ -286,10 +313,20 @@ class SubagentDispatcher:
 
         try:
             t0 = time.monotonic()
-            effective_task_context = _prepare_research_task_context(spec, task_context)
-            research_mode = _research_mode_for_task(spec, task_context)
-            if self._research_runtime is not None and research_mode is not None:
-                mode = "deep_research" if research_mode == "deep_research" else "research"
+            # Etap 3B: explicit depth-mode override ("research" from the UI)
+            # forces deep_research for the research-agent, bypassing keyword
+            # detection. When None, keyword detection is the fallback (3A behavior).
+            if forced_research_mode == "research" and spec.id == "research-agent":
+                resolved_research_mode: str | None = "deep_research"
+            else:
+                resolved_research_mode = forced_research_mode or _research_mode_for_task(
+                    spec, task_context
+                )
+            effective_task_context = _prepare_research_task_context(
+                spec, task_context, research_mode=resolved_research_mode
+            )
+            if self._research_runtime is not None and resolved_research_mode is not None:
+                mode = "deep_research" if resolved_research_mode == "deep_research" else "research"
                 language = detect_language(task_context)
                 self._research_runtime.initialize_run_mode(
                     user, subagent_run_id, mode, language=language
@@ -301,6 +338,7 @@ class SubagentDispatcher:
                     subagent_id=spec.id,
                     mode=mode,
                     language=language,
+                    forced=bool(forced_research_mode),
                 )
 
             def forward_tool_start(tool_name: str) -> None:
@@ -319,10 +357,8 @@ class SubagentDispatcher:
                 if on_subagent_llm_queue_status is not None:
                     on_subagent_llm_queue_status(subagent_name, status)
 
-            # B-060: when the parent wants visibility into the subagent's tool
-            # calls, record them in an inner recorder and merge into the parent
-            # trajectory after the run completes. This is how the eval harness
-            # sees table_query/excel_workbook/etc. that ran inside the dispatch.
+            # When the parent wants nested visibility, capture and merge the
+            # isolated subagent trajectory.
             inner_recorder = (
                 TrajectoryRecorder(f"{spec.id}#inner")
                 if parent_trajectory_recorder is not None
@@ -396,8 +432,14 @@ class SubagentDispatcher:
             # — banner + gathered facts + sources + a limitation noting synthesis did not
             # happen — instead of pretending the facts dump is a finished deep report.
             if spec.id == "research-agent" and self._research_runtime is not None:
-                research_mode = _research_mode_for_task(spec, task_context)
-                mode = "deep_research" if research_mode == "deep_research" else "research"
+                # Etap 3B: honour the explicit override on timeout recovery too.
+                if forced_research_mode == "research":
+                    recovery_research_mode: str | None = "deep_research"
+                else:
+                    recovery_research_mode = forced_research_mode or _research_mode_for_task(
+                        spec, task_context
+                    )
+                mode = "deep_research" if recovery_research_mode == "deep_research" else "research"
                 try:
                     partial = self._research_runtime.finalize_report(
                         user, subagent_run_id, mode, answer="", interrupted=True
@@ -405,7 +447,7 @@ class SubagentDispatcher:
                 except Exception as partial_err:  # pragma: no cover - defensive
                     logger.warning("Research partial-handoff failed: %s", partial_err)
                     return f"Subagent error: execution timed out after {int(timeout_seconds)}s"
-                TaskRun(self._workspace_base).generate_handoff(
+                await TaskRun(self._workspace_base).generate_handoff(
                     user,
                     subagent_run_id,
                     partial_result=partial,
@@ -420,7 +462,39 @@ class SubagentDispatcher:
                     partial_len=len(partial),
                 )
                 return partial
-            return f"Subagent error: execution timed out after {int(timeout_seconds)}s"
+            # Non-research: best-effort journal handoff instead of a bare error
+            # (Sprint 2 / C1 residual). Does not re-enter AgentLoop under the
+            # outer wait_for deadline.
+            reason = f"{spec.id} timed out after {int(timeout_seconds)}s"
+            partial = (
+                f"Subagent '{spec.name}' was interrupted: wall-clock timeout "
+                f"after {int(timeout_seconds)}s. Work may be incomplete; "
+                "review the tool-call journal in the partial handoff."
+            )
+            try:
+                handoff = await TaskRun(self._workspace_base).generate_handoff(
+                    user,
+                    subagent_run_id,
+                    partial_result=partial,
+                    reason=reason,
+                )
+                log_event(
+                    "subagent_partial_handoff",
+                    subagent_run_id,
+                    parent_run_id=parent_run_id,
+                    subagent_id=spec.id,
+                    timeout_seconds=timeout_seconds,
+                    partial_len=len(handoff),
+                )
+                # Return a compact message to the parent; full handoff is on disk.
+                return partial
+            except Exception as handoff_err:  # pragma: no cover - defensive
+                logger.exception(
+                    "Subagent timeout handoff failed subagent=%s: %s",
+                    spec.id,
+                    handoff_err,
+                )
+                return f"Subagent error: execution timed out after {int(timeout_seconds)}s"
         except Exception as e:
             logger.error("Subagent %s failed: %s", spec.id, e)
             log_event(

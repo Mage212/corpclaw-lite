@@ -6,6 +6,7 @@ import hashlib
 import re
 import time
 from dataclasses import dataclass, field
+from typing import Any
 
 from corpclaw_lite.extensions.tools.base import TOOL_ERROR_PREFIX
 
@@ -59,10 +60,13 @@ class SimpleProgressGuard:
         signatures: list[tuple[str, str]] = []
         for tool_name, result in tool_results:
             if not result.startswith(TOOL_ERROR_PREFIX):
-                # Any successful result in the action is progress.
-                self.state.last_tool_error_signature = None
-                self.state.same_error_count = 0
-                return False
+                # Success on one tool is progress for THAT tool, but a sibling tool
+                # in the same batch may still be looping on an identical error.
+                # Skip successes and keep accumulating error signatures so a
+                # mixed batch like [error_A, success, error_A] repeated across
+                # turns is still detected (B-069). A fully-successful batch
+                # resets via the ``if not signatures`` branch below.
+                continue
 
             normalized_error = self._normalize_error(result)
             signature = (tool_name, normalized_error)
@@ -320,6 +324,25 @@ class SimpleBudgetGuard:
         if count > 0:
             self.state.tool_calls_used += count
 
+    def reserve_tool_calls(self, count: int) -> None:
+        """Atomically admit and account for a complete tool-call batch.
+
+        A model response is one protocol batch: executing only the prefix that
+        happens to fit would leave the remaining calls without results and
+        would change the model's requested action set.  Validate the projected
+        total before mutating state so callers can reject the whole batch.
+        """
+        if count < 0:
+            raise ValueError("Tool call reservation count cannot be negative")
+        if count == 0:
+            return
+        projected = self.state.tool_calls_used + count
+        if self.config.enabled and projected > self.config.max_tool_calls:
+            raise BudgetExceededError(
+                f"Tool call budget exceeded: {projected}/{self.config.max_tool_calls}"
+            )
+        self.state.tool_calls_used = projected
+
     def pause(self) -> None:
         """Pause the time budget (e.g., while waiting in an LLM queue)."""
         if self.state.paused_at is None:
@@ -447,9 +470,16 @@ class TerminalToolMandateConfig:
 class TerminalToolMandate:
     """Workflow-finalize guard: push the run toward its mandatory terminal tool.
 
-    Tracks elapsed wall-clock time (via :func:`time.monotonic`, mirroring
-    :class:`SoftDeadline`) and, when the run is running low on budget AND has not yet
-    called ``terminal_tool``, signals the caller to escalate:
+    Tracks BOTH elapsed wall-clock time (via :func:`time.monotonic`, mirroring
+    :class:`SoftDeadline`) and iteration count (when ``max_iterations`` is
+    provided). Local LLMs are fast but iteration-inefficient — they hit the
+    iteration limit long before the wall-clock deadline, leaving the guard
+    dormant while the model loops on gather/store. The effective budget ratio
+    is ``max(wallclock_ratio, iteration_ratio)``: whichever resource is closer
+    to exhaustion drives the escalation.
+
+    When the run is running low on budget AND has not yet called
+    ``terminal_tool``, signals the caller to escalate:
 
     - :meth:`should_nudge`: inject a system note telling the model to stop gathering
       and call ``research_list_facts`` then ``research_finalize``.
@@ -465,9 +495,15 @@ class TerminalToolMandate:
         config: TerminalToolMandateConfig | None = None,
         *,
         max_time_ms: int = 300000,
+        max_iterations: int | None = None,
     ) -> None:
         self.config = config or TerminalToolMandateConfig()
         self._max_time_ms = max_time_ms
+        # B-047 extension: iteration-budget awareness. Local LLMs are fast but
+        # iteration-inefficient — they hit the iteration limit long before the
+        # wall-clock deadline. When set, the mandate escalates based on
+        # whichever resource (wall-clock OR iterations) is closer to exhaustion.
+        self._max_iterations = max_iterations
         self._start = time.monotonic()
         self._nudge_injected = False
         self._restricted = False
@@ -476,37 +512,96 @@ class TerminalToolMandate:
     def enabled(self) -> bool:
         return self.config.enabled and bool(self.config.terminal_tool)
 
-    def _elapsed_ratio(self) -> float:
+    def _wallclock_ratio(self) -> float:
         elapsed_ms = (time.monotonic() - self._start) * 1000
         return elapsed_ms / self._max_time_ms if self._max_time_ms > 0 else 1.0
 
-    def elapsed_ratio(self) -> float:
-        """Current fraction of max_wall_time_ms elapsed (for telemetry)."""
-        return self._elapsed_ratio()
+    def _iteration_ratio(self, iteration: int | None) -> float | None:
+        """Fraction of max_iterations consumed, or None if iteration tracking is off."""
+        if iteration is None or not self._max_iterations or self._max_iterations <= 0:
+            return None
+        return iteration / self._max_iterations
+
+    def _elapsed_ratio(self, iteration: int | None = None) -> float:
+        """Effective ratio: whichever resource is closer to exhaustion.
+
+        Wall-clock is always tracked. If iteration tracking is enabled
+        (``max_iterations`` was provided and ``iteration`` is given), the
+        *larger* of the two ratios wins — the resource closest to depletion
+        drives the escalation, so a fast-but-iteration-heavy local LLM is
+        nudged/restricted before it hits the iteration budget.
+        """
+        wallclock = self._wallclock_ratio()
+        iter_ratio = self._iteration_ratio(iteration)
+        if iter_ratio is None:
+            return wallclock
+        return max(wallclock, iter_ratio)
+
+    def elapsed_ratio(self, iteration: int | None = None) -> float:
+        """Current effective budget fraction (wall-clock OR iterations) for telemetry."""
+        return self._elapsed_ratio(iteration)
 
     def terminal_called(self, tools_used: list[str]) -> bool:
         """Whether the mandatory terminal tool has been called during this run."""
         return self.config.terminal_tool in tools_used
 
-    def should_nudge(self, tools_used: list[str]) -> bool:
+    def should_nudge(self, tools_used: list[str], iteration: int | None = None) -> bool:
         if not self.enabled or self._nudge_injected:
             return False
         if self.terminal_called(tools_used):
             return False
-        if self._elapsed_ratio() < self.config.nudge_ratio:
+        if self._elapsed_ratio(iteration) < self.config.nudge_ratio:
             return False
         self._nudge_injected = True
         return True
 
-    def should_restrict(self, tools_used: list[str]) -> bool:
+    def should_restrict(self, tools_used: list[str], iteration: int | None = None) -> bool:
         if not self.enabled or self._restricted:
             return False
         if self.terminal_called(tools_used):
             return False
-        if self._elapsed_ratio() < self.config.restrict_ratio:
+        if self._elapsed_ratio(iteration) < self.config.restrict_ratio:
             return False
         self._restricted = True
         return True
+
+    def restricted_tool_names(self) -> frozenset[str] | None:
+        """If restrict is active, return allowed tool names; else None.
+
+        Re-entrant: used after base schema rebuild (B-107) so restrict still
+        applies on subsequent LLM calls. Unlike :meth:`should_restrict`, this
+        does not flip state — it only reports the active restrict allowlist.
+        """
+        if not self.enabled or not self._restricted:
+            return None
+        return frozenset(self.config.required_before) | {self.config.terminal_tool}
+
+    def apply_schema_restrict(
+        self, tools_schema: list[dict[str, Any]] | None
+    ) -> list[dict[str, Any]] | None:
+        """Re-filter ``tools_schema`` when restrict is already active.
+
+        Safe to call every LLM turn after a base-schema rebuild. No-op until
+        :meth:`should_restrict` has fired once (or ``_restricted`` is True).
+        """
+        allowed = self.restricted_tool_names()
+        if allowed is None or not tools_schema:
+            return tools_schema
+        out: list[dict[str, Any]] = []
+        for entry in tools_schema:
+            name = ""
+            fn_obj: object = entry.get("function")
+            if isinstance(fn_obj, dict):
+                raw_name_obj: object = fn_obj.get("name")  # type: ignore[attr-defined]
+                if isinstance(raw_name_obj, str):
+                    name = raw_name_obj
+            else:
+                raw_top: object = entry.get("name")
+                if isinstance(raw_top, str):
+                    name = raw_top
+            if name in allowed:
+                out.append(entry)
+        return out
 
     @property
     def nudge_injected(self) -> bool:

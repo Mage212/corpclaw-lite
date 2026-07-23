@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import os
 import sqlite3
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 from urllib.parse import quote
 
 import pytest
@@ -13,7 +17,12 @@ from aiohttp import hdrs, web
 from aiohttp.test_utils import make_mocked_request
 
 from corpclaw_lite.agent.factory import AgentStack
-from corpclaw_lite.channels.service import AgentRequestService, is_llm_transport_error
+from corpclaw_lite.channels.service import (
+    AgentRequestService,
+    RunningRequest,
+    is_llm_transport_error,
+)
+from corpclaw_lite.channels.web.chat_context_store import ChatContextStore
 from corpclaw_lite.channels.web.chat_store import WebChatFile, WebChatStore
 from corpclaw_lite.channels.web.files import (
     build_tree,
@@ -25,15 +34,18 @@ from corpclaw_lite.channels.web.files import (
     make_directory,
     move_paths,
     preview_file,
+    read_text_for_estimate,
     rename_path,
     resolve_workspace_path,
     save_upload,
     search_files,
 )
 from corpclaw_lite.channels.web.orchestrator import WebChannelOrchestrator, _DownloadGrant
+from corpclaw_lite.channels.web.pinned_context_store import PinnedContextStore
 from corpclaw_lite.config.bootstrap import BootstrapLoader
 from corpclaw_lite.config.settings import RoutingRule, Settings
 from corpclaw_lite.exceptions import LLMBackendUnavailableError
+from corpclaw_lite.llm.tokenizer_client import TokenizerClient
 from corpclaw_lite.users.manager import UserManager
 from corpclaw_lite.users.models import User
 
@@ -59,6 +71,9 @@ class FakeWorkspaceService:
     def get_user_workspace(self, _user: User) -> Path:
         return self.workspace
 
+    async def get_running_request(self, _user_id: int) -> RunningRequest | None:
+        return None
+
 
 def web_request(
     method: str,
@@ -69,6 +84,17 @@ def web_request(
 ) -> web.Request:
     request = make_mocked_request(method, path, match_info=match_info or {})
     request["user"] = user
+    return request
+
+
+def web_json_request(
+    method: str,
+    path: str,
+    user: User,
+    payload: dict[str, Any],
+) -> web.Request:
+    request = web_request(method, path, user)
+    request.json = AsyncMock(return_value=payload)  # type: ignore[method-assign]
     return request
 
 
@@ -156,6 +182,56 @@ async def test_web_file_manager_operations(tmp_path: Path) -> None:
         recursive=False,
     )
     assert deleted == ["archive/summary.txt", "archive/summary_1.txt"]
+
+
+@pytest.mark.asyncio
+async def test_web_delete_rejects_symlink_escape(tmp_path: Path) -> None:
+    """B-072: a symlink inside the workspace pointing outside is rejected on
+    delete (the ancestor-walk in _reject_symlink_ancestors runs right before
+    the destructive op, closing the TOCTOU window)."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    secret = tmp_path / "secret.txt"
+    secret.write_text("outside-secret")
+    link = workspace / "escape"
+    os.symlink(secret, link)
+
+    with pytest.raises(PermissionError):
+        await delete_path(workspace, "escape")
+    # The outside file must be untouched.
+    assert secret.exists()
+    assert secret.read_text() == "outside-secret"
+
+
+@pytest.mark.asyncio
+async def test_web_copy_rejects_nested_symlinks_and_cleans_destination(tmp_path: Path) -> None:
+    """Nested links are rejected even when their target is inside the workspace."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    await make_directory(workspace, "", "source")
+    await make_directory(workspace, "", "destination")
+    (workspace / "data.txt").write_text("inside")
+    safe_link = workspace / "source" / "link_to_data"
+    os.symlink(workspace / "data.txt", safe_link)
+    with pytest.raises(PermissionError, match="Symbolic links cannot be copied"):
+        await copy_paths(workspace, ["source"], "destination")
+    assert not (workspace / "destination" / "source").exists()
+
+
+@pytest.mark.asyncio
+async def test_web_copy_rejects_nested_external_symlink(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    source = workspace / "source"
+    destination = workspace / "destination"
+    source.mkdir(parents=True)
+    destination.mkdir()
+    secret = tmp_path / "host-secret.txt"
+    secret.write_text("must-not-copy")
+    os.symlink(secret, source / "leak.txt")
+
+    with pytest.raises(PermissionError, match="Symbolic links cannot be copied"):
+        await copy_paths(workspace, ["source"], "destination")
+    assert not (destination / "source").exists()
 
 
 @pytest.mark.asyncio
@@ -253,6 +329,493 @@ async def test_web_image_preview_uses_inline_endpoint(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_read_text_for_estimate_text_only(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "note.txt").write_text("hello budget", encoding="utf-8")
+    (workspace / "pic.png").write_bytes(b"\x89PNG")
+    assert await read_text_for_estimate(workspace, "note.txt") == "hello budget"
+    with pytest.raises(ValueError, match="text files only"):
+        await read_text_for_estimate(workspace, "pic.png")
+    with pytest.raises(FileNotFoundError):
+        await read_text_for_estimate(workspace, "missing.txt")
+
+
+@pytest.mark.asyncio
+async def test_estimate_context_allow(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "note.txt").write_text("abcd" * 10, encoding="utf-8")
+    user = User(id=1, name="Vadim", department="engineering")
+    settings = Settings()
+    settings.agent.compression.max_context_tokens = 10_000
+    orchestrator = WebChannelOrchestrator(settings)
+    orchestrator._service = FakeWorkspaceService(workspace)  # type: ignore[assignment]
+    orchestrator._tokenizer_client = TokenizerClient(mode="heuristic")
+
+    response = await orchestrator._handle_estimate_context(
+        web_json_request(
+            "POST",
+            "/api/files/estimate-context",
+            user,
+            {"path": "note.txt", "baseline_tokens": 0},
+        )
+    )
+    body = json.loads(response.text or "{}")
+    assert response.status == 200
+    assert body["decision"] == "allow"
+    assert body["path"] == "note.txt"
+    assert body["baseline_tokens"] == 0
+    assert body["file_tokens"] > 0
+    assert body["approximate"] is True
+    assert body["limit_tokens"] == 10_000
+
+
+@pytest.mark.asyncio
+async def test_estimate_context_block(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "big.txt").write_text("x" * 400, encoding="utf-8")  # ~100 tokens
+    user = User(id=2, name="Vadim", department="engineering")
+    settings = Settings()
+    settings.agent.compression.max_context_tokens = 100
+    orchestrator = WebChannelOrchestrator(settings)
+    orchestrator._service = FakeWorkspaceService(workspace)  # type: ignore[assignment]
+    orchestrator._tokenizer_client = TokenizerClient(mode="heuristic")
+
+    response = await orchestrator._handle_estimate_context(
+        web_json_request(
+            "POST",
+            "/api/files/estimate-context",
+            user,
+            {"path": "big.txt", "baseline_tokens": 0},
+        )
+    )
+    body = json.loads(response.text or "{}")
+    assert body["decision"] == "block"
+    assert body["offer_chunked"] is False
+
+
+@pytest.mark.asyncio
+async def test_estimate_context_missing_path(tmp_path: Path) -> None:
+    user = User(id=1, name="Vadim", department="engineering")
+    orchestrator = WebChannelOrchestrator(Settings())
+    orchestrator._service = FakeWorkspaceService(tmp_path)  # type: ignore[assignment]
+    with pytest.raises(web.HTTPBadRequest):
+        await orchestrator._handle_estimate_context(
+            web_json_request("POST", "/api/files/estimate-context", user, {})
+        )
+
+
+@pytest.mark.asyncio
+async def test_estimate_context_missing_file(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    user = User(id=1, name="Vadim", department="engineering")
+    orchestrator = WebChannelOrchestrator(Settings())
+    orchestrator._service = FakeWorkspaceService(workspace)  # type: ignore[assignment]
+    orchestrator._tokenizer_client = TokenizerClient(mode="heuristic")
+    with pytest.raises(web.HTTPNotFound):
+        await orchestrator._handle_estimate_context(
+            web_json_request(
+                "POST",
+                "/api/files/estimate-context",
+                user,
+                {"path": "nope.txt", "baseline_tokens": 0},
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_estimate_context_rejects_image(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "img.jpg").write_bytes(b"jpg")
+    user = User(id=1, name="Vadim", department="engineering")
+    orchestrator = WebChannelOrchestrator(Settings())
+    orchestrator._service = FakeWorkspaceService(workspace)  # type: ignore[assignment]
+    orchestrator._tokenizer_client = TokenizerClient(mode="heuristic")
+    with pytest.raises(web.HTTPBadRequest) as exc_info:
+        await orchestrator._handle_estimate_context(
+            web_json_request(
+                "POST",
+                "/api/files/estimate-context",
+                user,
+                {"path": "img.jpg", "baseline_tokens": 0},
+            )
+        )
+    assert "text" in str(exc_info.value.text).lower()
+
+
+@pytest.mark.asyncio
+async def test_attach_context_text_pending(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "note.txt").write_text("attach me please", encoding="utf-8")
+    user = User(id=3, name="Vadim", department="engineering")
+    settings = Settings()
+    settings.agent.compression.max_context_tokens = 50_000
+    orchestrator = WebChannelOrchestrator(settings)
+    orchestrator._service = FakeWorkspaceService(workspace)  # type: ignore[assignment]
+    orchestrator._tokenizer_client = TokenizerClient(mode="heuristic")
+    store = WebChatStore(tmp_path / "memory.db")
+    orchestrator._chat_store = store
+    session_id = await store.ensure_active_session(user.memory_key())
+
+    response = await orchestrator._handle_attach_context(
+        web_json_request(
+            "POST",
+            "/api/files/attach-context",
+            user,
+            {"path": "note.txt", "session_id": session_id, "baseline_tokens": 0},
+        )
+    )
+    body = json.loads(response.text or "{}")
+    assert response.status == 200
+    assert body["decision"] in {"allow", "warn"}
+    assert body["pending_count"] == 1
+    assert body["path"] == "note.txt"
+
+    pending = await orchestrator._handle_pending_context(
+        web_request("GET", f"/api/files/pending-context?session_id={session_id}", user)
+    )
+    pending_body = json.loads(pending.text or "{}")
+    assert pending_body["pending_count"] == 1
+
+    # Compose path used on send
+    items = orchestrator._pending_attachments.pop_all(user.id, session_id)
+    from corpclaw_lite.agent.inline_attach import compose_inline_attachments
+
+    composed = compose_inline_attachments(items, "what is in the file?")
+    assert "attach me please" in composed
+    assert "what is in the file?" in composed
+
+
+@pytest.mark.asyncio
+async def test_attach_context_busy_rejects(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "note.txt").write_text("x", encoding="utf-8")
+    user = User(id=4, name="Vadim", department="engineering")
+
+    class BusyService(FakeWorkspaceService):
+        async def get_running_request(self, _user_id: int) -> RunningRequest:
+            return RunningRequest(session_id=9, title="Отчёт")
+
+    orchestrator = WebChannelOrchestrator(Settings())
+    orchestrator._service = BusyService(workspace)  # type: ignore[assignment]
+    orchestrator._tokenizer_client = TokenizerClient(mode="heuristic")
+    response = await orchestrator._handle_attach_context(
+        web_json_request(
+            "POST",
+            "/api/files/attach-context",
+            user,
+            {"path": "note.txt", "session_id": 1, "baseline_tokens": 0},
+        )
+    )
+    assert response.status == 409
+
+
+@pytest.mark.asyncio
+async def test_attach_context_cumulative_pending_blocks(tmp_path: Path) -> None:
+    """H1: second attach must account for first pending tokens."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    # ~2500 tokens each (ascii /4). limit=5000 → block_at=4750.
+    # first alone: 2500 ALLOW; second with pending: 2500+2500=5000 → BLOCK.
+    (workspace / "a.txt").write_text("a" * 10_000, encoding="utf-8")
+    (workspace / "b.txt").write_text("b" * 10_000, encoding="utf-8")
+    user = User(id=11, name="Vadim", department="engineering")
+    settings = Settings()
+    settings.agent.compression.max_context_tokens = 5000
+    orchestrator = WebChannelOrchestrator(settings)
+    orchestrator._service = FakeWorkspaceService(workspace)  # type: ignore[assignment]
+    orchestrator._tokenizer_client = TokenizerClient(mode="heuristic")
+    store = WebChatStore(tmp_path / "mem_h1.db")
+    orchestrator._chat_store = store
+    session_id = await store.ensure_active_session(user.memory_key())
+
+    r1 = await orchestrator._handle_attach_context(
+        web_json_request(
+            "POST",
+            "/api/files/attach-context",
+            user,
+            {
+                "path": "a.txt",
+                "session_id": session_id,
+                "baseline_tokens": 0,
+                "chunked": False,
+            },
+        )
+    )
+    assert r1.status == 200
+    body1 = json.loads(r1.text or "{}")
+    assert body1["pending_count"] == 1
+    assert body1["effective_baseline_tokens"] == 0
+
+    with pytest.raises(web.HTTPBadRequest):
+        await orchestrator._handle_attach_context(
+            web_json_request(
+                "POST",
+                "/api/files/attach-context",
+                user,
+                {
+                    "path": "b.txt",
+                    "session_id": session_id,
+                    "baseline_tokens": 0,
+                    "chunked": False,
+                },
+            )
+        )
+    assert orchestrator._pending_attachments.count(user.id, session_id) == 1
+
+
+@pytest.mark.asyncio
+async def test_pin_context_under_and_over_budget(tmp_path: Path) -> None:
+    """B-095: pin allowed under 25%; blocked when sum exceeds pin budget."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    # ~2000 tokens each (ascii/4); limit 10000 → pin_budget=2500
+    (workspace / "a.txt").write_text("a" * 8000, encoding="utf-8")
+    (workspace / "b.txt").write_text("b" * 8000, encoding="utf-8")
+    user = User(id=21, name="Vadim", department="engineering")
+    settings = Settings()
+    settings.agent.compression.max_context_tokens = 10_000
+    settings.agent.pin_context_ratio = 0.25
+    orchestrator = WebChannelOrchestrator(settings)
+    orchestrator._service = FakeWorkspaceService(workspace)  # type: ignore[assignment]
+    orchestrator._tokenizer_client = TokenizerClient(mode="heuristic")
+    store = WebChatStore(tmp_path / "pin_mem.db")
+    pin_store = PinnedContextStore(tmp_path / "pin_mem.db")
+    orchestrator._chat_store = store
+    orchestrator._pinned_store = pin_store
+    session_id = await store.ensure_active_session(user.memory_key())
+
+    r1 = await orchestrator._handle_pin_context(
+        web_json_request(
+            "POST",
+            "/api/files/pin-context",
+            user,
+            {"path": "a.txt", "session_id": session_id, "chunked": False},
+        )
+    )
+    assert r1.status == 200
+    body1 = json.loads(r1.text or "{}")
+    assert body1["pin_budget"] == 2500
+    assert body1["pin_tokens"] == 2000
+    assert len(body1["pins"]) == 1
+
+    with pytest.raises(web.HTTPBadRequest):
+        await orchestrator._handle_pin_context(
+            web_json_request(
+                "POST",
+                "/api/files/pin-context",
+                user,
+                {"path": "b.txt", "session_id": session_id, "chunked": False},
+            )
+        )
+
+    r_list = await orchestrator._handle_list_pins(
+        web_request("GET", f"/api/files/pins?session_id={session_id}", user)
+    )
+    listed = json.loads(r_list.text or "{}")
+    assert listed["pin_tokens"] == 2000
+
+    await orchestrator._handle_unpin_context(
+        web_json_request(
+            "POST",
+            "/api/files/unpin-context",
+            user,
+            {"path": "a.txt", "session_id": session_id},
+        )
+    )
+    pins = await pin_store.list_pins(session_id, user.memory_key())
+    assert pins == []
+
+
+@pytest.mark.asyncio
+async def test_attach_context_unknown_session_404(tmp_path: Path) -> None:
+    """M4: session_id must belong to the user."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "a.txt").write_text("hi", encoding="utf-8")
+    user = User(id=12, name="Vadim", department="engineering")
+    settings = Settings()
+    orchestrator = WebChannelOrchestrator(settings)
+    orchestrator._service = FakeWorkspaceService(workspace)  # type: ignore[assignment]
+    orchestrator._tokenizer_client = TokenizerClient(mode="heuristic")
+    store = WebChatStore(tmp_path / "mem_m4.db")
+    orchestrator._chat_store = store
+    await store.ensure_active_session(user.memory_key())
+
+    with pytest.raises(web.HTTPNotFound):
+        await orchestrator._handle_attach_context(
+            web_json_request(
+                "POST",
+                "/api/files/attach-context",
+                user,
+                {"path": "a.txt", "session_id": 999999, "baseline_tokens": 0},
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_detach_context_all(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "a.txt").write_text("a", encoding="utf-8")
+    user = User(id=5, name="Vadim", department="engineering")
+    settings = Settings()
+    settings.agent.compression.max_context_tokens = 50_000
+    orchestrator = WebChannelOrchestrator(settings)
+    orchestrator._service = FakeWorkspaceService(workspace)  # type: ignore[assignment]
+    orchestrator._tokenizer_client = TokenizerClient(mode="heuristic")
+    store = WebChatStore(tmp_path / "mem2.db")
+    orchestrator._chat_store = store
+    session_id = await store.ensure_active_session(user.memory_key())
+    await orchestrator._handle_attach_context(
+        web_json_request(
+            "POST",
+            "/api/files/attach-context",
+            user,
+            {"path": "a.txt", "session_id": session_id, "baseline_tokens": 0},
+        )
+    )
+    response = await orchestrator._handle_detach_context(
+        web_json_request(
+            "POST",
+            "/api/files/detach-context",
+            user,
+            {"all": True, "session_id": session_id},
+        )
+    )
+    body = json.loads(response.text or "{}")
+    assert body["pending_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_estimate_context_uses_server_baseline_when_omitted(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "note.txt").write_text("hi", encoding="utf-8")
+    user = User(id=9, name="Vadim", department="engineering")
+    settings = Settings()
+    settings.agent.compression.max_context_tokens = 10_000
+    orchestrator = WebChannelOrchestrator(settings)
+    orchestrator._service = FakeWorkspaceService(workspace)  # type: ignore[assignment]
+    orchestrator._tokenizer_client = TokenizerClient(mode="heuristic")
+    orchestrator._context_usage[user.id] = {
+        "latest_total_tokens": 500,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 500,
+        "context_limit_tokens": 10_000,
+        "context_ratio": 0.05,
+    }
+
+    response = await orchestrator._handle_estimate_context(
+        web_json_request(
+            "POST",
+            "/api/files/estimate-context",
+            user,
+            {"path": "note.txt"},
+        )
+    )
+    body = json.loads(response.text or "{}")
+    assert body["baseline_tokens"] == 500
+
+
+@pytest.mark.asyncio
+async def test_attach_baseline_client_cannot_undercut_server_usage(tmp_path: Path) -> None:
+    """H3: client baseline_tokens=0 must not undercut server usage."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "note.txt").write_text("hello", encoding="utf-8")
+    user = User(id=31, name="Vadim", department="engineering")
+    settings = Settings()
+    settings.agent.compression.max_context_tokens = 50_000
+    orchestrator = WebChannelOrchestrator(settings)
+    orchestrator._service = FakeWorkspaceService(workspace)  # type: ignore[assignment]
+    orchestrator._tokenizer_client = TokenizerClient(mode="heuristic")
+    store = WebChatStore(tmp_path / "h3_mem.db")
+    orchestrator._chat_store = store
+    session_id = await store.ensure_active_session(user.memory_key())
+    orchestrator._context_usage[user.id] = {
+        "latest_total_tokens": 1200,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 1200,
+        "context_limit_tokens": 50_000,
+        "context_ratio": 0.024,
+    }
+
+    response = await orchestrator._handle_attach_context(
+        web_json_request(
+            "POST",
+            "/api/files/attach-context",
+            user,
+            {
+                "path": "note.txt",
+                "session_id": session_id,
+                "baseline_tokens": 0,
+            },
+        )
+    )
+    body = json.loads(response.text or "{}")
+    assert response.status == 200
+    assert body["effective_baseline_tokens"] >= 1200
+
+
+@pytest.mark.asyncio
+async def test_attach_baseline_includes_pin_tokens(tmp_path: Path) -> None:
+    """H2: sticky pins count toward attach baseline (even with usage=0)."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "pin.txt").write_text("p" * 4000, encoding="utf-8")  # ~1000 tok
+    (workspace / "note.txt").write_text("hello", encoding="utf-8")
+    user = User(id=32, name="Vadim", department="engineering")
+    settings = Settings()
+    settings.agent.compression.max_context_tokens = 50_000
+    settings.agent.pin_context_ratio = 0.25
+    orchestrator = WebChannelOrchestrator(settings)
+    orchestrator._service = FakeWorkspaceService(workspace)  # type: ignore[assignment]
+    orchestrator._tokenizer_client = TokenizerClient(mode="heuristic")
+    store = WebChatStore(tmp_path / "h2_mem.db")
+    pin_store = PinnedContextStore(tmp_path / "h2_mem.db")
+    orchestrator._chat_store = store
+    orchestrator._pinned_store = pin_store
+    session_id = await store.ensure_active_session(user.memory_key())
+
+    pin_resp = await orchestrator._handle_pin_context(
+        web_json_request(
+            "POST",
+            "/api/files/pin-context",
+            user,
+            {"path": "pin.txt", "session_id": session_id, "chunked": False},
+        )
+    )
+    pin_body = json.loads(pin_resp.text or "{}")
+    pin_tokens = int(pin_body["pin_tokens"])
+    assert pin_tokens > 0
+
+    attach_resp = await orchestrator._handle_attach_context(
+        web_json_request(
+            "POST",
+            "/api/files/attach-context",
+            user,
+            {
+                "path": "note.txt",
+                "session_id": session_id,
+                "baseline_tokens": 0,
+            },
+        )
+    )
+    attach_body = json.loads(attach_resp.text or "{}")
+    assert attach_resp.status == 200
+    assert attach_body["effective_baseline_tokens"] >= pin_tokens
+
+
+@pytest.mark.asyncio
 async def test_web_chat_file_payload_includes_path_only_for_available_workspace_file(
     tmp_path: Path,
 ) -> None:
@@ -286,6 +849,30 @@ async def test_web_chat_file_payload_includes_path_only_for_available_workspace_
     assert str(available_payload["file"]["url"]).startswith("/api/download/")  # type: ignore[index]
     assert "path" not in missing_payload["file"]  # type: ignore[operator]
     assert missing_payload["file"]["available"] is False  # type: ignore[index]
+
+
+@pytest.mark.asyncio
+async def test_chat_message_payload_includes_metadata(tmp_path: Path) -> None:
+    """B-143: history reload must surface schedule_confirm metadata for FE cards."""
+    user = User(id=71, name="Meta", department="engineering")
+    orchestrator = WebChannelOrchestrator(Settings())
+    store = WebChatStore(tmp_path / "memory.db")
+    msg = await store.append_message(
+        user_id=user.memory_key(),
+        role="assistant",
+        content="Предложена задача",
+        metadata={
+            "proactive": True,
+            "source": "schedule_propose",
+            "kind": "schedule_confirm",
+            "task_id": "deadbeef",
+        },
+    )
+    payload = await orchestrator._chat_message_payload(msg, user)
+    meta = payload.get("metadata")
+    assert isinstance(meta, dict)
+    assert meta.get("kind") == "schedule_confirm"
+    assert meta.get("task_id") == "deadbeef"
 
 
 @pytest.mark.asyncio
@@ -364,6 +951,59 @@ async def test_web_download_grant_is_owner_scoped_and_expires(tmp_path: Path) ->
     assert "expired" not in orchestrator._download_grants
 
 
+@pytest.mark.asyncio
+async def test_web_download_grant_is_single_use(tmp_path: Path) -> None:
+    """B-074/L5: a download-grant token is consumed on the first successful
+    download and cannot be replayed within its TTL (tokens live in URL
+    history/Referer/logs)."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    target = workspace / "report.pdf"
+    target.write_bytes(b"pdf")
+    owner = User(id=1, name="Vadim", department="engineering")
+    orchestrator = WebChannelOrchestrator(Settings())
+    orchestrator._service = FakeWorkspaceService(workspace)  # type: ignore[assignment]
+    orchestrator._download_grants["once"] = _DownloadGrant(
+        user_id=owner.id,
+        path=target,
+        filename=target.name,
+        caption="",
+        expires_at=time.time() + 60,
+    )
+
+    # First download succeeds and consumes the token.
+    await orchestrator._handle_download_grant(
+        web_request("GET", "/api/download/once", owner, match_info={"token": "once"})
+    )
+    assert "once" not in orchestrator._download_grants
+    # A replay with the same token is rejected even within the TTL.
+    with pytest.raises(web.HTTPNotFound):
+        await orchestrator._handle_download_grant(
+            web_request("GET", "/api/download/once", owner, match_info={"token": "once"})
+        )
+
+
+def test_origin_matches_request_present_and_matching() -> None:
+    """B-074/L4: a present Origin matching request.host is accepted."""
+    request = SimpleNamespace(
+        host="app.example:8090", headers={"Origin": "https://app.example:8090"}
+    )
+    assert WebChannelOrchestrator._origin_matches_request(request)  # type: ignore[arg-type]
+
+
+def test_origin_matches_request_missing_rejected() -> None:
+    """B-074/L4: a missing Origin header is rejected (was previously treated as a match).
+    Browsers always send Origin on WS handshakes; only a non-browser client omits it."""
+    request = SimpleNamespace(host="app.example:8090", headers={})
+    assert not WebChannelOrchestrator._origin_matches_request(request)  # type: ignore[arg-type]
+
+
+def test_origin_matches_request_mismatch_rejected() -> None:
+    """B-074/L4: a present-but-mismatched Origin is rejected (CSRF defense)."""
+    request = SimpleNamespace(host="app.example:8090", headers={"Origin": "https://evil.example"})
+    assert not WebChannelOrchestrator._origin_matches_request(request)  # type: ignore[arg-type]
+
+
 def test_llm_transport_error_detection() -> None:
     assert is_llm_transport_error(APIConnectionError("Connection error.")) is True
     assert (
@@ -426,12 +1066,14 @@ async def test_agent_request_service_converts_llm_connection_error(
 
 @pytest.mark.asyncio
 async def test_agent_request_service_resets_user_context(tmp_path: Path) -> None:
-    class FakeMemory:
-        def __init__(self) -> None:
-            self.cleared: list[str] = []
+    """B-106: reset invalidates KV-cache only; does not clear facts."""
 
+    class FakeMemory:
         async def clear(self, user_id: str) -> None:
-            self.cleared.append(user_id)
+            raise AssertionError("messages clear() is removed — must not be called")
+
+        async def clear_facts(self, user_id: str) -> None:
+            raise AssertionError("reset must not clear cross-chat facts")
 
     class FakeLoop:
         def __init__(self) -> None:
@@ -457,9 +1099,174 @@ async def test_agent_request_service_resets_user_context(tmp_path: Path) -> None
     )
     user = User(id=7, name="Vadim", department="engineering")
 
+    # Completes without touching FakeMemory (provider is not LLMRouter → no cache call).
     await service.reset_user_context(user)
 
-    assert loop.memory.cleared == [user.memory_key()]
+
+# --- M1 + L2: response-tone directive + shared system-prompt assembly --------
+
+
+def test_tone_directive_default_is_empty() -> None:
+    """'default' tone adds no directive (base SOUL.md tone line applies)."""
+    from corpclaw_lite.users.manager import tone_directive
+
+    assert tone_directive("default") == ""
+
+
+def test_tone_directive_concise_and_detailed_differ() -> None:
+    """concise/detailed return distinct non-empty directives."""
+    from corpclaw_lite.users.manager import tone_directive
+
+    concise = tone_directive("concise")
+    detailed = tone_directive("detailed")
+    assert concise and detailed
+    assert concise != detailed
+    assert "concise" in concise.lower()
+    assert "thorough" in detailed.lower()
+
+
+def test_tone_directive_unknown_returns_empty() -> None:
+    """Unknown tone values fall back to empty (defensive)."""
+    from corpclaw_lite.users.manager import tone_directive
+
+    assert tone_directive("bogus") == ""
+    assert tone_directive("") == ""
+
+
+def _build_service(tmp_path: Path) -> tuple[AgentRequestService, UserManager]:
+    """Minimal AgentRequestService with a real UserManager + loop prompt assembly (B-111)."""
+    from unittest.mock import AsyncMock
+
+    from corpclaw_lite.agent.loop import AgentConfig, AgentLoop
+    from corpclaw_lite.config.settings import AgentSettings
+    from corpclaw_lite.extensions.tools.registry import ToolRegistry
+    from corpclaw_lite.llm.base import LLMResponse, Provider
+
+    user_manager = UserManager(db_path=str(tmp_path / "users.db"))
+    bootstrap = BootstrapLoader(tmp_path / "bootstrap")
+    provider = AsyncMock(spec=Provider)
+    provider.chat.return_value = LLMResponse(content="ok", tool_calls=[])
+    loop = AgentLoop(
+        AgentConfig(
+            provider=provider,
+            registry=ToolRegistry(),
+            settings=AgentSettings(),
+            default_system_prompt="BASE SOUL",
+            bootstrap=bootstrap,
+            user_manager=user_manager,
+        )
+    )
+    stack = AgentStack(
+        loop=loop,
+        user_manager=user_manager,
+        tool_registry=None,  # type: ignore[arg-type]
+        full_tool_registry=None,
+        mcp_manager=None,
+        container_manager=None,
+        skill_registry=None,
+        plugin_registry=None,
+        skill_matcher=None,
+    )
+    service = AgentRequestService(
+        stack=stack,
+        bootstrap=bootstrap,
+        workspace_base=tmp_path / "workspaces",
+    )
+    return service, user_manager
+
+
+@pytest.mark.asyncio
+async def test_build_system_prompt_excludes_persisted_user_preferences(tmp_path: Path) -> None:
+    """System preview contains trusted policy, not persisted user-controlled text."""
+    service, user_manager = _build_service(tmp_path)
+    user = User(id=3, name="Vadim", department="engineering")
+
+    user_manager.set_agent_context(user.id, instructions="Always cite sources.", tone="concise")
+    prompt = await service.build_system_prompt(user)
+
+    assert prompt is not None
+    assert "BASE SOUL" in prompt
+    assert "Always cite sources." not in prompt
+    assert "Be concise" not in prompt
+    assert "You are talking to" not in prompt
+    assert "untrusted user-provided data" in prompt
+
+
+@pytest.mark.asyncio
+async def test_build_system_prompt_without_agent_context_is_not_none(tmp_path: Path) -> None:
+    """With no agent context, base SOUL still yields a preview prompt."""
+    service, _ = _build_service(tmp_path)
+    user = User(id=4, name="Anna", department="marketing")
+
+    prompt = await service.build_system_prompt(user)
+
+    assert prompt is not None
+    assert "BASE SOUL" in prompt
+
+
+@pytest.mark.asyncio
+async def test_tone_directive_reaches_agent_loop_via_service_run(tmp_path: Path) -> None:
+    """B-111: tone is assembled inside AgentLoop (not service system_prompt kwarg)."""
+    from unittest.mock import AsyncMock
+
+    from corpclaw_lite.agent.loop import AgentConfig, AgentLoop
+    from corpclaw_lite.config.settings import AgentSettings
+    from corpclaw_lite.extensions.tools.registry import ToolRegistry
+    from corpclaw_lite.llm.base import LLMResponse, Provider
+
+    captured_systems: list[str] = []
+    captured_messages: list[list[dict[str, Any]]] = []
+
+    class SpyProvider(AsyncMock):
+        async def chat(self, messages, tools=None, system=None, **kwargs):  # type: ignore[no-untyped-def]
+            if system:
+                captured_systems.append(system)
+            captured_messages.append(messages)
+            return LLMResponse(content="ok", tool_calls=[])
+
+    user_manager = UserManager(db_path=str(tmp_path / "users.db"))
+    provider = SpyProvider(spec=Provider)
+    loop = AgentLoop(
+        AgentConfig(
+            provider=provider,
+            registry=ToolRegistry(),
+            settings=AgentSettings(max_steps=2, max_tool_calls=2, max_wall_time_ms=5000),
+            default_system_prompt="BASE SOUL",
+            bootstrap=BootstrapLoader(tmp_path / "bootstrap"),
+            user_manager=user_manager,
+        )
+    )
+    stack = AgentStack(
+        loop=loop,
+        user_manager=user_manager,
+        tool_registry=None,  # type: ignore[arg-type]
+        full_tool_registry=None,
+        mcp_manager=None,
+        container_manager=None,
+        skill_registry=None,
+        plugin_registry=None,
+        skill_matcher=None,
+    )
+    service = AgentRequestService(
+        stack=stack,
+        bootstrap=BootstrapLoader(tmp_path / "bootstrap"),
+        workspace_base=tmp_path / "workspaces",
+    )
+    user = User(id=5, name="Vadim", department="engineering")
+    user_manager.set_agent_context(user.id, instructions="Be precise.", tone="detailed")
+
+    await service.run(user=user, message="hi", mode="chat", channel="web")
+
+    assert captured_systems, "provider.chat must receive a system prompt"
+    joined = "\n".join(captured_systems)
+    assert "Be precise." not in joined
+    assert "Be thorough" not in joined
+    assert "Vadim" not in joined
+    current = str(captured_messages[0][-1]["content"])
+    assert '"personal_instructions": "Be precise."' in current
+    assert '"tone_preference": "Be thorough' in current
+    assert '"name": "Vadim"' in current
+    assert "Current user request:\nhi" in current
 
 
 @pytest.mark.asyncio
@@ -631,6 +1438,79 @@ def test_web_login_failures_lock_out_key() -> None:
     assert orchestrator._login_retry_after(key) == 0
 
 
+def test_client_ip_uses_xff_behind_trusted_proxy() -> None:
+    """B-071: behind a trusted proxy, the real client IP comes from the leftmost
+    X-Forwarded-For entry."""
+    settings = Settings()
+    settings.web_channel.trusted_proxies = ["127.0.0.1"]
+    orchestrator = WebChannelOrchestrator(settings)
+    request = SimpleNamespace(
+        remote="127.0.0.1",
+        headers={"X-Forwarded-For": "203.0.113.5, 10.0.0.1"},
+    )
+    assert orchestrator._client_ip(request) == "203.0.113.5"
+
+
+def test_client_ip_ignores_xff_from_untrusted_peer() -> None:
+    """B-071: when the peer is NOT a trusted proxy, XFF is ignored (the socket
+    peer is used) — a direct/localhost client cannot spoof its IP via XFF."""
+    settings = Settings()  # trusted_proxies defaults to []
+    orchestrator = WebChannelOrchestrator(settings)
+    request = SimpleNamespace(
+        remote="198.51.100.7",
+        headers={"X-Forwarded-For": "203.0.113.5"},
+    )
+    assert orchestrator._client_ip(request) == "198.51.100.7"
+
+
+def test_login_lockout_per_username_independent_of_ip() -> None:
+    """B-071: a distributed brute-force (many IPs, one account) trips the
+    per-username cap and locks the account out regardless of source IP."""
+    settings = Settings()
+    settings.web_channel.max_login_failures_per_username = 4
+    orchestrator = WebChannelOrchestrator(settings)
+    # Failures arrive from a different IP each time but target one username.
+    for i in range(settings.web_channel.max_login_failures_per_username):
+        request = SimpleNamespace(remote=f"10.0.0.{i}", headers={})
+        orchestrator._record_login_failure(request, "victim")
+    # The username is now locked out independently of IP.
+    assert orchestrator._login_username_locked("victim")
+    # Even a brand-new IP sees the username lockout in the handler (checked
+    # before the per-IP key), so the distributed attack is contained.
+
+
+@pytest.mark.asyncio
+async def test_broadcast_tasks_tracked_and_cleaned_up() -> None:
+    """B-070: fire-and-forget broadcast tasks must keep a strong reference
+    (no GC mid-execution) and be removed from the tracking set on completion
+    (no unbounded growth on the high-frequency status-tick path)."""
+    orchestrator = WebChannelOrchestrator(Settings())
+
+    sent: list[dict[str, object]] = []
+
+    async def fake_broadcast(user_id: int, payload: dict[str, object]) -> None:
+        sent.append({"user_id": user_id, "payload": payload})
+
+    orchestrator._broadcast_to_user = fake_broadcast  # type: ignore[method-assign]
+
+    # Mimic the broadcast_task closure defined inside _handle_chat_ws.
+    def broadcast_task(payload: dict[str, object]) -> None:
+        task = asyncio.create_task(orchestrator._broadcast_to_user(7, payload))
+        orchestrator._broadcast_tasks.add(task)
+        task.add_done_callback(orchestrator._broadcast_tasks.discard)
+
+    assert orchestrator._broadcast_tasks == set()
+    broadcast_task({"type": "status", "status": "thinking"})
+    broadcast_task({"type": "chat_list_changed"})
+    assert len(orchestrator._broadcast_tasks) == 2
+
+    # Let both tasks run to completion.
+    await asyncio.gather(*orchestrator._broadcast_tasks)
+    # Cleanup-on-done removed them — the set is empty, no growth.
+    assert orchestrator._broadcast_tasks == set()
+    assert len(sent) == 2
+
+
 def test_web_session_cookie_auto_secure_local_http() -> None:
     settings = Settings()
     settings.web_channel.cookie_secure = "auto"
@@ -688,8 +1568,11 @@ async def test_web_reset_context_respects_active_request_lock() -> None:
             self.reset_calls = 0
             self.finished: list[int] = []
 
-        async def try_start_user_request(self, _user_id: int) -> bool:
+        async def try_start_user_request(self, _user_id: int, **_kwargs: object) -> bool:
             return not self.active
+
+        async def get_running_request(self, _user_id: int) -> None:
+            return None
 
         async def finish_user_request(self, user_id: int) -> None:
             self.finished.append(user_id)
@@ -718,8 +1601,11 @@ async def test_web_reset_context_clears_usage_snapshot() -> None:
             self.reset_calls = 0
             self.finished: list[int] = []
 
-        async def try_start_user_request(self, _user_id: int) -> bool:
+        async def try_start_user_request(self, _user_id: int, **_kwargs: object) -> bool:
             return True
+
+        async def get_running_request(self, _user_id: int) -> None:
+            return None
 
         async def finish_user_request(self, user_id: int) -> None:
             self.finished.append(user_id)
@@ -753,8 +1639,11 @@ async def test_web_reset_context_clears_usage_snapshot() -> None:
 @pytest.mark.asyncio
 async def test_web_reset_context_archives_web_chat_session(tmp_path: Path) -> None:
     class FakeService:
-        async def try_start_user_request(self, _user_id: int) -> bool:
+        async def try_start_user_request(self, _user_id: int, **_kwargs: object) -> bool:
             return True
+
+        async def get_running_request(self, _user_id: int) -> None:
+            return None
 
         async def finish_user_request(self, _user_id: int) -> None:
             return None
@@ -825,3 +1714,749 @@ async def test_web_orchestrator_stop_cleans_managed_containers() -> None:
     await orchestrator.stop()
 
     assert container_manager.stopped is True
+
+
+@pytest.mark.asyncio
+async def test_web_container_prune_loop_calls_prune_and_survives_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The container pruner calls prune_idle each pass and keeps running on error."""
+
+    class FakeContainerManager:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def prune_idle(self) -> int:
+            self.calls += 1
+            # First pass raises a transient Docker error — the loop must survive.
+            if self.calls == 1:
+                raise RuntimeError("docker daemon hiccup")
+            return 0
+
+    class FakeStack:
+        def __init__(self, container_manager: FakeContainerManager) -> None:
+            self.container_manager = container_manager
+
+    cm = FakeContainerManager()
+    orchestrator = WebChannelOrchestrator(Settings())
+    orchestrator._stack = FakeStack(cm)
+
+    # Drive the loop with a near-zero interval instead of the real 300s.
+    monkeypatch.setattr(
+        "corpclaw_lite.channels.web.orchestrator._CONTAINER_PRUNE_INTERVAL_SECONDS", 0
+    )
+
+    # Cancel after enough iterations to exercise both the error and the success paths.
+    task = asyncio.create_task(orchestrator._container_prune_loop())
+    # Yield control so the loop runs a couple of passes.
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    assert cm.calls >= 2  # one erroring pass + one healthy pass
+
+
+@pytest.mark.asyncio
+async def test_web_container_prune_loop_noop_without_container_manager() -> None:
+    """The pruner returns immediately when there is no container_manager (dev mode)."""
+    orchestrator = WebChannelOrchestrator(Settings())
+    orchestrator._stack = None  # dev mode: no stack at all
+    # Should return without entering the loop (no await asyncio.sleep).
+    await asyncio.wait_for(orchestrator._container_prune_loop(), timeout=1.0)
+
+
+# --- Issue 1/2: load_chat read_only by is_active; delete active w/ replacement --
+
+
+async def _read_only_for_target(store: WebChatStore, user_id: str, session_id: int) -> bool:
+    """Mirror of the orchestrator's load_chat read_only decision: editable when
+    the target is the user's active session, read-only otherwise."""
+    summary = await store.get_session(user_id, session_id)
+    return not (summary is not None and summary.is_active)
+
+
+@pytest.mark.asyncio
+async def test_load_chat_active_session_is_editable(tmp_path: Path) -> None:
+    """load_chat on the active chat must report read_only=False (edit mode)."""
+    store = WebChatStore(tmp_path / "memory.db")
+    # create_session archives the prior active one, so the LAST created is active.
+    inactive_id = await store.create_session(user_id="7", section="chat")
+    active_id = await store.create_session(user_id="7", section="chat")
+    assert active_id != inactive_id
+
+    active_summary = await store.get_session("7", active_id)
+    inactive_summary = await store.get_session("7", inactive_id)
+    assert active_summary is not None and active_summary.is_active is True
+    assert inactive_summary is not None and inactive_summary.is_active is False
+
+    assert await _read_only_for_target(store, "7", active_id) is False
+    assert await _read_only_for_target(store, "7", inactive_id) is True
+
+
+@pytest.mark.asyncio
+async def test_load_chat_inactive_session_is_read_only(tmp_path: Path) -> None:
+    """load_chat on a non-active chat reports read_only=True; reactivating flips it."""
+    store = WebChatStore(tmp_path / "memory.db")
+    first_id = await store.create_session(user_id="7", section="chat")
+    second_id = await store.create_session(user_id="7", section="chat")
+    # second is active, first is inactive
+    first = await store.get_session("7", first_id)
+    assert first is not None and first.is_active is False
+    assert await _read_only_for_target(store, "7", first_id) is True
+
+    # reactivate the first → it becomes editable, second becomes inactive
+    await store.activate_session(user_id="7", session_id=first_id)
+    assert await _read_only_for_target(store, "7", first_id) is False
+    assert await _read_only_for_target(store, "7", second_id) is True
+
+
+@pytest.mark.asyncio
+async def test_delete_active_chat_creates_replacement(tmp_path: Path) -> None:
+    """Deleting the active chat must leave a fresh active chat behind (invariant:
+    exactly one active session per user) so the agent still has a place to write."""
+    store = WebChatStore(tmp_path / "memory.db")
+    active_id = await store.create_session(user_id="7", section="chat")
+    before = await store.get_session("7", active_id)
+    assert before is not None and before.is_active is True
+
+    ok = await store.delete_session("7", active_id)
+    assert ok is True
+
+    # No active session right after deletion…
+    sessions = await store.list_sessions("7")
+    assert not any(s.is_active for s in sessions)
+
+    # …so the orchestrator's delete handler calls ensure_active_session to create
+    # a replacement. Verify that produces exactly one new active session.
+    new_id = await store.ensure_active_session("7")
+    assert new_id != active_id
+    replacement = await store.get_session("7", new_id)
+    assert replacement is not None and replacement.is_active is True
+    sessions_after = await store.list_sessions("7")
+    assert sum(1 for s in sessions_after if s.is_active) == 1
+
+
+@pytest.mark.asyncio
+async def test_delete_inactive_chat_makes_no_replacement(tmp_path: Path) -> None:
+    """Deleting a non-active chat leaves the existing active chat untouched."""
+    store = WebChatStore(tmp_path / "memory.db")
+    inactive_id = await store.create_session(user_id="7", section="chat")
+    active_id = await store.create_session(user_id="7", section="chat")
+    assert active_id != inactive_id
+
+    ok = await store.delete_session("7", inactive_id)
+    assert ok is True
+
+    # The active chat is unaffected.
+    still_active = await store.get_session("7", active_id)
+    assert still_active is not None and still_active.is_active is True
+    gone = await store.get_session("7", inactive_id)
+    assert gone is None
+
+
+# --- C: on-demand compression of the active chat's context ---
+
+
+@pytest.mark.asyncio
+async def test_compress_active_context_success(tmp_path: Path) -> None:
+    """_compress_active_context delegates to the service and refreshes usage."""
+
+    class FakeCompressService:
+        def __init__(self) -> None:
+            self.compress_calls = 0
+
+        async def try_start_user_request(self, _user_id: int, **_kwargs: object) -> bool:
+            return True
+
+        async def get_running_request(self, _user_id: int) -> None:
+            return None
+
+        async def finish_user_request(self, _user_id: int) -> None:
+            return None
+
+        async def compress_user_context(
+            self, _user: User, session_id: int | None = None
+        ) -> tuple[bool, str]:
+            self.compress_calls += 1
+            return True, "Контекст сжат: 10 → 4 сообщений."
+
+    orchestrator = WebChannelOrchestrator(Settings())
+    service = FakeCompressService()
+    orchestrator._service = service  # type: ignore[assignment]
+    user = User(id=7, name="Vadim", department="engineering")
+
+    ok, message, _usage = await orchestrator._compress_active_context(user)
+
+    assert ok is True
+    assert "сжат" in message
+    assert service.compress_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_compress_active_context_propagates_failure(tmp_path: Path) -> None:
+    """When the service reports compression failed, _compress_active_context
+    forwards the failure (ok=False) without raising."""
+
+    class FakeCompressService:
+        async def try_start_user_request(self, _user_id: int, **_kwargs: object) -> bool:
+            return True
+
+        async def get_running_request(self, _user_id: int) -> None:
+            return None
+
+        async def finish_user_request(self, _user_id: int) -> None:
+            return None
+
+        async def compress_user_context(
+            self, _user: User, session_id: int | None = None
+        ) -> tuple[bool, str]:
+            return False, "Слишком мало сообщений для сжатия."
+
+    orchestrator = WebChannelOrchestrator(Settings())
+    orchestrator._service = FakeCompressService()  # type: ignore[assignment]
+    user = User(id=7, name="Vadim", department="engineering")
+
+    ok, message, _usage = await orchestrator._compress_active_context(user)
+
+    assert ok is False
+    assert "мало" in message
+
+
+@pytest.mark.asyncio
+async def test_compress_active_context_with_explicit_session_id(tmp_path: Path) -> None:
+    """B-063 S3: _compress_active_context(user, session_id=N) passes the explicit
+    session_id to the service (does NOT resolve the active session). The session
+    must be owned by the user (S3-audit ownership check)."""
+
+    class SpyService:
+        def __init__(self) -> None:
+            self.passed_session_id: int | None = None
+
+        async def try_start_user_request(self, _user_id: int, **_kwargs: object) -> bool:
+            return True
+
+        async def get_running_request(self, _user_id: int) -> None:
+            return None
+
+        async def finish_user_request(self, _user_id: int) -> None:
+            return None
+
+        async def compress_user_context(
+            self, _user: User, session_id: int | None = None
+        ) -> tuple[bool, str]:
+            self.passed_session_id = session_id
+            return True, "Контекст сжат."
+
+    db = tmp_path / "compress_own.db"
+    ws = WebChatStore(db)
+    user = User(id=7, name="Vadim", department="engineering")
+    session_id = await ws.create_session(user_id=user.memory_key(), section="chat")
+
+    orchestrator = WebChannelOrchestrator(Settings())
+    orchestrator._chat_store = ws  # type: ignore[assignment]
+    spy = SpyService()
+    orchestrator._service = spy  # type: ignore[assignment]
+
+    await orchestrator._compress_active_context(user, session_id=session_id)
+
+    assert spy.passed_session_id == session_id
+
+
+@pytest.mark.asyncio
+async def test_compress_rejects_foreign_session_id(tmp_path: Path) -> None:
+    """B-063 S3-audit F1: compressing a session owned by ANOTHER user is rejected
+    (IDOR protection). Without the ownership check, the caller could destroy
+    another user's context-store via replace_context."""
+
+    class SpyService:
+        async def try_start_user_request(self, _user_id: int, **_kwargs: object) -> bool:
+            return True
+
+        async def get_running_request(self, _user_id: int) -> None:
+            return None
+
+        async def finish_user_request(self, _user_id: int) -> None:
+            return None
+
+        async def compress_user_context(
+            self, _user: User, session_id: int | None = None
+        ) -> tuple[bool, str]:
+            return True, "SHOULD NOT BE CALLED"
+
+    db = tmp_path / "compress_foreign.db"
+    ws = WebChatStore(db)
+    user_a = User(id=7, name="Alice", department="engineering")
+    user_b = User(id=20, name="Bob", department="marketing")
+    # Session owned by user B.
+    foreign_session = await ws.create_session(user_id=user_b.memory_key(), section="chat")
+
+    orchestrator = WebChannelOrchestrator(Settings())
+    orchestrator._chat_store = ws  # type: ignore[assignment]
+    orchestrator._service = SpyService()  # type: ignore[assignment]
+
+    # User A tries to compress user B's chat.
+    ok, message, _usage = await orchestrator._compress_active_context(
+        user_a, session_id=foreign_session
+    )
+
+    assert ok is False
+    assert "не найден" in message.lower() or "нет доступа" in message.lower()
+
+
+@pytest.mark.asyncio
+async def test_compress_rejects_nonexistent_session_id(tmp_path: Path) -> None:
+    """B-063 S3-audit F1: compressing a non-existent session_id is rejected."""
+
+    class SpyService:
+        async def try_start_user_request(self, _user_id: int, **_kwargs: object) -> bool:
+            return True
+
+        async def get_running_request(self, _user_id: int) -> None:
+            return None
+
+        async def finish_user_request(self, _user_id: int) -> None:
+            return None
+
+        async def compress_user_context(
+            self, _user: User, session_id: int | None = None
+        ) -> tuple[bool, str]:
+            return True, "SHOULD NOT BE CALLED"
+
+    db = tmp_path / "compress_nonexist.db"
+    ws = WebChatStore(db)
+    user = User(id=7, name="Vadim", department="engineering")
+
+    orchestrator = WebChannelOrchestrator(Settings())
+    orchestrator._chat_store = ws  # type: ignore[assignment]
+    orchestrator._service = SpyService()  # type: ignore[assignment]
+
+    ok, message, _usage = await orchestrator._compress_active_context(user, session_id=99999)
+
+    assert ok is False
+    assert "не найден" in message.lower() or "нет доступа" in message.lower()
+
+
+# --- B-063 S1: ChatContextStore (full LLM-context persistence per chat) ------
+
+
+def test_chat_context_store_schema_created(tmp_path: Path) -> None:
+    """The web_chat_context table + index exist after init."""
+    db = tmp_path / "memory.db"
+    # WebChatStore must exist first so the sessions table (FK target) is present.
+    WebChatStore(db)
+    ChatContextStore(db)  # creates web_chat_context schema
+    import sqlite3
+
+    with sqlite3.connect(db) as conn:
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        indexes = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+    assert "web_chat_context" in tables
+    assert "idx_web_chat_context_session" in indexes
+
+
+@pytest.mark.asyncio
+async def test_chat_context_store_append_list_roundtrip(tmp_path: Path) -> None:
+    """Append user/assistant+tool_calls/tool messages; list reconstructs them
+    with full structure (role/content/tool_calls/tool_call_id/name/reasoning)."""
+    db = tmp_path / "memory.db"
+    ws = WebChatStore(db)
+    store = ChatContextStore(db)
+    session_id = await ws.create_session(user_id="7", section="chat")
+
+    await store.append_context(
+        session_id=session_id, user_id="7", role="user", content="нормализуй Excel"
+    )
+    await store.append_context(
+        session_id=session_id,
+        user_id="7",
+        role="assistant",
+        content="",
+        tool_calls=[
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "normalize_excel", "arguments": '{"path":"a.xlsx"}'},
+            }
+        ],
+        reasoning="thinking about the file",
+    )
+    await store.append_context(
+        session_id=session_id,
+        user_id="7",
+        role="tool",
+        content="normalized 4 rows",
+        tool_call_id="call_1",
+        name="normalize_excel",
+    )
+    await store.append_context(
+        session_id=session_id, user_id="7", role="assistant", content="Готово!"
+    )
+
+    ctx = await store.list_context(session_id, user_id="7")
+    assert len(ctx) == 4
+    assert ctx[0] == {"role": "user", "content": "нормализуй Excel"}
+    assert ctx[1]["role"] == "assistant"
+    assert ctx[1]["content"] == ""
+    assert ctx[1]["tool_calls"] == [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "normalize_excel", "arguments": '{"path":"a.xlsx"}'},
+        }
+    ]
+    assert ctx[1]["reasoning"] == "thinking about the file"
+    assert ctx[2] == {
+        "role": "tool",
+        "content": "normalized 4 rows",
+        "tool_call_id": "call_1",
+        "name": "normalize_excel",
+    }
+    assert ctx[3] == {"role": "assistant", "content": "Готово!"}
+
+
+@pytest.mark.asyncio
+async def test_chat_context_store_seq_ordering(tmp_path: Path) -> None:
+    """seq is monotonic per session and list returns insertion order."""
+    db = tmp_path / "memory.db"
+    ws = WebChatStore(db)
+    store = ChatContextStore(db)
+    session_id = await ws.create_session(user_id="7", section="chat")
+
+    s1 = await store.append_context(session_id=session_id, user_id="7", role="user", content="a")
+    s2 = await store.append_context(
+        session_id=session_id, user_id="7", role="assistant", content="b"
+    )
+    s3 = await store.append_context(session_id=session_id, user_id="7", role="user", content="c")
+    assert (s1, s2, s3) == (1, 2, 3)
+
+    ctx = await store.list_context(session_id, user_id="7")
+    assert [m["content"] for m in ctx] == ["a", "b", "c"]
+
+
+@pytest.mark.asyncio
+async def test_chat_context_store_clear_and_replace(tmp_path: Path) -> None:
+    """clear empties the session; replace atomically swaps the full context."""
+    db = tmp_path / "memory.db"
+    ws = WebChatStore(db)
+    store = ChatContextStore(db)
+    session_id = await ws.create_session(user_id="7", section="chat")
+
+    await store.append_context(session_id=session_id, user_id="7", role="user", content="old1")
+    await store.append_context(session_id=session_id, user_id="7", role="assistant", content="old2")
+    assert store.has_context(session_id)
+
+    deleted = await store.clear_context(session_id, user_id="7")
+    assert deleted == 2
+    assert not store.has_context(session_id)
+    assert await store.list_context(session_id, user_id="7") == []
+
+    await store.replace_context(
+        session_id=session_id,
+        user_id="7",
+        messages=[
+            {"role": "user", "content": "new1"},
+            {"role": "assistant", "content": "new2", "reasoning": "summarized"},
+        ],
+    )
+    ctx = await store.list_context(session_id, user_id="7")
+    assert len(ctx) == 2
+    assert ctx[0]["content"] == "new1"
+    assert ctx[1]["content"] == "new2"
+    assert ctx[1]["reasoning"] == "summarized"
+
+
+@pytest.mark.asyncio
+async def test_chat_context_store_cascade_on_session_delete(tmp_path: Path) -> None:
+    """Deleting a web chat session cascades to its context rows."""
+    db = tmp_path / "memory.db"
+    ws = WebChatStore(db)
+    store = ChatContextStore(db)
+    session_id = await ws.create_session(user_id="7", section="chat")
+    await store.append_context(session_id=session_id, user_id="7", role="user", content="x")
+    assert store.has_context(session_id)
+
+    await ws.delete_session("7", session_id)
+    assert not store.has_context(session_id)
+    assert await store.list_context(session_id, user_id="7") == []
+
+
+@pytest.mark.asyncio
+async def test_chat_context_store_replace_does_not_relabel_foreign_rows(tmp_path: Path) -> None:
+    """B-067 store-layer defense-in-depth: replace_context DELETE is scoped by
+    user_id, so calling it with a foreign user_id on a session the caller doesn't
+    own cannot delete/relabel another user's rows. (The service-layer get_session
+    check is the primary control; this is the belt-and-suspenders.)"""
+    db = tmp_path / "memory.db"
+    ws = WebChatStore(db)
+    store = ChatContextStore(db)
+    # Victim owns the session and has context rows stamped user_id="8".
+    victim_session = await ws.create_session(user_id="8", section="chat")
+    await store.append_context(
+        session_id=victim_session, user_id="8", role="user", content="victim row"
+    )
+
+    # Attacker (user "7") calls replace_context on the victim's session_id.
+    # Before B-067 the DELETE was WHERE session_id=? only, so this would wipe
+    # the victim's rows and re-insert them stamped user_id="7" (re-attribution).
+    # After B-067 the DELETE is scoped by user_id, so it matches nothing; the
+    # subsequent INSERT then collides on UNIQUE(session_id, seq) — fail-closed.
+    import sqlite3
+
+    with pytest.raises(sqlite3.IntegrityError):
+        await store.replace_context(
+            session_id=victim_session,
+            user_id="7",  # attacker
+            messages=[{"role": "user", "content": "attacker row"}],
+        )
+
+    # Victim's original rows must be untouched — no silent re-attribution.
+    ctx = await store.list_context(victim_session, user_id="8")
+    contents = [m["content"] for m in ctx]
+    assert contents == ["victim row"]
+    assert "attacker row" not in contents
+    # list/clear scoped by user_id: attacker cannot read or wipe victim rows.
+    assert await store.list_context(victim_session, user_id="7") == []
+    assert await store.clear_context(victim_session, user_id="7") == 0
+    assert await store.list_context(victim_session, user_id="8") == [
+        {"role": "user", "content": "victim row"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_chat_context_store_unique_seq_under_concurrent_append(tmp_path: Path) -> None:
+    """B-063 S1 audit: concurrent appends to the same session must not collide
+    on seq. The UNIQUE(session_id, seq) index + retry-on-IntegrityError turns a
+    race into a recovered insert, keeping ordering deterministic."""
+    import asyncio
+
+    db = tmp_path / "memory.db"
+    ws = WebChatStore(db)
+    store = ChatContextStore(db)
+    session_id = await ws.create_session(user_id="7", section="chat")
+
+    # Fire several appends concurrently; with a plain MAX+1 and no UNIQUE these
+    # would produce duplicate seqs. With UNIQUE + retry, all succeed distinctly.
+    await asyncio.gather(
+        *(
+            store.append_context(
+                session_id=session_id, user_id="7", role="user", content=f"msg {i}"
+            )
+            for i in range(8)
+        )
+    )
+
+    ctx = await store.list_context(session_id, user_id="7")
+    assert len(ctx) == 8
+    # Every content is distinct and present (no lost inserts).
+    contents = {m["content"] for m in ctx}
+    assert contents == {f"msg {i}" for i in range(8)}
+
+
+def test_chat_store_migration_idempotent_on_already_migrated(tmp_path: Path) -> None:
+    """B-074/L9: re-init on an already-migrated DB swallows only the idempotent
+    "duplicate column" errors and succeeds (no StorageError)."""
+    db = tmp_path / "memory.db"
+    WebChatStore(db)  # first init migrates all columns
+    # second init must be idempotent — the "duplicate column" errors are swallowed.
+    WebChatStore(db)
+
+
+# --- B-063 S2: restore_user_context (activate=load) ---
+
+
+@pytest.mark.asyncio
+async def test_restore_user_context_validates_store_has_messages(tmp_path: Path) -> None:
+    """B-104/B-106: restore_user_context returns True when the context-store has data."""
+    from corpclaw_lite.extensions.tools.registry import ToolRegistry
+    from corpclaw_lite.memory.sqlite import SQLiteMemory
+
+    memory = SQLiteMemory(db_path=str(tmp_path / "m.db"))
+    store = ChatContextStore(tmp_path / "m.db")
+    ws = WebChatStore(tmp_path / "m.db")
+    session_id = await ws.create_session(user_id="7", section="chat")
+    await store.append_context(session_id=session_id, user_id="7", role="user", content="hi")
+    await store.append_context(session_id=session_id, user_id="7", role="assistant", content="done")
+
+    class _StubLoop:
+        def __init__(self, mem):
+            self.memory = mem
+            self.provider = None
+
+    stack = AgentStack(
+        loop=_StubLoop(memory),  # type: ignore[arg-type]
+        user_manager=UserManager(db_path=str(tmp_path / "u.db")),
+        chat_context_store=store,
+        chat_store=ws,
+        tool_registry=ToolRegistry(),  # type: ignore[arg-type]
+        full_tool_registry=None,
+        mcp_manager=None,
+        container_manager=None,
+    )
+    service = AgentRequestService(stack=stack, bootstrap=None, workspace_base=tmp_path / "ws")  # type: ignore[arg-type]
+    user = User(id=7, name="Vadim", department="engineering")
+
+    # Facts remain independent of restore (cross-chat personalization).
+    await memory.store_fact(user.memory_key(), "role", "engineer")
+    restored = await service.restore_user_context(user, session_id)
+
+    assert restored is True
+    facts = await memory.recall_facts(user.memory_key())
+    assert any(f["key"] == "role" for f in facts)
+    ctx = await store.list_context(session_id, user_id="7")
+    assert any(m.get("content") == "hi" for m in ctx)
+
+
+@pytest.mark.asyncio
+async def test_restore_user_context_returns_false_for_empty_store(tmp_path: Path) -> None:
+    """When the context-store has no data for the session, restore returns False
+    (caller falls back to reset_user_context)."""
+    from corpclaw_lite.extensions.tools.registry import ToolRegistry
+
+    store = ChatContextStore(tmp_path / "e.db")
+    WebChatStore(tmp_path / "e.db")
+
+    class _StubLoop:
+        def __init__(self):
+            self.memory = None
+            self.provider = None
+
+    stack = AgentStack(
+        loop=_StubLoop(),  # type: ignore[arg-type]
+        user_manager=UserManager(db_path=str(tmp_path / "u.db")),
+        chat_context_store=store,
+        tool_registry=ToolRegistry(),  # type: ignore[arg-type]
+        full_tool_registry=None,
+        mcp_manager=None,
+        container_manager=None,
+    )
+    service = AgentRequestService(stack=stack, bootstrap=None, workspace_base=tmp_path / "ws")  # type: ignore[arg-type]
+    user = User(id=7, name="Vadim", department="engineering")
+
+    restored = await service.restore_user_context(user, session_id=999)  # never created
+    assert restored is False
+
+
+@pytest.mark.asyncio
+async def test_restore_user_context_rejects_foreign_session(tmp_path: Path) -> None:
+    """B-067: restore_user_context verifies session ownership at the service
+    layer. A foreign session_id (owned by another user) returns False without
+    reading the transcript — closing the IDOR-by-read gap for any caller that
+    forgets the orchestrator's get_session pre-check."""
+    from corpclaw_lite.extensions.tools.registry import ToolRegistry
+    from corpclaw_lite.memory.sqlite import SQLiteMemory
+
+    db = tmp_path / "idor.db"
+    ws = WebChatStore(db)
+    store = ChatContextStore(db)
+    # Attacker is user 7; victim is user 8. Victim owns session_id.
+    victim_session = await ws.create_session(user_id="8", section="chat")
+    await store.append_context(
+        session_id=victim_session, user_id="8", role="user", content="victim secret"
+    )
+
+    memory = SQLiteMemory(db_path=str(tmp_path / "m.db"))
+
+    class _StubLoop:
+        def __init__(self, mem):
+            self.memory = mem
+            self.provider = None
+
+    stack = AgentStack(
+        loop=_StubLoop(memory),  # type: ignore[arg-type]
+        user_manager=UserManager(db_path=str(tmp_path / "u.db")),
+        chat_context_store=store,
+        chat_store=ws,  # B-067: wired so the service can verify ownership
+        tool_registry=ToolRegistry(),  # type: ignore[arg-type]
+        full_tool_registry=None,
+        mcp_manager=None,
+        container_manager=None,
+    )
+    service = AgentRequestService(stack=stack, bootstrap=None, workspace_base=tmp_path / "ws")  # type: ignore[arg-type]
+    attacker = User(id=7, name="Attacker", department="engineering")
+
+    restored = await service.restore_user_context(attacker, victim_session)
+    assert restored is False
+    # Attacker's facts must stay empty (no side effects / no leak).
+    facts = await memory.recall_facts(attacker.memory_key())
+    assert facts == []
+
+
+@pytest.mark.asyncio
+async def test_compress_user_context_rejects_foreign_session(tmp_path: Path) -> None:
+    """B-067: compress_user_context verifies ownership at the service layer.
+    A foreign session_id returns (False, msg) without invoking compress_now."""
+    from corpclaw_lite.extensions.tools.registry import ToolRegistry
+
+    db = tmp_path / "idor_c.db"
+    ws = WebChatStore(db)
+    ChatContextStore(db)
+    victim_session = await ws.create_session(user_id="8", section="chat")
+
+    class _StubLoop:
+        def __init__(self):
+            self.memory = None
+            self.provider = None
+
+        async def compress_now(self, user, session_id=None):  # type: ignore[no-untyped-def]
+            raise AssertionError("compress_now must not run for a foreign session")
+
+    stack = AgentStack(
+        loop=_StubLoop(),  # type: ignore[arg-type]
+        user_manager=UserManager(db_path=str(tmp_path / "u.db")),
+        chat_context_store=None,
+        chat_store=ws,
+        tool_registry=ToolRegistry(),  # type: ignore[arg-type]
+        full_tool_registry=None,
+        mcp_manager=None,
+        container_manager=None,
+    )
+    service = AgentRequestService(stack=stack, bootstrap=None, workspace_base=tmp_path / "ws")  # type: ignore[arg-type]
+    attacker = User(id=7, name="Attacker", department="engineering")
+
+    ok, message = await service.compress_user_context(attacker, session_id=victim_session)
+    assert ok is False
+    assert "не найден" in message.lower() or "нет доступа" in message.lower()
+
+
+@pytest.mark.asyncio
+async def test_restore_user_context_succeeds_without_memory_shadow(tmp_path: Path) -> None:
+    """B-104/B-106: restore does not require message methods on SQLiteMemory."""
+    from corpclaw_lite.extensions.tools.registry import ToolRegistry
+    from corpclaw_lite.memory.sqlite import SQLiteMemory
+
+    db = tmp_path / "memfail.db"
+    ws = WebChatStore(db)
+    store = ChatContextStore(db)
+    session_id = await ws.create_session(user_id="7", section="chat")
+    await store.append_context(session_id=session_id, user_id="7", role="user", content="hi")
+    await store.append_context(
+        session_id=session_id, user_id="7", role="assistant", content="hello"
+    )
+
+    memory = SQLiteMemory(db_path=str(db))
+
+    class _StubLoop:
+        def __init__(self, mem):
+            self.memory = mem
+            self.provider = None
+
+    stack = AgentStack(
+        loop=_StubLoop(memory),  # type: ignore[arg-type]
+        user_manager=UserManager(db_path=str(tmp_path / "u.db")),
+        chat_context_store=store,
+        chat_store=ws,
+        tool_registry=ToolRegistry(),  # type: ignore[arg-type]
+        full_tool_registry=None,
+        mcp_manager=None,
+        container_manager=None,
+    )
+    service = AgentRequestService(
+        stack=stack,
+        bootstrap=None,
+        workspace_base=tmp_path / "ws",  # type: ignore[arg-type]
+    )
+    user = User(id=7, name="Vadim", department="engineering")
+
+    restored = await service.restore_user_context(user, session_id)
+    assert restored is True

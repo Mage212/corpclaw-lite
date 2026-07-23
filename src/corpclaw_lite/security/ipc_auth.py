@@ -46,6 +46,17 @@ class IPCAuth:
         self.nonce_ttl = nonce_ttl_seconds
         self._seen_nonces: dict[str, float] = {}
 
+    def secret_for_stdin(self) -> str:
+        """Return the secret as a string to feed the worker over stdin.
+
+        The worker reads the secret as the first stdin line (followed by the
+        signed JSON payload). Keeping it on stdin — not in the docker exec argv
+        — prevents local observers from harvesting it via ``ps`` / ``/proc``.
+        """
+        if isinstance(self._secret, bytes):
+            return self._secret.decode("utf-8")
+        return self._secret
+
     def _cleanup_nonces(self) -> None:
         """Remove expired nonces."""
         now = time.time()

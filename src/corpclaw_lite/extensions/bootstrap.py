@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Any
 
 from corpclaw_lite.config.settings import Settings, SkillsSettings
 from corpclaw_lite.extensions.paths import resolve_dirs
@@ -83,6 +84,7 @@ def load_extensions(
     tool_registry: ToolRegistry,
     skills_settings: SkillsSettings,
     full_tool_registry: ToolRegistry | None = None,
+    permission_checker: Any | None = None,
 ) -> tuple[SkillRegistry, PluginRegistry, SkillMatcher | None]:
     """Load skills, plugins, register plugin tools, and create SkillMatcher.
 
@@ -99,7 +101,7 @@ def load_extensions(
         (skill_registry, plugin_registry, skill_matcher_or_None)
     """
     # ── Skills ──────────────────────────────────────────────────────────
-    skill_registry = SkillRegistry()
+    skill_registry = SkillRegistry(permission_checker=permission_checker)
     skill_dirs = resolve_dirs("skills", settings, project_root)
     for index, skills_dir in enumerate(skill_dirs):
         if not skills_dir.exists():

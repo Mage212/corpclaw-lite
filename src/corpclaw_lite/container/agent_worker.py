@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import sys
 from typing import TYPE_CHECKING
 
@@ -36,6 +35,7 @@ def _build_container_registry() -> ToolRegistry:
     Lazy-loading tools here to speed up python startup in the container.
     """
     try:
+        from corpclaw_lite.extensions.tools.builtin.apply_fill_plan import ApplyFillPlanTool
         from corpclaw_lite.extensions.tools.builtin.chart_generate import ChartGenerateTool
         from corpclaw_lite.extensions.tools.builtin.convert_format import ConvertFormatTool
         from corpclaw_lite.extensions.tools.builtin.diff_text import DiffTextTool
@@ -73,6 +73,11 @@ def _build_container_registry() -> ToolRegistry:
         PdfReaderTool(),
         ExcelInspectTool(),
         ExcelWorkbookTool(),
+        # Brief→FillPlan production path.
+        # Must be kept in sync with factory._all_tool_classes(); otherwise
+        # container.enabled=true rejects the tool call the LLM emits after
+        # reading FILES_BRIEF.
+        ApplyFillPlanTool(),
     ]:
         registry.register(tool)
     return registry
@@ -91,9 +96,20 @@ def get_registry() -> ToolRegistry:
 def process_request() -> None:
     """Read from stdin, verify, execute tool, sign response, print to stdout."""
     _init_logging()
-    # sys.stdin.read() hangs indefinitely on Docker Desktop for Mac because of EOF handling issues.
-    # Since payload is sent as a single line JSON string, we use readline().
-    input_data = sys.stdin.readline().strip()
+    # Two-line stdin protocol (security-hardening sprint 3): line 1 is the IPC
+    # secret, line 2 is the signed JSON payload. Keeping the secret on stdin
+    # keeps it out of the docker exec argv (visible via ps/proc). We fall back to
+    # CORPCLAW_IPC_SECRET env only if the first line looks like JSON (legacy host
+    # callers that still send a single payload line and rely on env).
+    first_line = sys.stdin.readline()
+    second_line = sys.stdin.readline()
+    secret_from_stdin = first_line.strip()
+    input_data = second_line.strip()
+    if not input_data:
+        # Legacy single-line caller: the first line was actually the payload.
+        input_data = secret_from_stdin
+        secret_from_stdin = ""
+
     if not input_data:
         return
 
@@ -102,11 +118,9 @@ def process_request() -> None:
     try:
         req = json.loads(input_data)
 
-        # Verify — in the container env, CORPCLAW_IPC_SECRET is injected
-        auth = IPCAuth()
-        # Clear secret from process environment to reduce exposure window.
-        # IPCAuth.__init__ already stored the secret internally.
-        os.environ.pop("CORPCLAW_IPC_SECRET", None)
+        # Verify — secret is provided on stdin for this docker-exec process only,
+        # not in the long-lived container create environment.
+        auth = IPCAuth(secret=secret_from_stdin or None)
         payload = auth.verify(req)
 
         if payload.get("type") != "tool_call":

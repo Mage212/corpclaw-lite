@@ -5,6 +5,7 @@ import os
 import re
 
 __all__ = [
+    "CredentialScrubbingFormatter",
     "CredentialScrubber",
     "scrub_text",
 ]
@@ -35,10 +36,14 @@ class CredentialScrubber(logging.Filter):
     """
 
     PATTERNS: tuple[re.Pattern[str], ...] = (
-        re.compile(r"sk-[a-zA-Z0-9]{20,}"),  # OpenAI / Anthropic
+        re.compile(r"sk-(?:proj|ant|svcacct)-[a-zA-Z0-9_-]{16,}"),
+        re.compile(r"sk-[a-zA-Z0-9_-]{20,}"),  # OpenAI-compatible legacy keys
+        re.compile(r"\bhf_[a-zA-Z0-9]{20,}"),  # Hugging Face
+        re.compile(r"\bglpat-[a-zA-Z0-9_-]{16,}"),  # GitLab PAT
+        re.compile(r"\bgithub_pat_[a-zA-Z0-9_]{20,}"),  # GitHub fine-grained PAT
         re.compile(r"\bbot\d{6,}:[A-Za-z0-9_-]{20,}"),  # Telegram bot token in URLs
         re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{20,}"),  # Raw Telegram bot token
-        re.compile(r"ghp_[a-zA-Z0-9]{36}"),  # GitHub PAT
+        re.compile(r"ghp_[a-zA-Z0-9]{20,}"),  # GitHub PAT (sync with tool_guard_rules)
         re.compile(r"Bearer\s+[a-zA-Z0-9\-\._~+/]+=*"),  # Generic Bearer
         re.compile(r"AKIA[A-Z0-9]{16}"),  # AWS Access Key ID
         re.compile(r"xox[bprs]-[a-zA-Z0-9\-]+"),  # Slack tokens
@@ -50,11 +55,12 @@ class CredentialScrubber(logging.Filter):
 
     def __init__(self, name: str = "") -> None:
         super().__init__(name)
+        # B-074/L3: only static patterns here. The IPC secret is re-read from
+        # the environment on each filter() call (see _scrub) so a secret that
+        # is rotated or loaded from .env after logging setup is still redacted
+        # — matching the module-level scrub_text() behaviour. Caching it here
+        # (the previous behaviour) leaked the secret into logs in that window.
         self._patterns: list[re.Pattern[str]] = list(self.PATTERNS)
-        # Dynamically scrub the IPC secret if set
-        ipc_secret = os.environ.get("CORPCLAW_IPC_SECRET")
-        if ipc_secret and len(ipc_secret) > 8:
-            self._patterns.append(re.compile(re.escape(ipc_secret)))
 
     def filter(self, record: logging.LogRecord) -> bool:
         """Process the log record and scrub sensitive text."""
@@ -89,4 +95,16 @@ class CredentialScrubber(logging.Filter):
         res = text
         for pattern in self._patterns:
             res = pattern.sub(self.MASK, res)
+        # B-074/L3: dynamically scrub the IPC secret on each call, matching
+        # scrub_text(). Cheap (a single str.replace) and rotation-safe.
+        ipc_secret = os.environ.get("CORPCLAW_IPC_SECRET")
+        if ipc_secret and len(ipc_secret) > 8:
+            res = res.replace(ipc_secret, self.MASK)
         return res
+
+
+class CredentialScrubbingFormatter(logging.Formatter):
+    """Scrub the final formatted record, including formatter-created traceback text."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        return scrub_text(super().format(record))

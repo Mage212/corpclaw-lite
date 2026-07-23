@@ -19,8 +19,19 @@ class TestQueueBasic:
         assert entry.user_id == "user1"
         assert q.active_count == 1
         assert q.queue_length == 0
-        await q.release("user1", 5.0)
+        await q.release(entry, 5.0)
         assert q.active_count == 0
+
+    @pytest.mark.asyncio
+    async def test_on_load_changed_fires_on_acquire_and_release(self) -> None:
+        """DC-008 ambient bar needs load hooks even when no waiter notify runs."""
+        q = LLMRequestQueue(max_concurrent=2)
+        events: list[str] = []
+        q.set_on_load_changed(lambda: events.append(f"a={q.active_count}"))
+        entry = await q.acquire("user1")
+        assert events == ["a=1"]
+        await q.release(entry, 1.0)
+        assert events == ["a=1", "a=0"]
 
     @pytest.mark.asyncio
     async def test_acquire_fills_to_capacity(self) -> None:
@@ -34,7 +45,7 @@ class TestQueueBasic:
         """Third request blocks until a slot is released."""
         q = LLMRequestQueue(max_concurrent=1)
 
-        await q.acquire("u1")
+        entry_u1 = await q.acquire("u1")
 
         result: list[str] = []
 
@@ -47,7 +58,7 @@ class TestQueueBasic:
         assert result == [], "Should still be waiting"
         assert q.queue_length == 1
 
-        await q.release("u1", 1.0)
+        await q.release(entry_u1, 1.0)
         await task
         assert result == ["acquired"]
         assert q.queue_length == 0
@@ -99,6 +110,35 @@ class TestQueueBasic:
         assert q.active_count == 1
         await q.release(entry, 0.1)
 
+    @pytest.mark.asyncio
+    async def test_double_release_is_noop_on_semaphore(self) -> None:
+        """Releasing the same entry twice must not over-grant semaphore slots.
+
+        Regression guard: release() unconditionally called semaphore.release(),
+        so a double-release would bump the counter above max_concurrent and allow
+        extra concurrent inferences. The fix gates the release on the entry being
+        active, so the second release is a no-op.
+        """
+        q = LLMRequestQueue(max_concurrent=1)
+        entry = await q.acquire("u1")
+        await q.release(entry, 1.0)
+        assert q.active_count == 0
+        # The double release must be a safe no-op (no exception, no extra slot).
+        await q.release(entry, 1.0)
+
+        # u2 takes the single real slot; it must succeed.
+        entry_u2 = await q.acquire("u2")
+        assert q.active_count == 1
+        # u3 must block — there is only one slot and the double-release above did
+        # NOT grant a phantom second one.
+        waiter = asyncio.create_task(q.acquire("u3"))
+        await asyncio.sleep(0.02)
+        assert not waiter.done(), (
+            "u3 must block: double-release must not over-grant a semaphore slot"
+        )
+        waiter.cancel()
+        await q.release(entry_u2, 1.0)
+
 
 class TestPositionTracking:
     """Queue position and estimated wait."""
@@ -106,7 +146,7 @@ class TestPositionTracking:
     @pytest.mark.asyncio
     async def test_position_while_waiting(self) -> None:
         q = LLMRequestQueue(max_concurrent=1)
-        await q.acquire("u1")
+        entry_u1 = await q.acquire("u1")
 
         # u2 enters queue
         task = asyncio.create_task(q.acquire("u2"))
@@ -125,11 +165,11 @@ class TestPositionTracking:
         assert q.get_position("u3") == 1
 
         # Cleanup
-        await q.release("u1", 1.0)
-        await task
-        await q.release("u2", 1.0)
-        await task3
-        await q.release("u3", 1.0)
+        await q.release(entry_u1, 1.0)
+        entry_u2 = await task
+        await q.release(entry_u2, 1.0)
+        entry_u3 = await task3
+        await q.release(entry_u3, 1.0)
 
     @pytest.mark.asyncio
     async def test_position_none_when_not_queued(self) -> None:
@@ -140,10 +180,10 @@ class TestPositionTracking:
     @pytest.mark.asyncio
     async def test_position_none_after_acquired(self) -> None:
         q = LLMRequestQueue(max_concurrent=2)
-        await q.acquire("u1")
+        entry = await q.acquire("u1")
         # Active, not waiting
         assert q.get_position("u1") is None
-        await q.release("u1", 1.0)
+        await q.release(entry, 1.0)
 
 
 class TestRollingAverage:
@@ -153,13 +193,13 @@ class TestRollingAverage:
     async def test_avg_updates_on_release(self) -> None:
         q = LLMRequestQueue(max_concurrent=2)
 
-        await q.acquire("u1")
-        await q.release("u1", 10.0)
+        entry_u1 = await q.acquire("u1")
+        await q.release(entry_u1, 10.0)
         # Default 15s, weight 0.2: 0.8*15 + 0.2*10 = 14.0
         assert abs(q._avg_request_seconds - 14.0) < 0.01
 
-        await q.acquire("u2")
-        await q.release("u2", 20.0)
+        entry_u2 = await q.acquire("u2")
+        await q.release(entry_u2, 20.0)
         # 0.8*14 + 0.2*20 = 15.2
         assert abs(q._avg_request_seconds - 15.2) < 0.01
 
@@ -170,7 +210,7 @@ class TestWaitingEntries:
     @pytest.mark.asyncio
     async def test_get_waiting_entries(self) -> None:
         q = LLMRequestQueue(max_concurrent=1)
-        await q.acquire("u1")
+        entry_u1 = await q.acquire("u1")
 
         t2 = asyncio.create_task(q.acquire("u2"))
         t3 = asyncio.create_task(q.acquire("u3"))
@@ -180,16 +220,16 @@ class TestWaitingEntries:
         ids = {e.user_id for e in entries}
         assert ids == {"u2", "u3"}
 
-        await q.release("u1", 1.0)
-        await t2
-        await q.release("u2", 1.0)
-        await t3
-        await q.release("u3", 1.0)
+        await q.release(entry_u1, 1.0)
+        entry_u2 = await t2
+        await q.release(entry_u2, 1.0)
+        entry_u3 = await t3
+        await q.release(entry_u3, 1.0)
 
     @pytest.mark.asyncio
     async def test_get_entry_by_id(self) -> None:
         q = LLMRequestQueue(max_concurrent=1)
-        await q.acquire("u1")
+        entry_u1 = await q.acquire("u1")
 
         t = asyncio.create_task(q.acquire("target"))
         await asyncio.sleep(0.02)
@@ -201,9 +241,9 @@ class TestWaitingEntries:
         no_entry = q.get_entry("nobody")
         assert no_entry is None
 
-        await q.release("u1", 1.0)
-        await t
-        await q.release("target", 1.0)
+        await q.release(entry_u1, 1.0)
+        entry_target = await t
+        await q.release(entry_target, 1.0)
 
 
 class TestConcurrentAccess:
@@ -218,13 +258,13 @@ class TestConcurrentAccess:
 
         async def worker(uid: str) -> None:
             nonlocal peak_active
-            await q.acquire(uid)
+            entry = await q.acquire(uid)
             async with lock:
                 current = q.active_count
                 if current > peak_active:
                     peak_active = current
             await asyncio.sleep(0.05)
-            await q.release(uid, 0.05)
+            await q.release(entry, 0.05)
 
         await asyncio.gather(*[worker(f"u{i}") for i in range(10)])
         assert peak_active <= max_c
@@ -331,3 +371,36 @@ class TestSlotAffinity:
         assert entry.slot_kind == "simple"
         assert entry.backend_extra_body == {}
         await q.release(entry, 1.0)
+
+    @pytest.mark.asyncio
+    async def test_cancel_after_slot_lock_before_semaphore_releases_both(self) -> None:
+        q = LLMRequestQueue(
+            max_concurrent=1,
+            strategy="slot_affinity",
+            slot_affinity=SlotAffinityConfig(
+                enabled=True,
+                provider_names=("llamacpp",),
+                sticky_slot_ids=(0,),
+                overflow_slot_ids=(),
+            ),
+        )
+        # A non-matching provider consumes only the global semaphore.
+        holder = await q.acquire("holder", provider_name="other")
+        waiter = asyncio.create_task(q.acquire("u1", provider_name="llamacpp"))
+        for _ in range(100):
+            if q._slots[0].lock.locked():
+                break
+            await asyncio.sleep(0.001)
+        assert q._slots[0].lock.locked()
+        assert not waiter.done()
+
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        assert not q._slots[0].lock.locked()
+        assert q.queue_length == 0
+
+        await q.release(holder, 0.1)
+        next_entry = await asyncio.wait_for(q.acquire("u2", provider_name="llamacpp"), timeout=0.5)
+        assert next_entry.slot_id == 0
+        await q.release(next_entry, 0.1)

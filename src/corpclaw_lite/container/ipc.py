@@ -107,7 +107,14 @@ class ContainerIPC:
             "tool_timeout": self.tool_timeout,
         }
         signed_message = self.auth.sign(payload)
-        input_data = (json.dumps(signed_message) + "\n").encode("utf-8")
+        # Two-line stdin protocol: first line is the IPC secret, second line the
+        # signed JSON payload. This keeps the secret out of the docker exec argv
+        # (visible via /proc/<pid>/cmdline and `ps`), so a local observer who can
+        # list processes cannot harvest CORPCLAW_IPC_SECRET to forge HMAC calls.
+        secret_str = self.auth.secret_for_stdin()
+        secret_line = (secret_str + "\n").encode("utf-8")
+        payload_line = (json.dumps(signed_message) + "\n").encode("utf-8")
+        input_data = secret_line + payload_line
 
         cmd = [
             "docker",

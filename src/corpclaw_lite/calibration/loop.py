@@ -110,21 +110,23 @@ class CalibrationLoop:
             department="engineering",
         )
 
-        # Get system prompt
+        # B-111: AgentLoop assembles base + user layers at run-time.
+        # system_prompt below is only for the cloud analyzer's "current prompt" context.
         from corpclaw_lite.config.bootstrap import BootstrapLoader
 
-        bootstrap = BootstrapLoader(self._project_root / "config" / "bootstrap")
-        system_prompt = bootstrap.get_system_prompt() or ""
+        system_prompt = (
+            BootstrapLoader(self._project_root / "config" / "bootstrap").get_system_prompt() or ""
+        )
 
         # Prepare workspace
         workspace = self._project_root / ".calibration_workspace"
         workspace.mkdir(exist_ok=True)
 
-        # Baseline run
+        # Baseline run (system_prompt=None → loop default + user layers)
         runner = CalibrationRunner(
             agent_loop,
             cal_user,
-            system_prompt,
+            None,
             workspace,
             skill_matcher=_cal_stack.skill_matcher,
             skill_registry=_cal_stack.skill_registry,
@@ -172,22 +174,18 @@ class CalibrationLoop:
                 improvements=["Cloud provider not available — dry-run only"],
             )
 
-        # Build a temporary router to resolve calibration-specific provider
+        # Resolve the calibration provider. Prefer an explicit calibration
+        # routing rule; otherwise build the cloud provider directly from its
+        # connection. (LLMRouter.with_overrides does not fit here — the
+        # fallback swaps the *provider* to the cloud connection, not the
+        # sampling on an existing route.)
         router = LLMRouter.from_settings(settings.llm, provider_registry)
-        calibration_provider = router.for_task("calibration")
-
-        # If no calibration rule, try building directly from cloud provider connection
-        if not router.has_task_route("calibration"):
+        if router.has_task_route("calibration"):
+            calibration_provider = router.for_task("calibration")
+        else:
             from corpclaw_lite.llm.router import build_provider
 
-            cloud_model: str = "calibration"
-            for rule in settings.llm.routing:
-                if rule.task_kind == "calibration" and rule.provider == self._cloud_name:
-                    if rule.model is not None:
-                        cloud_model = rule.model
-                    break
-
-            built = build_provider(cloud_conn, model=cloud_model)
+            built = build_provider(cloud_conn, model="calibration")
             if built is None:
                 print(
                     f"\n⚠️  Cloud provider '{self._cloud_name}' could not be built"
@@ -244,8 +242,8 @@ class CalibrationLoop:
             reasoning = proposed.get("reasoning", "—")
             print(f"  Analysis: {reasoning}")
 
-            # Apply changes
-            editor.apply(proposed["changes"])
+            # Apply changes (None-safe: an analyzer that omits "changes" is a no-op)
+            editor.apply(proposed.get("changes"))
 
             # Rebuild stack with new config
             new_settings = load_settings(self._project_root / "config" / "settings.yaml")
@@ -253,9 +251,11 @@ class CalibrationLoop:
             new_loop = _new_stack.loop
             new_registry = _new_stack.tool_registry
 
-            # Reload bootstrap with calibrated overrides
-            new_bootstrap = BootstrapLoader(self._project_root / "config" / "bootstrap")
-            new_system_prompt = new_bootstrap.get_system_prompt() or ""
+            # Reload bootstrap snapshot for analyzer context (not passed into run).
+            new_system_prompt = (
+                BootstrapLoader(self._project_root / "config" / "bootstrap").get_system_prompt()
+                or ""
+            )
 
             # Load and apply tool overrides
             overrides = editor.load_tool_overrides()
@@ -269,7 +269,7 @@ class CalibrationLoop:
             new_runner = CalibrationRunner(
                 new_loop,
                 cal_user,
-                new_system_prompt,
+                None,
                 workspace,
                 few_shots=calibrated_few_shots,
                 skill_matcher=_new_stack.skill_matcher,

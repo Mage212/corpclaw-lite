@@ -1,5 +1,7 @@
 import logging
 
+import pytest
+
 from corpclaw_lite.security.credential_scrubber import CredentialScrubber, scrub_text
 
 
@@ -47,6 +49,14 @@ def test_scrub_text_removes_github_pat():
     raw = "token=ghp_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8"
     result = scrub_text(raw)
     assert "ghp_" not in result
+    assert "***REDACTED***" in result
+
+
+def test_scrub_text_removes_short_github_pat():
+    """DC-020: scrubber must match tool_guard width ghp_…{20,} (not only 36)."""
+    short_pat = "ghp_" + "A" * 20
+    result = scrub_text(f"token={short_pat}")
+    assert short_pat not in result
     assert "***REDACTED***" in result
 
 
@@ -108,3 +118,33 @@ def test_credential_scrubber_exc_text():
     scrubber.filter(record)
     assert "sk-" not in record.exc_text
     assert "***REDACTED***" in record.exc_text
+
+
+def test_credential_scrubber_redacts_ipc_secret_set_after_construction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B-074/L3: the logging filter must redact CORPCLAW_IPC_SECRET even when it
+    is set (or rotated) AFTER the scrubber was constructed at logging setup.
+
+    Previously __init__ cached the secret into a regex once; a secret loaded
+    from .env later, or rotated in-process, leaked into logs. Now filter()
+    re-reads the env on each call, matching scrub_text().
+    """
+    monkeypatch.delenv("CORPCLAW_IPC_SECRET", raising=False)
+    scrubber = CredentialScrubber()  # constructed before the secret exists
+
+    secret = "ipc-secret-rotation-after-logging-init-0123456789"
+    monkeypatch.setenv("CORPCLAW_IPC_SECRET", secret)
+
+    record = logging.LogRecord(
+        name="test",
+        level=logging.INFO,
+        pathname="",
+        lineno=0,
+        msg=f"signed payload with {secret}",
+        args=(),
+        exc_info=None,
+    )
+    scrubber.filter(record)
+    assert secret not in record.msg
+    assert "***REDACTED***" in record.msg

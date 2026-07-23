@@ -154,20 +154,25 @@ data/
 |-------------|----------|
 | **ReAct-цикл агента** | Классический reasoning+acting с бюджетными ограничениями и обнаружением зацикливаний |
 | **LLM Router** | Маршрутизация задач к конкретным провайдерам (локальный Ollama, облачный Anthropic и др.) |
-| **Модельные пресеты** | Параметры инференса и конфигурация reasoning для каждой модели |
+| **Model + Sampling Profiles** | Ортогональные `ModelProfile` (свойства модели) + `SamplingProfile` (свойства задачи/фазы) с per-call `RequestOptions` override (D-056) |
+| **PhasePolicy** | Per-фазное управление thinking — research gathering off, aggregation on; closing mode off |
+| **Workflow-finalize Guard** | Каскад nudge → restrict → auto-finalize — research-субагенты всегда возвращают отчёт, работа не теряется при исчерпании бюджета |
+| **Raw LLM Capture** | Opt-in логирование сырых request/response в `logs/llm_payloads.jsonl` (по умолчанию **выкл.**, DC-037) с field-level allowlist + scrubbing секретов — для диагностики и датасета дообучения |
 | **XML Tool Calling** | Fallback-парсер для локальных LLM без нативного function calling |
 | **Сжатие контекста** | 3-уровневое сжатие для ограниченных контекстных окон |
 | **Smart Approvals** | LLM-оценка риска опасных операций |
-| **Docker-песочница** | Пользовательские контейнеры с лимитами ресурсов и запретом сети по умолчанию |
+| **Docker-песочница** | Пользовательские контейнеры с лимитами ресурсов и deny-all сетью; host-tools только с явным env opt-in (DC-016) |
+| **Workspace isolation** | Per-user `workspaces/user_<id>/` через contextvar для path-validated тулзов даже без контейнера (DC-017) |
 | **ToolGuard** | 31 YAML-правило безопасности с уровнями CRITICAL/HIGH/MEDIUM/INFO |
 | **Субагенты** | Изолированные ReAct-циклы со специализированными инструментами (экономия 60-80% контекста) |
 | **Скиллы** | Markdown-инструкции с TF-IDF семантическим матчем + горячая перезагрузка |
 | **Плагины** | Доверенные локальные расширения через manifest.yaml и subprocess-изоляцию |
 | **MCP-интеграция** | Model Context Protocol серверы через stdio JSON-RPC |
-| **Web-канал** | Браузерный чат, единая statusline выполнения, личный файловый диспетчер и общая идентичность с Telegram |
+| **Web-канал** | Браузерный чат (редизайн в стиле Mistral.ai: multi-chat история, режимы Fast/Think/Research, менеджер расширений, контекст агента), единая statusline выполнения, личный файловый диспетчер и общая идентичность с Telegram |
+| **Персистенция LLM-контекста per chat** | Полный LLM-facing контекст (tool_calls + reasoning) хранится per web-чат → восстановление при переключении, сжатие любого чата и корреляция capture для сбора датасета (B-063) |
 | **Онбординг** | Гибридный детерминированный Q&A + LLM-финализация профиля |
 | **Автокалибровка** | Адаптация промптов/описаний инструментов/few-shots под конкретную локальную модель |
-| **RBAC** | 10 департаментов с инструментальными разрешениями и бюджетами |
+| **RBAC** | 10 департаментов с инструментальными разрешениями (лимиты ресурсов глобальны в settings.yaml) |
 | **Приватный overlay расширений** | Корпоративные доработки в отдельном приватном репо, компонуются в рантайме — ни одного приватного файла в публичном репо ([документация](../corpclaw-lite/CONTRIBUTING.md#private-extensions-overlay)) |
 | **Горячая перезагрузка** | Скиллы, плагины, субагенты и MCP-серверы перезагружаются без перезапуска |
 
@@ -260,7 +265,10 @@ plugins/my_plugin/
 | `document-agent` | read/write/edit_file, normalize_excel, list_files | Создание и редактирование документов |
 | `execution-agent` | exec_script, write_file, read_file | Выполнение скриптов и команд |
 | `research-agent` | research_search, research_fetch_source, research_read_source, research_store_fact, research_list_facts, research_finalize, web_fetch, web_search | Веб-исследование, проверка источников и финализация ответа |
-| `data-agent` | table_query, chart_generate, convert_format, pdf_reader, diff_text, excel_workbook, read/write_file, list_files, search_files, send_file | Анализ данных, SQL, графики, Excel и конвертация |
+| `data-agent` | table_query, chart_generate, convert_format, pdf_reader, diff_text, excel_workbook, read/write_file, list_files, search_files | Анализ данных, SQL, графики, Excel и конвертация |
+
+> `send_file` доступен только основному агенту: субагент создаёт файл, main
+> доставляет его пользователю (two-step create→send, см. `BEHAVIOR.md`).
 
 ### MCP-серверы (`config/mcp_servers.yaml`)
 
@@ -278,13 +286,21 @@ servers:
 
 - локальные аккаунты с паролем и HttpOnly session cookie;
 - личный workspace пользователя (`workspaces/user_<users.id>`) общий для Telegram и Web;
-- современный React/Vite UI с отдельной production-сборкой;
+- современный React/Vite UI (редизайн в стиле Mistral.ai) с отдельной production-сборкой;
+- **multi-chat история**: несколько независимых чатов с авто-именами, группировкой по времени,
+  переключением (restore-on-activate) и удалением; стартовая панель пустая;
+- **режимы глубины Fast / Think / Research** в композере (переключают sampling-профиль);
+- **менеджер расширений** и панель **контекста агента** (личные инструкции + тон ответа);
 - сворачиваемый файловый диспетчер: дерево папок, поиск, предпросмотр, drag-and-drop,
   загрузка, скачивание, переименование, перемещение, копирование и удаление с подтверждением;
 - чат с режимами `execute` и `chat`;
+- **персистенция полного LLM-контекста per chat** (B-063): переключение чата восстанавливает
+  точное LLM-состояние (включая `tool_calls` и reasoning), а «Сжать» работает с любым чатом,
+  не только с активным;
 - единая statusline выполнения: WebSocket обновляет текущий статус модели в одной строке,
   не засоряя историю чата отдельными служебными сообщениями;
 - подтверждения опасных действий через интерактивный UI.
+
 
 ### Production-like запуск
 
@@ -341,6 +357,21 @@ npm run dev
 > Если `container.enabled=true`, для веб-канала также нужен `CORPCLAW_IPC_SECRET`, как и для
 > Telegram. Файловые инструменты агента выполняются в контейнере, а операции веб-диспетчера
 > дополнительно проверяют границы личного workspace на стороне хоста.
+
+### Изоляция контейнера (defaults и dev)
+
+| Режим | Конфиг | Env |
+|-------|--------|-----|
+| **Прод (по умолчанию)** | `container.enabled: true` | Docker + `CORPCLAW_IPC_SECRET` |
+| **Dev без Docker** | `container.enabled: false` | `CORPCLAW_ALLOW_HOST_TOOLS=1` |
+| **Telegram/Web без Docker** | `container.enabled: false` | `CORPCLAW_ALLOW_HOST_TOOLS=1` **и** `CORPCLAW_ENFORCE_PROD_CONTAINER=false` |
+
+Без opt-in старт падает с `StartupConfigurationError` (DC-016). Host-tools не для multi-user прода.
+
+**Closed-contour defaults (v0.2.3):**
+- `logging.capture_enabled: false` — захват сырых LLM-пейлоадов только opt-in.
+- Департамент `default` = **office-without-web** (офисные субагенты, без web/research).
+- File-тулзы резолвят пути в `workspaces/user_<id>/` даже при выключенных контейнерах (DC-017).
 
 ---
 
@@ -468,45 +499,72 @@ CorpClaw Lite спроектирован для работы в **замкнут
 
 ### LLM Router
 
-Маршрутизация разных задач к конкретным провайдерам:
+Маршрутизация задач к провайдерам через routing rules в `config/settings.yaml`.
+Провайдеры регистрируются через env (`PROVIDER_*__*`), модели и sampling-профили —
+через routing rules:
 
 ```yaml
+# .env
+PROVIDER_LLAMACPP__TYPE=openai
+PROVIDER_LLAMACPP__BASE_URL=http://localhost:11434/v1
+PROVIDER_LLAMACPP__API_KEY=ollama
+```
+
+```yaml
+# config/settings.yaml
 llm:
-  default: "default"
-  named:
-    default:
-      type: "openai"
-      model: "qwen3.5-4b"
-      base_url: "http://localhost:11434/v1"
-      preset: "qwen3.5-thinking"
-    cloud:
-      type: "anthropic"
-      model: "claude-sonnet-4-20250514"
-      api_key: "${ANTHROPIC_API_KEY}"
   routing:
+    - task_kind: "default"
+      provider: "llamacpp"
+      model: "gemma4-26b-qat"
+      sampling: "gemma4-default"      # ссылка на sampling-профиль (model-scoped)
     - task_kind: "vision"
-      provider: "default"
-    - subagent_id: "code_review"
-      provider: "cloud"
+      provider: "llamacpp"
+      model: "gemma4-26b-qat"
+      sampling: "gemma4-fast"         # thinking off для экстракции
+    - subagent_id: "research-agent"
+      provider: "llamacpp"
+      model: "gemma4-26b-qat"
 ```
 
-### Модельные пресеты
+### Модельные профили и sampling (D-056)
 
-Разные модели требуют разные параметры инференса и стратегии reasoning:
+Пресет расщеплён на два ортогональных слоя: `ModelProfile` (свойства модели) +
+`SamplingProfile` (свойства задачи/фазы). Sampling-профили **model-scoped** —
+`inference_overrides` применяются только при совпадении модели. Хранятся в
+`config/model_presets.yaml`:
 
 ```yaml
-presets:
-  qwen3.5-thinking:
-    thinking:
-      source: "native"          # Использует поле reasoning_content из API
-    thinking_budget_tokens: 1024
-    inference_params:
-      temperature: 0.7
-      top_p: 0.95
-      top_k: 20
+models:                          # ModelProfile — свойства модели
+  gemma4-26b-qat:
+    thinking_parser: {source: native}
+    default_inference: {temperature: 1.0, top_p: 0.95, top_k: 64}  # офиц. рекомендация
+
+sampling:                        # SamplingProfile — свойства задачи/фазы
+  gemma4-default:                # natural thinking
+    model: gemma4-26b-qat
+    thinking_mode: default
+  gemma4-fast:                   # thinking off — быстрый режим
+    model: gemma4-26b-qat
+    thinking_mode: off
 ```
 
-**Приоритет:** `уровень запроса > пресет > дефолты провайдера`
+**Приоритет merge:** `model_profile defaults < sampling overrides < RequestOptions
+(per-call) < backend extra_body (transport)`.
+
+**PhasePolicy** (`agent/phase_policy.py`) — per-call переключение thinking по
+фазе задачи: closing-mode → off; research gathering → off, aggregation → on
+(monotonic переход: `research_list_facts` в cumulative tools → все последующие
+turns = aggregation, thinking force-on). Auxiliary calls (vision/compress/
+consolidate) → off через `aux-no-thinking` sampling (config-driven).
+
+**`LLMRouter.with_overrides()`** — программный atomic override всех agent-роутов
+in-memory (для testing/A/B). Перестраивает default/vision/compress/consolidate
+роуты сразу → устраняет route-contamination.
+
+Legacy формат (`presets:` комбинированный блок, `RoutingRule.preset`) всё ещё
+поддерживается back-compat reader'ом — overlay/unmigrated config работает без
+правок.
 
 ---
 
@@ -594,19 +652,19 @@ uv run pytest tests/ --cov=src/corpclaw_lite --cov-report=term-missing  # Пок
 
 | Компонент | LOC | Файлов |
 |-----------|-----|--------|
-| Agent Core | ~4 400 | 13 |
+| Agent Core | ~5 760 | 15 |
 | Extensions | ~9 100 | 51 |
-| Channels | ~6 500 | 22 |
+| Channels | ~7 900 | 22 |
 | Calibration | ~1 560 | 8 |
-| LLM Providers | ~4 000 | 9 |
-| Eval harness (B-060) | ~1 860 | 9 |
-| Container | ~830 | 6 |
+| LLM Providers | ~5 210 | 9 |
+| Eval harness (B-060) | ~2 350 | 10 |
+| Container | ~870 | 6 |
 | Security | ~800 | 6 |
 | Memory | ~840 | 4 |
 | Onboarding | ~630 | 5 |
-| Прочее | ~3 170 | ~27 |
-| **Исходный код** | **~34 500** | **~160** |
-| **Тесты** | **~30 300** | **~139** (1476 тестов собрано) |
+| Прочее | ~4 660 | ~30 |
+| **Исходный код** | **~39 680** | **166** |
+| **Тесты** | **~35 550** | **~149** (1666 тестов собрано) |
 
 ---
 

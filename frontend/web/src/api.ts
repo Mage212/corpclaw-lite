@@ -1,18 +1,40 @@
 import type {
+  AgentContextPayload,
+  AgentFileChangesPayload,
+  AgentFileDiffPayload,
+  AgentFileRevertPayload,
+  ChatSummary,
   DirectoryPayload,
+  ExtensionsPayload,
   FileEntry,
+  PendingContextPayload,
+  PinsPayload,
   PreviewPayload,
+  ChatSection,
+  ScheduleAcceptOverrides,
+  ScheduleTask,
   SessionPayload,
+  SidebarSection,
   TreeNode,
   WorkspaceOverviewPayload
 } from "./types";
 import {
   errorMessageFromPayload,
+  parseAgentFileChangesPayload,
+  parseAgentFileDiffPayload,
+  parseAgentFileRevertPayload,
+  parseChatSummaries,
+  parseChatSummary,
   parseDirectoryPayload,
+  parseExtensionsPayload,
   parseOkPayload,
   parsePathPayload,
   parsePathsPayload,
+  parsePendingContextPayload,
+  parsePinsPayload,
   parsePreviewPayload,
+  parseScheduleTaskEnvelope,
+  parseScheduleTaskList,
   parseSearchPayload,
   parseSessionPayload,
   parseTreeNode,
@@ -86,6 +108,217 @@ export function createWebSocketTicket(
 
 export function getWorkspaceOverview(): Promise<WorkspaceOverviewPayload> {
   return apiFetch("/api/workspace/overview", parseWorkspaceOverviewPayload);
+}
+
+// --- Etap 2: chat history endpoints ---
+
+export function getChats(csrf: string, section?: ChatSection): Promise<ChatSummary[]> {
+  const params = section ? new URLSearchParams({ section }) : new URLSearchParams();
+  const qs = params.toString();
+  return apiFetch(`/api/chats${qs ? `?${qs}` : ""}`, (value) =>
+    parseChatSummaries((value as { chats?: unknown }).chats)
+  );
+}
+
+export function createChat(csrf: string, section: SidebarSection): Promise<ChatSummary> {
+  return apiFetch("/api/chats", parseChatEnvelope, {
+    method: "POST",
+    csrf,
+    body: JSON.stringify({ section })
+  });
+}
+
+export function activateChat(csrf: string, chatId: number): Promise<ChatSummary> {
+  return apiFetch(`/api/chats/${chatId}/activate`, parseChatEnvelope, {
+    method: "POST",
+    csrf
+  });
+}
+
+// --- Etap 2B: chat management ---
+
+export function renameChat(csrf: string, chatId: number, title: string): Promise<{ ok: boolean }> {
+  return apiFetch(`/api/chats/${chatId}`, parseOkPayload, {
+    method: "PATCH",
+    csrf,
+    body: JSON.stringify({ title })
+  });
+}
+
+export function deleteChat(csrf: string, chatId: number): Promise<{ ok: boolean }> {
+  return apiFetch(`/api/chats/${chatId}`, parseOkPayload, {
+    method: "DELETE",
+    csrf
+  });
+}
+
+// --- B-140 / B-141: schedule lifecycle ---
+
+export function listSchedule(
+  csrf: string,
+  statuses?: string[]
+): Promise<ScheduleTask[]> {
+  const params = new URLSearchParams();
+  if (statuses && statuses.length > 0) {
+    params.set("status", statuses.join(","));
+  }
+  const qs = params.toString();
+  return apiFetch(`/api/schedule${qs ? `?${qs}` : ""}`, parseScheduleTaskList, {
+    csrf
+  });
+}
+
+export function getScheduleTask(csrf: string, taskId: string): Promise<ScheduleTask> {
+  return apiFetch(`/api/schedule/${encodeURIComponent(taskId)}`, parseScheduleTaskEnvelope, {
+    csrf
+  });
+}
+
+export function acceptSchedule(
+  csrf: string,
+  taskId: string,
+  overrides: ScheduleAcceptOverrides = {}
+): Promise<ScheduleTask> {
+  return apiFetch(
+    `/api/schedule/${encodeURIComponent(taskId)}/accept`,
+    parseScheduleTaskEnvelope,
+    {
+      method: "POST",
+      csrf,
+      body: JSON.stringify(overrides)
+    }
+  );
+}
+
+export function dismissSchedule(csrf: string, taskId: string): Promise<ScheduleTask> {
+  return apiFetch(
+    `/api/schedule/${encodeURIComponent(taskId)}/dismiss`,
+    parseScheduleTaskEnvelope,
+    {
+      method: "POST",
+      csrf
+    }
+  );
+}
+
+export function pauseSchedule(csrf: string, taskId: string): Promise<ScheduleTask> {
+  return apiFetch(
+    `/api/schedule/${encodeURIComponent(taskId)}/pause`,
+    parseScheduleTaskEnvelope,
+    {
+      method: "POST",
+      csrf
+    }
+  );
+}
+
+export function resumeSchedule(csrf: string, taskId: string): Promise<ScheduleTask> {
+  return apiFetch(
+    `/api/schedule/${encodeURIComponent(taskId)}/resume`,
+    parseScheduleTaskEnvelope,
+    {
+      method: "POST",
+      csrf
+    }
+  );
+}
+
+/** B-143 PR3: preview parse of free-form schedule_text (no activate). */
+export type ScheduleParseAssist = {
+  formula: string;
+  explanation: string;
+  schedule: { kind: string; run_at?: string | null; minutes?: number | null; expr?: string | null };
+  next_run_at: string | null;
+  original_text: string;
+};
+
+export function parseAssistSchedule(
+  csrf: string,
+  taskId: string,
+  scheduleText?: string
+): Promise<ScheduleParseAssist> {
+  const body: { schedule_text?: string } = {};
+  if (scheduleText !== undefined) {
+    body.schedule_text = scheduleText;
+  }
+  return apiFetch(
+    `/api/schedule/${encodeURIComponent(taskId)}/parse-assist`,
+    (value) => {
+      const source = value as { assist?: unknown };
+      const a = (source.assist ?? {}) as Record<string, unknown>;
+      const scheduleRaw = (a.schedule ?? {}) as Record<string, unknown>;
+      return {
+        formula: typeof a.formula === "string" ? a.formula : "",
+        explanation: typeof a.explanation === "string" ? a.explanation : "",
+        schedule: {
+          kind: typeof scheduleRaw.kind === "string" ? scheduleRaw.kind : "unset",
+          ...(typeof scheduleRaw.run_at === "string" ? { run_at: scheduleRaw.run_at } : {}),
+          ...(typeof scheduleRaw.minutes === "number" ? { minutes: scheduleRaw.minutes } : {}),
+          ...(typeof scheduleRaw.expr === "string" ? { expr: scheduleRaw.expr } : {})
+        },
+        next_run_at: typeof a.next_run_at === "string" ? a.next_run_at : null,
+        original_text: typeof a.original_text === "string" ? a.original_text : ""
+      };
+    },
+    {
+      method: "POST",
+      csrf,
+      body: JSON.stringify(body)
+    }
+  );
+}
+
+// --- Etap 4: Extensions management ---
+
+export function getExtensions(): Promise<ExtensionsPayload> {
+  return apiFetch("/api/extensions", parseExtensionsPayload);
+}
+
+export function reloadExtensions(csrf: string): Promise<{ ok: boolean; errors?: string[] }> {
+  return apiFetch("/api/extensions/reload", parseOkPayload, {
+    method: "POST",
+    csrf
+  });
+}
+
+// --- Etap 5: Agent Context ---
+
+export function getAgentContext(): Promise<AgentContextPayload> {
+  return apiFetch("/api/agent-context", (value) => ({
+    instructions: typeof (value as { instructions?: unknown }).instructions === "string"
+      ? (value as { instructions: string }).instructions
+      : "",
+    tone: ["default", "concise", "detailed"].includes(
+      (value as { tone?: string }).tone ?? ""
+    )
+      ? ((value as { tone: AgentContextPayload["tone"] }).tone)
+      : "default"
+  }));
+}
+
+export function saveAgentContext(
+  csrf: string,
+  payload: AgentContextPayload
+): Promise<{ ok: boolean }> {
+  return apiFetch("/api/agent-context", parseOkPayload, {
+    method: "PUT",
+    csrf,
+    body: JSON.stringify(payload)
+  });
+}
+
+export function getAgentContextPreview(): Promise<{ prompt: string }> {
+  return apiFetch("/api/agent-context/preview", (value) => ({
+    prompt: typeof (value as { prompt?: unknown }).prompt === "string"
+      ? (value as { prompt: string }).prompt
+      : ""
+  }));
+}
+
+/** POST /api/chats and POST /api/chats/{id}/activate return `{chat: {...}}`. */
+function parseChatEnvelope(value: unknown): ChatSummary {
+  const source = (value ?? {}) as { chat?: unknown };
+  return parseChatSummary(source.chat);
 }
 
 export function listFiles(
@@ -168,6 +401,115 @@ export function deleteFiles(
 
 export function downloadUrl(path: string): string {
   return `/api/files/download?path=${encodeURIComponent(path)}`;
+}
+
+/** B-094: one-shot attach to next message. */
+export function attachContext(
+  csrf: string,
+  path: string,
+  sessionId: number,
+  options?: { baselineTokens?: number; chunked?: boolean | null }
+): Promise<PendingContextPayload> {
+  const body: Record<string, unknown> = { path, session_id: sessionId };
+  if (options?.baselineTokens !== undefined) body.baseline_tokens = options.baselineTokens;
+  if (options?.chunked !== undefined) body.chunked = options.chunked;
+  return apiFetch("/api/files/attach-context", parsePendingContextPayload, {
+    method: "POST",
+    csrf,
+    body: JSON.stringify(body)
+  });
+}
+
+export function detachContext(
+  csrf: string,
+  sessionId: number,
+  path?: string
+): Promise<PendingContextPayload> {
+  const body: Record<string, unknown> =
+    path === undefined ? { all: true, session_id: sessionId } : { path, session_id: sessionId };
+  return apiFetch("/api/files/detach-context", parsePendingContextPayload, {
+    method: "POST",
+    csrf,
+    body: JSON.stringify(body)
+  });
+}
+
+export function listPendingContext(
+  sessionId: number
+): Promise<PendingContextPayload> {
+  return apiFetch(
+    `/api/files/pending-context?session_id=${encodeURIComponent(String(sessionId))}`,
+    parsePendingContextPayload
+  );
+}
+
+/** B-095: sticky pin (≤25% context). */
+export function pinContext(
+  csrf: string,
+  path: string,
+  sessionId: number,
+  options?: { chunked?: boolean | null }
+): Promise<PinsPayload> {
+  const body: Record<string, unknown> = { path, session_id: sessionId };
+  if (options?.chunked !== undefined) body.chunked = options.chunked;
+  return apiFetch("/api/files/pin-context", parsePinsPayload, {
+    method: "POST",
+    csrf,
+    body: JSON.stringify(body)
+  });
+}
+
+export function unpinContext(
+  csrf: string,
+  sessionId: number,
+  path?: string
+): Promise<PinsPayload> {
+  const body: Record<string, unknown> =
+    path === undefined ? { all: true, session_id: sessionId } : { path, session_id: sessionId };
+  return apiFetch("/api/files/unpin-context", parsePinsPayload, {
+    method: "POST",
+    csrf,
+    body: JSON.stringify(body)
+  });
+}
+
+export function listPins(sessionId: number): Promise<PinsPayload> {
+  return apiFetch(
+    `/api/files/pins?session_id=${encodeURIComponent(String(sessionId))}`,
+    parsePinsPayload
+  );
+}
+
+/** B-117: agent file change journal. */
+export function listAgentFileChanges(
+  options?: { limit?: number; status?: string }
+): Promise<AgentFileChangesPayload> {
+  const params = new URLSearchParams();
+  if (options?.limit != null) params.set("limit", String(options.limit));
+  if (options?.status != null) params.set("status", options.status);
+  const qs = params.toString();
+  return apiFetch(
+    `/api/files/changes${qs ? `?${qs}` : ""}`,
+    parseAgentFileChangesPayload
+  );
+}
+
+export function getAgentFileDiff(changeId: string): Promise<AgentFileDiffPayload> {
+  return apiFetch(
+    `/api/files/changes/${encodeURIComponent(changeId)}/diff`,
+    parseAgentFileDiffPayload
+  );
+}
+
+export function revertAgentFileChange(
+  csrf: string,
+  changeId: string
+): Promise<AgentFileRevertPayload> {
+  return apiFetch(
+    `/api/files/changes/${encodeURIComponent(changeId)}/revert`,
+    parseAgentFileRevertPayload,
+    { method: "POST", csrf, body: "{}" }
+  );
 }
 
 export function uploadFiles(

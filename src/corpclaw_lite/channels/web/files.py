@@ -1,6 +1,7 @@
 # pyright: reportUnknownMemberType=false, reportUnknownVariableType=false, reportAttributeAccessIssue=false
 from __future__ import annotations
 
+import os
 import shutil
 from dataclasses import dataclass
 from datetime import datetime
@@ -12,6 +13,7 @@ import anyio
 
 from corpclaw_lite.channels.telegram.file_manager import is_protected_delete_target
 from corpclaw_lite.channels.telegram.upload import is_safe_extension, sanitize_filename
+from corpclaw_lite.security.path_validator import validate_no_symlink_escape
 
 __all__ = [
     "WebFileEntry",
@@ -24,6 +26,7 @@ __all__ = [
     "make_directory",
     "move_paths",
     "preview_file",
+    "read_text_for_estimate",
     "rename_path",
     "resolve_workspace_path",
     "save_upload",
@@ -225,7 +228,15 @@ async def rename_path(workspace: Path, raw_path: str, new_name: str) -> str:
     resolve_workspace_path(workspace, _relative(workspace, destination))
     if destination.exists():
         raise FileExistsError("Target already exists")
-    await anyio.to_thread.run_sync(lambda: target.rename(destination))
+    ws_root = workspace.resolve()
+    await anyio.to_thread.run_sync(
+        lambda: (
+            # B-072: re-validate source + destination symlinks right before rename.
+            validate_no_symlink_escape(ws_root, target.resolve(), raw_path),
+            validate_no_symlink_escape(ws_root, destination.resolve(), new_name),
+            target.rename(destination),
+        )
+    )
     return _relative(workspace, destination)
 
 
@@ -240,6 +251,18 @@ def _unique_destination(parent: Path, name: str) -> Path:
         destination = (parent / f"{stem}_{counter}{suffix}").resolve()
         counter += 1
     return destination
+
+
+def _reject_tree_symlinks(root: Path) -> None:
+    """Reject every symlink below *root* without following directory links."""
+    for dir_path, dir_names, file_names in os.walk(root, followlinks=False):
+        current = Path(dir_path)
+        for name in [*dir_names, *file_names]:
+            candidate = current / name
+            if candidate.is_symlink():
+                raise PermissionError(
+                    f"Symbolic links cannot be copied: {candidate.relative_to(root)}"
+                )
 
 
 async def move_paths(workspace: Path, raw_paths: list[str], target_dir: str | None) -> list[str]:
@@ -259,10 +282,14 @@ async def move_paths(workspace: Path, raw_paths: list[str], target_dir: str | No
                 raise ValueError("Cannot move a directory into itself")
             destination = _unique_destination(parent, source.name)
             resolve_workspace_path(workspace, _relative(workspace, destination))
+            # B-072: re-validate source + destination symlinks right before rename.
+            validate_no_symlink_escape(ws_root, source.resolve(), raw_path)
+            validate_no_symlink_escape(ws_root, destination.resolve(), destination.name)
             source.rename(destination)
             moved.append(_relative(workspace, destination))
         return moved
 
+    ws_root = workspace.resolve()
     return await anyio.to_thread.run_sync(_move)
 
 
@@ -281,13 +308,34 @@ async def copy_paths(workspace: Path, raw_paths: list[str], target_dir: str | No
                 raise PermissionError("Protected path cannot be copied")
             destination = _unique_destination(parent, source.name)
             resolve_workspace_path(workspace, _relative(workspace, destination))
+            # B-072: re-validate source symlink right before copy. symlinks=False
+            # dereferences any symlinks inside a copied tree (copies content,
+            # not the link), so a symlink pointing outside is followed only if
+            # its target already passed the ancestor-walk check.
+            validate_no_symlink_escape(ws_root, source.resolve(), raw_path)
+            validate_no_symlink_escape(ws_root, destination.resolve(), destination.name)
             if source.is_dir():
-                shutil.copytree(source, destination)
+                # Check before the operation for a clear error. copytree preserves
+                # links instead of dereferencing them, so a link introduced by a
+                # concurrent writer cannot disclose its target. The post-copy scan
+                # rejects and removes such a raced-in link as well.
+                _reject_tree_symlinks(source)
+                try:
+                    shutil.copytree(source, destination, symlinks=True)
+                    _reject_tree_symlinks(destination)
+                except BaseException:
+                    if destination.exists() or destination.is_symlink():
+                        if destination.is_dir() and not destination.is_symlink():
+                            shutil.rmtree(destination)
+                        else:
+                            destination.unlink()
+                    raise
             else:
                 shutil.copy2(source, destination)
             copied.append(_relative(workspace, destination))
         return copied
 
+    ws_root = workspace.resolve()
     return await anyio.to_thread.run_sync(_copy)
 
 
@@ -297,8 +345,13 @@ async def delete_path(workspace: Path, raw_path: str, *, recursive: bool = True)
         raise FileNotFoundError("Path not found")
     if target == workspace.resolve() or is_protected_delete_target(target, workspace):
         raise PermissionError("Protected path cannot be deleted")
+    ws_root = workspace.resolve()
 
     def _delete() -> None:
+        # B-072: re-validate inside the thread, right before the op, to close
+        # the TOCTOU window between resolve_workspace_path and the destructive
+        # rmtree/unlink (a symlink swapped in between would otherwise escape).
+        validate_no_symlink_escape(ws_root, target.resolve(), raw_path)
         if target.is_dir():
             if not recursive and any(target.iterdir()):
                 raise ValueError("Directory is not empty")
@@ -405,6 +458,38 @@ async def preview_file(workspace: Path, raw_path: str) -> dict[str, object]:
     except UnicodeDecodeError:
         content = data.decode("cp1251", errors="replace")
     return {"type": "text", "entry": entry.to_dict(), "truncated": False, "content": content}
+
+
+async def read_text_for_estimate(
+    workspace: Path,
+    raw_path: str,
+    *,
+    max_bytes: int = _MAX_PREVIEW_BYTES,
+) -> str:
+    """Read a workspace text file for B-093 budget estimation.
+
+    Raises:
+        FileNotFoundError: path missing or not a file.
+        ValueError: not a text kind, or larger than ``max_bytes``.
+        PermissionError: path escapes workspace (via resolve).
+    """
+    target = resolve_workspace_path(workspace, raw_path)
+    if not target.exists() or not target.is_file():
+        raise FileNotFoundError("File not found")
+    entry = _build_entry(workspace, target)
+    if entry.kind != "text":
+        raise ValueError(
+            "Budget estimate supports text files only "
+            f"(got kind={entry.kind!r}); binary/image/PDF is B-094."
+        )
+    size = target.stat().st_size
+    if size > max_bytes:
+        raise ValueError(f"File is too large to estimate (max {max_bytes} bytes)")
+    data = await anyio.Path(target).read_bytes()
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data.decode("cp1251", errors="replace")
 
 
 async def save_upload(

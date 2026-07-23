@@ -74,6 +74,16 @@ class ScenarioSetup:
     # vision scenarios. Supported generator ids live in
     # corpclaw_lite.eval.vision_fixtures.generate_image.
     generated_images: list[tuple[str, str]] = field(default_factory=lambda: list[tuple[str, str]]())
+    # (relative_dest_path, generator_id) — deterministic xlsx generation for
+    # office scenarios (normalize_excel etc.). Supported generator ids live in
+    # corpclaw_lite.eval.corpus_fixtures.generate_workbook.
+    generated_workbooks: list[tuple[str, str]] = field(
+        default_factory=lambda: list[tuple[str, str]]()
+    )
+    # Synthetic media-report workspace generators (deterministic, no corpus).
+    # When True, _setup_workspace calls the matching support fixture builder.
+    generate_noisy_completed_month: bool = False
+    generate_dual_type: bool = False
 
 
 @dataclass
@@ -109,8 +119,14 @@ def _parse_setup(raw: dict[str, Any] | None) -> ScenarioSetup | None:
     files = [(f["path"], f["content"]) for f in raw.get("files", [])]
     copy_from_corpus = [(c["dest"], c["source"]) for c in raw.get("copy_from_corpus", [])]
     generated_images = [(g["dest"], g["generator"]) for g in raw.get("generated_images", [])]
+    generated_workbooks = [(g["dest"], g["generator"]) for g in raw.get("generated_workbooks", [])]
     return ScenarioSetup(
-        files=files, copy_from_corpus=copy_from_corpus, generated_images=generated_images
+        files=files,
+        copy_from_corpus=copy_from_corpus,
+        generated_images=generated_images,
+        generated_workbooks=generated_workbooks,
+        generate_noisy_completed_month=bool(raw.get("generate_noisy_completed_month", False)),
+        generate_dual_type=bool(raw.get("generate_dual_type", False)),
     )
 
 

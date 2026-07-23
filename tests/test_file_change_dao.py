@@ -212,6 +212,35 @@ async def test_list_recent_for_user_filters_by_user(dao: FileChangeDAO) -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_change_and_list_status_filter(dao: FileChangeDAO) -> None:
+    """B-117: get_change + list_recent status filter."""
+    cid = await dao.record_change(
+        user_id="u",
+        run_id="r1",
+        tool_name="write_file",
+        file_path="a.txt",
+        op="modify",
+        before_hash="b",
+        after_hash="a",
+        backup_path="a.txt",
+        size_bytes=1,
+    )
+    assert cid is not None
+    got = await dao.get_change(cid)
+    assert got is not None
+    assert got.id == cid
+    assert got.file_path == "a.txt"
+    assert await dao.get_change("missing") is None
+
+    await dao.mark_reverted("r1", cid)
+    open_only = await dao.list_recent_for_user("u", limit=10, status="open")
+    assert open_only == []
+    reverted = await dao.list_recent_for_user("u", limit=10, status="reverted")
+    assert len(reverted) == 1
+    assert reverted[0].id == cid
+
+
+@pytest.mark.asyncio
 async def test_mark_reverted_and_recompute_status(dao: FileChangeDAO) -> None:
     """Reverting all changes in a run marks the run as reverted."""
     for i in range(2):

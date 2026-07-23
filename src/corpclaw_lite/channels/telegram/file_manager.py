@@ -29,6 +29,7 @@ from corpclaw_lite.channels.telegram.callback_data import (
     CB_DELETE_ROOT,
     CB_DELETE_UP,
 )
+from corpclaw_lite.security.path_validator import validate_no_symlink_escape
 
 __all__ = [
     "DELETE_PAGE_SIZE",
@@ -333,8 +334,14 @@ async def _build_confirmation_async(
     return await asyncio.to_thread(build_delete_confirmation, target_path, workspace)
 
 
-async def _path_delete_async(path: Path) -> None:
+async def _path_delete_async(path: Path, workspace: Path | None = None) -> None:
+    ws_root = workspace.resolve() if workspace is not None else None
+
     def _delete() -> None:
+        # B-072: re-validate symlinks right before the op to close the TOCTOU
+        # window between _execute_delete's resolve and this unlink/rmdir.
+        if ws_root is not None:
+            validate_no_symlink_escape(ws_root, path.resolve(), str(path))
         if path.is_dir():
             path.rmdir()
         else:
@@ -383,10 +390,15 @@ class DeleteBrowserHandler:
 
     Args:
         workspace: Root workspace directory for browsing.
+        owner_uid: Telegram user id of the user who opened ``/delete``. The
+            channel checks ``callback_query.from_user.id`` against this before
+            dispatching a ``del:*`` callback, so in a group chat one user
+            cannot tap another's inline delete buttons (B-068).
     """
 
-    def __init__(self, workspace: Path) -> None:
+    def __init__(self, workspace: Path, owner_uid: int | None = None) -> None:
         self._workspace = workspace
+        self._owner_uid = owner_uid
 
     async def handle_delete_command(
         self,
@@ -652,7 +664,7 @@ class DeleteBrowserHandler:
                 await safe_edit_message(update, "Для папок нужен отдельный сценарий подтверждения.")
                 return
             try:
-                await _path_delete_async(target_path)
+                await _path_delete_async(target_path, workspace=self._workspace)
             except OSError:
                 self._clear_state(context.user_data)
                 await safe_edit_message(update, "Удалить можно только пустую папку.")
@@ -660,7 +672,7 @@ class DeleteBrowserHandler:
             next_path = target_path.parent
             next_page = 0
         else:
-            await _path_delete_async(target_path)
+            await _path_delete_async(target_path, workspace=self._workspace)
             next_path = Path(str(state.get("current_path", str(workspace))))
             next_page = int(state.get("page", 0))
 

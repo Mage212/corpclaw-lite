@@ -86,6 +86,10 @@ class PluginHotReloader:
             self._task.cancel()
             logger.info("PluginHotReloader stopped.")
 
+    async def reload_now(self) -> None:
+        """Trigger an immediate rescan (Etap 4: manual reload button)."""
+        await self._scan()
+
     # ── Internal ──────────────────────────────────────────────────────────────
 
     async def _poll_loop(self) -> None:

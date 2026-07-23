@@ -1,102 +1,117 @@
-# CorpClaw Lite — Model Presets
+# Model Presets — ModelProfile (model properties) + SamplingProfile (task properties)
 #
-# Named presets define inference parameters and thinking/reasoning configuration
-# for specific models. Reference a preset by name in settings.yaml routing rules:
+# Split D-056: each model gets a canonical ModelProfile with OFFICIAL inference
+# parameters from the manufacturer. SamplingProfiles are **model-scoped** — each
+# sampling profile declares `model:` and its `inference_overrides` apply ONLY when
+# the route's model matches. A mismatch (e.g. a qwen sampling on a gemma4 route)
+# is detected by the router at load time → warn + skip inference_overrides
+# (thinking_mode preserved). This prevents silent cross-model parameter leakage
+# that breaks models (e.g. qwen's temperature=0.4 made gemma4 non-deterministically
+# crash at thinking-OFF).
 #
-#   llm:
-#     routing:
-#       - task_kind: "default"
-#         provider: "ollama"
-#         model: "qwen3.5-4b"
-#         preset: "qwen3.5-thinking"    # ← uses this preset
+# Admins/testers can still override per-call via RequestOptions (model-agnostic
+# by design — explicit override, highest priority).
 #
-# All fields are optional — include only what the model needs.
-# Priority: request-level params > preset params > provider defaults.
+# Source of canonical parameters:
+#   Gemma 4 — official Google recommendation (single set for all modes).
+#   Qwen 3  — official recommendation, 4 task-specific modes.
 
-presets:
-  # ── Main ────────────────────────────────────────────────────────────────
-  temperature-0.4:
-    inference_params:
-      temperature: 0.4
+models:
+  # ── Qwen 3 (35B A3B) ──────────────────────────────────────────────────────
+  # Native reasoning_content (Qwen3-style). Default inference = "Thinking mode
+  # for general tasks" (official rec). Task-specific overrides live in the
+  # qwen-* sampling profiles below.
+  qwen3.6-35b-a3b:
+    description: "Qwen 3 35B A3B with native reasoning_content"
+    thinking_parser:
+      source: "native"
+    default_inference:
+      temperature: 1.0
+      top_p: 0.95
+      top_k: 20
+      min_p: 0.0
+      presence_penalty: 1.5
+      repetition_penalty: 1.0
 
-  # ── Gemma 4 ────────────────────────────────────────────────────────────────
-  gemma4-thinking:
-    description: "Gemma 4 with extended thinking via <|think|> tag injection"
-    system_prompt_prefix: "<|think|>"
-    thinking:
-      open_tag: "<|channel>thought"
-      close_tag: "<channel|>"
-      source: "content"
-    inference_params:
+  # ── Gemma 4 (26B A4B) ─────────────────────────────────────────────────────
+  # Native reasoning_content. Official rec: temperature=1.0, top_p=0.95, top_k=64
+  # (single set for all modes). DO NOT lower temperature below ~0.7: gemma4
+  # becomes non-deterministically unstable at thinking-OFF (degenerate output).
+  gemma4-26b-a4b:
+    description: "Gemma 4 26B A4B with native reasoning_content"
+    thinking_parser:
+      source: "native"
+    default_inference:
       temperature: 1.0
       top_p: 0.95
       top_k: 64
 
+sampling:
+  # ── Gemma 4 (single recommendation for all modes) ─────────────────────────
+  gemma4-default:
+    description: "Gemma 4 natural thinking (official rec)"
+    model: gemma4-26b-a4b
+    thinking_mode: default
+
   gemma4-fast:
     description: "Gemma 4 without thinking — fast mode"
-    inference_params:
-      temperature: 0.7
-      top_p: 0.9
+    model: gemma4-26b-a4b
+    thinking_mode: off
 
-  # ── Qwen 3 / 3.5 ──────────────────────────────────────────────────────────
-  #
-  # SAFETY NOTES (from LM Studio docs):
-  #   presence_penalty  — penalizes tokens already present in INPUT (prompt + tool schemas).
-  #                       NEVER use with tool calling — it blocks tool name generation.
-  #   repeat_penalty    — penalizes tokens repeated in OUTPUT only.
-  #                       Safe for tool calling, prevents looping. (routed via extra_body)
-  #   frequency_penalty — like repeat_penalty but proportional to occurrence count. Safe.
-  #
-  qwen3.5-thinking:
-    description: "Qwen3.5 with native reasoning_content field"
-    thinking:
-      source: "native"
-    # thinking_budget_tokens: 1024
-    inference_params:
-      temperature: 0.7
+  # ── Qwen 3 (4 canonical modes per official recommendation) ────────────────
+  qwen-thinking-general:
+    description: "Qwen3 thinking mode, general tasks"
+    model: qwen3.6-35b-a3b
+    thinking_mode: default
+    inference_overrides:
+      temperature: 1.0
       top_p: 0.95
       top_k: 20
       min_p: 0.0
-      repeat_penalty: 1.1           # safe for tool calling (output-only penalty)
-      # presence_penalty: DO NOT USE — kills tool calling (see notes above)
+      presence_penalty: 1.5
+      repetition_penalty: 1.0
 
-  # ── Structured Output (example for models ≥7B) ─────────────────────────────
-  #
-  # LM Studio supports response_format with JSON Schema (same as OpenAI Structured Output).
-  # The model will only generate valid JSON conforming to the provided schema.
-  #
-  # LIMITATIONS:
-  #   - Models <7B parameters may not reliably follow the schema (LM Studio docs warning)
-  #   - NOT COMPATIBLE with tool calling in the same request — use separately
-  #   - For GGUF: uses grammar-based sampling via llama.cpp
-  #   - For MLX: uses Outlines
-  #
-  # USE CASE:
-  #   Suitable for structured data extraction tasks (document parsing, NER, classification)
-  #   where tool calling is not needed.
-  #
-  # qwen3-structured:
-  #   description: "Qwen3 with structured JSON output (no tool calling)"
-  #   thinking:
-  #     source: "native"
-  #   thinking_budget_tokens: 512
-  #   inference_params:
-  #     temperature: 0.3              # low temp for deterministic structured output
-  #     top_p: 0.9
-  #     response_format:              # OpenAI-compatible, passed as standard param
-  #       type: "json_schema"
-  #       json_schema:
-  #         name: "extraction_result"
-  #         strict: true
-  #         schema:
-  #           type: "object"
-  #           properties:
-  #             entities:
-  #               type: "array"
-  #               items:
-  #                 type: "object"
-  #                 properties:
-  #                   name: { type: "string" }
-  #                   type: { type: "string", enum: ["person", "org", "location"] }
-  #                 required: ["name", "type"]
-  #           required: ["entities"]
+  qwen-thinking-coding:
+    description: "Qwen3 thinking mode, precise coding tasks"
+    model: qwen3.6-35b-a3b
+    thinking_mode: default
+    inference_overrides:
+      temperature: 0.6
+      top_p: 0.95
+      top_k: 20
+      min_p: 0.0
+      presence_penalty: 0.0
+      repetition_penalty: 1.0
+
+  qwen-instruct-general:
+    description: "Qwen3 instruct (no-thinking) mode, general tasks"
+    model: qwen3.6-35b-a3b
+    thinking_mode: off
+    inference_overrides:
+      temperature: 0.7
+      top_p: 0.8
+      top_k: 20
+      min_p: 0.0
+      presence_penalty: 1.5
+      repetition_penalty: 1.0
+
+  qwen-instruct-reasoning:
+    description: "Qwen3 instruct (no-thinking) mode, reasoning tasks"
+    model: qwen3.6-35b-a3b
+    thinking_mode: off
+    inference_overrides:
+      temperature: 1.0
+      top_p: 0.95
+      top_k: 20
+      min_p: 0.0
+      presence_penalty: 1.5
+      repetition_penalty: 1.0
+
+  # ── Auxiliary: thinking off for extraction / summarization ──────────────
+  # Used by vision / compress / consolidate routes (when on qwen) — extraction
+  # does not need reasoning, only speed. Low temperature for deterministic output.
+  aux-no-thinking:
+    model: qwen3.6-35b-a3b
+    thinking_mode: off
+    inference_overrides:
+      temperature: 0.2

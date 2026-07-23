@@ -9,6 +9,7 @@ from corpclaw_lite.extensions.tools.builtin.files import (
     IMAGE_EXTENSIONS,
     resolve_and_validate_path,
 )
+from corpclaw_lite.extensions.tools.context import get_tool_execution_context
 
 __all__ = [
     "ReadImageTool",
@@ -53,6 +54,9 @@ class ReadImageTool(Tool):
         return self._processor
 
     async def execute(self, user: User | None = None, **kwargs: Any) -> str:
+        context = get_tool_execution_context()
+        if user is None and context is not None:
+            user = context.user
         path = kwargs.get("path")
         prompt = kwargs.get("prompt", "Describe this image in detail.")
 

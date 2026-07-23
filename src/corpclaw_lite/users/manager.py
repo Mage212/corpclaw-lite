@@ -6,10 +6,12 @@ import logging
 import secrets
 import shutil
 import sqlite3
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from hashlib import pbkdf2_hmac
 from pathlib import Path
+from typing import Any, cast
 
 import anyio
 
@@ -17,10 +19,51 @@ from corpclaw_lite.users.models import User
 from corpclaw_lite.utils.db import db_connect
 
 __all__ = [
+    "MemoryWorkerState",
     "UserManager",
+    "tone_directive",
 ]
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryWorkerState:
+    """B-109: per-user memory-worker opt-in state + last-run metadata."""
+
+    user_id: int
+    enabled: bool
+    last_run_at: str | None = None
+    last_status: str | None = None
+    last_error: str | None = None
+
+
+# Response-tone directives injected into the system prompt per the user's
+# ``user_agent_context.tone`` setting (Etap 5). ``"default"`` has no directive —
+# the base SOUL.md tone line applies unchanged. ``tone_directive()`` is the
+# single point consumed by ``AgentLoop`` (B-111) for both run-time assembly and
+# web preview, so the tone setting can never silently go unused.
+_TONE_DIRECTIVES: dict[str, str] = {
+    "concise": (
+        "Be concise: give short, direct answers. Skip preamble, hedging, and "
+        "restating the question. Prefer lists over prose when several items are involved."
+    ),
+    "detailed": (
+        "Be thorough: explain your reasoning, structure the answer with headings, "
+        "and include relevant context. Prefer completeness over brevity."
+    ),
+}
+
+
+def tone_directive(tone: str) -> str:
+    """Return the system-prompt directive for a response tone.
+
+    Returns an empty string for ``"default"`` and any unknown value, so callers
+    can always append the result without a special-case branch.
+    """
+    return _TONE_DIRECTIVES.get(tone, "")
+
+
 _PASSWORD_ITERATIONS = 200_000
 _SESSION_TOKEN_BYTES = 32
 _PASSWORD_MIN_LENGTH = 12
@@ -29,8 +72,9 @@ _PASSWORD_MAX_LENGTH = 256
 
 class UserManager:
     """
-    Manages user storage in SQLite.
-    Users are stored in the same DB as memory (data/memory.db by default).
+    Manages user storage in SQLite (default path: data/users.db).
+
+    Cross-chat agent facts live in SQLiteMemory (memory.db / memory_entries), not here.
     """
 
     def __init__(
@@ -42,13 +86,12 @@ class UserManager:
     ) -> None:
         self._db = Path(db_path)
         self._db.parent.mkdir(parents=True, exist_ok=True)
+        self._whitelist_path = self._db.parent / "whitelist.json"
+        self._revoked_path = self._db.parent / "revoked_sessions.json"
         self._password_min_length = max(1, password_min_length)
         self._password_max_length = max(self._password_min_length, password_max_length)
         self._init_db()
-        self._whitelist_path = self._db.parent / "whitelist.json"
-        self._revoked_path = self._db.parent / "revoked_sessions.json"
-        self._whitelist_cache: list[dict[str, int | str]] | None = None
-        self._revoked_cache: set[int] | None = None
+        self._migrate_legacy_auth_json()
 
     def _init_db(self) -> None:
         with db_connect(self._db) as conn:
@@ -65,6 +108,31 @@ class UserManager:
                     is_admin INTEGER NOT NULL DEFAULT 0,
                     disabled INTEGER NOT NULL DEFAULT 0,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS telegram_whitelist (
+                    telegram_id INTEGER PRIMARY KEY,
+                    department TEXT NOT NULL DEFAULT 'default',
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS telegram_revocations (
+                    telegram_id INTEGER PRIMARY KEY,
+                    revoked_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS app_metadata (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
                 )
                 """
             )
@@ -94,6 +162,109 @@ class UserManager:
                     FOREIGN KEY(user_id) REFERENCES users(id)
                 )
                 """
+            )
+            # Etap 5: per-user agent context (personal instructions + tone).
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_agent_context (
+                    user_id INTEGER PRIMARY KEY,
+                    instructions TEXT NOT NULL DEFAULT '',
+                    tone TEXT NOT NULL DEFAULT 'default',
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            # B-109: per-user memory worker opt-in + run history.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_memory_worker (
+                    user_id INTEGER PRIMARY KEY,
+                    enabled INTEGER NOT NULL DEFAULT 0,
+                    last_run_at TEXT,
+                    last_status TEXT,
+                    last_error TEXT,
+                    updated_at TEXT NOT NULL DEFAULT ''
+                )
+                """
+            )
+
+    @staticmethod
+    def _read_legacy_whitelist(path: Path) -> list[tuple[int, str]]:
+        if not path.exists():
+            return []
+        try:
+            raw: object = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise RuntimeError(f"Cannot migrate legacy whitelist {path}: {exc}") from exc
+        if not isinstance(raw, list):
+            raise RuntimeError(f"Cannot migrate legacy whitelist {path}: expected a JSON list")
+        result: list[tuple[int, str]] = []
+        for entry in raw:
+            if not isinstance(entry, dict):
+                raise RuntimeError(f"Cannot migrate legacy whitelist {path}: invalid entry")
+            telegram_id = entry.get("telegram_id")
+            department = entry.get("department", "default")
+            if isinstance(telegram_id, bool) or not isinstance(telegram_id, int):
+                raise RuntimeError(f"Cannot migrate legacy whitelist {path}: invalid telegram_id")
+            if not isinstance(department, str) or not department:
+                raise RuntimeError(f"Cannot migrate legacy whitelist {path}: invalid department")
+            result.append((telegram_id, department))
+        return result
+
+    @staticmethod
+    def _read_legacy_revocations(path: Path) -> list[int]:
+        if not path.exists():
+            return []
+        try:
+            raw: object = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise RuntimeError(f"Cannot migrate legacy revocations {path}: {exc}") from exc
+        if not isinstance(raw, list):
+            raise RuntimeError(f"Cannot migrate legacy revocations {path}: expected a JSON list")
+        result: list[int] = []
+        for item in raw:
+            if isinstance(item, bool) or not isinstance(item, (int, str)):
+                raise RuntimeError(f"Cannot migrate legacy revocations {path}: invalid id")
+            try:
+                result.append(int(item))
+            except ValueError as exc:
+                raise RuntimeError(f"Cannot migrate legacy revocations {path}: invalid id") from exc
+        return result
+
+    def _migrate_legacy_auth_json(self) -> None:
+        """Import the pre-Sprint-1 JSON stores once; SQLite is canonical afterwards."""
+        with db_connect(self._db) as conn:
+            marker = conn.execute(
+                "SELECT 1 FROM app_metadata WHERE key = 'auth_json_import_v1'"
+            ).fetchone()
+        if marker is not None:
+            return
+
+        whitelist = self._read_legacy_whitelist(self._whitelist_path)
+        revoked = self._read_legacy_revocations(self._revoked_path)
+        with db_connect(self._db) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            marker = conn.execute(
+                "SELECT 1 FROM app_metadata WHERE key = 'auth_json_import_v1'"
+            ).fetchone()
+            if marker is not None:
+                return
+            conn.executemany(
+                "INSERT OR IGNORE INTO telegram_whitelist (telegram_id, department) VALUES (?, ?)",
+                whitelist,
+            )
+            conn.executemany(
+                "INSERT OR IGNORE INTO telegram_revocations (telegram_id) VALUES (?)",
+                [(telegram_id,) for telegram_id in revoked],
+            )
+            conn.execute(
+                "INSERT INTO app_metadata (key, value) VALUES ('auth_json_import_v1', 'done')"
+            )
+        if whitelist or revoked:
+            logger.info(
+                "Imported legacy auth JSON into SQLite (whitelist=%d, revoked=%d)",
+                len(whitelist),
+                len(revoked),
             )
 
     def create_user(
@@ -306,16 +477,27 @@ class UserManager:
         return user
 
     def set_web_password(self, username: str, password: str) -> bool:
-        """Set a local web user's password. Returns False if the user is missing."""
+        """Set a local web user's password. Returns False if the user is missing.
+
+        S3-08: all existing web sessions for the user are invalidated atomically,
+        so a session established before a password rotation (e.g. after suspected
+        compromise) cannot remain valid until its TTL.
+        """
         clean_username = self.normalize_username(username)
         self._validate_password(password)
         password_hash = self.hash_password(password)
         with db_connect(self._db) as conn:
-            cur = conn.execute(
+            row = conn.execute(
+                "SELECT id FROM users WHERE username = ?", (clean_username,)
+            ).fetchone()
+            if row is None:
+                return False
+            conn.execute(
                 "UPDATE users SET password_hash = ? WHERE username = ?",
                 (password_hash, clean_username),
             )
-        return bool(cur.rowcount)
+            conn.execute("DELETE FROM web_sessions WHERE user_id = ?", (int(row[0]),))
+        return True
 
     def merge_web_user(
         self,
@@ -356,10 +538,19 @@ class UserManager:
                 "UPDATE web_sessions SET user_id = ? WHERE user_id = ?",
                 (target_user_id, source_user_id),
             )
+            # B-074/M4: copy credentials onto the target first (needed to resolve
+            # target.workspace_key() below) and null the source's credentials so
+            # the source can no longer log in, but do NOT set disabled=1 yet.
+            # The disabled flag is set only after the workspace/memory
+            # sub-migrations succeed, so a mid-merge failure leaves the source
+            # recoverable (credentials already moved, but the merge can be
+            # retried or rolled back rather than leaving a half-moved disabled
+            # user). Nulling source.username here also clears the UNIQUE
+            # constraint so the target can take it over.
             conn.execute(
                 """
                 UPDATE users
-                SET username = NULL, password_hash = NULL, disabled = 1
+                SET username = NULL, password_hash = NULL
                 WHERE id = ?
                 """,
                 (source_user_id,),
@@ -394,6 +585,19 @@ class UserManager:
                 memory_db_path=memory_db_path,
                 source_key=source_after.memory_key(),
                 target_key=target_after.memory_key(),
+            )
+
+        # B-074/M4: disable the source only after all sub-migrations succeeded.
+        # A failure above propagates with the source still enabled and its data
+        # intact (recoverable), rather than disabled with half-moved memory.
+        with db_connect(self._db) as conn:
+            conn.execute(
+                """
+                UPDATE users
+                SET username = NULL, password_hash = NULL, disabled = 1
+                WHERE id = ?
+                """,
+                (source_user_id,),
             )
 
         return {
@@ -647,29 +851,106 @@ class UserManager:
 
     @staticmethod
     def _merge_memory(*, memory_db_path: Path, source_key: str, target_key: str) -> tuple[int, int]:
+        """Move memory facts (and optional legacy tables) from source to target user.
+
+        D-078 / B-106: ``SQLiteMemory`` is facts-only and drops the legacy
+        ``messages`` table on init. The legacy ``UPDATE messages`` is best-effort
+        only (no-op when the table is absent) so merge does not fail on modern DBs.
+        """
         if source_key == target_key or not memory_db_path.exists():
             return 0, 0
         with db_connect(memory_db_path) as conn:
-            cur = conn.execute(
-                "UPDATE messages SET user_id = ? WHERE user_id = ?",
-                (target_key, source_key),
-            )
-            moved_messages = int(cur.rowcount or 0)
-            cur = conn.execute(
-                """
-                UPDATE memory_facts
-                SET user_id = ?
-                WHERE user_id = ?
-                  AND NOT EXISTS (
-                      SELECT 1 FROM memory_facts existing
-                      WHERE existing.user_id = ?
-                        AND existing.key = memory_facts.key
-                  )
-                """,
-                (target_key, source_key, target_key),
-            )
-            moved_facts = int(cur.rowcount or 0)
-            conn.execute("DELETE FROM memory_facts WHERE user_id = ?", (source_key,))
+            # Legacy transcript table (pre-D-078). Optional — often missing.
+            moved_messages = 0
+            try:
+                cur = conn.execute(
+                    "UPDATE messages SET user_id = ? WHERE user_id = ?",
+                    (target_key, source_key),
+                )
+                moved_messages = int(cur.rowcount or 0)
+            except sqlite3.OperationalError as e:
+                if "no such table" not in str(e).lower():
+                    raise
+
+            # B-108: memory_entries (abstraction UNIQUE per user). Legacy memory_facts optional.
+            moved_facts = 0
+            try:
+                cur = conn.execute(
+                    """
+                    UPDATE memory_entries
+                    SET user_id = ?
+                    WHERE user_id = ?
+                      AND NOT EXISTS (
+                          SELECT 1 FROM memory_entries existing
+                          WHERE existing.user_id = ?
+                            AND existing.primary_abstraction =
+                                memory_entries.primary_abstraction
+                      )
+                    """,
+                    (target_key, source_key, target_key),
+                )
+                moved_facts = int(cur.rowcount or 0)
+                conn.execute("DELETE FROM memory_entries WHERE user_id = ?", (source_key,))
+                # Best-effort FTS cleanup (table may be missing).
+                try:
+                    conn.execute(
+                        "DELETE FROM memory_entries_fts WHERE user_id = ?",
+                        (source_key,),
+                    )
+                    # Re-index moved rows for target (application dual-write normally
+                    # keeps FTS in sync; after raw SQL merge rebuild rows for target).
+                    rows = conn.execute(
+                        """
+                        SELECT id, user_id, primary_abstraction, cue_indices_json
+                        FROM memory_entries WHERE user_id = ?
+                        """,
+                        (target_key,),
+                    ).fetchall()
+                    for row in rows:
+                        rid, uid, abstr, cues_json = row[0], row[1], row[2], row[3]
+                        try:
+                            parsed_cues: Any = json.loads(cues_json) if cues_json else []
+                            if isinstance(parsed_cues, list):
+                                cues_text = " ".join(
+                                    str(item) for item in cast(list[Any], parsed_cues)
+                                )
+                            else:
+                                cues_text = ""
+                        except Exception:
+                            cues_text = ""
+                        conn.execute(
+                            "DELETE FROM memory_entries_fts WHERE rowid = ?",
+                            (rid,),
+                        )
+                        conn.execute(
+                            """
+                            INSERT INTO memory_entries_fts(
+                                rowid, user_id, primary_abstraction, cues
+                            ) VALUES (?, ?, ?, ?)
+                            """,
+                            (rid, uid, abstr, cues_text),
+                        )
+                except sqlite3.OperationalError:
+                    pass
+            except sqlite3.OperationalError as e:
+                if "no such table" not in str(e).lower():
+                    raise
+                # Pre-B-108 DBs
+                cur = conn.execute(
+                    """
+                    UPDATE memory_facts
+                    SET user_id = ?
+                    WHERE user_id = ?
+                      AND NOT EXISTS (
+                          SELECT 1 FROM memory_facts existing
+                          WHERE existing.user_id = ?
+                            AND existing.key = memory_facts.key
+                      )
+                    """,
+                    (target_key, source_key, target_key),
+                )
+                moved_facts = int(cur.rowcount or 0)
+                conn.execute("DELETE FROM memory_facts WHERE user_id = ?", (source_key,))
             try:
                 target_active = conn.execute(
                     """
@@ -772,62 +1053,51 @@ class UserManager:
     # ── Whitelist ─────────────────────────────────────────────────────────────
 
     def _load_whitelist(self) -> list[dict[str, int | str]]:
-        """Load whitelist entries from JSON file (cached)."""
-        if self._whitelist_cache is not None:
-            return self._whitelist_cache
-        if not self._whitelist_path.exists():
-            return []
-        try:
-            data = json.loads(self._whitelist_path.read_text("utf-8"))
-            if isinstance(data, list):
-                self._whitelist_cache = data  # type: ignore[assignment]
-                return data  # type: ignore[return-value]
-        except Exception as e:
-            logger.warning("Failed to load whitelist: %s", e)
-        return []
-
-    def _save_whitelist(self, entries: list[dict[str, int | str]]) -> None:
-        """Save whitelist entries to JSON file (atomic write) and update cache."""
-        self._whitelist_path.parent.mkdir(parents=True, exist_ok=True)
-        from corpclaw_lite.utils.fs import atomic_write_text
-
-        atomic_write_text(self._whitelist_path, json.dumps(entries, indent=2), encoding="utf-8")
-        self._whitelist_cache = entries
+        """Load the canonical whitelist directly from SQLite."""
+        with db_connect(self._db) as conn:
+            rows = conn.execute(
+                "SELECT telegram_id, department FROM telegram_whitelist ORDER BY telegram_id"
+            ).fetchall()
+        return [
+            {"telegram_id": int(telegram_id), "department": str(department)}
+            for telegram_id, department in rows
+        ]
 
     def seed_whitelist(self, telegram_ids: list[int], default_department: str) -> None:
         """Merge config-based whitelist IDs into the persistent file.
 
         Only adds IDs that are not already present. Called once at startup.
         """
-        entries = self._load_whitelist()
-        existing_ids = {e["telegram_id"] for e in entries}
-        added = 0
-        for tid in telegram_ids:
-            if tid not in existing_ids:
-                entries.append({"telegram_id": tid, "department": default_department})
-                added += 1
+        with db_connect(self._db) as conn:
+            before = conn.total_changes
+            conn.executemany(
+                "INSERT OR IGNORE INTO telegram_whitelist (telegram_id, department) VALUES (?, ?)",
+                [(tid, default_department) for tid in telegram_ids],
+            )
+            added = conn.total_changes - before
         if added:
-            self._save_whitelist(entries)
             logger.info("Seeded %d IDs into whitelist", added)
 
     def add_to_whitelist(self, telegram_id: int, department: str = "default") -> None:
         """Add a telegram_id to the persistent whitelist."""
-        entries = self._load_whitelist()
-        existing_ids = {e["telegram_id"] for e in entries}
-        if telegram_id in existing_ids:
+        with db_connect(self._db) as conn:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO telegram_whitelist (telegram_id, department) VALUES (?, ?)",
+                (telegram_id, department),
+            )
+        if not cur.rowcount:
             logger.info("telegram_id=%d already in whitelist", telegram_id)
             return
-        entries.append({"telegram_id": telegram_id, "department": department})
-        self._save_whitelist(entries)
         logger.info("Added telegram_id=%d to whitelist (dept=%s)", telegram_id, department)
 
     def remove_from_whitelist(self, telegram_id: int) -> bool:
         """Remove a telegram_id from the persistent whitelist. Returns True if found."""
-        entries = self._load_whitelist()
-        new_entries = [e for e in entries if e.get("telegram_id") != telegram_id]
-        if len(new_entries) == len(entries):
+        with db_connect(self._db) as conn:
+            cur = conn.execute(
+                "DELETE FROM telegram_whitelist WHERE telegram_id = ?", (telegram_id,)
+            )
+        if not cur.rowcount:
             return False
-        self._save_whitelist(new_entries)
         logger.info("Removed telegram_id=%d from whitelist", telegram_id)
         return True
 
@@ -837,59 +1107,48 @@ class UserManager:
 
     def is_allowed(self, telegram_id: int) -> bool:
         """Check if telegram_id is in the whitelist (deny-by-default)."""
-        entries = self._load_whitelist()
-        if not entries:
-            return False  # deny all when empty
-        return any(e.get("telegram_id") == telegram_id for e in entries)
+        with db_connect(self._db) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM telegram_whitelist WHERE telegram_id = ?", (telegram_id,)
+            ).fetchone()
+        return row is not None
 
     def get_whitelist_department(self, telegram_id: int) -> str:
         """Return department for a whitelisted telegram_id, or 'default'."""
-        for e in self._load_whitelist():
-            if e.get("telegram_id") == telegram_id:
-                dept = e.get("department", "default")
-                return str(dept)
-        return "default"
+        with db_connect(self._db) as conn:
+            row = conn.execute(
+                "SELECT department FROM telegram_whitelist WHERE telegram_id = ?", (telegram_id,)
+            ).fetchone()
+        return str(row[0]) if row is not None else "default"
 
     # ── Revoked Sessions ──────────────────────────────────────────────────────
 
     def _load_revoked(self) -> set[int]:
-        if self._revoked_cache is not None:
-            return self._revoked_cache
-        if not self._revoked_path.exists():
-            return set()
-        try:
-            data = json.loads(self._revoked_path.read_text("utf-8"))
-            if isinstance(data, list):
-                result = {int(item) for item in data if isinstance(item, (int, float, str))}  # type: ignore[misc]
-                self._revoked_cache = result
-                return result
-        except Exception as e:
-            logger.warning("Failed to load revoked sessions: %s", e)
-        return set()
-
-    def _save_revoked(self, revoked: set[int]) -> None:
-        self._revoked_path.parent.mkdir(parents=True, exist_ok=True)
-        from corpclaw_lite.utils.fs import atomic_write_text
-
-        atomic_write_text(self._revoked_path, json.dumps(sorted(revoked)), encoding="utf-8")
-        self._revoked_cache = revoked
+        with db_connect(self._db) as conn:
+            rows = conn.execute("SELECT telegram_id FROM telegram_revocations").fetchall()
+        return {int(row[0]) for row in rows}
 
     def revoke_session(self, telegram_id: int) -> None:
         """Block a user from interacting with the bot."""
-        revoked = self._load_revoked()
-        revoked.add(telegram_id)
-        self._save_revoked(revoked)
+        with db_connect(self._db) as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO telegram_revocations (telegram_id) VALUES (?)",
+                (telegram_id,),
+            )
         logger.info("Session revoked for telegram_id=%d", telegram_id)
 
     def unrevoke_session(self, telegram_id: int) -> None:
         """Unblock a previously revoked user."""
-        revoked = self._load_revoked()
-        revoked.discard(telegram_id)
-        self._save_revoked(revoked)
+        with db_connect(self._db) as conn:
+            conn.execute("DELETE FROM telegram_revocations WHERE telegram_id = ?", (telegram_id,))
 
     def is_session_revoked(self, telegram_id: int) -> bool:
         """Check if a user's session is revoked."""
-        return telegram_id in self._load_revoked()
+        with db_connect(self._db) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM telegram_revocations WHERE telegram_id = ?", (telegram_id,)
+            ).fetchone()
+        return row is not None
 
     # ── Async wrappers (for use from event loop) ─────────────────────────────
 
@@ -919,3 +1178,166 @@ class UserManager:
     async def async_update_name(self, user_id: int, name: str) -> None:
         """Async wrapper around update_name."""
         await anyio.to_thread.run_sync(partial(self.update_name, user_id, name))
+
+    def get_agent_context(self, user_id: int) -> dict[str, str] | None:
+        """Return the user's agent context (instructions + tone), or None if unset."""
+        try:
+            with db_connect(self._db) as conn:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(
+                    "SELECT instructions, tone FROM user_agent_context WHERE user_id = ?",
+                    (int(user_id),),
+                ).fetchone()
+                if row is None:
+                    return None
+                return {
+                    "instructions": str(row["instructions"]),  # type: ignore[index]
+                    "tone": str(row["tone"]),  # type: ignore[index]
+                }
+        except Exception as e:
+            logger.warning("Failed to get agent context for user %s: %s", user_id, e)
+            return None
+
+    async def async_get_agent_context(self, user_id: int) -> dict[str, str] | None:
+        """Async wrapper around get_agent_context."""
+        return await anyio.to_thread.run_sync(partial(self.get_agent_context, user_id))
+
+    def set_agent_context(self, user_id: int, *, instructions: str, tone: str) -> None:
+        """Upsert the user's agent context (personal instructions + tone)."""
+        if tone not in ("default", "concise", "detailed"):
+            tone = "default"
+        instructions = instructions.strip()[:10000]  # cap at 10k chars
+        try:
+            with db_connect(self._db) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO user_agent_context (user_id, instructions, tone, updated_at)
+                    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        instructions = excluded.instructions,
+                        tone = excluded.tone,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (int(user_id), instructions, tone),
+                )
+                conn.commit()
+        except Exception as e:
+            logger.warning("Failed to set agent context for user %s: %s", user_id, e)
+
+    async def async_set_agent_context(self, user_id: int, *, instructions: str, tone: str) -> None:
+        """Async wrapper around set_agent_context."""
+        await anyio.to_thread.run_sync(
+            partial(self.set_agent_context, user_id, instructions=instructions, tone=tone)
+        )
+
+    # ── B-109: Memory worker opt-in + run history ───────────────────────────
+
+    def set_memory_worker_enabled(self, user_id: int, enabled: bool) -> None:
+        """Opt a user in/out of the background memory worker (B-109)."""
+        now = datetime.now(UTC).isoformat()
+        try:
+            with db_connect(self._db) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO user_memory_worker (user_id, enabled, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        enabled = excluded.enabled,
+                        updated_at = excluded.updated_at
+                    """,
+                    (int(user_id), 1 if enabled else 0, now),
+                )
+        except Exception as e:
+            logger.warning("Failed to set memory_worker state for user %s: %s", user_id, e)
+
+    async def async_set_memory_worker_enabled(self, user_id: int, enabled: bool) -> None:
+        """Async wrapper around set_memory_worker_enabled."""
+        await anyio.to_thread.run_sync(partial(self.set_memory_worker_enabled, user_id, enabled))
+
+    def get_memory_worker_state(self, user_id: int) -> MemoryWorkerState | None:
+        """Return the user's memory-worker state, or None if no row exists."""
+        try:
+            with db_connect(self._db) as conn:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(
+                    "SELECT * FROM user_memory_worker WHERE user_id = ?",
+                    (int(user_id),),
+                ).fetchone()
+        except Exception as e:
+            logger.warning("Failed to get memory_worker state for user %s: %s", user_id, e)
+            return None
+        if row is None:
+            return None
+        return MemoryWorkerState(
+            user_id=int(row["user_id"]),
+            enabled=bool(row["enabled"]),
+            last_run_at=str(row["last_run_at"]) if row["last_run_at"] is not None else None,
+            last_status=str(row["last_status"]) if row["last_status"] is not None else None,
+            last_error=str(row["last_error"]) if row["last_error"] is not None else None,
+        )
+
+    async def async_get_memory_worker_state(self, user_id: int) -> MemoryWorkerState | None:
+        """Async wrapper around get_memory_worker_state."""
+        return await anyio.to_thread.run_sync(partial(self.get_memory_worker_state, user_id))
+
+    def list_memory_worker_enabled_users(self) -> list[int]:
+        """Return user_ids that have opted in to the memory worker."""
+        try:
+            with db_connect(self._db) as conn:
+                rows = conn.execute(
+                    "SELECT user_id FROM user_memory_worker WHERE enabled = 1"
+                ).fetchall()
+        except Exception as e:
+            logger.warning("Failed to list memory_worker enabled users: %s", e)
+            return []
+        return [int(r[0]) for r in rows]
+
+    async def async_list_memory_worker_enabled_users(self) -> list[int]:
+        """Async wrapper around list_memory_worker_enabled_users."""
+        return await anyio.to_thread.run_sync(self.list_memory_worker_enabled_users)
+
+    def update_memory_worker_run(
+        self,
+        user_id: int,
+        *,
+        status: str,
+        error: str | None = None,
+    ) -> None:
+        """Record the outcome of a memory-worker run for the user.
+
+        Does NOT auto-enable: if no row exists, inserts with ``enabled=0`` so the
+        opt-in guarantee is preserved (worker should only call this for already
+        opted-in users, but defense-in-depth).
+        """
+        now = datetime.now(UTC).isoformat()
+        truncated_error = error[:2000] if error else None
+        try:
+            with db_connect(self._db) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO user_memory_worker (
+                        user_id, enabled, last_run_at, last_status, last_error, updated_at
+                    )
+                    VALUES (?, 0, ?, ?, ?, ?)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        last_run_at = excluded.last_run_at,
+                        last_status = excluded.last_status,
+                        last_error = excluded.last_error,
+                        updated_at = excluded.updated_at
+                    """,
+                    (int(user_id), now, status, truncated_error, now),
+                )
+        except Exception as e:
+            logger.warning("Failed to update memory_worker run for user %s: %s", user_id, e)
+
+    async def async_update_memory_worker_run(
+        self,
+        user_id: int,
+        *,
+        status: str,
+        error: str | None = None,
+    ) -> None:
+        """Async wrapper around update_memory_worker_run."""
+        await anyio.to_thread.run_sync(
+            partial(self.update_memory_worker_run, user_id, status=status, error=error)
+        )

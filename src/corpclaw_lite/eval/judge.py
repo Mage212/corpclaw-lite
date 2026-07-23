@@ -71,13 +71,31 @@ def render_transcript(trajectory: Trajectory) -> str:
 
 
 class LLMJudge:
-    """Score a turn via a cloud model using the 7-dimension rubric."""
+    """Score a turn via a cloud model using the 7-dimension rubric.
+
+    When ``ensemble > 1``, the judge queries the provider N times per turn and
+    aggregates the verdicts by per-dimension median. This reduces judge
+    variance (the cloud judge itself is not perfectly stable across calls) —
+    orthogonal to multi-seed, which reduces *agent* sampling noise. A single
+    failed ensemble member is tolerated (median of the survivors).
+    """
+
+    _DIMENSIONS = (
+        "correctness",
+        "tool_selection",
+        "context_retention",
+        "completeness",
+        "efficiency",
+        "personality",
+        "error_recovery",
+    )
 
     def __init__(
         self,
         provider: Provider,
         rubric_path: Path | str | None = None,
         agent_tools: list[str] | None = None,
+        ensemble: int = 1,
     ) -> None:
         self._provider = provider
         path = Path(rubric_path) if rubric_path else _DEFAULT_RUBRIC_PATH
@@ -85,6 +103,7 @@ class LLMJudge:
             raise FileNotFoundError(f"Judge rubric not found: {path}")
         self._rubric = path.read_text(encoding="utf-8")
         self._agent_tools = agent_tools
+        self._ensemble = max(1, ensemble)
 
     async def judge_turn(
         self,
@@ -101,13 +120,34 @@ class LLMJudge:
         ambiguity.
         """
         prompt = self._build_prompt(turn, final_answer, trajectory, turn_index)
+
+        if self._ensemble <= 1:
+            return await self._judge_once(prompt)
+
+        # Ensemble: query the provider N times, take per-dimension median.
+        verdicts: list[dict[str, Any]] = []
+        for _ in range(self._ensemble):
+            try:
+                verdicts.append(await self._query_and_parse(prompt))
+            except (JudgeError, Exception):  # noqa: BLE001 — tolerate one bad member
+                logger.debug("[eval] Ensemble member failed, continuing")
+        if not verdicts:
+            raise JudgeError("All ensemble judge calls failed")
+        return self._build_ensemble_score(verdicts)
+
+    async def _judge_once(self, prompt: str) -> TurnScore:
+        """Single judge call → TurnScore (no ensemble)."""
+        verdict = await self._query_and_parse(prompt)
+        return self._build_score(verdict)
+
+    async def _query_and_parse(self, prompt: str) -> dict[str, Any]:
+        """Call the provider once and parse the JSON verdict."""
         response = await self._provider.chat(
             messages=[{"role": "user", "content": prompt}],
             system=_JUDGE_SYSTEM,
         )
         content = (response.content or "").strip()
-        verdict = self._parse_verdict(content)
-        return self._build_score(verdict)
+        return self._parse_verdict(content)
 
     # ─────────────────────────── prompt assembly ─────────────────────────
 
@@ -217,15 +257,7 @@ appear in the transcript prefixed with the subagent id (e.g. ``[data-agent]``).
             raise JudgeError(f"Judge 'scores' is not an object: {type(raw_scores_obj)}")
         raw_scores = cast(dict[str, Any], raw_scores_obj)
         scores: dict[str, float] = {}
-        for dim in (
-            "correctness",
-            "tool_selection",
-            "context_retention",
-            "completeness",
-            "efficiency",
-            "personality",
-            "error_recovery",
-        ):
+        for dim in self._DIMENSIONS:
             value: Any = raw_scores.get(dim)
             if value is None:
                 raise JudgeError(f"Judge missing dimension '{dim}'")
@@ -245,6 +277,65 @@ appear in the transcript prefixed with the subagent id (e.g. ``[data-agent]``).
             passed=passed,
             failure_category=failure,
             reasoning=reasoning,
+            judge_used=True,
+        )
+
+    def _build_ensemble_score(self, verdicts: list[dict[str, Any]]) -> TurnScore:
+        """Aggregate N judge verdicts by per-dimension median.
+
+        Numeric dimensions are median'd independently, then ``overall`` and
+        ``passed`` are recomputed deterministically. ``failure_category`` and
+        ``reasoning`` are taken from the verdict whose overall score is closest
+        to the median overall (a deterministic tie-break that avoids arbitrary
+        text averaging).
+        """
+        import statistics
+
+        # Extract per-dimension scores from each verdict (tolerate partial).
+        per_dim: dict[str, list[float]] = {dim: [] for dim in self._DIMENSIONS}
+        parsed_overalls: list[float] = []
+        for v in verdicts:
+            raw = cast(dict[str, Any], v.get("scores", {}))
+            dim_scores: dict[str, float] = {}
+            for dim in self._DIMENSIONS:
+                val: Any = raw.get(dim)
+                if val is not None:
+                    try:
+                        dim_scores[dim] = float(val)
+                        per_dim[dim].append(float(val))
+                    except (TypeError, ValueError):
+                        pass
+            if dim_scores:
+                parsed_overalls.append(recompute_overall(dim_scores))
+
+        # Median per dimension (0.0 when no samples for that dim).
+        median_scores: dict[str, float] = {
+            dim: (statistics.median(vals) if vals else 0.0) for dim, vals in per_dim.items()
+        }
+        overall = recompute_overall(median_scores)
+        passed = decide_pass(median_scores, overall)
+
+        # Pick the verdict closest to the median overall for text fields.
+        best_idx = 0
+        best_dist = float("inf")
+        for i, ov in enumerate(parsed_overalls):
+            dist = abs(ov - overall)
+            if dist < best_dist:
+                best_dist = dist
+                best_idx = i
+        # Map parsed_overalls index back to a verdict that had scores.
+        scored_verdicts = [v for v in verdicts if isinstance(v.get("scores"), dict)]
+        representative = scored_verdicts[best_idx] if scored_verdicts else verdicts[0]
+        failure = representative.get("failure_category")
+        if not isinstance(failure, str | type(None)):
+            failure = None
+        reasoning = str(representative.get("reasoning", ""))
+        return TurnScore(
+            scores=median_scores,
+            overall_score=overall,
+            passed=passed,
+            failure_category=failure,
+            reasoning=f"[ensemble of {len(verdicts)}] {reasoning}",
             judge_used=True,
         )
 

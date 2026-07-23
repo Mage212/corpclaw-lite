@@ -114,6 +114,23 @@ class MCPManager:
         """Return the current config file content (for hot-reload diffing)."""
         return self._load_config()
 
+    def get_server_tools(self) -> dict[str, list[str]]:
+        """Snapshot of ``{server_name: [tool_names]}`` for connected servers.
+
+        Etap 4: powers the Extensions UI's MCP section.
+        """
+        return {name: list(tools) for name, tools in self._server_tools.items()}
+
+    def get_server_status(self) -> dict[str, str]:
+        """Return ``{server_name: "connected" | "disconnected"}``.
+
+        Diff configured servers (from YAML) against connected ones (in ``_clients``).
+        Etap 4: powers the Extensions UI's MCP status badges.
+        """
+        configured = {str(s.get("name", "unknown")) for s in self._load_config()}
+        connected = set(self._clients.keys())
+        return {name: ("connected" if name in connected else "disconnected") for name in configured}
+
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _load_config(self) -> list[dict[str, Any]]:

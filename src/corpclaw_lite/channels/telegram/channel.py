@@ -72,6 +72,7 @@ class TelegramChannel(Channel):
         onboarding_engine: Any | None = None,
         image_handler: Callable[..., Any] | None = None,
         cache_reset_callback: Callable[[str], Awaitable[None]] | None = None,
+        session_reset_callback: Callable[[User], Awaitable[None]] | None = None,
         setup_handler: Callable[[int], Awaitable[str]] | None = None,
         access_checker: Callable[[int, str], Awaitable[bool]] | None = None,
         user_resolver: Callable[[int], Awaitable[User | None]] | None = None,
@@ -83,14 +84,16 @@ class TelegramChannel(Channel):
             message_handler: Callback async function(telegram_id, message, mode) -> str
             workspace_base: Base directory for per-user workspaces
             tool_registry: For /help command — lists available tools
-            memory: For /new command — clears user history
+            memory: Optional facts store (B-106); transcript reset no longer uses it.
             onboarding_engine: OnboardingEngine instance for /setup command
             image_handler: Optional async function(telegram_id, image_path, caption) for
                            direct image processing that bypasses the agent loop. When set,
                            uploaded images are routed here instead of through message_handler
                            so the raw vision-model response reaches the user unmodified.
-            cache_reset_callback: Optional async callback invoked by /new after
-                                  memory is cleared, so LLM cache state can be invalidated.
+            cache_reset_callback: Optional async callback invoked by /new so LLM cache
+                                  state can be invalidated after session reset.
+            session_reset_callback: Optional async callback (B-102) to end the Telegram
+                                  virtual chat session after /new (does not touch web).
             setup_handler: Optional async callback invoked by /setup under orchestrator locks.
             access_checker: Optional async callback used before commands, uploads and callbacks.
             tg_settings: Telegram configuration (fallback IPs, timeouts, retry limits).
@@ -104,6 +107,7 @@ class TelegramChannel(Channel):
         self._memory = memory
         self._onboarding_engine = onboarding_engine
         self._cache_reset_callback = cache_reset_callback
+        self._session_reset_callback = session_reset_callback
         self._setup_handler = setup_handler
         self._access_checker = access_checker
         self._user_resolver = user_resolver
@@ -111,6 +115,10 @@ class TelegramChannel(Channel):
 
         # Approval system: message_id → (Future[bool], expected_telegram_user_id)
         self._pending_approvals: dict[str, tuple[asyncio.Future[bool], int]] = {}
+
+        # B-143 PR2: schedule accept/dismiss via inline buttons.
+        # Handler: (telegram_user_id, action "accept"|"dismiss", task_id) → reply text
+        self._schedule_action_handler: Callable[[int, str, str], Awaitable[str]] | None = None
 
         # Deduplication
         self._processed_ids: set[int] = set()
@@ -197,17 +205,27 @@ class TelegramChannel(Channel):
         self._app = builder.build()
 
         # ── Register handlers ──────────────────────────────────────────────
-        self._app.add_handler(CommandHandler("start", self._handle_start))
-        self._app.add_handler(CommandHandler("help", self._handle_help))
-        self._app.add_handler(CommandHandler("new", self._handle_new))
-        self._app.add_handler(CommandHandler("delete", self._handle_delete))
-        self._app.add_handler(CommandHandler("chat", self._handle_chat))
-        self._app.add_handler(CommandHandler("execute", self._handle_execute))
-        self._app.add_handler(CommandHandler("setup", self._handle_setup))
+        # S3-06: by default the bot only operates in private chats, so a group
+        # cannot observe another user's workflow, files or approval prompts.
+        # telegram.allow_groups=True widens the scope for shared deployments.
+        allow_groups = bool(settings and settings.allow_groups)
+        chat_filter = filters.ALL if allow_groups else filters.ChatType.PRIVATE
 
-        self._app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_text))
-        self._app.add_handler(MessageHandler(filters.Document.ALL, self._handle_document))
-        self._app.add_handler(MessageHandler(filters.PHOTO, self._handle_photo))
+        self._app.add_handler(CommandHandler("start", self._handle_start, filters=chat_filter))
+        self._app.add_handler(CommandHandler("help", self._handle_help, filters=chat_filter))
+        self._app.add_handler(CommandHandler("new", self._handle_new, filters=chat_filter))
+        self._app.add_handler(CommandHandler("delete", self._handle_delete, filters=chat_filter))
+        self._app.add_handler(CommandHandler("chat", self._handle_chat, filters=chat_filter))
+        self._app.add_handler(CommandHandler("execute", self._handle_execute, filters=chat_filter))
+        self._app.add_handler(CommandHandler("setup", self._handle_setup, filters=chat_filter))
+
+        self._app.add_handler(
+            MessageHandler(chat_filter & filters.TEXT & ~filters.COMMAND, self._handle_text)
+        )
+        self._app.add_handler(
+            MessageHandler(chat_filter & filters.Document.ALL, self._handle_document)
+        )
+        self._app.add_handler(MessageHandler(chat_filter & filters.PHOTO, self._handle_photo))
 
         self._app.add_handler(CallbackQueryHandler(self._handle_callback))
         self._app.add_error_handler(self._on_error)
@@ -586,15 +604,17 @@ class TelegramChannel(Channel):
         await update.effective_chat.send_message(text)
 
     async def _handle_new(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Reset conversation history."""
+        """Reset conversation history (B-102 virtual session + B-106 facts-only memory)."""
         if not update.effective_user or not update.effective_chat:
             return
         if not await self._check_access(update, "new"):
             return
         tid = update.effective_user.id
         user = await self._resolve_user(tid)
-        if self._memory:
-            await self._memory.clear(user.memory_key())
+        # Transcript: archive Telegram virtual session (CASCADE clears ChatContextStore).
+        # Facts on SQLiteMemory are cross-chat and intentionally preserved.
+        if self._session_reset_callback is not None:
+            await self._session_reset_callback(user)
         if self._cache_reset_callback is not None:
             await self._cache_reset_callback(user.memory_key())
         await update.effective_chat.send_message("🔄 Сессия сброшена. Можете начать заново.")
@@ -612,7 +632,7 @@ class TelegramChannel(Channel):
         user = await self._resolve_user(update.effective_user.id)
         workspace = self.get_user_workspace(user)
 
-        handler = DeleteBrowserHandler(workspace=workspace)
+        handler = DeleteBrowserHandler(workspace=workspace, owner_uid=update.effective_user.id)
         # Store in context.user_data for thread safety
         if context.user_data is not None:
             context.user_data["delete_handler"] = handler
@@ -773,6 +793,12 @@ class TelegramChannel(Channel):
 
     # ── Callback handler ──────────────────────────────────────────────────────
 
+    def set_schedule_action_handler(
+        self, handler: Callable[[int, str, str], Awaitable[str]] | None
+    ) -> None:
+        """Register B-143 schedule consent callback handler (accept/dismiss)."""
+        self._schedule_action_handler = handler
+
     async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
         if not query or not query.message:
@@ -783,12 +809,26 @@ class TelegramChannel(Channel):
 
         data = query.data or ""
 
+        # B-143 PR2: schedule consent (sc:a:|sc:d: + task_id)
+        if data.startswith("sc:"):
+            await self._handle_schedule_callback(query, data)
+            return
+
         # Delete-flow callbacks → file manager handler
         if data.startswith("del:"):
             handler = (
                 context.user_data.get("delete_handler") if context.user_data is not None else None
             )
             if handler is not None:
+                # B-068: in a group chat, context.user_data is shared per chat,
+                # so without this check user B could tap user A's inline delete
+                # buttons and delete files from A's workspace. Mirror the
+                # approval-flow identity check (caller_uid != expected_uid).
+                owner_uid = getattr(handler, "_owner_uid", None)
+                caller_uid = query.from_user.id if query.from_user else None
+                if owner_uid is not None and caller_uid != owner_uid:
+                    await query.answer("Эта кнопка удаления не для вас.", show_alert=True)
+                    return
                 await query.answer()
                 await handler.handle_callback(update, context, data)
                 return
@@ -817,6 +857,37 @@ class TelegramChannel(Channel):
         await query.answer()
         label = "✅ Approved" if approved else "❌ Denied"
         await query.edit_message_text(text=label)
+
+    async def _handle_schedule_callback(self, query: Any, data: str) -> None:
+        """B-143: Accept/Dismiss scheduled task from inline keyboard."""
+        from corpclaw_lite.channels.telegram.callback_data import parse_schedule_callback
+
+        parsed = parse_schedule_callback(data)
+        if parsed is None:
+            await query.answer("Некорректная кнопка.", show_alert=True)
+            return
+        if self._schedule_action_handler is None:
+            await query.answer(
+                "Планировщик недоступен в этом процессе. Откройте «Задачи» в web.",
+                show_alert=True,
+            )
+            return
+        action, task_id = parsed
+        caller_uid = query.from_user.id if query.from_user else None
+        if caller_uid is None:
+            await query.answer("Access denied.", show_alert=True)
+            return
+        try:
+            result_text = await self._schedule_action_handler(caller_uid, action, task_id)
+        except Exception:
+            logger.exception("Schedule callback failed action=%s task=%s", action, task_id)
+            await query.answer("Ошибка обработки. Попробуйте в web «Задачи».", show_alert=True)
+            return
+        await query.answer()
+        try:
+            await query.edit_message_text(text=result_text)
+        except Exception as exc:
+            logger.debug("Could not edit schedule message: %s", exc)
 
     # ── Error handler ─────────────────────────────────────────────────────────
 

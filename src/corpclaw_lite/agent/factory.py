@@ -14,13 +14,16 @@ Container isolation (container.enabled=true, default):
 
 Dev mode (container.enabled=false):
     - All tools run directly on the host (no isolation)
-    - Useful for local development without Docker
+    - Requires CORPCLAW_ALLOW_HOST_TOOLS=1 (DC-016 / B-097)
+    - Multi-user surfaces (telegram/web) additionally require
+      CORPCLAW_ENFORCE_PROD_CONTAINER=false
 """
 
 from __future__ import annotations
 
 import contextlib
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -28,6 +31,7 @@ from typing import TYPE_CHECKING, Any
 from corpclaw_lite.agent.loop import AgentConfig, AgentLoop
 from corpclaw_lite.exceptions import StartupConfigurationError
 from corpclaw_lite.paths import PROJECT_ROOT
+from corpclaw_lite.security.host_tools_gate import HostToolsSurface, assert_host_tools_allowed
 from corpclaw_lite.users.manager import UserManager
 
 __all__ = [
@@ -40,6 +44,8 @@ if TYPE_CHECKING:
     from corpclaw_lite.agent.compressor import ContextCompressor
     from corpclaw_lite.agent.file_snapshots import FileSnapshotStore
     from corpclaw_lite.agent.file_state import FileStateRegistry
+    from corpclaw_lite.channels.web.chat_context_store import ChatContextStore
+    from corpclaw_lite.channels.web.chat_store import WebChatStore
     from corpclaw_lite.config.settings import AgentSettings, ResearchSettings, Settings, WebSettings
     from corpclaw_lite.container.ipc import ContainerIPC
     from corpclaw_lite.container.manager import ContainerManager
@@ -51,7 +57,6 @@ if TYPE_CHECKING:
     from corpclaw_lite.extensions.subagents.registry import SubagentRegistry
     from corpclaw_lite.extensions.tools.registry import ToolRegistry
     from corpclaw_lite.llm.base import Provider
-    from corpclaw_lite.memory.consolidation import MemoryConsolidator
     from corpclaw_lite.memory.file_changes import FileChangeDAO
     from corpclaw_lite.memory.sqlite import SQLiteMemory
     from corpclaw_lite.security.tool_guard import ToolGuard
@@ -74,6 +79,17 @@ class AgentStack:
     skill_registry: SkillRegistry | None = None
     plugin_registry: PluginRegistry | None = None
     skill_matcher: SkillMatcher | None = None
+    chat_context_store: ChatContextStore | None = None
+    # B-067: WebChatStore owns get_session (the chat-ownership primitive).
+    # Wired so AgentRequestService can verify session ownership at the service
+    # layer (not just in the channel orchestrator), closing the IDOR gap where
+    # a public service method accepted an unverified session_id.
+    chat_store: WebChatStore | None = None
+    # B-095: durable pinned files for re-inject each turn.
+    pinned_context_store: Any | None = None
+    # B-117: file change journal + on-disk backups for review/revert UX.
+    file_change_dao: Any | None = None
+    file_snapshot_store: Any | None = None
 
 
 def _build_router(settings: Settings | None = None) -> Provider:
@@ -118,6 +134,7 @@ def _build_router(settings: Settings | None = None) -> Provider:
 
 def _all_tool_classes() -> list[Any]:
     """Return ALL tool classes (for subagent filtering and container registry)."""
+    from corpclaw_lite.extensions.tools.builtin.apply_fill_plan import ApplyFillPlanTool
     from corpclaw_lite.extensions.tools.builtin.chart_generate import ChartGenerateTool
     from corpclaw_lite.extensions.tools.builtin.convert_format import ConvertFormatTool
     from corpclaw_lite.extensions.tools.builtin.diff_text import DiffTextTool
@@ -150,6 +167,7 @@ def _all_tool_classes() -> list[Any]:
         PdfReaderTool(),
         ExcelInspectTool(),
         ExcelWorkbookTool(),
+        ApplyFillPlanTool(),
     ]
 
 
@@ -171,9 +189,9 @@ _SUBAGENT_ONLY_TOOLS = {
 def _main_agent_tool_classes() -> list[Any]:
     """Return tool classes for the main agent (lightweight, routing-oriented).
 
-    Heavy data tools (table_query, normalize_excel, etc.) are excluded —
-    the main agent should use ``excel_inspect`` to understand a file and
-    then ``dispatch_subagent`` for actual work.
+    Heavy data tools (table_query, normalize_excel, excel_workbook, etc.) are
+    excluded. Main keeps ``excel_inspect`` for ad-hoc exploration and
+    ``apply_fill_plan`` for the FILES_BRIEF → FillPlan production path.
     """
     return [t for t in _all_tool_classes() if t.name not in _SUBAGENT_ONLY_TOOLS]
 
@@ -252,6 +270,7 @@ def _build_extensions_stack(
     skill_matcher: SkillMatcher | None = None,
     skill_registry: SkillRegistry | None = None,
     full_tool_registry: ToolRegistry | None = None,
+    approval_callback: Callable[[str, str], Awaitable[bool]] | None = None,
 ) -> SubagentRegistry:
     """Register subagents, MCP, host-side tools."""
     from corpclaw_lite.agent.subagent import SubagentDispatcher
@@ -292,6 +311,7 @@ def _build_extensions_stack(
             skill_registry=skill_registry,
             research_runtime=research_runtime,
             workspace_base=workspace_base,
+            approval_callback=approval_callback,
         )
         registry.register(
             DispatchSubagentTool(
@@ -333,11 +353,14 @@ def _build_memory_stack(
     provider: Provider,
     registry: ToolRegistry,
     full_tool_registry: ToolRegistry | None = None,
-) -> tuple[SQLiteMemory, MemoryConsolidator | None, ContextCompressor | None]:
-    """Build memory, consolidation, compression."""
+) -> tuple[SQLiteMemory, ContextCompressor | None]:
+    """Build memory (facts + tools) and optional context compressor.
+
+    B-105: ``MemoryConsolidator`` removed — mid-session transcript compression
+    is solely ``ContextCompressor`` + ``ChatContextStore`` (``_compress_chat``).
+    """
     from corpclaw_lite.agent.compressor import ContextCompressor
     from corpclaw_lite.extensions.tools.builtin.memory import MemoryRecallTool, MemoryStoreTool
-    from corpclaw_lite.memory.consolidation import MemoryConsolidator
     from corpclaw_lite.memory.sqlite import SQLiteMemory
 
     memory = SQLiteMemory()
@@ -351,16 +374,6 @@ def _build_memory_stack(
         full_tool_registry.register(store_tool)
         full_tool_registry.register(recall_tool)
 
-    consolidator = None
-    if agent_settings.consolidation_enabled:
-        consolidator = MemoryConsolidator(
-            provider=provider,
-            threshold=agent_settings.consolidation_threshold,
-        )
-        logger.info(
-            "Memory consolidation enabled (threshold=%d)", agent_settings.consolidation_threshold
-        )
-
     compressor = None
     if agent_settings.compression.enabled:
         compressor = ContextCompressor(provider, agent_settings.compression)
@@ -368,7 +381,7 @@ def _build_memory_stack(
             "Context compression enabled (threshold_ratio=%.2f)",
             agent_settings.compression.threshold_ratio,
         )
-    return memory, consolidator, compressor
+    return memory, compressor
 
 
 # B-040: office tools wrapped with file-change tracking.
@@ -382,6 +395,9 @@ _OFFICE_TRACKED_TOOLS: dict[str, dict[str, Any]] = {
     "convert_format": {"path_param": "input_path", "tracks_output": False},
     "write_file": {"path_param": "path", "tracks_output": True},
     "edit_file": {"path_param": "path", "tracks_output": True},
+    # apply_fill_plan receives a JSON ``plan`` kwarg (not a direct path).
+    # FileTrackedTool resolves template/output_path from the plan internally.
+    "apply_fill_plan": {"path_param": "plan", "tracks_output": False},
 }
 
 
@@ -435,8 +451,11 @@ def _wrap_office_tools_with_file_tracking(
     return dao, snapshot_store, file_state
 
 
-def _build_system_prompt(settings: Settings, project_root: Path) -> str | None:
-    """Load bootstrap system prompt."""
+def _build_bootstrap(settings: Settings, project_root: Path) -> tuple[Any, str | None]:
+    """Load multi-dir bootstrap loader + base SOUL system prompt (B-111).
+
+    Returns ``(BootstrapLoader, system_prompt_text)``.
+    """
     from corpclaw_lite.config.bootstrap import BootstrapLoader
     from corpclaw_lite.extensions.paths import resolve_dirs as _resolve_dirs
 
@@ -451,7 +470,7 @@ def _build_system_prompt(settings: Settings, project_root: Path) -> str | None:
         )
     else:
         logger.warning("No bootstrap/*.md files found — using minimal default system prompt")
-    return system_prompt
+    return bootstrap, system_prompt
 
 
 def _load_calibrated_tool_overrides(*registries: ToolRegistry) -> None:
@@ -466,13 +485,35 @@ def _load_calibrated_tool_overrides(*registries: ToolRegistry) -> None:
 
 def build_agent_stack(
     settings: Settings | None = None,
+    *,
+    router_override: Provider | None = None,
+    host_tools_surface: HostToolsSurface = "dev",
+    workspace_override: Path | None = None,
+    approval_callback: Callable[[str, str], Awaitable[bool]] | None = None,
 ) -> AgentStack:
-    """Build and return the complete agent stack from config + env."""
+    """Build and return the complete agent stack from config + env.
+
+    Args:
+        settings: Pre-loaded Settings. If None, loads from config/settings.yaml.
+        router_override: A pre-built Provider (usually an LLMRouter, e.g. one
+            produced by ``LLMRouter.with_overrides(...)``) to use instead of
+            building one from settings. When None (default), the router is built
+            from settings via ``_build_router``. Used by the eval harness and
+            other callers that need a programmatically overridden router
+            (D-056 PR3) without mutating YAML.
+        host_tools_surface: DC-016 gate surface. ``"dev"`` enforces Level 1
+            (CORPCLAW_ALLOW_HOST_TOOLS) when containers are off; ``"multiuser"``
+            also enforces Level 2 for telegram/web.
+        workspace_override: explicit workspace root for isolated harnesses.
+        approval_callback: optional approval channel shared by main and subagent loops.
+    """
     from corpclaw_lite.config.loader import load_settings
+    from corpclaw_lite.config.providers import ProviderRegistry
     from corpclaw_lite.config.settings import AgentSettings
     from corpclaw_lite.container.ipc import ContainerIPC
     from corpclaw_lite.container.manager import ContainerManager
     from corpclaw_lite.extensions.tools.registry import ToolRegistry
+    from corpclaw_lite.llm.presets import PresetRegistry
 
     full_settings: Settings = (
         settings
@@ -482,7 +523,16 @@ def build_agent_stack(
     container_cfg = full_settings.container
     agent_settings = full_settings.agent if full_settings.agent else AgentSettings()
 
-    provider = _build_router(settings=full_settings)
+    provider = (
+        router_override if router_override is not None else _build_router(settings=full_settings)
+    )
+    # Etap 3: resolve registries for depth-mode override (Fast/Think). These are
+    # independent of router_override — env providers + model_presets.yaml.
+    depth_provider_registry = ProviderRegistry.from_env()
+    depth_presets_path = PROJECT_ROOT / "config" / "model_presets.yaml"
+    depth_preset_registry = (
+        PresetRegistry.from_yaml(depth_presets_path) if depth_presets_path.exists() else None
+    )
     registry = ToolRegistry()
 
     container_manager: ContainerManager | None = None
@@ -494,7 +544,7 @@ def build_agent_stack(
                 "but Docker daemon is not available.",
                 hint=(
                     "Start Docker, or set container.enabled=false in config/settings.yaml "
-                    "for local development without isolation."
+                    "with CORPCLAW_ALLOW_HOST_TOOLS=1 for local development without isolation."
                 ),
             )
         from corpclaw_lite.security.ipc_auth import IPCAuth
@@ -511,7 +561,9 @@ def build_agent_stack(
                 f"Failed to initialise ContainerIPC: {e}. Is CORPCLAW_IPC_SECRET set in .env?"
             ) from e
 
-        workspace_base = (PROJECT_ROOT / container_cfg.workspace_base).resolve()
+        workspace_base = (
+            workspace_override or (PROJECT_ROOT / container_cfg.workspace_base).resolve()
+        )
         container_manager = ContainerManager(
             settings=container_cfg,
             network_policy=network_policy,
@@ -526,11 +578,23 @@ def build_agent_stack(
             workspace_base,
         )
     else:
+        # DC-016 / B-097: refuse silent host-tools unless explicitly opted in.
+        assert_host_tools_allowed(
+            container_enabled=False,
+            surface=host_tools_surface,
+        )
         container_ipc = None
+        # Still set workspace_base so DC-017 contextvar can isolate per-user paths.
+        workspace_base = (
+            workspace_override or (PROJECT_ROOT / container_cfg.workspace_base).resolve()
+        )
         _register_local_tools(registry)
         logger.warning(
             "Container isolation DISABLED (container.enabled=false) — "
-            "file/script tools run on host. Dev mode only!"
+            "file/script tools run on host. Dev mode only! "
+            "(surface=%s, workspace_base=%s)",
+            host_tools_surface,
+            workspace_base,
         )
 
     # Build a separate registry with ALL tools for subagent filtering.
@@ -555,6 +619,7 @@ def build_agent_stack(
         registry,
         full_settings.skills,
         full_tool_registry=full_tool_reg,
+        permission_checker=permission_checker,
     )
 
     subagent_registry = _build_extensions_stack(
@@ -571,8 +636,9 @@ def build_agent_stack(
         skill_matcher=skill_matcher,
         skill_registry=skill_registry,
         full_tool_registry=full_tool_reg,
+        approval_callback=approval_callback,
     )
-    memory, consolidator, compressor = _build_memory_stack(
+    memory, compressor = _build_memory_stack(
         agent_settings, provider, registry, full_tool_registry=full_tool_reg
     )
     file_change_dao, snapshot_store, file_state = _wrap_office_tools_with_file_tracking(
@@ -602,7 +668,7 @@ def build_agent_stack(
             ", ".join(str(p) for p in mcp_paths),
         )
 
-    system_prompt = _build_system_prompt(full_settings, PROJECT_ROOT)
+    bootstrap_loader, system_prompt = _build_bootstrap(full_settings, PROJECT_ROOT)
 
     # Load calibrated few-shots (if any) for injection into every run()
     few_shots: list[dict[str, Any]] | None = None
@@ -618,6 +684,24 @@ def build_agent_stack(
             few_shots = _examples
             logger.info("Loaded %d calibrated few-shot examples", len(_examples))
 
+    # B-063 S1: per-chat full-LLM-context store. Shares memory.db with
+    # SQLiteMemory; the loop writes the full message schema (tool_calls/
+    # reasoning/tool-role) here on every turn so any chat can later be restored.
+    from corpclaw_lite.channels.web.chat_context_store import ChatContextStore
+    from corpclaw_lite.channels.web.chat_store import WebChatStore
+
+    chat_context_store = ChatContextStore(memory.db_path)
+    # B-067: WebChatStore owns get_session — the chat-ownership primitive used
+    # by AgentRequestService to verify session ownership at the service layer.
+    chat_store = WebChatStore(memory.db_path)
+    # B-095: pinned files (re-inject each turn; not compressor middle).
+    from corpclaw_lite.channels.web.pinned_context_store import PinnedContextStore
+
+    pinned_context_store = PinnedContextStore(memory.db_path)
+
+    # B-111: create UserManager before the loop so run() can load agent_context.
+    user_manager = UserManager()
+
     loop = AgentLoop(
         AgentConfig(
             provider=provider,
@@ -626,18 +710,46 @@ def build_agent_stack(
             memory=memory,
             tool_guard=guard,
             permission_checker=permission_checker,
-            consolidator=consolidator,
             compressor=compressor,
             default_system_prompt=system_prompt,
             workspace_base=workspace_base,
+            approval_callback=approval_callback,
             file_change_dao=file_change_dao,
+            # Etap 3: registries + depth mapping for Fast/Think override.
+            preset_registry=depth_preset_registry,
+            provider_registry=depth_provider_registry,
+            depth_modes=agent_settings.depth_modes,
+            chat_context_store=chat_context_store,
+            pinned_context_store=pinned_context_store,
+            bootstrap=bootstrap_loader,
+            user_manager=user_manager,
         )
     )
-    user_manager = UserManager()
+
+    # Etap 4 audit: warn at startup if depth_modes references models not in routing.
+    if agent_settings.depth_modes.fast or agent_settings.depth_modes.think:
+        route_models = {r.model for r in full_settings.llm.routing}
+        for depth_name, mapping in [
+            ("fast", agent_settings.depth_modes.fast),
+            ("think", agent_settings.depth_modes.think),
+        ]:
+            for model_key in mapping:
+                if model_key not in route_models:
+                    logger.warning(
+                        "depth_modes.%s references model '%s' not found in routing rules; "
+                        "depth override for this model will be a no-op.",
+                        depth_name,
+                        model_key,
+                    )
 
     return AgentStack(
         loop=loop,
         user_manager=user_manager,
+        chat_context_store=chat_context_store,
+        chat_store=chat_store,
+        pinned_context_store=pinned_context_store,
+        file_change_dao=file_change_dao,
+        file_snapshot_store=snapshot_store,
         tool_registry=registry,
         full_tool_registry=full_tool_reg,
         mcp_manager=mcp_manager,

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import yaml
 
+from corpclaw_lite.llm.router import LLMRouter
 from corpclaw_lite.logging.trace import log_event
 
 __all__ = [
@@ -132,6 +133,7 @@ class ToolGuard:
         arguments: dict[str, Any],
         risk_level: str | None = None,
         run_id: str | None = None,
+        user_id: str | None = None,
     ) -> None:
         """
         Evaluate ALL rules against the tool call, then apply the strictest matching action.
@@ -239,7 +241,9 @@ class ToolGuard:
                 and self._provider
                 and _SEVERITY_RANK.get(worst.severity, 0) < _SEVERITY_RANK[RuleSeverity.HIGH]
             ):
-                verdict = await self._smart_evaluate(tool_name, arguments, worst)
+                verdict = await self._smart_evaluate(
+                    tool_name, arguments, worst, user_id=user_id, run_id=run_id
+                )
                 if verdict == "approve":
                     logger.info(
                         "Smart approval audit: verdict=approve tool=%s rule=%s",
@@ -298,7 +302,13 @@ class ToolGuard:
         return cleaned[:max_length]
 
     async def _smart_evaluate(
-        self, tool_name: str, arguments: dict[str, Any], rule: GuardRule
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        rule: GuardRule,
+        *,
+        user_id: str | None = None,
+        run_id: str | None = None,
     ) -> str:
         """LLM-based risk assessment for smart approvals.
 
@@ -332,10 +342,32 @@ Response:"""
         try:
             if self._provider is None:
                 return "escalate"
-            response = await asyncio.wait_for(
-                self._provider.chat(messages=[{"role": "user", "content": prompt}], tools=None),
-                timeout=10.0,
-            )
+            # Acquire the inference slot under the REAL user (not the phantom
+            # "_router_chat" that LLMRouter.chat() hardcodes), so per-user slot
+            # affinity / accounting is correct. For an LLMRouter we use
+            # acquire_slot + default.chat directly; for a raw provider we call
+            # chat() unchanged (no queue in that case).
+            #
+            # Note: the 10s wait_for covers only the inference (default.chat),
+            # NOT the queue wait inside acquire_slot — that wait is unbounded, as
+            # it already was before this change (the old provider.chat() path went
+            # through call_default_with_slot with the same unbounded queue wait).
+            # If wait_for times out, the CancelledError is handled cleanly by
+            # acquire_slot's finally (router.py) and queue.acquire's CancelledError
+            # branch (queue.py); the tool is then escalated to a human.
+            provider = self._provider
+            messages = [{"role": "user", "content": prompt}]
+            if isinstance(provider, LLMRouter):
+                async with provider.acquire_slot(user_id or "_router_chat", run_id=run_id):
+                    response = await asyncio.wait_for(
+                        provider.default.chat(messages=messages, tools=None),
+                        timeout=10.0,
+                    )
+            else:
+                response = await asyncio.wait_for(
+                    provider.chat(messages=messages, tools=None),
+                    timeout=10.0,
+                )
             content = (response.content or "").strip().upper()
             if content.startswith("APPROVE"):
                 return "approve"

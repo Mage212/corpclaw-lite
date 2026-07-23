@@ -4,6 +4,789 @@
 
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/).
 
+## [0.3.0] — 2026-07-23
+
+**Minor** `0.2.7 → 0.3.0`. Security hardening (3 спринта), детерминистический
+Excel-fill pipeline, cloud LLM judge в eval-харнессе, и закрытие пробелов в
+file-tracking для production-инструментов.
+
+### Added
+
+- **Детерминистический Excel-fill pipeline.** Модель больше не получает полную
+  свободу исследования файлов (read → inspect → iterate), что затягивало и
+  иногда ломало процесс. Теперь при загрузке xlsx-файла в Telegram или Web
+  канал автоматически генерирует **FILES_BRIEF** — детерминистический
+  структурный обзор (листы, колонки, роли, period cells) без значений. Модель
+  получает готовую карту файлов и принимает лишь одно решение: как
+  сопоставить источники с шаблоном. Затем один вызов `apply_fill_plan`
+  выполняет всё заполнение детерминистически (Python читает источники,
+  вычисляет period, пишет результат). `workbook_fill.md` skill направляет
+  модель по этому пути. Результат: score 9.55–10.0 с cloud-судьёй на
+  реальных отчётах (против ~5.6 fallback без судьи).
+- **Auto-debug harness.** `scripts/auto_debug.py` — standalone eval-раннер с
+  A/B guards, multi-seed aggregation, и интеграцией cloud LLM-судьи
+  (`--judge cloud`). Сценарии в `config/debug_scenarios.yaml` используют
+  синтетические генераторы workbooks (без коммерческих данных). Поддержка
+  `{{FILES_BRIEF}}` template-injection и synthetic workspace generators
+  (`generate_noisy_completed_month`, `generate_dual_type`) в eval-runner.
+- **Cloud LLM judge в eval.** `auto_debug.py --judge cloud` подключает
+  cloud-провайдер (glm-5.2) как 7-мерного судью: передаёт полный transcript
+  (user message + tool calls + results + final answer), получает оценки по
+  rubric (correctness, tool_selection, completeness, efficiency, и др.).
+- **Memory worker (B-109 PR1+PR2).** `MemoryWorkerSettings` config block;
+  `user_memory_worker` opt-in table; `MemoryWorkerService` (asyncio poll loop,
+  quiet hours, busy gate, one-shot LLM call, merge-only write). Routing
+  `memory_worker` → `maintenance` load class. CLI `memory-worker enable/disable/
+  status/run`. Opt-in default off.
+- **Memora-style memory entries (B-108).** `memory_entries` (abstraction +
+  value + cues) + hybrid FTS5 recall. Tools `memory_store`/`memory_recall`
+  accept abstraction/value/cues with legacy back-compat.
+- **Schedule system (B-118/B-140/B-141/B-143).** SchedulerService + REST API +
+  web UI «Задачи» + Telegram inline consent + LLM parse-assist.
+- **Headless-run (B-119) + proactive-send (B-120).** Запуск агента без
+  inbound-сообщения; proactive push в system session.
+- **Review/revert UX (B-117).** List agent file mutations, text/binary diff,
+  revert via snapshot restore.
+
+### Fixed
+
+- **Security & Correctness Sprint 3 (15 находок).** Container reuse теперь
+  revalidates image/network/capability/seccomp settings (fail-open закрыт);
+  seccomp profile missing → fail-fast вместо silent skip; IPC secret
+  передаётся через stdin worker'а, не в `docker exec` argv (видно через ps);
+  MCP/plugin subprocess reads bounded (8 MiB cap); Docker build pinned через
+  `uv export --frozen` с хешами; Telegram handlers только ChatType.PRIVATE
+  (default); raw exception text больше не уходит пользователю; password change
+  инвалидирует web sessions; REST upload rate-limited + `client_max_size`;
+  shutdown bounded (`asyncio.wait_for`); `/health` default loopback;
+  calibration filenames contained + atomic apply/rollback; memory value cap +
+  fallback recall LIMIT; `memory-worker run` CLI fix (AttributeError); nested
+  settings models `extra="forbid"` (LLM/Container/Agent/WebChannel/Extensions).
+- **Security & Correctness Sprint 2.** ToolExecutionContext isolates runtime
+  identity/callbacks from plugin/MCP business args; tool batches reserve
+  budget atomically; persisted user data at user authority; Anthropic native
+  ReAct history + bounded streaming + signed-thinking replay; closing mode
+  preserves finalisation funnel; loop-exhaustion answers saved before teardown.
+- **Security & Correctness Sprint 1.** Directory copy rejects nested symlinks;
+  department overlays preserve omitted policy fields; skill prompts respect
+  department RBAC; Telegram whitelist/revocations migrated to SQLite;
+  credential scrubbing covers modern token formats + formatted tracebacks;
+  native tool calls limited to offered schema; queue cancellation releases
+  partial acquisitions; terminal-tool history protocol-complete; scheduler
+  claims atomic.
+- **FileTracked wrapping для apply_fill_plan.** Production fill-path теперь
+  журналируется (B-040) и детектит cross-agent stale-writes (B-058). Раньше
+  `apply_fill_plan` обходил FileTrackedTool — его записи были невидимы для
+  change journal и stale-write detector.
+- **Scheduler status-guarded transitions.** Atomic optimistic-lock
+  `update_guarded` prevents cross-channel races.
+- **B-108 FTS durability.** Rebuild from `memory_entries` when row counts
+  diverge; single cue boost (no double-count).
+- **Post-review hardening (F1–F7).** Budget resume on queue slot failure;
+  ownership-404 tests; TTL expire clears dedup_key; concurrent multichannel
+  push.
+
+### Docs
+
+- **B-125 post-2B memory model.** AGENTS.md / ARCHITECTURE.md updated: sole
+  `ChatContextStore` transcript, facts-only `SQLiteMemory`.
+
+## [Unreleased]
+
+## [0.2.7] — 2026-07-14
+
+**Patch** `0.2.6 → 0.2.7`. **Sprint 2B complete** — memory/prompt unify
+(B-102…B-106 + B-111).
+
+### Changed — Sprint 2B
+
+#### 2B.1 — B-102 Telegram virtual-session
+
+- `WebChatStore` sessions are **channel-scoped** (`channel=web|telegram`);
+  unique open session is `(user_id, channel)`. Telegram passes `session_id`
+  into `AgentLoop.run`; `/new` resets only the Telegram virtual session.
+
+#### 2B.2 — B-103 / B-104 loop context unify
+
+- Transcript load/persist only via `ChatContextStore` when `session_id` is set;
+  no dual-write to `SQLiteMemory.messages`. CLI/subagent: empty history.
+- `restore_user_context` ownership + presence only (no memory shadow).
+- Telegram image turns persist to context store.
+
+#### 2B.3 — B-105 compress unify
+
+- Sole on-demand path: `_compress_chat` via `ChatContextStore` (`session_id`
+  required). Removed `_compress_from_memory` and entire `MemoryConsolidator`.
+- Dropped consolidator settings and post-turn `maybe_consolidate` hooks.
+
+#### 2B.4 — B-106 SQLiteMemory facts-only
+
+- Removed messages API and legacy `messages` table on init.
+- Remaining surface: `store_fact` / `recall_facts` / `clear_facts` / `vacuum`.
+- Session reset does not clear facts; eval/calibration use `clear_facts` only.
+
+#### 2B.5 — B-111 unify prompt assembly + close Sprint 2B
+
+- **Path A/B merge:** `AgentLoop` self-assembles user-context layers (dept +
+  onboarding `.md` + personal instructions + tone) when `bootstrap` /
+  `user_manager` are wired. Channels pass only skill-block extras as
+  `system_prompt`.
+- Removed duplicate Path A line `You are talking to {name} from {dept}` —
+  sole identity block is `Current User Context` (name/department + facts +
+  recent files).
+- `AgentRequestService.build_system_prompt` delegates to
+  `loop.assemble_system_prompt` (web preview).
+- Headless-ready: direct `run()` gets onboarding `.md` without service Path A
+  (prerequisite for DC-027 memory worker).
+
+## [0.2.6] — 2026-07-14
+
+**Patch** `0.2.5 → 0.2.6`. **Sprint 2A complete** — Loop refactor (B-078 adaptations +
+B-079 EventSink). Behavior-neutral pure moves; next = Sprint 2B (memory/prompt).
+
+### Changed — Sprint 2A
+
+#### 2A.1 — Schema adaptations package (B-078)
+
+- Free functions under `agent/adaptations/`:
+  - `tool_surface.py` — `apply_tool_surface`, `inject_tool_soft_hint`
+  - `closing.py` — `apply_closing_mode` (B-046)
+  - `mandate.py` — `apply_workflow_mandate` (B-047)
+- Call order unchanged: base → phase → mandate re-apply → closing → soft-hint;
+  mandate **before** dedup.
+- Unit tests: `test_adaptations_{tool_surface,closing,mandate}.py`.
+
+#### 2A.2 — Auto-finalize cascade (B-078)
+
+- `auto_finalize_cascade` → `adaptations/finalize.py` (B-073 never re-raise;
+  stage B emergency LLM + stage C programmatic terminal).
+- Explicit deps (`call_llm`, `execute_tool_call`, registry/provider).
+- Unit tests: `test_adaptations_finalize.py`.
+
+#### 2A.3 — EventSink (B-079)
+
+- `agent/events.py`: `AgentEvent` union, `EventSink` protocol, `CallbackEventSink`,
+  `NullEventSink`, registry subagent adapters.
+- `AgentLoop.run(event_sink=...)` plus legacy `on_*` kwargs → `CallbackEventSink`
+  (web/telegram unchanged).
+- Tool start/batch, LLM stage/queue, subagent status funnel through `sink.emit`.
+- Unit tests: `test_event_sink.py`.
+
+### Handoff → Sprint 2B
+
+- Memory dual-write unify (B-102…106), prompt Path A/B unify (B-111).
+- Invariants preserved: B-046×2, B-047 before dedup, B-066 budget on retries, B-073.
+
+## [0.2.5] — 2026-07-13
+
+**Patch** `0.2.4 → 0.2.5`. **Фаза 1 — Agent Stability — complete** (B-076 + B-107 +
+B-077 + audit hotfixes). Ready for roadmap **Фаза 2** (B-078 adaptations / B-079
+event-sink / memory unify B-102…106 / B-111).
+
+### Changed
+
+- **B-077 Prologue / Epilogue extraction (DC-001 Phase 2).** `AgentLoop.run()` is a
+  thin orchestrator: `_build_turn_context` packs history, dynamic prompt, guards,
+  `LoopState`, contextvars, and user-message persist; `_finalize_turn` resets
+  health + contextvars via `TurnTokens`. Run counters (`t0`, loop-warning /
+  empty-response / XML-repair) live on `LoopState`. Behavior-neutral pure
+  move-and-name — ReAct body unchanged.
+- Gate tests: office READING excludes mutating tools; prologue packs `LoopState`.
+
+### Handoff → Phase 2
+
+- **Invariants for B-078:** B-046 closing ×2 (top-of-iter + pre-LLM); B-047 mandate
+  before dedup; B-066 budget on retry paths; B-073 auto-finalize never re-raises.
+- **Schema compose order:** base → phase filter → mandate re-apply → closing →
+  soft-hint once (messages tail).
+- **Not in this release:** B-078/B-079, memory dual-write unify (B-102…106), prompt
+  Path A/B unify (B-111) — roadmap Фаза 2.
+
+## [0.2.4] — 2026-07-13
+
+**Patch** `0.2.3 → 0.2.4`. **Фаза 1 — Agent Stability** (B-076 / B-107), плюс
+hotfix после code-trace аудита compose/mandate.
+
+### Added — Фаза 1 (Agent Stability)
+
+- **LoopState state bag (B-076 / DC-001 Phase 1).** Run-scoped mutable pieces of
+  `AgentLoop.run` live on `agent/loop_state.LoopState` (`budget`, guards,
+  `base_tools_schema` / `tools_schema`, turn tool lists, etc.). Behavior-neutral
+  structure extraction; enables phase-aware schema refilters from a stable base.
+- **Tool-surface phase filter + BM25 soft-hint (B-107 / DC-036 / D-087).**
+  New `agent/tool_surface.py`: deterministic READING/ANALYZING/EXECUTING/MEMORY
+  detection; hard filter for **office** subagents from `base_tools_schema` only on
+  phase change (cache-breaking once); BM25 ranking hint appended to **messages tail**
+  (cache-safe, does not rewrite system prompt). Research (`mandate.enabled`) and
+  execution-agent profiles skip hard filter. Main agent: soft-hint only (already
+  light toolset, D-028). Closing-mode re-narrows to terminal tools after base
+  rebuild so B-046 stays correct.
+- Settings: `agent.tool_surface.{enabled,soft_hint_enabled,soft_hint_top_k,
+  hard_filter_profiles}`.
+
+### Fixed — post-Phase-1 audit (H1 / H2 / soft-hint)
+
+- **B-047 mandate restrict survives base-schema rebuild (H1).** After B-107,
+  `_apply_tool_surface` rebuilt `tools_schema` from `base_tools_schema` every
+  turn while `should_restrict` is one-shot — restrict never reached the next
+  LLM call. Added `TerminalToolMandate.apply_schema_restrict` (re-entrant) and
+  re-apply after every compose. `tool_surface.enabled=false` is a true no-op
+  on schema (no base wipe).
+- **Office READING includes analyze tools (H2).** Default phase no longer
+  chicken-eggs `table_query` / `pdf_reader` / `chart_generate` / `excel_workbook`.
+  Mutating tools (`write_file`, `edit_file`, `exec_script`, `normalize_excel`,
+  `convert_format`) stay EXECUTING-only.
+- **Soft-hint injected once per LLM call** (pre-LLM only), not twice per
+  iteration.
+
+## [0.2.3] — 2026-07-13
+
+**Patch bump** `0.2.2 → 0.2.3`. Фокус: **Фаза 0 — Foundation Hardening**
+(closed-contour defaults + security gates) и снижение объёма Excel/SQL
+tool-output под локальные 26–35B модели.
+
+### Breaking / behaviour changes
+
+- **LLM payload capture: shipped default OFF (DC-037).**
+  `config/settings.yaml → logging.capture_enabled: false`. Opt-in only for
+  diagnostics / fine-tuning dataset collection (closed-contour privacy).
+- **Default department: office-without-web (DC-039).**
+  `default` loses `web_fetch` / `web_search` / `research-agent` and gains
+  office subagents (`filesystem` / `document` / `execution` / `data`).
+  Unclassified users can run Excel/SQL office Work without host-side web egress.
+- **Container host-tools gate (DC-016 / D-070).**
+  `container.enabled=false` requires `CORPCLAW_ALLOW_HOST_TOOLS=1`. Telegram/web
+  (multi-user surfaces) additionally require
+  `CORPCLAW_ENFORCE_PROD_CONTAINER=false` to run without Docker isolation.
+  Silent host-mode in production is no longer possible.
+- **Per-user workspace root via contextvar (DC-017 / D-071).**
+  File tools honor `workspaces/user_<key>/` even in dev mode (not only container
+  bind-mount). Protects path-validated tools; absolute-path shell still needs
+  container isolation.
+- **table_query output limits** for local 26–35B models:
+  `_MAX_RESULT_ROWS` 10 000 → 500, `_MAX_RESULT_CHARS` 50 000 → 8 000; advisory
+  note when result >50 rows. `output_path` still stores the full result.
+- **excel_workbook limits + formula_mode default:**
+  smaller page sizes; default `formula_mode` `both` → `values` (skills/prompts
+  that need formulas already set `formula_mode=both` explicitly).
+
+### Security / cleanup
+
+- **Credential scrubber: `ghp_` regex synced to `{20,}` (DC-020)** — matches
+  `tool_guard_rules.yaml` (was strict `{36}`).
+- **Removed diverged `docker/Dockerfile.agent` (DC-022)** — image build uses only
+  `docker/Dockerfile`.
+- **Docs: `send_file` is main-agent only (DC-038)** — subagents create files;
+  main delivers via two-step create→`send_file` (`BEHAVIOR.md`).
+
+### Added
+
+- `security/host_tools_gate.py` — Level 1/2 startup gate for host tools.
+- `agent/workspace_context.py` — per-run `workspace_root` contextvar.
+- Tests: `test_host_tools_gate.py`, `test_workspace_context.py`,
+  `test_default_department_rbac.py`.
+
+## [0.2.2] — 2026-06-29
+
+**Minor bump** `0.2.1 → 0.2.2`. Версия не релизнута в main (как и 0.2.1);
+накоплена в `pre-release`. Два больших блока + множество фиксов.
+
+Фокус версии:
+
+1. **Полный редизайн веб-интерфейса (Mistral.ai-стиль)** — 5 этапов: layout,
+   multi-chat history, depth modes (Fast/Think/Research), extensions management,
+   agent context (personal instructions + tone). + 8 раундов аудитов и фиксов.
+2. **Full LLM-context persistence per chat (B-063)** — 4 спринта: persist
+   полного LLM-context (tool_calls + reasoning) per chat, restore-on-activate,
+   compress-any-chat, capture correlation. + 4 раунда аудитов.
+
+### Breaking changes
+
+- **Web channel: стартовая панель — пустая.** Раньше при загрузке страницы
+  автоматически грузилась история активного чата. Теперь панель пуста, и
+  пользователь сам выбирает чат или пишет сообщение (продолжает активный).
+- **Web channel: активация чата = LOAD, не RESET.** Переключение чатов больше
+  не стирает контекст — он восстанавливается из persistent store. Это меняет
+  контракт `POST /api/chats/{id}/activate` (раньше reset_user_context, теперь
+  restore_user_context с fallback на reset).
+- **Web channel: удаление активного чата разрешено.** Раньше блокировалось
+  (FE disabled + BE 409). Теперь — auto-replacement (ensure_active_session
+  создаёт новый активный чат). `chat_store.delete_session` больше не отказывает
+  для активной сессии.
+- **`db_connect` включает `PRAGMA foreign_keys=ON` глобально.** Ранее FK
+  декларации были dormant (SQLite по умолчанию off). Все `ON DELETE CASCADE`
+  (file_changes→agent_change_sets, web_chat_context→web_chat_sessions) теперь
+  реально работают. Код, удалявший parent без очистки children, теперь получит
+  `FOREIGN KEY constraint failed` вместо silent orphan.
+
+### Added
+
+#### Веб-интерфейс — полный редизайн (Mistral.ai-стиль)
+
+**Etape 1 — Layout & Navigation:**
+- **2-колоночный layout** (sidebar + main-area) вместо 3-панельной сетки.
+  Bottom-drawer для файлов, preview-overlay (side/expanded), минималистичный
+  topbar. 3-мерное resize (sidebar/drawer/preview) с persist в localStorage.
+- **ActivityCard** — inline run-timeline между user-message и assistant-reply.
+  Сворачиваемая, auto-expand при running/approval, auto-collapse при done.
+  Events scoped per-request (Map<requestId, events[]>).
+- **ContextSizeBar** — компактный индикатор заполненности context-window под
+  композером + кнопка «Сжать» (подключена в S3).
+
+**Etape 2 — Multi-chat History:**
+- **Multi-session модель.** `web_chat_sessions` + `web_chat_messages` с
+  section/title/updated_at/folder_id колонками. 1 активный чат на пользователя
+  (partial unique index). Создание/список/активация/переименование/удаление.
+  Auto-naming из первого user-message (truncation, без LLM). Time-range
+  grouping (Сегодня / Вчера / Предыдущие 7 дней / Ранее).
+- **View vs Activate.** Клик по чату → read-only transcript (load_chat WS).
+  Активация — отдельный REST call или activate-on-send.
+- **Empty start.** Стартовая панель пустая; первое сообщение продолжает активный
+  чат. Пользователь сам решает — выбрать старый или начать новый.
+
+**Etape 3 — Depth Modes:**
+- **Fast/Think/Research** selector в композере. Fast → sampling profile без
+  thinking (model-specific: gemma4-fast, qwen-instruct). Think → sampling с
+  thinking (gemma4-default, qwen-thinking). Research → force deep_research
+  через contextvar (Work-only).
+- **`AgentLoop.run(depth_mode)`** — резолвит sampling profile по
+  `(depth, route_model)` через `LLMRouter.with_overrides(sampling_name=...)`.
+  depth_mode contextvar thread'ится в `DispatchSubagentTool` (gated на
+  `spec.id == "research-agent"` — не-исследовательские субагенты не
+  контаминируются).
+
+**Etape 4 — Extensions Management:**
+- **Read-only ExtensionsView** (Skills/Subagents/MCP/Plugins) с status badges.
+  Manual reload button (POST /api/extensions/reload) вызывает `reload_now()`
+  на всех 4 watcher'ах.
+- **4 watcher'а встроены в web/telegram orchestrator** start/stop lifecycle:
+  SkillHotReloader, SubagentHotReloader, PluginHotReloader, MCPHotReloader.
+
+**Etape 5 — Agent Context:**
+- **Personal instructions + response tone.** `user_agent_context` table
+  (instructions TEXT + tone TEXT). GET/PUT /api/agent-context +
+  /api/agent-context/preview (BE-assembled system prompt). Tone (concise/
+  detailed) → directive injected в system prompt через `tone_directive()`.
+  Live preview обновляется при сохранении.
+
+#### B-063 — Full LLM-context persistence per chat
+
+**S1 — Persistence:**
+- **`ChatContextStore`** (`channels/web/chat_context_store.py`) — новый store:
+  `web_chat_context` table (session_id, user_id, role, content, tool_calls,
+  tool_call_id, name, reasoning, seq). UNIQUE(session_id, seq). FK CASCADE.
+- **Persist на каждый turn** — `AgentLoop.run(session_id)` persist'ит полный
+  LLM-facing message schema (tool_calls + reasoning) в 5 точках: user message,
+  assistant tool-call message, tool result (parallel + sequential), final
+  assistant answer. Non-fatal (persist failure не роняет run).
+- **Contextvar isolation** (`agent/context_target.py`) — session_id/user_id
+  хранятся в contextvars (task-scoped), НЕ в instance attrs → concurrent
+  multi-user runs на shared singleton loop изолированы.
+
+**S2 — Restore-on-activate:**
+- **`build_from_full_history`** (`agent/context.py`) — реконструкция полного
+  LLM-context из store: tool_calls (dict→ToolCall), tool-role, system-merge,
+  phase-2 leading-strip (assistant+tool), few_shots injection.
+- **`restore_user_context`** (`channels/service.py`) — clear+re-add в
+  SQLiteMemory (text-only fallback); run() грузит full schema из store
+  (приоритетный путь).
+- **`_handle_activate_chat`** — load вместо reset. activate_session ПЕРЕД
+  restore (F4 fix: если restore raise'нет, session flag корректен, memory
+  восстанавливается при следующем run()).
+
+**S3 — Compress-any-chat:**
+- **`_compress_from_context_store`** (`agent/loop.py`) — compress грузит
+  full schema из store для любого session_id, сжимает, write-back через
+  `replace_context`. Не трогает SQLiteMemory (чат может быть неактивным).
+- **IDOR ownership-check** — `_compress_active_context` проверяет
+  `get_session(user.memory_key(), session_id)` → reject if None.
+- **FE** — compress payload несёт `session_id` (chatId viewed chat).
+
+**S4 — Capture correlation:**
+- **Capture contextvars** (`llm/base.py`) — `set_capture_context(user_id,
+  session_id)` + `set_run_id(stats.run_id)` populate'ятся в `AgentLoop.run()`,
+  reset'ятся в finally. Task-scoped, no leak.
+- **Payload enrichment** — `payload.py` capture() пишет `user_id`,
+  `session_id`, `run_id` в каждую запись `llm_payloads.jsonl`. Провайдеры
+  (OpenAI, Anthropic) читают contextvars и передают в pl.capture().
+- **Bonus fix:** `set_run_id` теперь вызывается → `run_id` больше не null.
+
+#### Core improvements
+
+- **Background idle-container pruner** в web и telegram channels (раньше
+  CLI-only). Периодический `prune_idle()` каждые 300s, try/except на каждый
+  pass — transient Docker hiccup не убивает reaper.
+- **Per-user approval locks** (`loop.py`) — `dict[int, asyncio.Lock]`, lazy
+  creation + stale-pruning past `_MAX_APPROVAL_LOCKS=10000`. Разные
+  пользователи больше не блокируют друг друга на approval prompts.
+- **TaskRun journal I/O offloaded to thread pool** — `anyio.to_thread` для
+  file writes в `task_run.py`, не блокирует event loop.
+
+### Changed
+
+- **`AgentLoop._save_turn`** — теперь вызывается unconditionally (не под
+  `if self._memory:` guard). `_save_memory` внутри no-op'ит при отсутствии
+  memory, но `_persist_context_msg` (context store) работает независимо.
+- **`AgentLoop.run(session_id)`** — опциональный параметр; threaded от web
+  orchestrator → service → loop. None для telegram/CLI/subagents → persist
+  выключен.
+- **`AgentRequestService.run(session_id)` / `.compress_user_context(session_id)` /
+  `.restore_user_context(session_id)`** — session_id threaded через весь стек.
+- **Web channel: mode derived from section.** Chat/Work заменяют legacy
+  mode-toggle. Work → execute (tools on), Chat → chat (tools off).
+- **`config/settings.yaml`**: `agent.depth_modes` (fast/think per-model mapping),
+  `web.chat_active_max_messages` (2000), `web.chat_archived_session_ttl_days` (30),
+  `web.chat_max_archived_sessions_per_user` (20).
+
+### Fixed
+
+#### Web UI (аудиты и фиксы)
+
+- **Layout grid-collapse** (PR #57) — `.main-pane` рос до content-height
+  (2052px), скроллилась вся страница вместо панели сообщений. Root: grid
+  `minmax(0,1fr)` + `min-height:0` + flex враппер.
+- **Composer на коротких чатах** (PR #59) — `.chat-shell` без `flex:1`
+  сворачивался до content-height → композер по центру. Fix: `flex:1`.
+- **Sidebar toggle на десктопе** (PR #61) — CSS-правило скрывало сайдбар
+  только в `@media ≤900px`. Добавлено desktop-правило.
+- **User menu popover** (PR #62) — открывался вниз, обрезался `overflow:hidden`
+  сайдбара. Fix: `bottom: calc(100% + 8px)` → открывается вверх.
+- **Compress button** (PR #60) — заглушка `disabled` → подключена к on-demand
+  компрессии через WS `compress` event.
+- **Eye «Просмотр»** (PR #60) — `disabled={!preview}` → always-clickable;
+  без файла открывает overlay с empty-state.
+- **Sidebar-toggle position** (PR #61) — был справа рядом с eye; fix:
+  `.topbar-leading { grid-area: files }`.
+- **False «overridden by overlay» warnings** (PR #56) — watcher'ы на initial
+  scan ре-регистрировали уже загруженные файлы → попадали в overlay branch.
+  Fix: `_prime()` кэширует mtimes только для файлов уже в registry.
+
+#### Memory & context
+
+- **Latent `self._connect()` bug** (PR #55) — `get_agent_context`/
+  `set_agent_context` вызывали `self._connect()` (не существует на UserManager)
+  → весь Etap 5 (agent context: instructions AND tone) молча no-op'ил.
+  Fix: `db_connect(self._db)`.
+- **Terminal-tool double-persist** (PR #71) — terminal tools persist'или
+  результат дважды (tool + assistant). Fix: skip tool-role для terminal tools.
+- **Phase-2 strip drops tool_calls** (PR #71) — leading assistant+tool_calls
+  strip'ился, но tool_calls терялись. Fix: render в system prompt text.
+- **restore_user_context partial-write** (PR #71) — clear+add без try/except.
+  Fix: non-fatal wrap.
+- **Tone directive not injected** (PR #55, M1) — tone поле сохранялось, но
+  не доходило до промпта. Fix: `tone_directive()` + inject в `build_system_prompt`.
+- **Contextvar leak** (PR #55, L1) — `set_call_depth_mode` вне try/finally →
+  leak при exception в context-build. Fix: set внутри try.
+
+#### DB & infrastructure
+
+- **`db_connect` FK pragma** (PR #63) — `PRAGMA foreign_keys=ON` globally.
+  Ранее CASCADE декларации были dormant.
+- **LLM queue semaphore double-release** — guard against double-release.
+- **Smart-eval LLM slot** — acquires under real user_id/run_id.
+- **Auto-finalize LLM call** — routed through the queue.
+
+### Backward compatibility
+
+- Legacy `presets:` / `RoutingRule.preset` / `ModelPreset` — back-compat reader
+  (без изменений с 0.2.1).
+- Telegram channel — `session_id=None` → persist/restore/compress = legacy path
+  (без изменений).
+- `web_chat_messages` (user-visible transcript) — без schema изменений;
+  `web_chat_context` — новая таблица (additive).
+- Старые чаты (до S1) — нет данных в `web_chat_context` → activate falls back
+  to reset (как до S2).
+
+### Known limitations
+
+- **B3:** `append_context` retry (3 попытки) может исчерпаться под extreme
+  concurrent writers → message silently dropped (mitigated single-in-flight lock).
+- **B5:** SQLiteMemory `get_history` грузится всегда, даже когда `full_history`
+  из context-store перекрывает (premature optimization, не блокирующее).
+- **B6:** Synthetic correction prompts (empty-response/XML-repair) не
+  persist'ятся в context-store (intentional — они transient recovery nudges).
+- **Stale usage snapshot** — `compress_done` сообщает устаревший context-usage
+  (cache не пересчитывается после compress; pre-existing с PR #60).
+- **`should_compress` bypass** — on-demand compress() вызывается напрямую, минуя
+  guard "last message is pending tool result" (pre-existing с PR #60).
+- **Anthropic stream() не captured** — pre-existing, не B-063 regression.
+- **Full-LLM-context хранится только in-memory для активного чата** (AGENTS.md
+  §Reasoning known limitation) — **устранено в B-063** (S1-S4). Теперь persist
+  + restore + compress-any-chat работают для всех чатов.
+
+## [0.2.1] — 2026-06-25
+
+**Minor bump** `0.1.13 → 0.2.1`. Первоначально планировалась как major `0.2.0`
+(D-056: production-ready управление провайдерами/моделями/thinking), и была
+полностью реализована (`8a76992` release commit), но после живых live-тестов
+перед тегом выяснилось, что версия несёт ещё несколько критичных регрессий —
+raw-capture инфраструктуру (PR #33), фикс контейнерной изоляции, ломавшей
+**каждый** tool call в container-режиме, и целый раунд live-test фиксов.
+Поэтому major-функционал D-056 (0.2.0) + raw-capture + все live-test фиксы
+объединены в один выпуск `0.2.1`; релиз `0.2.0` закоммичен, но не тегирован
+в main — его доработки вошли в 0.2.1. Версия остаётся в `pre-release` (не
+релизнута в main) — есть доработки не готовые для production-релиза.
+
+Фокус версии — три блока:
+
+1. **D-056 — управление провайдерами/моделями/thinking.** Пресет расщеплён на
+   ортогональные слои: `ModelProfile` (свойства модели) + `SamplingProfile`
+   (свойства задачи/фазы). Per-call override поднят через второй независимый
+   contextvar (`RequestOptions`). `PhasePolicy` переключает thinking по фазе
+   задачи. `LLMRouter.with_overrides()` — программный atomic override.
+2. **Raw LLM capture (D-056 post-0.2.0, PR #33).** Сырые request/response
+   payload'ы пишутся в `logs/llm_payloads.jsonl` с field-level allowlist и
+   credential scrubbing. Основа для диагностики «что именно получила/вернула
+   модель» и будущей системы сбора датасета для дообучения.
+3. **Фиксы контейнерной изоляции и capture-wiring**, найденные живыми прогонами.
+
+### Breaking changes
+
+- **`config/model_presets.yaml`**: legacy комбинированный формат `presets:` →
+  split `models:` + `sampling:`. Back-compat reader в ядре парсит legacy
+  `presets:` и split'ит в виртуальные (ModelProfile, SamplingProfile) пары по
+  тому же имени — overlay-репо и unmigrated config продолжают работать без
+  правок. Миграция рекомендуемая, не обязательная.
+- **`RoutingRule.preset`** → deprecated alias. Рекомендуется `sampling:`
+  (split-формат). Legacy `preset:` работает через back-compat reader; при
+  заданных обоих `sampling` выигрывает.
+- **`ModelPreset`** тип deprecated (alias + bridge `profile_from_legacy_preset`).
+  Новый код должен использовать `ModelProfile` + `SamplingProfile`.
+- `requires_core` plugins: bump до `^0.2.0` (плагины с `^0.1.x` получат
+  warn-and-skip при загрузке, advisory — не fatal).
+
+### Added
+
+#### D-056 — provider/model/thinking management
+
+- **RequestOptions** (`llm/base.py`) — per-call contextvar (второй независимый
+  рельс рядом с `BackendRequestOptions`). Несёт per-call `inference` +
+  `thinking` override (`ThinkingOverride`: `default`/`off`/`budget`). Provider
+  мерджит оба с детерминированным приоритетом. Протокол `Provider` не меняется —
+  override через contextvar, не через параметры `chat()`.
+- **Расщепление `ModelPreset` → `ModelProfile` + `SamplingProfile`**
+  (`llm/presets.py`). `ModelProfile`: `thinking_parser`, `system_prompt_prefix`,
+  `default_inference` (свойства модели). `SamplingProfile`: `thinking_mode`,
+  `thinking_budget`, `inference_overrides`, ссылка на `ModelProfile` (свойства
+  задачи/фазы). Дубликаты пресетов схлопнуты (`gemma4-thinking`/`gemma4-fast` →
+  один `gemma4-26b-qat` profile + два sampling). YAML-bool coercion
+  (`thinking_mode: off` без кавычек → валидируется).
+- **`PhasePolicy`** (`agent/phase_policy.py`) — детектор фазы задачи, per-call
+  переключает thinking через `RequestOptions`. `DefaultPhasePolicy` enabled by
+  default, но **no-op для main agent в default phase** → меняет behavior только
+  в closing_mode (off) и для workflow subagent (gathering off / aggregation on,
+  monotonic-переход: как только aggregation marker (`research_list_facts`)
+  попадает в cumulative `tools_used`, все последующие turns = aggregation).
+  `PhasePolicySettings` в `AgentSettings` (`enabled`, `aggregation_markers`,
+  `gathering_tools`, per-phase thinking).
+- **`LLMRouter.with_overrides()`** (`llm/router.py`) — программный atomic override
+  agent-facing роутов. Возвращает новый router с переопределёнными
+  sampling/thinking/model in-memory. `apply_to="all_agent_routes"` перестраивает
+  все 4 agent-роута сразу → контаминация устранена. `queue`/`cache_manager`
+  шарятся, `provider_meta` пересоздаётся с distinct profile_label.
+- **`build_agent_stack(settings, *, router_override=None)`** (`agent/factory.py`)
+  — инъекция готового router (eval/custom callers).
+- **`aux-no-thinking` sampling profile** + auxiliary routes (vision/compress/
+  consolidate) → thinking off через config, без PhasePolicy.
+
+#### Raw LLM request/response capture (D-056 post-0.2.0, PR #33)
+
+- **`PayloadCaptureLogger`** (`logging/payload.py`) — singleton, пишет
+  `logs/llm_payloads.jsonl` (ротация 20MB×3), по одной записи на LLM-вызов.
+  Field-level allowlist (dot-notation: `request.messages`, `response.reasoning`
+  и т.д.), credential scrubbing на каждом leaf-значении, без транкации. Запись
+  `diagnostic.*` (raw content/finish_reason при XML-parse failure) — всегда,
+  независимо от allowlist. Опциональный: `logging.capture_enabled: false` по
+  умолчанию.
+- **`run_id` contextvar** (`llm/base.py`) — тегирует каждую capture-запись
+  агентским run_id (для корреляции с `agent_trace.jsonl`).
+- **Capture hooks в провайдерах**: `_capture_llm_io()` вызывается из
+  `chat()`/`chat_streamed()`/`chat_with_image()` (`OpenAIProvider`,
+  `AnthropicProvider`), плюс всегда-on diagnostic capture в `_finalize_response`
+  при XML-parse failure. Streaming-провайдер захватывает **собранный** полный
+  `LLMResponse`, не partial deltas.
+- **`LoggingSettings.capture_enabled` / `capture_fields` / `capture_dir`**
+  (`config/settings.py`) — конфигурация capture через `config/settings.yaml →
+  logging`.
+- **+10 unit-тестов** (`tests/test_payload_capture.py`): allowlist filtering,
+  scrubbing, diagnostic capture, disabled-by-default, `run_id` тегирование.
+
+### Changed
+
+- **`RoutingRule`** (`config/settings.py`): новые поля `model_profile`, `sampling`
+  (предпочтительно), legacy `preset` deprecated. `sampling` выигрывает над
+  `preset`.
+- **`OpenAIProvider`/`AnthropicProvider`**: `_apply_preset` → `_apply_model_profile`
+  + `_apply_sampling` + `_apply_request_options` с merge priority: model_profile
+  defaults < sampling overrides < RequestOptions (per-call) < backend extra_body.
+  `chat_with_image` почищен от inline preset copy.
+- **`config/model_presets.yaml`** мигрирован к `models:`/`sampling:` структуре.
+- **`config/settings.yaml`**: routing → `sampling:` на каждом rule;
+  `agent.phase_policy` блок (enabled default, markers, per-phase thinking);
+  `logging.capture_enabled: true` (включён для диагностики).
+- **`calibration/loop.py`**: двух-путная resolution с dead inner loop
+  линеаризована (`has_task_route` gate; unreachable model-harvesting loop удалён).
+
+#### Department budget упразднён + auto-finalize cascade
+
+- **Department-specific `max_iterations`/`max_tool_calls` удалены из production
+  path.** Раньше `permission_checker.get_budget(user)` silently перекрывал
+  `settings.yaml → agent.max_steps` — оператор менял config, перезапускал, лимит
+  тот же (мы сами попались: settings=30, но engineering dept=20 wins). Теперь
+  единый авторитетный лимит в `settings.yaml`. `budget:` блок в
+  `config/departments.yaml` остаётся валидным YAML (back-compat), но не
+  применяется. RBAC (tools, subagents, skills) остаётся department-scoped.
+- **`max_steps: 15→30`, `max_tool_calls: 30→60`** — больше места для research и
+  сложных задач.
+- **Auto-finalize cascade (B+C)** на budget exhaustion: если workflow subagent
+  (с `terminal_tool`) исчерпал бюджет, не вызвав terminal — cascade пытается
+  спасти работу: **B** — один emergency LLM-call «synthesize NOW» с
+  schema=[terminal_tool]. Если модель зовёт terminal → выполнить. **C** — если B
+  вернул текст, программный вызов terminal с этим текстом. Работа предыдущих
+  итераций не теряется. Main agent (без terminal_tool) → generic budget message
+  как раньше.
+- **Degenerate-empty-response retry.** Локальные LLMы (gemma4 thinking-OFF)
+  иногда после tool result отдают пустой контент + ноль tool_calls + finish=stop
+  (degenerate stutter). Раньше loop выходил с «Agent provided no response» на
+  iter 2-3, теряя весь ран. Теперь — bounded retry (3 попытки) с корректирующим
+  промптом «You returned an empty response. Continue your task», симметрично с
+  planning-text guard. После 3 пустых ответов → graceful exit.
+- **`pdf_reader` output_path → full extraction.** При указании `output_path`
+  инструмент извлекал только `max_chars` (50K) по умолчанию, обрезая документ.
+  «Конвертируй PDF в .md» занимало 6 итераций (реэкспорт кусками + read_file
+  loops). Фикс: при `output_path` извлекается весь документ без truncation;
+  `max_chars` применяется только к строке, возвращаемой в контекст агента.
+  Конвертация — 1 шаг.
+- **Workflow-mandate restrict assertion.** Iteration-aware mandate (PR #36)
+  меняет timing restrict'а — может срабатывать на другой итерации, чем
+  wall-clock-only, и closing-mode может параллельно сузить schema до только
+  terminal_tool. Тест адаптирован: проверяет наличие restrict'а и наличие
+  terminal_tool в нём, а не точный набор инструментов.
+
+### Fixed
+
+#### Контейнерная изоляция (найдено живым прогоном web-канала)
+
+- **`IPCToolProxy` ломал каждый container tool call.** `ToolRegistry.execute`
+  инжектирует host-context kwargs (`user`, `run_id`, `on_subagent_*` callbacks,
+  `parent_trajectory_recorder`) в `tool_kwargs` для каждого вызова.
+  `IPCToolProxy.execute` доставал только `user` и кидал **всё остальное** в IPC
+  `args` → лямбды летели в контейнер → `IPCAuth.sign` падал на
+  `TypeError: Object of type function is not JSON serializable`. Симптом: модель
+  корректно звала `list_files` 4 раза, каждый раз получала ошибку, сдавалась.
+  Та же причина ломала research-agent (первый `research_search` падал на
+  сериализации → агент за 1 итерацию без tool calls писал ответ руками).
+  Фикс: `IPCToolProxy.execute` стрипает host-only kwargs по whitelist
+  (`_HOST_ONLY_KWARGS`) **и** фильтрует `args` до declared params — в контейнер
+  идут только LLM-созданные аргументы. Defence-in-depth. Regression-тесты
+  (`tests/test_container_proxy.py`, 4 теста) включают end-to-end проверку: полный
+  host-kwargs проходит через `IPCAuth.sign` без падения.
+- **Raw-capture молча отключён в web и telegram каналах.** `setup_logging()`
+  принимает `capture_enabled/capture_fields/capture_dir` и корректно подключает
+  `PayloadCaptureLogger`, но **только CLI call-sites их передавали** — web и
+  telegram orchestrators опускали эти параметры → capture запускался с дефолтами
+  (`enabled=false`) несмотря на `settings.yaml → capture_enabled: true`.
+  Симптом: `llm_payloads.jsonl` оставался пустым на всех канальных запусках.
+  Фикс: оба оркестратора передают capture-config из `log_cfg`.
+
+#### D-056 post-validation (найдены живым прогоном gemma4-26b-qat перед тегом)
+
+- **Judge route contamination.** Canonical `config/settings.yaml` имел `eval`
+  route закомментированным → `_resolve_judge` падал на `default` (агент-модель) →
+  судья скорил ответы на той же модели что оценивал. Раскомментирован
+  `eval` → cloud/glm-5.2 (safe: `from_settings` skip+warn если cloud не настроен).
+- **gemma4 config wrong parser.** `config/model_presets.yaml` декларировал
+  `gemma4-26b-qat` с `thinking_parser: source: content` + `<|think|>` prefix,
+  но proxy отдаёт reasoning в native `reasoning_content` (Qwen-style), не в
+  content-tags. Config исправлен на `source: native`, prefix убран.
+- **Thinking-off не подавлял prefix-based thinking.** `thinking_mode=off` ставил
+  только `chat_template_kwargs.enable_thinking=False` (Qwen-механизм). Для
+  prefix-based моделей (gemma4 `<|think|>`) prefix — это и есть переключатель
+  thinking, и он оставался активным → модель продолжала reasoning (89% ходов).
+  Добавлен `_thinking_disabled()` helper; `_apply_model_profile` подавляет
+  `system_prompt_prefix` при thinking-off (sampling или per-call RequestOptions).
+  После фикса: **gemma4+off — reasoning=0 на 100% ходов** (валидировано live).
+- **PhasePolicy research timing (logic inversion).** Aggregation-фаза
+  детектировалась по prev_tool_calls только → turn с `research_list_facts`
+  шёл в gathering (thinking off), а `research_finalize` получал thinking-on
+  только если list_facts был в immediately-previous turn (часто пропускалось).
+  Фикс: gathering→aggregation переход **monotonic** — `PhaseContext` несёт
+  cumulative `tools_used`; как только aggregation marker (`research_list_facts`)
+  появляется в cumulative, все последующие turns = aggregation.
+- **Aggregation не включала thinking.** `aggregation_thinking="default"`
+  производил no-op (RequestOptions=None) → на gemma4+off run финальный synthesis
+  шёл без reasoning (модель не обдумывала собранные факты перед отчётом). Фикс:
+  `_thinking_options("default")` возвращает RequestOptions (force-on);
+  `_apply_request_options` для `mode=default` ставит `enable_thinking=True`,
+  отменяя sampling-off. Валидировано: reasoning=2269 в aggregation-turn после
+  `research_list_facts`.
+
+#### Model-scoped sampling + gemma4 research crash (найдено live-тестами 0.2.1)
+
+- **Cross-model parameter leakage → gemma4 crash.** Sampling-профиль
+  `temperature-0.4` (авторский для qwen, `model: qwen3.6-35b-a3b`) применялся к
+  роуту `default` с `model: gemma4-26b-qat`. Router резолвил ModelProfile по
+  `sampling.model`, но `inference_overrides: {temperature: 0.4}` применялся
+  безусловно к gemma4 — молчаливая утечка. При temp=0.4 gemma4
+  non-deterministically деградирует на thinking-OFF + multi-turn с `role=tool`:
+  генерирует 12-char garbage reasoning, finish=stop, без content/tool_calls.
+  Симптом: research-agent падал на iteration 2/4 с `malformed_xml_tool_call`.
+
+  **Фикс (config):** `ModelProfile.default_inference` обновлены до официальных
+  рекомендаций производителей — Gemma 4: `1.0/0.95/64`, Qwen 3: 4 канонических
+  режима (thinking-general/coding, instruct-general/reasoning) с
+  presence_penalty=1.5. Sampling-профили реструктурированы на model-scoped
+  (`gemma4-default`, `gemma4-fast`, `qwen-thinking-general`, и т.д.). Legacy
+  `temperature-0.4` удалён. Роуты обновлены: `default→gemma4-default`,
+  `vision/compress/consolidate→gemma4-fast`.
+
+  **Фикс (code):** `_enforce_model_match()` в `router.py` — sampling-профиль с
+  `model:` несовместимым с моделью роута → warn + skip `inference_overrides`
+  (thinking_mode preserved). Guard в `_get_or_create` и `with_overrides`.
+
+- **Reasoning-fallback копировал garbage в content (FIX 2).**
+  `_resolve_reasoning_fallback` (legacy Qwen3 heuristic) копировал любой
+  reasoning в content. Для gemma4's 12-char garbage это создавало обрезанный
+  XML-маркер → ложный `malformed_xml_tool_call` crash. Фикс: length-gate —
+  fallback (копирование reasoning→content) срабатывает только для reasoning
+  ≥ `_REASONING_FALLBACK_MIN_CHARS` (100). Короткий фрагмент → content остаётся
+  пустым, агент retry'ит вместо краша.
+
+### Added (eval + overlay)
+
+- **+2 research eval-сценария** (`config/eval_scenarios.yaml`, 28 total):
+  `research_basic_fact_lookup`, `research_comparison_synthesis`. PhasePolicy
+  research gathering/aggregation — главный use-case D-056 — ранее не
+  покрывался eval-корпусом. Теперь покрывается.
+- **Overlay e2e-тесты version-aware** (`tests/test_overlay_e2e.py`): corp-echo
+  assertions учитывают `requires_core` контракт — плагин загружается когда
+  core-версия удовлетворяет constraint, и корректно warn-and-skip'ается иначе
+  (раньше тесты падали на 0.1.13 с плагином `^0.2.0`).
+
+### Backward compatibility
+
+Legacy `presets:` YAML, `RoutingRule.preset`, и `ModelPreset` тип продолжают
+работать через back-compat reader/bridge. Overlay-репо с legacy config НЕ
+требует правок. Миграция к split-формату рекомендуемая.
+
+### Roadmap: fine-tune dataset collection
+
+Raw-capture (`logs/llm_payloads.jsonl`) — фундамент для будущей системы сбора
+датасета для дообучения локальных моделей. Планируемая логика (следующие версии):
+
+- **Позитивные примеры** — успешные траектории: LLM-запрос → корректный
+  tool-call (по judge-оценке или downstream-валидации) → сохраняется как
+  few-shot/SFT-пример. Фильтр: `request_finished.status=ok`, целевой tool-call
+  привёл к верному результату.
+- **Негативные примеры** — провальные/loop траектории: model не зовёт нужный
+  tool, зацикливается, XML-parse failure, tool-call с неверными аргументами.
+  Используются для preference/DPO-пар (выбранная плохая генерация vs.
+  исправленная) и для отладки шаблонов/промптов.
+- Capture уже несёт всё необходимое (`request.messages`, `request.tools`,
+  `response.content`/`reasoning`/`tool_calls`, `run_id` для корреляции с
+  trace-метриками) — доработка будет в слое разметки/экспорта, не в capture.
+
+
 ## [0.1.13] — 2026-06-23
 
 Фокус версии — **три фазы инфраструктуры агента**. Phase 0 добавляет

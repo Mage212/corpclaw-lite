@@ -160,13 +160,20 @@ class TestTelegramChannel:
 
     @pytest.mark.asyncio
     async def test_handle_new(self, channel: TelegramChannel) -> None:
+        """B-106: /new resets virtual session + cache, not SQLiteMemory messages."""
         update = MagicMock()
         update.effective_user.id = 123
         update.effective_chat.send_message = AsyncMock()
         channel._memory = AsyncMock()
+        session_reset = AsyncMock()
+        cache_reset = AsyncMock()
+        channel._session_reset_callback = session_reset
+        channel._cache_reset_callback = cache_reset
 
         await channel._handle_new(update, MagicMock())
-        channel._memory.clear.assert_awaited_once_with("123")
+        session_reset.assert_awaited_once()
+        cache_reset.assert_awaited_once_with("123")
+        channel._memory.clear.assert_not_called()
         update.effective_chat.send_message.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -286,9 +293,50 @@ class TestTelegramChannel:
     async def test_handle_callback_delete(self, channel: TelegramChannel) -> None:
         update = MagicMock()
         update.callback_query.data = "del:ws"
+        update.callback_query.from_user.id = 4242
         update.callback_query.answer = AsyncMock()
         context = MagicMock()
         handler = AsyncMock()
+        handler._owner_uid = 4242  # owner taps their own button (B-068)
+        context.user_data = {"delete_handler": handler}
+
+        await channel._handle_callback(update, context)
+        handler.handle_callback.assert_awaited_once_with(update, context, "del:ws")
+
+    @pytest.mark.asyncio
+    async def test_handle_callback_delete_denied_for_wrong_owner(
+        self, channel: TelegramChannel
+    ) -> None:
+        """B-068: in a group chat, user B cannot tap user A's delete buttons."""
+        update = MagicMock()
+        update.callback_query.data = "del:ws"
+        update.callback_query.from_user.id = 9999  # user B
+        update.callback_query.answer = AsyncMock()
+        context = MagicMock()
+        handler = AsyncMock()
+        handler._owner_uid = 4242  # user A opened /delete
+        context.user_data = {"delete_handler": handler}
+
+        await channel._handle_callback(update, context)
+        # dispatch must NOT happen — wrong owner
+        handler.handle_callback.assert_not_awaited()
+        update.callback_query.answer.assert_awaited_once()
+        # the alert denial message was shown
+        args, kwargs = update.callback_query.answer.call_args
+        assert kwargs.get("show_alert") is True
+
+    @pytest.mark.asyncio
+    async def test_handle_callback_delete_no_owner_uid_allows_dispatch(
+        self, channel: TelegramChannel
+    ) -> None:
+        """B-068 backward-compat: a handler without owner_uid (e.g. legacy or
+        test mock) is dispatched as before — the check is opt-in via _owner_uid."""
+        update = MagicMock()
+        update.callback_query.data = "del:ws"
+        update.callback_query.answer = AsyncMock()
+        context = MagicMock()
+        handler = AsyncMock()
+        handler._owner_uid = None  # explicitly unset
         context.user_data = {"delete_handler": handler}
 
         await channel._handle_callback(update, context)
@@ -472,3 +520,25 @@ class TestResolveFallbackIps:
             "read_timeout": 20.0,
             "pool_timeout": 8.0,
         }
+
+
+# ── S3-06: Telegram private-chat filter ───────────────────────────────────────
+
+
+def test_private_chat_filter_derived_from_allow_groups() -> None:
+    """S3-06: the handler chat filter is ChatType.PRIVATE unless allow_groups is set."""
+    from telegram.ext import filters as tg_filters
+
+    from corpclaw_lite.config.settings import TelegramSettings
+
+    # Default (allow_groups=False) → private-only filter.
+    settings_default = TelegramSettings()
+    filter_default = (
+        tg_filters.ALL if settings_default.allow_groups else tg_filters.ChatType.PRIVATE
+    )
+    assert filter_default is tg_filters.ChatType.PRIVATE
+
+    # Explicit allow_groups=True → all chats.
+    settings_open = TelegramSettings(allow_groups=True)
+    filter_open = tg_filters.ALL if settings_open.allow_groups else tg_filters.ChatType.PRIVATE
+    assert filter_open is tg_filters.ALL

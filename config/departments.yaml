@@ -2,13 +2,17 @@
 #
 # Each department defines:
 #   allowed_tools: tools this department can use (["*"] = all)
-#   budget: optional override for agent loop limits (iterations + tool_calls only)
+#   allowed_subagents: subagents this department can dispatch to
 #
-# Time budget (max_wall_time_ms) is controlled globally in config/settings.yaml
-# because it depends on hardware/model speed, not on department complexity.
+# Resource limits (max_steps, max_tool_calls, max_wall_time_ms) are controlled
+# globally in config/settings.yaml → agent.*. Department-specific iteration/
+# tool-call budgets were removed — they silently overrode settings, causing
+# "config change has no effect" bugs (the operator changes settings.yaml but
+# the department budget wins). The `budget:` block is still parsed for
+# back-compat but no longer applied in the agent loop.
 #
-# Main agent tools (inspection + routing):
-#   read_file, list_files, search_files, excel_inspect
+# Main agent tools (inspection + routing + brief fill):
+#   read_file, list_files, search_files, excel_inspect, apply_fill_plan
 # Host-side tools (registered separately):
 #   web_fetch, web_search, read_image, memory_store, memory_recall,
 #   dispatch_subagent, send_file
@@ -18,7 +22,13 @@
 
 departments:
   default:
-    description: "Default department for unclassified users"
+    # DC-039: office-without-web — closed-loop office Work for unclassified users.
+    # No host-side web egress; office subagents (document/data/execution/filesystem)
+    # instead of research-only. send_file stays on main for two-step delivery.
+    description: "Default department for unclassified users (office Work, no web egress)"
+    allowed_skills: ["*"]
+    allowed_plugins: ["*"]
+    allowed_mcp: ["*"]
     allowed_tools:
       - read_file
       - list_files
@@ -28,17 +38,19 @@ departments:
       - read_image
       - dispatch_subagent
       - excel_inspect
-      - web_fetch
-      - web_search
+      - apply_fill_plan
       - send_file
     allowed_subagents:
-      - research-agent
-    budget:
-      max_iterations: 10
-      max_tool_calls: 20
+      - filesystem-agent
+      - document-agent
+      - execution-agent
+      - data-agent
 
   engineering:
     description: "Software engineering and IT teams"
+    allowed_skills: ["*"]
+    allowed_plugins: ["*"]
+    allowed_mcp: ["*"]
     allowed_tools:
       - "*"
     allowed_subagents:
@@ -47,12 +59,12 @@ departments:
       - document-agent
       - data-agent
       - research-agent
-    budget:
-      max_iterations: 20
-      max_tool_calls: 50
 
   it:
     description: "IT support and infrastructure"
+    allowed_skills: ["*"]
+    allowed_plugins: ["*"]
+    allowed_mcp: ["*"]
     allowed_tools:
       - read_file
       - list_files
@@ -62,6 +74,7 @@ departments:
       - read_image
       - dispatch_subagent
       - excel_inspect
+      - apply_fill_plan
       - web_fetch
       - web_search
       - send_file
@@ -69,12 +82,12 @@ departments:
       - filesystem-agent
       - document-agent
       - research-agent
-    budget:
-      max_iterations: 15
-      max_tool_calls: 30
 
   marketing:
     description: "Marketing and communications"
+    allowed_skills: ["*"]
+    allowed_plugins: ["*"]
+    allowed_mcp: ["*"]
     allowed_tools:
       - read_file
       - list_files
@@ -87,15 +100,16 @@ departments:
       - read_image
       - dispatch_subagent
       - excel_inspect
+      - apply_fill_plan
     allowed_subagents:
       - document-agent
       - research-agent
-    budget:
-      max_iterations: 10
-      max_tool_calls: 20
 
   finance:
     description: "Finance and accounting"
+    allowed_skills: ["*"]
+    allowed_plugins: ["*"]
+    allowed_mcp: ["*"]
     allowed_tools:
       - read_file
       - list_files
@@ -106,18 +120,19 @@ departments:
       - read_image
       - dispatch_subagent
       - excel_inspect
+      - apply_fill_plan
       - web_fetch
       - web_search
     allowed_subagents:
       - data-agent
       - document-agent
       - research-agent
-    budget:
-      max_iterations: 10
-      max_tool_calls: 20
 
   hr:
     description: "Human resources"
+    allowed_skills: ["*"]
+    allowed_plugins: ["*"]
+    allowed_mcp: ["*"]
     allowed_tools:
       - read_file
       - list_files
@@ -128,17 +143,18 @@ departments:
       - read_image
       - dispatch_subagent
       - excel_inspect
+      - apply_fill_plan
       - web_fetch
       - web_search
     allowed_subagents:
       - document-agent
       - research-agent
-    budget:
-      max_iterations: 10
-      max_tool_calls: 20
 
   analytics:
     description: "Data analytics and BI"
+    allowed_skills: ["*"]
+    allowed_plugins: ["*"]
+    allowed_mcp: ["*"]
     allowed_tools:
       - read_file
       - list_files
@@ -151,16 +167,17 @@ departments:
       - read_image
       - dispatch_subagent
       - excel_inspect
+      - apply_fill_plan
     allowed_subagents:
       - data-agent
       - document-agent
       - research-agent
-    budget:
-      max_iterations: 15
-      max_tool_calls: 30
 
   product:
     description: "Product management"
+    allowed_skills: ["*"]
+    allowed_plugins: ["*"]
+    allowed_mcp: ["*"]
     allowed_tools:
       - read_file
       - list_files
@@ -172,16 +189,17 @@ departments:
       - read_image
       - dispatch_subagent
       - excel_inspect
+      - apply_fill_plan
       - send_file
     allowed_subagents:
       - document-agent
       - research-agent
-    budget:
-      max_iterations: 10
-      max_tool_calls: 20
 
   admin:
     description: "System administrators — full access"
+    allowed_skills: ["*"]
+    allowed_plugins: ["*"]
+    allowed_mcp: ["*"]
     allowed_tools:
       - "*"
     allowed_subagents:
@@ -190,12 +208,12 @@ departments:
       - document-agent
       - data-agent
       - research-agent
-    budget:
-      max_iterations: 25
-      max_tool_calls: 60
 
   development:
     description: "Software development team"
+    allowed_skills: ["*"]
+    allowed_plugins: ["*"]
+    allowed_mcp: ["*"]
     allowed_tools:
       - "*"
     allowed_subagents:
@@ -204,6 +222,3 @@ departments:
       - document-agent
       - data-agent
       - research-agent
-    budget:
-      max_iterations: 20
-      max_tool_calls: 50

@@ -44,30 +44,36 @@ llm:
       prune_interval_seconds: 600.0
       http_timeout_seconds: 30.0
   # Routing rules — checked top-to-bottom, first match wins
-  # provider: must match a name registered via PROVIDER_* env vars in .env
-  # model:    model identifier for that provider
-  # preset:   (optional) model preset from config/model_presets.yaml
+  # provider:       must match a name registered via PROVIDER_* env vars in .env
+  # model:          model identifier for that provider
+  # sampling:       (preferred) sampling profile from config/model_presets.yaml
+  #                 (the ``sampling:`` block). Controls thinking_mode + per-task
+  #                 inference overrides. See D-056.
+  # model_profile:  (optional) override the model profile; inferred from the
+  #                 sampling profile's ``model:`` or the rule's ``model:`` if absent.
+  # preset:         (deprecated) legacy combined preset — still works via the
+  #                 back-compat reader. Prefer ``sampling:``.
   routing:
-    # Main chat (used by AgentLoop)
+    # Main chat (used by AgentLoop) — gemma4 with its model-scoped sampling.
+    # NOTE: sampling profile MUST match the route's model. The router detects
+    # mismatches and warns + skips inference_overrides (thinking_mode preserved).
     - task_kind: "default"
       provider: "llamacpp"
-      model: "qwen3.6-35b-a3b"
-      preset: "temperature-0.4"
+      model: "gemma4-26b-a4b"
+      sampling: "gemma4-default"
 
-    # Vision analysis (separate LLM call for images)
+    # Vision analysis (separate LLM call for images) — thinking off (extraction)
     - task_kind: "vision"
       provider: "llamacpp"
-      model: "qwen3.6-35b-a3b"
+      model: "gemma4-26b-a4b"
+      sampling: "gemma4-fast"
 
-    # Memory consolidation (LLM-based history compression)
-    - task_kind: "consolidate"
-      provider: "llamacpp"
-      model: "qwen3.6-35b-a3b"
-
-    # Context compression (LLM-based summary of old turns)
+    # Context compression (LLM-based summary of old turns) — thinking off
+    # B-105: sole transcript compress path (ChatContextStore); MemoryConsolidator removed
     - task_kind: "compress"
       provider: "llamacpp"
-      model: "qwen3.6-35b-a3b"
+      model: "gemma4-26b-a4b"
+      sampling: "gemma4-fast"
 
     # Calibration analysis (cloud provider recommended)
     # Uncomment and configure PROVIDER_OPENROUTER__* in .env to enable
@@ -77,11 +83,12 @@ llm:
 
     # Eval judge (B-060): cloud model that scores agent answers against the
     # 7-dimension rubric. The agent-under-test stays on the `default` route
-    # (local LLM); only the judge uses this. Configure PROVIDER_*__* for a
-    # cloud provider in .env and uncomment, e.g.:
-    # - task_kind: "eval"
-    #   provider: "cloud"
-    #   model: "glm-5.2"
+    # (local LLM); only the judge uses this. Requires PROVIDER_CLOUD__* env vars
+    # (e.g. z.ai glm-5.2). When the cloud provider is not registered, the judge
+    # resolves to None and the eval falls back to deterministic-only scoring.
+    - task_kind: "eval"
+      provider: "cloud"
+      model: "glm-5.2"
 
     # Per-subagent routing (optional — falls back to default if no rule matches)
     # - subagent_id: "research-agent"
@@ -89,13 +96,11 @@ llm:
     #   model: "deepseek/deepseek-chat-v3-0324"
 
 agent:
-  max_steps: 15
-  max_tool_calls: 30
+  max_steps: 30
+  max_tool_calls: 60
   max_wall_time_ms: 300000
   max_history: 20
   approval_mode: "manual"
-  consolidation_enabled: true
-  consolidation_threshold: 50
   llm_streaming_enabled: true
   llm_stream_stall_seconds: 20.0
   llm_stream_max_reasoning_chars: 12000
@@ -109,6 +114,47 @@ agent:
     protect_tail_tokens: 3000
     summary_ratio: 0.20
     prune_min_messages: 15
+  # B-095: sticky pinned files hard cap as fraction of max_context_tokens.
+  # Re-injected each turn outside compressor middle; default 25%.
+  pin_context_ratio: 0.25
+  # D-056 PR2: per-call thinking overrides based on task phase. The policy is
+  # enabled by default but is a NO-OP for the main agent in its default phase
+  # (no override returned), so it only takes effect in closing mode (budget
+  # pressure) and for workflow subagents (research). Set enabled: false to
+  # disable entirely.
+  phase_policy:
+    enabled: true
+    # Semantic primary signal: tool names whose presence in the PREVIOUS turn
+    # marks the aggregation/finalization phase (about to write the final report).
+    aggregation_markers: ["research_list_facts"]
+    # Semantic signal: tool names whose presence in the previous turn marks the
+    # gathering phase (still collecting raw material).
+    gathering_tools:
+      - research_search
+      - research_fetch_source
+      - research_read_source
+      - research_list_sources
+      - research_store_fact
+    # Per-phase thinking overrides (default | off | budget).
+    closing_thinking: "off"          # main agent budget < soft_deadline_ratio
+    gathering_thinking: "off"        # research gathering (incl. first turn)
+    aggregation_thinking: "default"  # research aggregation (final analysis/report)
+
+  # Etap 3 (Sprint 3A): user-selectable depth modes (Fast/Think). Each maps to
+  # a named SamplingProfile in config/model_presets.yaml, keyed by the route's
+  # model, so every model carries its own official inference/thinking params.
+  # Resolution goes through router.with_overrides(sampling_name=...) — the full
+  # profile applies, no raw thinking override bypassing the preset system.
+  depth_modes:
+    default: "think"
+    # Fast = thinking OFF (instruct mode). Official rec per model.
+    fast:
+      gemma4-26b-a4b: gemma4-fast            # single official set, thinking off
+      qwen3.6-35b-a3b: qwen-instruct-general # temp=0.7, top_p=0.8, thinking off
+    # Think = thinking ON (default reasoning). Official rec per model.
+    think:
+      gemma4-26b-a4b: gemma4-default          # temp=1.0, top_p=0.95, top_k=64
+      qwen3.6-35b-a3b: qwen-thinking-general  # temp=1.0, top_p=0.95, pp=1.5
 
 web:
   search_backend: "auto"
@@ -158,8 +204,8 @@ container:
   max_memory: "512m"
   cpus: 0.5
   idle_timeout_seconds: 600
-  max_per_user: 1
-  strict_capabilities: false
+  max_concurrent_containers: 20
+  strict_capabilities: true  # cap_drop ALL + seccomp + explicit non-root user (Sprint 1, B-064)
   ipc_timeout_seconds: 120.0
 
 telegram:
@@ -200,6 +246,38 @@ skills:
 extensions:
   extra_paths: []
 
+# B-118 / DC-030: scheduled agent tasks (web-owned poll; consent-first).
+scheduler:
+  enabled: true
+  poll_seconds: 30
+  max_tasks_per_user: 3
+  timezone: "Europe/Moscow"
+  pending_ttl_days: 14
+  db_path: "data/scheduler.db"
+  claim_ttl_seconds: 900
+  max_task_text_chars: 16000
+  max_schedule_text_chars: 500
+
+# B-109 / DC-027 Layer 2+3: background memory curator (web-owned; not consent UI).
+# Master switch off by default; each user must also opt in (CLI memory-worker enable).
+memory_worker:
+  enabled: false
+  interval_hours: 24
+  quiet_hours_start: "22:00"
+  quiet_hours_end: "07:00"
+  # null → reuse scheduler.timezone
+  timezone: null
+  max_users_per_tick: 20
+  max_sessions: 5
+  max_messages_per_session: 40
+  max_transcript_chars: 24000
+  max_entries_per_run: 20
+  notify_on_update: false
+  keep_history_backups: false
+  bootstrap_users_dir: "config/bootstrap/users"
+  entries_backup_dir: "memory_backups"
+  poll_seconds: 300
+
 logging:
   level: "DEBUG"
   console_level: "INFO"
@@ -208,3 +286,24 @@ logging:
   trace_enabled: true
   trace_level: "metadata"
   trace_preview_chars: 200
+  # D-056 / DC-037: raw LLM request/response capture.
+  # Default OFF (closed-contour safety). Opt-in for diagnostics / fine-tuning
+  # dataset collection. When enabled, writes logs/llm_payloads.jsonl with one
+  # record per LLM call, filtered by capture_fields (allowlist).
+  # Credentials are scrubbed (sk-*, Bearer, etc.) — still review capture_fields
+  # before enabling in privacy-sensitive deployments. See AGENTS.md §"LLM payload
+  # capture" for the rationale.
+  capture_enabled: false
+  capture_fields:
+    - "request.model"           # model name
+    - "request.messages"        # full messages array (system + user + history)
+    - "request.tools"           # full tools schema
+    - "request.params"          # temperature/top_p/max_tokens/seed/...
+    - "request.extra_body"      # chat_template_kwargs, id_slot, cache_prompt, top_k...
+    - "response.content"        # raw content (pre-XML-parse)
+    - "response.reasoning"      # raw reasoning_content
+    - "response.tool_calls"     # parsed tool_calls
+    - "response.usage"          # token counts + backend timings
+    - "response.finish_reason"  # stop | tool_calls | length | ...
+  capture_dir: "logs"
+

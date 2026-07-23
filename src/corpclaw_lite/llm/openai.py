@@ -18,15 +18,47 @@ from corpclaw_lite.llm.base import (
     TokenUsage,
     ToolCall,
     get_backend_request_options,
+    get_request_options,
+    get_run_id,
 )
-from corpclaw_lite.llm.presets import ModelPreset
+from corpclaw_lite.llm.presets import ModelPreset, ModelProfile, SamplingProfile
 from corpclaw_lite.llm.xml_tool_calling import parse_xml_tool_calls
+from corpclaw_lite.logging.trace import log_event
 
 __all__ = [
     "OpenAIProvider",
 ]
 
 logger = logging.getLogger(__name__)
+
+
+def _strip_provider_metadata(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Copy canonical messages without provider-private transcript metadata.
+
+    Anthropic signed-thinking state is durable metadata, not part of the
+    OpenAI/LiteLLM wire contract.  Strip it before requests and payload capture
+    without mutating the canonical transcript used by a possible route switch.
+    """
+
+    sanitized: list[dict[str, Any]] = []
+    for message in messages:
+        copied = dict(message)
+        raw_calls = copied.get("tool_calls")
+        if isinstance(raw_calls, list):
+            calls: list[Any] = []
+            for raw_call in raw_calls:
+                if isinstance(raw_call, dict):
+                    call = dict(raw_call)
+                    call.pop("_provider_metadata", None)
+                    call.pop("provider_metadata", None)
+                    calls.append(call)
+                else:
+                    calls.append(raw_call)
+            copied["tool_calls"] = calls
+        copied.pop("_provider_metadata", None)
+        copied.pop("provider_metadata", None)
+        sanitized.append(copied)
+    return sanitized
 
 
 def _text_delta(value: Any) -> str:
@@ -108,9 +140,22 @@ class OpenAIProvider(Provider):
         self,
         settings: ProviderSettings,
         preset: ModelPreset | None = None,
+        *,
+        model_profile: ModelProfile | None = None,
+        sampling: SamplingProfile | None = None,
     ):
         self._model = settings.model
-        self._preset = preset
+        # Always store the split profiles as the canonical internal shape (D-056).
+        # Legacy ``preset=`` is bridged to a (ModelProfile, SamplingProfile) pair
+        # so every code path below deals with one representation. If both are
+        # supplied, the explicit profiles win.
+        if model_profile is None and sampling is None and preset is not None:
+            from corpclaw_lite.llm.presets import profile_from_legacy_preset
+
+            model_profile, sampling = profile_from_legacy_preset(preset)
+        self._preset = preset  # kept for back-compat introspection (deprecated)
+        self._model_profile = model_profile
+        self._sampling = sampling
         api_key = settings.api_key or "dummy"  # local models may not need a real key
         if settings.base_url:
             self._client = openai.AsyncOpenAI(api_key=api_key, base_url=settings.base_url)
@@ -143,54 +188,294 @@ class OpenAIProvider(Provider):
         }
     )
 
-    def _apply_preset(self, system: str | None, kwargs: dict[str, Any]) -> str | None:
-        """Merge preset inference params and inject system_prompt_prefix.
+    def _thinking_disabled(self) -> bool:
+        """Return True if thinking is turned off by sampling or per-call override.
 
-        Priority: request-level params > preset params > provider defaults.
-        Uses ``setdefault`` so request-level values are never overwritten.
-
-        Non-standard params (top_k, min_p, etc.) are routed to ``extra_body``
-        so the OpenAI SDK doesn't reject them.
+        Some models (e.g. gemma4) enable thinking via a ``system_prompt_prefix``
+        token (``<|think|>``) rather than a ``chat_template_kwargs`` flag. For
+        those, "thinking off" must suppress the prefix — setting
+        ``enable_thinking=False`` alone has no effect. This helper checks both
+        the SamplingProfile and the per-call RequestOptions so the prefix is
+        suppressed whenever thinking is off by any layer.
         """
-        if not self._preset:
+        if self._sampling is not None and self._sampling.thinking_mode == "off":
+            return True
+        opts = get_request_options()
+        return opts is not None and opts.thinking is not None and opts.thinking.mode == "off"
+
+    def _apply_model_profile(self, system: str | None, kwargs: dict[str, Any]) -> str | None:
+        """Apply the ModelProfile: default inference params + system_prompt_prefix.
+
+        Lowest inference priority — SamplingProfile and RequestOptions override
+        these. ``setdefault`` is used so higher layers always win. Non-standard
+        params (top_k, min_p, repeat_penalty, ...) are routed to ``extra_body``
+        so the OpenAI SDK doesn't reject them.
+
+        The ``system_prompt_prefix`` (e.g. gemma4 ``<|think|>``) is suppressed
+        when thinking is disabled (SamplingProfile or RequestOptions) — for
+        prefix-based models the prefix IS the thinking switch.
+        """
+        if not self._model_profile:
             return system
 
         extra_body: dict[str, Any] = dict(kwargs.pop("extra_body", None) or {})
-
-        # 1. Merge inference params — split standard vs extended
-        for k, v in self._preset.inference_params.items():
+        for k, v in self._model_profile.default_inference.items():
             if k in self._OPENAI_STANDARD_PARAMS:
                 kwargs.setdefault(k, v)
             else:
                 extra_body.setdefault(k, v)
+        if extra_body:
+            kwargs["extra_body"] = extra_body
+
+        # Suppress the thinking prefix when thinking is off. For gemma4-style
+        # models the prefix (<|think|>) is what enables reasoning; without this
+        # check, thinking_mode=off would set enable_thinking=False (a Qwen
+        # mechanism) but leave the prefix active, so gemma4 keeps reasoning.
+        if self._model_profile.system_prompt_prefix and not self._thinking_disabled():
+            prefix = self._model_profile.system_prompt_prefix
+            return f"{prefix}\n{system}" if system else prefix
+        return system
+
+    def _apply_sampling(self, kwargs: dict[str, Any]) -> None:
+        """Apply the SamplingProfile: thinking mode/budget + inference overrides.
+
+        Middle inference priority — overrides ModelProfile defaults, is itself
+        overridden by RequestOptions (per-call). Thinking mode maps to backend
+        controls:
+          - ``off``    → ``extra_body.chat_template_kwargs.enable_thinking=false``
+            (Qwen-style disable) AND suppresses the ModelProfile's
+            ``system_prompt_prefix`` (gemma4 ``<|think|>``) — see
+            ``_apply_model_profile`` / ``_thinking_disabled``. Both mechanisms
+            are applied so thinking-off works across model families.
+          - ``budget`` → cap ``max_tokens`` to ``budget + 1024`` (soft cap on
+            reasoning output, model-dependent effectiveness).
+          - ``default``→ the model's natural thinking.
+        """
+        if not self._sampling:
+            return
+
+        extra_body: dict[str, Any] = dict(kwargs.pop("extra_body", None) or {})
+
+        # Inference overrides — middle priority, wins over ModelProfile defaults.
+        # Direct assignment (not setdefault) so the task-level layer overrides
+        # the model-level defaults; per-call RequestOptions override these in turn.
+        for k, v in self._sampling.inference_overrides.items():
+            if k in self._OPENAI_STANDARD_PARAMS:
+                kwargs[k] = v
+            else:
+                extra_body[k] = v
+
+        # Thinking mode.
+        if self._sampling.thinking_mode == "off":
+            ctk = dict(extra_body.get("chat_template_kwargs") or {})
+            ctk.setdefault("enable_thinking", False)
+            extra_body["chat_template_kwargs"] = ctk
+        elif self._sampling.thinking_mode == "budget" and self._sampling.thinking_budget:
+            kwargs.setdefault("max_tokens", self._sampling.thinking_budget + 1024)
 
         if extra_body:
             kwargs["extra_body"] = extra_body
 
-        # 2. Thinking budget → cap max_tokens
-        if self._preset.thinking_budget_tokens:
-            budget = self._preset.thinking_budget_tokens
-            kwargs.setdefault("max_tokens", budget + 1024)
+    def _apply_request_options(self, kwargs: dict[str, Any]) -> None:
+        """Apply per-call RequestOptions (inference + thinking overrides).
 
-        # 3. System prompt prefix injection
-        if self._preset.system_prompt_prefix:
-            prefix = self._preset.system_prompt_prefix
-            return f"{prefix}\n{system}" if system else prefix
+        Highest inference priority — overrides ModelProfile and SamplingProfile.
+        Reads the per-call contextvar set by PhasePolicy (or callers). The
+        transport-level ``extra_body`` from ``BackendRequestOptions`` is merged
+        separately by ``_apply_backend_options``.
+        """
+        options = get_request_options()
+        if options is None:
+            return
 
+        extra_body: dict[str, Any] = dict(kwargs.pop("extra_body", None) or {})
+
+        if options.inference:
+            for k, v in options.inference.items():
+                if k in self._OPENAI_STANDARD_PARAMS:
+                    # Per-call override wins over profile/sampling → set directly.
+                    kwargs[k] = v
+                else:
+                    extra_body[k] = v
+
+        if options.thinking:
+            mode = options.thinking.mode
+            if mode == "off":
+                ctk = dict(extra_body.get("chat_template_kwargs") or {})
+                ctk["enable_thinking"] = False  # per-call override wins
+                extra_body["chat_template_kwargs"] = ctk
+            elif mode == "budget" and options.thinking.budget is not None:
+                kwargs["max_tokens"] = options.thinking.budget + 1024
+            elif mode == "default":
+                # Force the model's natural thinking ON — cancel any
+                # thinking_mode=off set by the sampling profile (e.g. aggregation
+                # phase must reason to synthesise, even on an off-configured run).
+                ctk = dict(extra_body.get("chat_template_kwargs") or {})
+                ctk["enable_thinking"] = True
+                extra_body["chat_template_kwargs"] = ctk
+
+        if extra_body:
+            kwargs["extra_body"] = extra_body
+
+    def _apply_preset(self, system: str | None, kwargs: dict[str, Any]) -> str | None:
+        """DEPRECATED: combined preset application (back-compat).
+
+        New code should call ``_apply_model_profile`` + ``_apply_sampling``
+        + ``_apply_request_options``. Kept so any external caller of the old
+        private API keeps working.
+        """
+        system = self._apply_model_profile(system, kwargs)
+        self._apply_sampling(kwargs)
         return system
 
-    def _parse_reasoning(self, message: Any) -> tuple[str, str]:
-        """Extract (reasoning, content) based on preset thinking config.
+    # ── Raw request/response capture (D-056 post-0.2.0) ──────────────────────
 
-        Returns:
-            (reasoning_text, clean_content) — reasoning is empty string if
-            no thinking config is set or no reasoning was found.
+    def _capture_llm_io(
+        self,
+        phase: str,
+        kwargs: dict[str, Any],
+        raw_response: Any | None = None,
+        *,
+        finish_reason: str | None = None,
+        error: str | None = None,
+        diagnostic: dict[str, Any] | None = None,
+    ) -> None:
+        """Capture the raw request + response to logs/llm_payloads.jsonl.
+
+        No-op when payload capture is disabled (the common case). Extracts the
+        request/response summaries and hands them to the PayloadCaptureLogger
+        singleton, which applies the field allowlist + credential scrubbing.
         """
-        if not self._preset or not self._preset.thinking:
-            # No preset / no thinking config — return content as-is
+        from corpclaw_lite.logging.payload import get_payload_logger
+
+        pl = get_payload_logger()
+        if pl is None or not pl.enabled:
+            return
+
+        from corpclaw_lite.llm.base import (
+            get_capture_session_id,
+            get_capture_user_id,
+            get_run_id,
+        )
+
+        response_summary = (
+            self._response_summary(raw_response, finish_reason) if raw_response else None
+        )
+        pl.capture(
+            run_id=get_run_id(),
+            user_id=get_capture_user_id(),
+            session_id=get_capture_session_id(),
+            phase=phase,
+            request=self._request_summary(kwargs),
+            response=response_summary,
+            finish_reason=finish_reason,
+            error=error,
+            diagnostic=diagnostic,
+        )
+
+    @staticmethod
+    def _request_summary(kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Build a request summary dict from the provider kwargs.
+
+        Keys match the ``request.*`` allowlist paths: ``model``, ``messages``,
+        ``tools``, ``params`` (standard OpenAI params), ``extra_body``.
+        """
+        # Standard OpenAI params that are NOT messages/tools/extra_body/model.
+        standard_param_keys = {
+            "temperature",
+            "max_tokens",
+            "max_completion_tokens",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty",
+            "stop",
+            "seed",
+            "tool_choice",
+            "parallel_tool_calls",
+            "response_format",
+            "user",
+            "n",
+            "logit_bias",
+            "logprobs",
+            "top_logprobs",
+            "stream",
+        }
+        params = {k: v for k, v in kwargs.items() if k in standard_param_keys}
+        return {
+            "model": kwargs.get("model"),
+            "messages": kwargs.get("messages"),
+            "tools": kwargs.get("tools"),
+            "params": params or None,
+            "extra_body": kwargs.get("extra_body"),
+        }
+
+    @staticmethod
+    def _response_summary(raw_response: Any, finish_reason: str | None) -> dict[str, Any]:
+        """Build a response summary dict from the raw SDK/streamed response.
+
+        Keys match the ``response.*`` allowlist paths: ``content``,
+        ``reasoning``, ``tool_calls``, ``usage``, ``finish_reason``. Handles
+        both SDK ChatCompletion objects (have ``.model_dump()``) and the
+        streamed SimpleNamespace assembled in ``chat_streamed``.
+        """
+        # SDK objects expose model_dump(); SimpleNamespace does not.
+        if hasattr(raw_response, "model_dump"):
+            try:
+                data = raw_response.model_dump()
+            except Exception:
+                data = {}
+            choices = data.get("choices") or []
+            choice = choices[0] if choices else {}
+            msg = choice.get("message") or {}
+            return {
+                "content": msg.get("content") or "",
+                "reasoning": msg.get("reasoning_content") or "",
+                "tool_calls": msg.get("tool_calls") or [],
+                "usage": data.get("usage"),
+                "finish_reason": choice.get("finish_reason") or finish_reason,
+            }
+        # Fallback: SimpleNamespace from chat_streamed — has choices/message-like
+        # attributes. Try attribute access.
+        try:
+            choices = getattr(raw_response, "choices", None) or []
+            choice = choices[0] if choices else None
+            msg = getattr(choice, "message", None) if choice else None
+            if msg is not None:
+                return {
+                    "content": getattr(msg, "content", "") or "",
+                    "reasoning": getattr(msg, "reasoning_content", "") or "",
+                    "tool_calls": getattr(msg, "tool_calls", []) or [],
+                    "usage": getattr(raw_response, "usage", None),
+                    "finish_reason": getattr(choice, "finish_reason", None) or finish_reason,
+                }
+        except Exception:
+            pass
+        return {
+            "content": None,
+            "reasoning": None,
+            "tool_calls": None,
+            "usage": None,
+            "finish_reason": finish_reason,
+        }
+
+    def _parse_reasoning(self, message: Any) -> tuple[str, str]:
+        """Extract (reasoning, content) based on the model's thinking parser.
+
+        Reads ``ModelProfile.thinking_parser`` (new API) with a back-compat
+        fallback to the legacy ``ModelPreset.thinking``. Returns
+        (reasoning_text, clean_content) — reasoning is empty string if no
+        thinking config is set or no reasoning was found.
+        """
+        cfg = None
+        if self._model_profile is not None:
+            cfg = self._model_profile.thinking_parser
+        elif self._preset is not None:
+            cfg = self._preset.thinking
+
+        if cfg is None:
+            # No thinking config — return content as-is
             return "", message.content or ""
 
-        cfg = self._preset.thinking
         if cfg.source == "native":
             # Qwen3-style: API returns reasoning in a dedicated field
             reasoning = getattr(message, "reasoning_content", None) or ""
@@ -206,6 +491,15 @@ class OpenAIProvider(Provider):
             return reasoning, content
 
         return "", raw
+
+    # Minimum reasoning length for the reasoning→content fallback (sub-case b).
+    # Qwen3's "everything in reasoning_content" edge case yields real answers
+    # (hundreds+ of chars). A short reasoning fragment (e.g. gemma4's 12-char
+    # degenerate output at thinking-OFF + low temp) is NOT a real answer —
+    # copying it to content would create a truncated XML marker and trigger a
+    # false "malformed_xml_tool_call" crash. Below this threshold we leave
+    # content empty so the agent retries instead of crashing on garbage.
+    _REASONING_FALLBACK_MIN_CHARS = 100
 
     def _resolve_reasoning_fallback(
         self,
@@ -223,6 +517,12 @@ class OpenAIProvider(Provider):
           a) reasoning_content has XML tool calls → parse them (NOT a final answer)
           b) reasoning_content is plain text → use as the final answer
 
+        Sub-case (b) only fires for substantial reasoning (≥
+        ``_REASONING_FALLBACK_MIN_CHARS``): a short reasoning fragment (e.g.
+        gemma4's degenerate 12-char output) is not a real answer and copying it
+        to content would cause a false malformed-XML crash. Below the threshold,
+        content stays empty so the agent can retry instead of crashing.
+
         Returns updated (content, tool_calls). Unchanged if no fallback needed.
         """
         # Only trigger when content is empty, no native tool calls, and stop
@@ -233,6 +533,9 @@ class OpenAIProvider(Provider):
         if not reasoning_text:
             return content, tool_calls
 
+        # Sub-case (a): reasoning contains XML tool-call markers — parse it.
+        # This can be a real tool-call embedded in reasoning, so it is checked
+        # regardless of length.
         if tools:
             _MARKERS = ("<tool_call>", "<function=")
             if any(m in reasoning_text for m in _MARKERS):
@@ -247,9 +550,16 @@ class OpenAIProvider(Provider):
                     )
                     return "", [*tool_calls, *parse_result.tool_calls]
                 logger.debug("XML fallback (reasoning_content): no tool_call parsed from reasoning")
+                # Markers present but unparseable — do NOT copy a short fragment
+                # to content (truncated marker → false malformed_xml crash).
+                if len(reasoning_text.strip()) < self._REASONING_FALLBACK_MIN_CHARS:
+                    return content, tool_calls
                 return reasoning_text.strip(), tool_calls
-            return reasoning_text.strip(), tool_calls
 
+        # Sub-case (b): plain-text reasoning as the answer. Only for substantial
+        # reasoning — a short fragment is degenerate output, not an answer.
+        if len(reasoning_text.strip()) < self._REASONING_FALLBACK_MIN_CHARS:
+            return content, tool_calls
         return reasoning_text.strip(), tool_calls
 
     # ── Main chat ─────────────────────────────────────────────────────────────
@@ -260,17 +570,31 @@ class OpenAIProvider(Provider):
         tools: list[dict[str, Any]] | None = None,
         system: str | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-        """Build OpenAI-compatible chat kwargs shared by full and streamed calls."""
+        """Build OpenAI-compatible chat kwargs shared by full and streamed calls.
+
+        Merge priority (each layer wins over the previous via setdefault /
+        direct assignment for per-call overrides):
+            ModelProfile.default_inference  (lowest)
+              < SamplingProfile.inference_overrides + thinking_mode
+                < RequestOptions.inference / RequestOptions.thinking (per-call)
+                  < BackendRequestOptions.extra_body (transport, lowest of its
+                    own layer — merged separately by ``_apply_backend_options``)
+        """
         final_messages: list[dict[str, Any]] = []
         kwargs: dict[str, Any] = {"model": self._model}
 
-        # Apply preset: merge inference params + inject system_prompt_prefix
-        system = self._apply_preset(system, kwargs)
+        # 1. Model profile (default inference + system_prompt_prefix).
+        system = self._apply_model_profile(system, kwargs)
+        # 2. Sampling profile (thinking mode + inference overrides).
+        self._apply_sampling(kwargs)
+        # 3. Per-call request options (PhasePolicy / caller overrides).
+        self._apply_request_options(kwargs)
+        # 4. Transport-level backend options (queue/cache extra_body).
         self._apply_backend_options(kwargs)
 
         if system:
             final_messages.append({"role": "system", "content": system})
-        final_messages.extend(messages)
+        final_messages.extend(_strip_provider_metadata(messages))
 
         # Defensive: ensure no None content in any message (breaks Jinja templates)
         for msg in final_messages:
@@ -294,12 +618,24 @@ class OpenAIProvider(Provider):
         extra_body.update(options.extra_body)
         kwargs["extra_body"] = extra_body
 
-    def _tool_calls_from_native(self, native_tool_calls: Any) -> list[ToolCall]:
+    def _tool_calls_from_native(
+        self, native_tool_calls: Any, allowed_tool_names: set[str]
+    ) -> list[ToolCall]:
         """Normalize OpenAI SDK tool calls into our ToolCall model."""
         tool_calls: list[ToolCall] = []
         if not native_tool_calls:
             return tool_calls
         for tc in native_tool_calls:
+            tool_name = str(tc.function.name)
+            if tool_name not in allowed_tool_names:
+                logger.warning("Rejected native tool call outside offered schema: %s", tool_name)
+                log_event(
+                    "native_tool_call_rejected",
+                    get_run_id() or "unknown",
+                    tool=tool_name,
+                    reason="not_in_offered_schema",
+                )
+                continue
             try:
                 args = json.loads(tc.function.arguments)
             except json.JSONDecodeError:
@@ -308,7 +644,7 @@ class OpenAIProvider(Provider):
             tool_calls.append(
                 ToolCall(
                     id=tc.id,
-                    name=tc.function.name,
+                    name=tool_name,
                     arguments=args,
                 )
             )
@@ -325,14 +661,16 @@ class OpenAIProvider(Provider):
         usage: TokenUsage,
     ) -> LLMResponse:
         """Apply the same post-processing to full and streamed responses."""
-        tool_calls = self._tool_calls_from_native(getattr(raw_message, "tool_calls", None))
+        allowed_names = {t["function"]["name"] for t in tools or [] if "function" in t}
+        tool_calls = self._tool_calls_from_native(
+            getattr(raw_message, "tool_calls", None), allowed_names
+        )
 
         content, tool_calls = self._resolve_reasoning_fallback(
             content, finish_reason, raw_message, tools, tool_calls
         )
 
         if not tool_calls and tools and content:
-            allowed_names = {t["function"]["name"] for t in tools if "function" in t}
             parse_result = parse_xml_tool_calls(content, allowed_tool_names=allowed_names)
             if parse_result.tool_calls:
                 logger.info(
@@ -341,6 +679,35 @@ class OpenAIProvider(Provider):
                 )
                 tool_calls.extend(parse_result.tool_calls)
                 content = ""
+            elif parse_result.error_code:
+                # XML markers present but parsing failed — capture the raw
+                # unparsed content for diagnosis (the "could not safely parse"
+                # path). Always captured regardless of allowlist so the model's
+                # raw output is visible when tool-call parsing breaks.
+                from corpclaw_lite.llm.base import (
+                    get_capture_session_id,
+                    get_capture_user_id,
+                    get_run_id,
+                )
+                from corpclaw_lite.logging.payload import get_payload_logger
+
+                pl = get_payload_logger()
+                if pl is not None and pl.enabled:
+                    pl.capture(
+                        run_id=get_run_id(),
+                        user_id=get_capture_user_id(),
+                        session_id=get_capture_session_id(),
+                        phase="xml_parse_failure",
+                        request=None,
+                        response=None,
+                        finish_reason=finish_reason,
+                        error=parse_result.error_code,
+                        diagnostic={
+                            "raw_unparsed_content": content,
+                            "raw_reasoning": reasoning,
+                            "parse_error_message": parse_result.error_message,
+                        },
+                    )
 
         return LLMResponse(
             content=content,
@@ -368,6 +735,7 @@ class OpenAIProvider(Provider):
 
         response = await self._client.chat.completions.create(**kwargs)
         if not response.choices:
+            self._capture_llm_io("chat", kwargs, response, finish_reason=None)
             return LLMResponse(content="", tool_calls=[], reasoning="")
         choice = response.choices[0]
 
@@ -376,6 +744,8 @@ class OpenAIProvider(Provider):
 
         usage = _usage_from_raw(response.usage)
         usage = _apply_timings(usage, getattr(response, "timings", None))
+
+        self._capture_llm_io("chat", kwargs, response, finish_reason=choice.finish_reason)
 
         return self._finalize_response(
             content=content,
@@ -519,6 +889,9 @@ class OpenAIProvider(Provider):
             tools=tools,
             usage=usage,
         )
+        # Capture raw I/O for streamed calls. raw_message is a SimpleNamespace
+        # (content/reasoning_content/tool_calls); usage + finish_reason are locals.
+        self._capture_llm_io("chat_streamed", kwargs, raw_message, finish_reason=finish_reason)
         emit(
             LLMStreamEvent(
                 stage="finished",
@@ -555,21 +928,25 @@ class OpenAIProvider(Provider):
 
         kwargs: dict[str, Any] = {"model": self._model}
 
-        # Apply preset inference params (but NOT system_prompt_prefix for vision).
-        # Non-standard params (top_k, min_p, etc.) go into extra_body.
-        if self._preset:
-            # Thinking budget → cap max_tokens (same logic as chat())
-            if self._preset.thinking_budget_tokens:
-                budget = self._preset.thinking_budget_tokens
-                kwargs.setdefault("max_tokens", budget + 1024)
-            extra_body: dict[str, Any] = {}
-            for k, v in self._preset.inference_params.items():
+        # Apply the same profile/sampling/per-call layers as chat(), but NOT
+        # the ModelProfile's system_prompt_prefix — vision prompts must not
+        # receive the thinking prefix (e.g. gemma4 <|think|>). We reuse the
+        # split apply methods and inline only the model-profile inference
+        # defaults, skipping the prefix.
+        if self._model_profile:
+            extra_body: dict[str, Any] = dict(kwargs.pop("extra_body", None) or {})
+            for k, v in self._model_profile.default_inference.items():
                 if k in self._OPENAI_STANDARD_PARAMS:
                     kwargs.setdefault(k, v)
                 else:
                     extra_body.setdefault(k, v)
             if extra_body:
                 kwargs["extra_body"] = extra_body
+        # Sampling profile (thinking mode + inference overrides) — same as chat.
+        self._apply_sampling(kwargs)
+        # Per-call request options (PhasePolicy / caller overrides) — same as chat.
+        self._apply_request_options(kwargs)
+        # Transport-level backend options (queue/cache extra_body).
         self._apply_backend_options(kwargs)
 
         if system:
@@ -579,12 +956,16 @@ class OpenAIProvider(Provider):
 
         response = await self._client.chat.completions.create(**kwargs)
         if not response.choices:
+            self._capture_llm_io("chat_with_image", kwargs, response, finish_reason=None)
             return LLMResponse(content="")
         choice = response.choices[0]
         content = choice.message.content or ""
 
         usage = _usage_from_raw(response.usage)
         usage = _apply_timings(usage, getattr(response, "timings", None))
+        self._capture_llm_io(
+            "chat_with_image", kwargs, response, finish_reason=choice.finish_reason
+        )
         return LLMResponse(content=content, usage=usage)
 
     async def stream(

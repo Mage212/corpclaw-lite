@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
@@ -15,6 +16,30 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+# Filenames accepted by apply() when a cloud model supplies a key that becomes
+# the written basename. Restrict to alphanumerics, underscore, hyphen and dot,
+# reject any path separator or ``..`` so a crafted key cannot escape the target
+# directory (e.g. a bootstrap file that is later loaded as the system prompt).
+_SAFE_FILENAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+_ALLOWED_EXTENSIONS = {".md", ".yaml", ".yml"}
+
+
+def _safe_filename(name: str, *, default_ext: str = ".md") -> str:
+    """Validate and normalise a model-supplied filename.
+
+    Rejects path separators, ``..`` and non-allowlisted extensions. Raises
+    ValueError on any attempt to escape the target directory.
+    """
+    if not name or not _SAFE_FILENAME_RE.match(name):
+        raise ValueError(f"Unsafe calibration filename rejected: {name!r}")
+    if "/" in name or "\\" in name or name in {".", ".."}:
+        raise ValueError(f"Unsafe calibration filename rejected: {name!r}")
+    if not any(name.endswith(ext) for ext in _ALLOWED_EXTENSIONS):
+        # No recognised extension → append the default. Keep it inside the
+        # allowlist by construction.
+        return f"{name}{default_ext}"
+    return name
 
 
 class ConfigEditor:
@@ -34,16 +59,31 @@ class ConfigEditor:
         """Return calibrated config directory."""
         return self._calibrated_dir
 
-    def apply(self, changes: dict[str, Any]) -> None:
+    def apply(self, changes: dict[str, Any] | None) -> None:
         """Apply proposed changes from CalibrationAnalyzer.
 
         Args:
             changes: Dictionary with optional keys: system_prompt, tool_overrides,
                      few_shots, settings, skills, subagent_prompts, department_prompts.
+
+        Any write failure rolls back to the pre-apply state, so a partially-applied
+        change set can never leave the calibrated tree inconsistent.
         """
+        if changes is None:
+            changes = {}
         self._backup_current()
         self._calibrated_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self._apply_sections(changes)
+        except Exception:
+            # S3-13: a partial apply (e.g. disk full, permission error, or a
+            # rejected filename mid-way) must not leave the calibrated tree in a
+            # half-written state. Roll back to the backed-up state and re-raise.
+            logger.exception("[calibration] apply() failed; rolling back")
+            self.rollback()
+            raise
 
+    def _apply_sections(self, changes: dict[str, Any]) -> None:
         # 1. System prompt overrides
         raw_sp: Any = changes.get("system_prompt")
         if raw_sp is not None and isinstance(raw_sp, dict):
@@ -51,9 +91,10 @@ class ConfigEditor:
             bootstrap_dir.mkdir(parents=True, exist_ok=True)
             sp_items = cast(dict[str, str], raw_sp)
             for filename, content in sp_items.items():
-                target = bootstrap_dir / filename
+                safe = _safe_filename(filename, default_ext=".md")
+                target = bootstrap_dir / safe
                 target.write_text(content, encoding="utf-8")
-                logger.info("[calibration] Updated bootstrap: %s", filename)
+                logger.info("[calibration] Updated bootstrap: %s", safe)
 
         # 2. Tool description overrides
         raw_to: Any = changes.get("tool_overrides")
@@ -95,9 +136,10 @@ class ConfigEditor:
             skills_dir.mkdir(parents=True, exist_ok=True)
             sk_items = cast(dict[str, str], raw_sk)
             for skill_id, instructions in sk_items.items():
-                target = skills_dir / f"{skill_id}.md"
+                safe = _safe_filename(f"{skill_id}.md", default_ext=".md")
+                target = skills_dir / safe
                 target.write_text(instructions, encoding="utf-8")
-                logger.info("[calibration] Updated skill instructions: %s", skill_id)
+                logger.info("[calibration] Updated skill instructions: %s", safe)
 
         # 6. Subagent prompt overrides
         raw_sa: Any = changes.get("subagent_prompts")
@@ -106,9 +148,10 @@ class ConfigEditor:
             sa_dir.mkdir(parents=True, exist_ok=True)
             sa_items = cast(dict[str, str], raw_sa)
             for filename, content in sa_items.items():
-                target = sa_dir / filename
+                safe = _safe_filename(filename, default_ext=".md")
+                target = sa_dir / safe
                 target.write_text(content, encoding="utf-8")
-                logger.info("[calibration] Updated subagent prompt: %s", filename)
+                logger.info("[calibration] Updated subagent prompt: %s", safe)
 
         # 7. Department prompt overrides
         raw_dp: Any = changes.get("department_prompts")
@@ -117,10 +160,13 @@ class ConfigEditor:
             dp_dir.mkdir(parents=True, exist_ok=True)
             dp_items = cast(dict[str, str], raw_dp)
             for dept_name, content in dp_items.items():
-                filename = dept_name if dept_name.endswith(".md") else f"{dept_name}.md"
-                target = dp_dir / filename
+                safe = _safe_filename(
+                    dept_name if str(dept_name).endswith(".md") else f"{dept_name}.md",
+                    default_ext=".md",
+                )
+                target = dp_dir / safe
                 target.write_text(content, encoding="utf-8")
-                logger.info("[calibration] Updated department prompt: %s", filename)
+                logger.info("[calibration] Updated department prompt: %s", safe)
 
     def rollback(self) -> None:
         """Restore previous calibration state from backup."""

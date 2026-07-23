@@ -1,16 +1,55 @@
 import { Bot, CheckCircle2, CircleAlert, Download, Eye, Send, Sparkles } from "lucide-react";
 import { useLayoutEffect, useRef } from "react";
-import type { ChatMessage, StatusLine, User } from "../types";
+import type {
+  ChatMessage,
+  ContextUsage,
+  DepthMode,
+  SidebarSection,
+  StatusLine,
+  User
+} from "../types";
+import { ActivityCard } from "./ActivityCard";
+import { ContextSizeBar } from "./ContextSizeBar";
 import { MarkdownMessage } from "./MarkdownMessage";
+import { parseScheduleConfirmMeta, ScheduleConfirmCard } from "./ScheduleConfirmCard";
 import type { WebChatSession } from "./useWebChatSession";
 
 type ChatPanelProps = {
   session: WebChatSession;
   user: User;
   onPreviewFile: (path: string) => void;
+  contextUsage: ContextUsage | null;
+  depthMode: DepthMode;
+  onDepthModeChange: (mode: DepthMode) => void;
+  /** B-091: main web_fetch allow; Work only. */
+  webAccess: boolean;
+  onWebAccessChange: (enabled: boolean) => void;
+  section: SidebarSection;
+  /** B-095 pin budget for ContextSizeBar. */
+  pinTokens?: number;
+  pinBudget?: number;
+  /** B-143: CSRF for schedule confirm card REST actions. */
+  csrf?: string;
+  onOpenSchedule?: () => void;
+  onScheduleResolved?: () => void;
 };
 
-export function ChatPanel({ session, user, onPreviewFile }: ChatPanelProps) {
+export function ChatPanel({
+  session,
+  user,
+  onPreviewFile,
+  contextUsage,
+  depthMode,
+  onDepthModeChange,
+  webAccess,
+  onWebAccessChange,
+  section,
+  pinTokens = 0,
+  pinBudget = 0,
+  csrf,
+  onOpenSchedule,
+  onScheduleResolved
+}: ChatPanelProps) {
   const messagesRef = useRef<HTMLDivElement | null>(null);
   const preserveScrollRef = useRef<{ height: number; top: number } | null>(null);
 
@@ -23,8 +62,12 @@ export function ChatPanel({ session, user, onPreviewFile }: ChatPanelProps) {
       preserveScrollRef.current = null;
       return;
     }
+    // Only auto-stick to bottom when the user is already near it; otherwise a
+    // streaming run would yank the view away while they're reading older history.
+    const distanceFromBottom = node.scrollHeight - node.scrollTop - node.clientHeight;
+    if (distanceFromBottom > 160) return;
     node.scrollTo({ top: node.scrollHeight });
-  }, [session.messages, session.status]);
+  }, [session.messages, session.status, session.runEventsByRequest, session.approvals]);
 
   function loadOlder() {
     const node = messagesRef.current;
@@ -47,39 +90,60 @@ export function ChatPanel({ session, user, onPreviewFile }: ChatPanelProps) {
         {session.messages.length === 0 && (
           <div className="empty-chat">
             <Bot size={32} />
-            <strong>{user.name}, рабочая сессия готова</strong>
-            <span>Задачи и ответы появятся здесь.</span>
+            <strong>{user.name}, выберите чат или начните новый</strong>
+            <span>
+              Сообщение продолжит активный чат. Чтобы вернуться к истории —
+              выберите чат слева.
+            </span>
           </div>
         )}
-        {session.messages.map((message) => (
-          <MessageBubble key={message.id} message={message} onPreviewFile={onPreviewFile} />
-        ))}
-        {session.approvals.map((approval) => (
-          <div className="approval-card" key={approval.approval_id}>
-            <div className="approval-title">
-              <CircleAlert size={18} />
-              <strong>{approval.action}</strong>
-            </div>
-            <p>{approval.details}</p>
-            <div>
-              <button
-                className="primary"
-                onClick={() => session.answerApproval(approval.approval_id, true)}
-              >
-                Разрешить
-              </button>
-              <button onClick={() => session.answerApproval(approval.approval_id, false)}>
-                Отклонить
-              </button>
-            </div>
-          </div>
-        ))}
+        {session.messages.flatMap((message, index) => {
+          const bubble = (
+            <MessageBubble
+              key={message.id}
+              message={message}
+              onPreviewFile={onPreviewFile}
+              {...(csrf !== undefined ? { csrf } : {})}
+              {...(onOpenSchedule !== undefined ? { onOpenSchedule } : {})}
+              {...(onScheduleResolved !== undefined ? { onScheduleResolved } : {})}
+            />
+          );
+          // After a user message that opened a request, render its ActivityCard.
+          // The card is omitted when there's no timeline data and the request
+          // isn't active (e.g. history reloaded without persisted events).
+          if (message.role === "user" && message.request_id) {
+            const rid = message.request_id;
+            const events = session.runEventsByRequest.get(rid) ?? [];
+            const approvals = session.approvals.filter((approval) => approval.request_id === rid);
+            const isActive = session.status.requestId === rid && session.status.active;
+            if (events.length > 0 || approvals.length > 0 || isActive) {
+              return [
+                bubble,
+                <ActivityCard
+                  key={`activity_${index}_${rid}`}
+                  requestId={rid}
+                  events={events}
+                  approvals={approvals}
+                  isActive={isActive}
+                  statusLabel={isActive ? session.status.label : ""}
+                  statusTone={isActive ? session.status.tone : "idle"}
+                  onAnswerApproval={session.answerApproval}
+                />
+              ];
+            }
+          }
+          return [bubble];
+        })}
       </div>
       <StatusLineView status={session.status} connected={session.connected} />
       <footer className="composer">
         <textarea
           value={session.input}
-          placeholder="Введите сообщение или задачу"
+          placeholder={
+            session.readOnly
+              ? "Просмотр чата. Отправьте сообщение, чтобы активировать."
+              : "Введите сообщение или задачу"
+          }
           onChange={(event) => session.setInput(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === "Enter" && !event.shiftKey) {
@@ -96,20 +160,108 @@ export function ChatPanel({ session, user, onPreviewFile }: ChatPanelProps) {
           <Send size={18} />
         </button>
       </footer>
+      <div className="composer-extras">
+        <ModeSelector value={depthMode} onChange={onDepthModeChange} section={section} />
+        {section === "work" && (
+          <WebAccessToggle value={webAccess} onChange={onWebAccessChange} />
+        )}
+        <ContextSizeBar
+          usage={contextUsage}
+          onCompress={session.readOnly ? undefined : session.compress}
+          compressing={session.compressing}
+          pinTokens={pinTokens}
+          pinBudget={pinBudget}
+        />
+      </div>
     </main>
+  );
+}
+
+/**
+ * B-091: Work-only toggle for main-agent web_fetch (not web_search; research stays).
+ * Cache-safe server path uses tail hint + execute deny — UI only flips the flag.
+ */
+function WebAccessToggle({
+  value,
+  onChange
+}: {
+  value: boolean;
+  onChange: (enabled: boolean) => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={`web-access-toggle ${value ? "on" : "off"}`}
+      onClick={() => onChange(!value)}
+      title={
+        value
+          ? "Веб включён (web_fetch). Нажмите, чтобы отключить сеть для main-агента."
+          : "Веб выключен. Main-агент не ходит в сеть; deep research — через субагента."
+      }
+      aria-pressed={value}
+    >
+      <span className="web-access-label">Веб</span>
+      <span className="web-access-state">{value ? "вкл" : "выкл"}</span>
+    </button>
+  );
+}
+
+/**
+ * Fast/Think/Research depth selector (Etap 3). Compact segmented control.
+ * Research is Work-only (requires tools to dispatch the research subagent).
+ */
+function ModeSelector({
+  value,
+  onChange,
+  section
+}: {
+  value: DepthMode;
+  onChange: (mode: DepthMode) => void;
+  section: SidebarSection;
+}) {
+  const modes: DepthMode[] = section === "work" ? ["fast", "think", "research"] : ["fast", "think"];
+  const label = (mode: DepthMode): string =>
+    mode === "fast" ? "Fast" : mode === "think" ? "Think" : "Research";
+  const hint = (mode: DepthMode): string =>
+    mode === "fast"
+      ? "Быстрый ответ (без размышлений)"
+      : mode === "think"
+        ? "С размышлениями"
+        : "Глубокое исследование через research-агента";
+  return (
+    <div className="depth-selector" role="group" aria-label="Режим обработки">
+      {modes.map((mode) => (
+        <button
+          key={mode}
+          className={`depth-option ${value === mode ? "active" : ""}`}
+          onClick={() => onChange(mode)}
+          title={hint(mode)}
+          aria-pressed={value === mode}
+        >
+          {label(mode)}
+        </button>
+      ))}
+    </div>
   );
 }
 
 function MessageBubble({
   message,
-  onPreviewFile
+  onPreviewFile,
+  csrf,
+  onOpenSchedule,
+  onScheduleResolved
 }: {
   message: ChatMessage;
   onPreviewFile: (path: string) => void;
+  csrf?: string;
+  onOpenSchedule?: () => void;
+  onScheduleResolved?: () => void;
 }) {
   const roleLabel =
     message.role === "user" ? "Вы" : message.role === "assistant" ? "CorpClaw" : "Система";
   const filePath = message.file?.path || "";
+  const scheduleMeta = parseScheduleConfirmMeta(message.metadata ?? null);
   return (
     <article className={`message ${message.role} ${message.tone || "normal"}`}>
       <div className="message-role">{roleLabel}</div>
@@ -142,6 +294,14 @@ function MessageBubble({
         <MarkdownMessage text={message.text} />
       ) : (
         <div className="message-text">{message.text}</div>
+      )}
+      {scheduleMeta && csrf && (
+        <ScheduleConfirmCard
+          csrf={csrf}
+          meta={scheduleMeta}
+          {...(onOpenSchedule !== undefined ? { onOpenSchedule } : {})}
+          {...(onScheduleResolved !== undefined ? { onResolved: onScheduleResolved } : {})}
+        />
       )}
     </article>
   );

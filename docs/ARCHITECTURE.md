@@ -1,7 +1,7 @@
 # CorpClaw Lite — Архитектура проекта
 
-> Версия документа: 2026-06-23
-> Версия проекта: 0.1.13 — ~160 Python-модулей, ~34.5K LOC, 1476 pytest-кейсов
+> Версия документа: 2026-07-13
+> Версия проекта: 0.2.6 — Phase 2A complete; Sprint 2B.1 channel-scoped sessions
 
 ---
 
@@ -113,21 +113,23 @@ corpclaw-lite/
 │   │   ├── plugins/        # Плагины с manifest.yaml + sandbox worker + hot-reload (10s)
 │   │   ├── subagents/      # Специализированные субагенты (5 builtin)
 │   │   └── mcp/            # Model Context Protocol интеграция + hot-reload (10s)
-│   ├── channels/           # CLI, Telegram и Web каналы
+│   ├── agent/              # Ядро агента (loop, context, context_target, guards, compressor,
+│   │                       #   factory, subagent, vision) — loop.persist full LLM-context per chat (B-063)
+│   ├── channels/           # CLI, Telegram и Web каналы (web/chat_context_store.py — B-063)
 │   ├── security/           # ToolGuard (YAML + Smart), NetworkPolicy, CredentialScrubber, IPCAuth
 │   ├── container/          # Docker-изоляция + IPC-прокси + agent worker
 │   ├── memory/             # SQLite + консолидация
 │   ├── departments/        # RBAC по департаментам (10 департаментов)
 │   ├── users/              # Пользователи + whitelist + session revocation
 │   ├── config/             # Settings, bootstrap prompts, interpolation, loader
-│   ├── runtime/            # Graceful shutdown (SIGINT/SIGTERM)
+│   ├── runtime/            # Graceful shutdown; UserRunGate (process-local 1-in-flight)
 │   ├── utils/              # DB helpers
 │   └── logging/            # Структурированное логирование + health endpoint
 ├── config/                 # YAML-конфигурации + bootstrap prompts
 ├── skills/                 # 5 Markdown-скиллов с scope-фильтрацией
 ├── plugins/                # Директория плагинов
-├── docker/                 # Dockerfile, Dockerfile.agent, seccomp_default.json
-└── tests/                  # Тесты (1056 pytest-кейсов, 106 Python test-файлов)
+├── docker/                 # Dockerfile, seccomp_default.json
+└── tests/                  # Тесты (1719+ pytest-кейсов)
 ```
 
 ---
@@ -149,8 +151,11 @@ no tool_calls? → Response → Save to Memory
 **AgentConfig** (dataclass) — группирует все зависимости AgentLoop:
 - `provider: Provider` — LLM провайдер/router
 - `registry: ToolRegistry` — доступные инструменты
-- `settings: AgentSettings` — конфигурация (max_steps=15, max_tool_calls=30, max_wall_time_ms=300000)
-- `permission_checker`, `tool_guard`, `memory`, `consolidator`, `compressor`, `approval_callback`
+- `settings: AgentSettings` — конфигурация (max_steps=30, max_tool_calls=60, max_wall_time_ms=300000)
+- `permission_checker`, `tool_guard`, `memory` (facts-only), `compressor`, `approval_callback`
+- `chat_context_store: ChatContextStore | None` — sole LLM transcript when `session_id` set
+  (web + Telegram virtual session after 2B; `None`/no session_id → CLI/subagent in-memory only).
+  `run(session_id)` writes user/tool_calls/tool-result/answer; compress via `_compress_chat`
 
 **RunStats** (dataclass) — метрики выполнения:
 - `iterations`, `tools_used`, `duration_ms`
@@ -172,6 +177,49 @@ results = await asyncio.gather(*[execute_one(tc) for tc in tool_calls])
 - Нормальный ответ (no tool calls)
 - Budget exceeded
 - Loop detected (2x warning)
+
+### AgentLoop structure (B-077 / B-078 / B-079, v0.2.6)
+
+```
+run(event_sink=… | on_* kwargs → CallbackEventSink)
+  → _build_turn_context  # prologue: history, prompt, LoopState, contextvars
+  → while ReAct
+       adaptations.apply_tool_surface / apply_closing_mode / inject_tool_soft_hint
+       adaptations.apply_workflow_mandate  # before dedup (B-047)
+       event_sink.emit(ToolStart / LlmStage / Queue / Subagent…)
+  → except budget
+       adaptations.auto_finalize_cascade   # B-073
+  → finally _finalize_turn  # epilogue: TurnTokens reset
+```
+
+- `LoopState` / `TurnTokens` — `agent/loop_state.py` (B-076 + B-077).
+- **Adaptations** (`agent/adaptations/`, B-078): `tool_surface`, `closing`,
+  `mandate`, `finalize` — free functions, unit-tested.
+- **EventSink** (`agent/events.py`, B-079): status path; kwargs back-compat via
+  `CallbackEventSink`.
+- Next: Sprint **2B** memory/prompt unify (B-102…106, B-111).
+
+### Tools schema pipeline (B-107 / B-047 / B-046, v0.2.4+)
+
+Перед каждым LLM-call schema собирается **с нуля из `base_tools_schema`** (immutable
+копия на старте run), затем сужается по слоям:
+
+```
+base_tools_schema
+  → tool_surface phase filter (office: READING = read+analyze, EXECUTING = +write/exec)
+  → mandate.apply_schema_restrict (re-entrant; B-047 после one-shot should_restrict)
+  → closing-mode terminal narrow (B-046, re-apply when already closing)
+  → soft-hint once in messages tail (BM25, cache-safe; not system_prompt)
+```
+
+- **Research** (`tool_surface_profile=none` + `TerminalToolMandate`): hard phase-filter off;
+  restrict **re-applied** after base rebuild (fix 0.2.4 / H1).
+- **Office** subagents: READING includes `table_query` / `pdf_reader` / `chart_generate` /
+  `excel_workbook` (fix 0.2.4 / H2); mutating tools only in EXECUTING.
+- **Main**: soft-hint only (light toolset, D-028).
+- `agent.tool_surface.enabled=false` → true no-op on schema (no base wipe).
+
+`LoopState` (`agent/loop_state.py`, B-076) holds run-scoped guards, schemas, turn tool lists.
 - Timeout (LLM call)
 - Terminal tool success
 
@@ -183,11 +231,11 @@ results = await asyncio.gather(*[execute_one(tc) for tc in tool_calls])
 2. **Tools**: Container mode → `IPCToolProxy` (7 filesystem tools); Dev mode → прямая регистрация
 3. **Security**: ToolGuard + PermissionChecker
 4. **Extensions**: subagents, host-side tools, skills, plugins
-5. **Memory**: SQLiteMemory + MemoryConsolidator + ContextCompressor
-6. **System Prompt**: BootstrapLoader из `config/bootstrap/*.md` + calibrated overrides
+5. **Memory**: SQLiteMemory (facts-only) + ContextCompressor; ChatContextStore for transcript
+6. **System Prompt**: BootstrapLoader + user-context assembly inside AgentLoop (B-111)
 7. **Few-shots**: Из `config/calibrated/few_shots.yaml`
 
-**AgentStack** содержит: `loop`, `user_manager`, `tool_registry`, `mcp_manager`, `container_manager`, `few_shots`, `subagent_registry`, `skill_registry`, `plugin_registry`, `skill_matcher`.
+**AgentStack** содержит: `loop`, `user_manager`, `tool_registry`, `mcp_manager`, `container_manager`, `few_shots`, `subagent_registry`, `skill_registry`, `plugin_registry`, `skill_matcher`, `chat_context_store`, `chat_store` (session ownership; `ChatContextStore` шарит `db_path` с `SQLiteMemory`).
 
 ### Context Builder (`agent/context.py`)
 
@@ -199,6 +247,44 @@ results = await asyncio.gather(*[execute_one(tc) for tc in tool_calls])
 | 2 | Strip leading assistant messages → merge в system_prompt | Qwen3.5 требует user-first |
 | 3 | Inject few-shots (calibration) | Примеры "вопрос → tool_call" |
 | 4 | Add history (user/assistant only) + current message | Drop orphaned tool messages |
+
+`build_from_full_history(user, message, full_history, ...)` (B-063) — реконструирует полный
+LLM-facing контекст из `ChatContextStore`: восстанавливает `tool_calls`/`tool_call_id`/`name`/
+`reasoning`, phase-1/2 system-merge + leading strip (tool_calls → текст в system prompt),
+few-shots. Используется session-bound `run(session_id)` и compress paths.
+
+### Per-chat LLM-context persistence (B-063 + Sprint 2B / D-078)
+
+**Модель после 0.2.7** (sole store + facts-only memory):
+
+| Слой | Таблица / API | Что хранит | Роль |
+|------|----------------|------------|------|
+| `ChatContextStore` | `web_chat_context` | полный LLM-facing контекст | sole transcript при `session_id` |
+| `SQLiteMemory` | `memory_facts` | key/value facts | cross-chat personalization only |
+| `WebChatStore` | `web_chat_messages` | UI role/content/tone | не LLM replay |
+
+`ChatContextStore`: `role/content/tool_calls/tool_call_id/name/reasoning/seq`,
+`UNIQUE(session_id, seq)`, `FK … ON DELETE CASCADE` к `web_chat_sessions`.
+Sessions channel-scoped (`channel=web|telegram`, B-102).
+
+**Isolation:** `agent/context_target.py` — `session_id`/`user_id` в `ContextVar`.
+
+**Persist:** user → assistant tool_calls → tool-result → final answer. Terminal tools skip
+tool-role. **Нет dual-write** в SQLiteMemory messages (API удалён, B-106).
+
+**Load:** `list_context` only when session bound; CLI/subagent empty history (B-104).
+
+**Restore-on-activate:** ownership + presence check only (no memory shadow).
+
+**Compress:** on-demand `compress_now(session_id)` → `_compress_chat` / store-first
+`_compress_store_transcript` (`list_context` → compress → `replace_context`). Mid-run
+auto-compress (B-124) uses the same store-first helper. Ownership-check before service
+compress (IDOR).
+
+**`db_connect` FK pragma:** `utils/db.py` теперь глобально включает `PRAGMA foreign_keys=ON` →
+все `ON DELETE CASCADE` (`web_chat_context→web_chat_sessions`,
+`file_changes→agent_change_sets`) реально срабатывают. Ранее FK-декларации были dormant
+(SQLite off by default).
 
 ### Context Compression (`agent/compressor.py`)
 
@@ -324,21 +410,92 @@ llm:
       provider: cloud
 ```
 
-`LLMRouter` методы: `for_task(task_kind)`, `for_subagent(subagent_id)`.
+`LLMRouter` методы: `for_task(task_kind)`, `for_subagent(subagent_id)`,
+`with_overrides(...)` (программный atomic override agent-роутов, D-056).
 
-### Model Presets (`llm/presets.py`)
+### LLM Management — split profiles + per-call override (D-056, v0.2.1)
 
-**ThinkingConfig**: `open_tag`, `close_tag`, `budget_tokens`, `source` ("content" для парсинга тегов, "native" для `reasoning_content`).
+Пресет расщеплён на два ортогональных слоя (устраняет заморозку пресета в
+инстансе провайдера и схлопывает дубликаты):
 
-**Доступные пресеты:**
+- **`ModelProfile`** (`llm/presets.py`) — свойства *модели* (привязан к model id,
+  редко меняется): `thinking_parser` (`ThinkingConfig`: `open_tag`/`close_tag`/
+  `source` "content"|"native"), `system_prompt_prefix`, `default_inference`.
+  `default_inference` = **авторитетные параметры от производителя** (официальная
+  рекомендация). Гарантирует, что модель работает в оптимальных условиях.
+- **`SamplingProfile`** — свойства *задачи/фазы* (меняется свободно, ссылается на
+  ModelProfile): `thinking_mode` (default|off|budget), `thinking_budget`,
+  `inference_overrides`. **Model-scoped:** каждый sampling-профиль декларирует
+  `model:` — его `inference_overrides` применяются **только** при совпадении с
+  моделью роута. При mismatch (e.g. qwen-sampling на gemma4-роуте) router
+  warn-and-skip'ает `inference_overrides` (`thinking_mode` сохраняется —
+  модель-агностичен). Это предотвращает молчаливую утечку cross-model параметров
+  (root cause gemma4 crash: qwen's `temperature=0.4` на gemma4 → degenerate output).
 
-| Preset | Модель | Thinking | Params |
-|--------|--------|----------|--------|
-| `qwen3.5-thinking` | Qwen 3.5 | native reasoning_content | temp=0.7, top_p=0.95, top_k=20 |
-| `gemma4-thinking` | Gemma 4 | `<\|think\|>` tags | defaults |
-| `gemma4-fast` | Gemma 4 | none | defaults |
+`config/model_presets.yaml` хранит оба в блоках `models:` + `sampling:`.
+Канонические параметры (официальные рекомендации):
+- **Gemma 4:** `temperature=1.0, top_p=0.95, top_k=64` (один набор для всех режимов).
+- **Qwen 3:** 4 режима (thinking-general, thinking-coding, instruct-general,
+  instruct-reasoning) с своими temperature/top_p/presence_penalty.
+`PresetRegistry` также парсит legacy комбинированный `presets:` (back-compat
+reader, split в виртуальные пары) — overlay/unmigrated config работает без правок.
 
-**Приоритет:** `request-level > preset > provider defaults`
+**Per-call override** — второй независимый contextvar `RequestOptions` (рядом с
+`BackendRequestOptions`): несёт `inference` + `thinking` (`ThinkingOverride`:
+default|off|budget). Provider мерджит с детерминированным приоритетом:
+
+```
+model_profile.default_inference   (lowest)
+  < SamplingProfile.inference_overrides + thinking_mode
+    < RequestOptions.inference / RequestOptions.thinking  (per-call, highest)
+      < BackendRequestOptions.extra_body  (transport)
+```
+
+**PhasePolicy** (`agent/phase_policy.py`) — детектор фазы задачи, per-call
+переключает thinking через `RequestOptions`. `DefaultPhasePolicy` enabled by
+default, но **no-op для main agent в default phase** → меняет behavior только в:
+- **closing mode** (бюджет < soft_deadline_ratio) → thinking off;
+- **workflow subagent** (research): gathering off / aggregation on. Переход
+  gathering→aggregation **monotonic** — как только aggregation marker
+  (`research_list_facts`) появляется в cumulative `tools_used`, все последующие
+  turns = aggregation. Wall-clock fallback: `nudge`/`restrict` → forced
+  aggregation.
+- **auxiliary** (vision/compress/consolidate) → thinking off через `aux-no-thinking`
+  sampling (config-driven, без PhasePolicy).
+
+Thinking-mode semantics (важно для prefix-based моделей):
+- `thinking_mode=off` → `chat_template_kwargs.enable_thinking=False` (Qwen-
+  style) **И** подавление `system_prompt_prefix` (gemma4 `<|think|>` — prefix
+  это переключатель thinking). `_thinking_disabled()` проверяет sampling И
+  per-call RequestOptions.
+- `aggregation_thinking="default"` (force-on) → `enable_thinking=True`,
+  **отменяет** sampling-off даже на gemma4+off run. Aggregation должен
+  обдумывать собранные факты перед синтезом отчёта. Если бы "default" был
+  no-op, finalize шёл бы без reasoning (валидировано: reasoning=2269 в
+  aggregation-turn после фикса vs 0 до).
+
+**Workflow-finalize guard (B-047)** — для subagent'ов с mandatory terminal tool
+(`research_finalize`): `TerminalToolMandate` эскалирует к завершению по мере
+исчерпания бюджета. Учитывает **оба** ресурса: `effective_ratio =
+max(wallclock_ratio, iteration_ratio)` — кто ближе к исчерпанию, тот драйвит.
+- **nudge** (ratio ≥ 0.6): inject системного сообщения «finalize now».
+- **restrict** (ratio ≥ 0.75): schema сужается до `required_before + terminal_tool`.
+- **auto-finalize cascade** (на budget exhaustion, только если terminal не вызван):
+  **B** — один emergency LLM-call с schema=[terminal_tool] и жёстким промптом
+  «synthesize NOW». Если модель зовёт terminal → выполнить. **C** — если B вернул
+  текст, программный вызов terminal tool с этим текстом как answer. Работа
+  предыдущих итераций не теряется.
+- **degenerate-empty-response retry** — локальные LLMы (gemma4 thinking-OFF)
+  иногда возвращают пустой контент + 0 tool_calls после tool result (degenerate
+  stutter). Loop даёт bounded retry (3 попытки) с корректирующим промптом,
+  вместо немедленного выхода с «Agent provided no response». Симметрично с
+  planning-text guard.
+
+**`LLMRouter.with_overrides()`** — программный atomic override agent-facing
+роутов. Возвращает новый router с переопределёнными sampling/thinking/model
+in-memory (без YAML-мутации). `apply_to="all_agent_routes"` перестраивает все 4
+agent-роута сразу — устраняет route-contamination (напр. gemma4 agent тихо
+маршрутизирующий vision → qwen). Reusable API для testing/calibration/A/B.
 
 ---
 
@@ -412,7 +569,7 @@ class Tool(ABC):
 | `table_query` | MEDIUM | SQL-запросы к CSV/XLSX/JSON через DuckDB |
 | `chart_generate` | MEDIUM | Графики (bar, line, pie, scatter, histogram) |
 | `convert_format` | MEDIUM | Конвертация CSV ↔ XLSX ↔ JSON ↔ Markdown |
-| `pdf_reader` | LOW | Извлечение текста из PDF (page ranges) |
+| `pdf_reader` | LOW | Извлечение текста из PDF (page ranges). При `output_path` — полный документ без truncation (одношаговая конвертация в .md) |
 | `research_search` | MEDIUM | Управляемый поиск источников для research-agent |
 | `research_fetch_source` | MEDIUM | Загрузка и кеширование источника исследования |
 | `research_read_source` | LOW | Чтение сохранённого источника с лимитами вывода |
@@ -491,7 +648,7 @@ version: "1.0.0"
 type: plugin
 description: "Does something"
 allowed_departments: ["*"]
-requires_core: "^0.1.13"   # caret-совместимый constraint; warn-and-skip при несовпадении
+requires_core: "^0.2.1"   # caret-совместимый constraint; warn-and-skip при несовпадении
 components:
   skill: skill.md
   tool: tool.py
@@ -507,7 +664,10 @@ components:
 | `document-agent` | read_file, write_file, edit_file, normalize_excel, list_files | `config/bootstrap/subagents/document.md` |
 | `execution-agent` | exec_script, write_file, read_file | `config/bootstrap/subagents/execution.md` |
 | `research-agent` | web_fetch, read_file, search_files, list_files, memory_store, memory_recall | `config/bootstrap/subagents/research.md` |
-| `data-agent` | table_query, chart_generate, convert_format, pdf_reader, diff_text, read/write_file, list_files, search_files, send_file | `config/bootstrap/subagents/data-agent.md` |
+| `data-agent` | table_query, chart_generate, convert_format, pdf_reader, diff_text, excel_workbook, read/write_file, list_files, search_files | `config/bootstrap/subagents/data-agent.md` |
+
+> **Delivery:** `send_file` is main-agent only. Subagents create/modify files; the
+> main agent delivers them via two-step create→`send_file` (`BEHAVIOR.md`).
 
 ### MCP Integration (`extensions/mcp/`)
 
@@ -562,10 +722,10 @@ extensions:
 | bootstrap (top-level) | replace по filename | overlay `SOUL.md` заменяет default `SOUL.md`; уникальные имена добавляются в alpha-сорте |
 | bootstrap (dept/user) | first match high→low | overlay выигрывает, если есть |
 | mcp | merge по server `name` | более поздний файл выигрывает |
-| departments | **union-merge** | allowlists объединяются с wildcard-нормализацией, budget переопределяется где overlay указывает |
+| departments | **union-merge** | allowlists объединяются с wildcard-нормализацией. Budget-блок парсится для back-compat, но **не применяется** в agent loop (ресурсные лимиты глобальны через `settings.yaml`) |
 
-**Version contract:** plugins декларируют `requires_core` в манифесте (`^0.1.13` =
-совместим с 0.1.x; bare = exact). Ядро проверяет в едином chokepoint
+**Version contract:** plugins декларируют `requires_core` в манифесте (`^0.2.1` =
+совместим с 0.2.x; bare = exact). Ядро проверяет в едином chokepoint
 (`PluginRegistry.register`) — при несовместимости warn-and-skip, никогда молча.
 Контракт применяется только к plugins.
 
@@ -649,13 +809,33 @@ User Message
 выполняются host-side инструментами (`web_fetch`, `web_search`) с SSRF-защитой и
 department/RBAC-контролем, чтобы не открывать сеть внутри пользовательской песочницы.
 
+### Host-tools gate (`security/host_tools_gate.py`, DC-016 / D-070)
+
+Защита от случайного prod-деплоя с `container.enabled=false` (тулзы на хосте без
+Docker-изоляции). Два уровня:
+
+| Уровень | Когда | Условие |
+|---------|-------|---------|
+| **1. Env gate** | любой `build_agent_stack` при `container.enabled=false` | нужен `CORPCLAW_ALLOW_HOST_TOOLS=1` |
+| **2. Multi-user** | telegram/web (`host_tools_surface="multiuser"`) | дополнительно `CORPCLAW_ENFORCE_PROD_CONTAINER=false` (по умолчанию enforce) |
+
+Иначе — `StartupConfigurationError` (fail-fast, тот же класс, что и «Docker unavailable»).
+
+### Workspace root contextvar (`agent/workspace_context.py`, DC-017 / D-071)
+
+На каждый `AgentLoop.run` выставляется `workspace_root = workspaces/user_<id>/`.
+`path_validator.resolve_and_validate_path` и `exec_script` cwd читают contextvar
+(fallback: `Path.cwd()` для CLI/eval). **Честное ограничение:** защищает
+path-validated file-тулзы; absolute-path shell (`cat /etc/passwd`) по-прежнему
+требует container isolation (DC-016).
+
 ### CredentialScrubber (`security/credential_scrubber.py`)
 
 Маскирование секретов в логах и результатах:
 - `sk-*` — OpenAI/Anthropic API ключи
-- `ghp_*` — GitHub PAT
+- `ghp_*` — GitHub PAT (`{20,}`, синхронизировано с tool_guard_rules, DC-020)
 - `Bearer *` — токены
-- `CORPCLAW_IPC_SECRET` — динамически из env
+- `CORPCLAW_IPC_SECRET` — динамически из env (re-read per filter call)
 - Работает как `logging.Filter` + функция `scrub_text()` для tool results
 
 ### IPCAuth (`security/ipc_auth.py`)
@@ -715,6 +895,38 @@ Production-ready интеграция:
 
 **Команды бота:** `/start`, `/help`, `/new`, `/delete`, `/chat`, `/execute`
 
+### Web Channel (`channels/web/`)
+
+Браузерный канал (0.2.2 — полный редизайн в Mistral.ai-стиле + B-063 persistence):
+
+| Компонент | Назначение |
+|-----------|------------|
+| `runner.py` | Entry point (`uv run corpclaw-lite web`) |
+| `orchestrator.py` | Lifecycle: auth, multi-chat, activate/restore, compress, depth modes, extensions mgmt |
+| `chat_store.py` | `web_chat_sessions` + `web_chat_messages` (multi-chat модель: section/title/updated_at/folder_id; 1 активный чат на пользователя — partial unique index) |
+| `chat_context_store.py` | `web_chat_context` — полный LLM-facing контекст per chat (B-063, см. §1 и §7) |
+| `files.py` | Файловый диспетчер: дерево, поиск, preview, drag-and-drop, rename/move/copy/delete с подтверждением |
+
+**Multi-chat модель:** создание/список/активация/переименование/удаление; auto-naming из первого
+user-message; time-range grouping (Сегодня / Вчера / Предыдущие 7 дней / Ранее). **View vs Activate:**
+клик → read-only transcript; активация — отдельный REST call или activate-on-send. **Empty start:**
+стартовая панель пустая, первое сообщение продолжает активный чат.
+
+**Restore-on-activate (B-063):** `POST /api/chats/{id}/activate` вызывает `restore_user_context`
+(раньше reset). Контекст восстанавливается из persistent store, не стирается.
+
+**Depth modes:** Fast / Think / Research selector в композере → sampling profile (Fast=thinking-off,
+Think=thinking-on) или force `deep_research` через contextvar (Research). `AgentLoop.run(depth_mode)`
+резолвит профиль по режиму.
+
+**Compress-any-chat (B-063 / B-105):** WS compress handler с ownership-check
+(`get_session` — IDOR) → `compress_now(session_id)` → `_compress_chat` (store-first).
+
+**Frontend:** React/Vite отдельной production-сборкой (`frontend/web/dist`); Vite dev server
+проксирует `/api` и `/ws` на backend `:8090`. Локальные аккаунты с паролем и HttpOnly session cookie;
+общий профиль с Telegram по внутреннему `users.id`.
+
+
 ---
 
 ## 6. Container System
@@ -732,11 +944,14 @@ Production-ready интеграция:
 | `mem_limit` | 512m |
 | `nano_cpus` | 0.5 × 10⁹ |
 | `pids_limit` | 100 |
-| `cap_drop` | ALL |
-| `security_opt` | seccomp (100+ allowed syscalls) |
+| `user` | agent (UID 1001, explicit — B-064) |
+| `cap_drop` | ALL (B-064: by default) |
+| `security_opt` | seccomp deny-by-default allow-list (unshare/personality trimmed, B-064) |
 | `network_mode` | none (deny-by-default) |
 | `read_only` | True (except /workspace, /tmp) |
 | `workspace` | bind-mount host workspace_base |
+
+Hardening (`cap_drop` + seccomp + explicit `user`) применяется при `container.strict_capabilities=true` (по умолчанию с B-064). Opt-out для dev/debug: `strict_capabilities=false` (контейнер всё равно non-root через `USER agent` образа).
 
 **Dev mode:** `container.enabled=false` → инструменты выполняются на хосте.
 
@@ -777,13 +992,16 @@ Host → verify(response) → result
 - Автоматическая schema migration
 - JSON десериализация
 
-### Memory Consolidation (`memory/consolidation.py`)
+### Per-chat LLM-context store (`channels/web/chat_context_store.py`) — B-063 / 2B
 
-LLM-based сжатие истории:
-- Триггер при превышении threshold (50 сообщений по умолчанию)
-- Первая половина → compact summary (3-5 bullet points)
-- Cooldown (предотвращает повторную консолидацию)
-- Safety guardrails: не консолидирует active workflows
+Sole LLM-facing transcript per session (web + Telegram virtual session).
+Таблица `web_chat_context` (`role/content/tool_calls/tool_call_id/name/reasoning/seq`,
+`UNIQUE(session_id, seq)`, `FK CASCADE`). Методы: `append_context`, `list_context`,
+`clear_context`, `replace_context`, `has_context`.
+
+**SQLiteMemory** (после B-106): только `memory_facts` + `vacuum`. Таблица `messages` и
+`MemoryConsolidator` удалены (D-078). Transcript compression = `ContextCompressor` +
+`ChatContextStore` only.
 
 ---
 
@@ -800,8 +1018,8 @@ llm:
   routing: [...]
 
 agent:
-  max_steps: 15
-  max_tool_calls: 30
+  max_steps: 30
+  max_tool_calls: 60
   max_wall_time_ms: 300000
   max_history: 20
   approval_mode: "manual"  # "manual" | "smart" | "off"
@@ -842,18 +1060,21 @@ skills:
 
 10 департаментов с RBAC:
 
-| Департамент | Tools | Budget (iter/tools/time) |
-|-------------|-------|--------------------------|
-| default | read, list, search, memory, normalize_excel, read_image, dispatch | 10/20/60s |
-| engineering | * (all) | 20/50/120s |
-| development | * (all) | 20/50/120s |
-| it | file ops + memory + read_image + dispatch | 15/30/90s |
-| marketing | content + web_fetch + normalize_excel + send_file | 10/20/60s |
-| finance | data + normalize_excel + send_file | 10/20/60s |
-| hr | docs + normalize_excel + send_file + read_image | 10/20/60s |
-| analytics | data + web_fetch + normalize_excel | 15/30/90s |
-| product | research + web_fetch + read_image + dispatch | 10/20/60s |
-| admin | * (all) | 25/60/180s |
+| Департамент | Tools / subagents | Notes |
+|-------------|-------------------|-------|
+| **default** | inspect + memory + dispatch + send_file; subagents: filesystem/document/execution/data | **office-without-web** (DC-039): no web_fetch/web_search/research |
+| engineering | * (all) + all subagents | |
+| development | * (all) + all subagents | |
+| it | file ops + memory + read_image + dispatch | |
+| marketing | content + web_fetch + send_file + office subagents | |
+| finance | data tools + send_file + data/document agents | |
+| hr | docs + send_file + read_image | |
+| analytics | data + web_fetch | |
+| product | research + web_fetch + read_image + dispatch | |
+| admin | * (all) | |
+
+> Budget (max_iterations / max_tool_calls / max_wall_time_ms) — **глобально** в
+> `settings.yaml → agent.*`, не per-department (D-035/D-037).
 
 ### PermissionChecker (`departments/permissions.py`)
 
@@ -863,8 +1084,12 @@ skills:
 - `can_use_plugin(user, plugin_name)`
 - `can_dispatch_subagent(user, subagent_id)`
 - `can_use_mcp(user, server_name)`
-- `get_budget(user)` → `SimpleBudgetGuardConfig`
 - Wildcard support: `*` = all
+
+> Ресурсные лимиты (`max_iterations`, `max_tool_calls`, `max_wall_time_ms`) —
+> глобальные (`settings.yaml → agent.*`), не per-department. Раньше
+> `get_budget(user)` перекрывал settings → баги «config change has no effect».
+> Метод остался в коде (back-compat), но не вызывается из production path.
 
 ---
 
@@ -877,6 +1102,7 @@ skills:
 | `corpclaw.log` | Текст | DEBUG, человекочитаемый |
 | `agent_activity.jsonl` | JSONL | Per-request активность, аналитика |
 | `agent_trace.jsonl` | JSONL | Per-run trace-события агента: tool calls, LLM-вызовы, streaming-события (`llm_stream_*`), queue/wait. Уровень детализации через `logging.trace_level`: `metadata` (по умолчанию) / `debug_preview` / `full` |
+| `llm_payloads.jsonl` | JSONL | **Raw LLM request/response** (D-056, opt-in): по одной записи на LLM-вызов, с field-level allowlist (`logging.capture_fields`) и credential scrubbing. Основа диагностики и будущей системы сбора датасета для дообучения |
 
 ### AgentLogger
 
@@ -898,6 +1124,105 @@ skills:
 
 `GET /health` на порту 8080 (aiohttp):
 - Uptime, requests, tool_calls, errors
+
+### Raw LLM Payload Capture (D-056)
+
+Опциональный слой поверх trace: пишет **сырые** request/response payload'ы в
+`logs/llm_payloads.jsonl` для диагностики «что именно получила/вернула модель»
+и как фундамент для будущей системы сбора датасета для дообучения. Off по
+умолчанию (`logging.capture_enabled: false`).
+
+**`PayloadCaptureLogger`** (`logging/payload.py`) — singleton, по одной записи
+на LLM-вызов (ротация 20MB×3):
+
+```json
+{
+  "ts": 1782326996.85,
+  "run_id": "fe4ffe64...",
+  "phase": "chat",
+  "request": {
+    "model": "qwen3.6-35b-a3b",
+    "messages": [{"role": "system", "content": "..."}, {"role": "user", "content": "..."}],
+    "extra_body": {"chat_template_kwargs": {"enable_thinking": false}, "id_slot": 0}
+  },
+  "response": {
+    "content": "2 + 2 = 4.",
+    "reasoning": "Here's a thinking process: ...",
+    "tool_calls": null,
+    "usage": {"input_tokens": 3373, "output_tokens": 184},
+    "finish_reason": "stop"
+  }
+}
+```
+
+Ключевые свойства:
+
+- **Field-level allowlist** (`logging.capture_fields`, dot-notation): оператор
+  выбирает, какие поля писать — `request.messages`, `response.reasoning`,
+  `response.tool_calls`, и т.д. По умолчанию полный набор для диагностики;
+  privacy-sensitive деплои подсекают список. Неизвестные поля в allowlist
+  логируются warning'ом и игнорируются.
+- **Credential scrubbing на каждом leaf-значении** (`sk-*`, `Bearer`, API-ключи)
+  — даже если полный `messages` в allowlist, секреты не попадут в файл.
+- **Без транкации** — весь payload целиком (в отличие от `trace._sanitize`).
+- **`diagnostic.*` всегда-on**: при XML-parse failure raw content/finish_reason
+  пишутся в capture независимо от allowlist (чтобы не потерять данные о
+  «поломанной» генерации — самые ценные для отладки).
+- **Streaming-провайдер** захватывает **собранный** полный `LLMResponse`, не
+  partial stream-deltas.
+- **`run_id` contextvar** (`llm/base.py`) тегирует каждую запись агентским
+  run_id → корреляция с `agent_trace.jsonl` (per-iteration метрики, phase,
+  tool calls).
+- **Capture correlation (B-063 S4):** дополнительно `_capture_user_id`/
+  `_capture_session_id` contextvar'ы (`set_capture_context`/`reset_capture_context`
+  в `llm/base.py`) населяются в `AgentLoop.run()` (через `agent/context_target.py`).
+  `payload.py → capture(user_id, session_id)` пишет их в каждую запись **вне allowlist**
+  (всегда) → корреляция траектории с конкретным web-чатом и пользователем — фундамент
+  для будущего сбора датасета дообучения. Ранее `set_run_id` не вызывался вовсе
+  (run_id всегда был null) — пофикшено в S4.
+
+**Конфигурация** (`config/settings.yaml → logging`):
+
+```yaml
+logging:
+  capture_enabled: false   # opt-in (DC-037 closed-contour default)
+  capture_fields:
+    - "request.model"
+    - "request.messages"
+    - "request.tools"
+    - "request.extra_body"
+    - "response.content"
+    - "response.reasoning"
+    - "response.tool_calls"
+    - "response.usage"
+    - "response.finish_reason"
+  capture_dir: "logs"
+```
+
+**Wiring**: `setup_logging()` (CLI/telegram/web) подключает singleton при
+старте; провайдеры читают его через `get_payload_logger()`. Capture hooks
+в `OpenAIProvider`/`AnthropicProvider` (`_capture_llm_io()`) вызываются из
+`chat()`/`chat_streamed()`/`chat_with_image()`.
+
+### Roadmap: fine-tune dataset collection
+
+Raw-capture — фундамент для будущей системы сбора датасета для дообучения
+локальных моделей (SFT/DPO). Планируемая логика (следующие версии):
+
+- **Позитивные примеры (успешные траектории)**: LLM-запрос → корректный
+  tool-call (подтверждён judge-оценкой или downstream-валидацией результата)
+  → экспортируется как few-shot/SFT-пример. Фильтр по `agent_trace.jsonl`:
+  `request_finished.status=ok` + целевой tool-call привёл к верному
+  downstream-результату.
+- **Негативные примеры (провальные/loop траектории)**: модель не зовёт нужный
+  tool, зацикливается (`loop detected`), XML-parse failure, tool-call с
+  неверными аргументами, fallback на `XML parsing`. Используются для
+  preference/DPO-пар (выбранная плохая генерация vs. исправленная) и для
+  отладки шаблонов/промптов/калибровки Edit Surfaces.
+- Capture уже несёт всё необходимое сырье (`request.messages`, `request.tools`,
+  `response.content`/`reasoning`/`tool_calls`, `run_id` для корреляции с
+  trace-метриками и outcome). Доработка будет в **слое разметки/экспорта**
+  (judge-скоринг, форматирование в SFT/DPO-формат, дедупликация), не в capture.
 
 ---
 
@@ -996,30 +1321,30 @@ skills:
 ## Ключевые метрики
 
 > Per-component breakdown приблизительный (модули переезжали между пакетами с момента
-> последнего точного подсчёта); totals проверены на 0.1.13.
+> последнего точного подсчёта); totals проверены на 0.2.2.
 
 | Компонент | LOC | Файлов |
 |-----------|-----|--------|
-| Agent Core | ~4,400 | 13 |
+| Agent Core | ~5,760 | 15 |
 | Calibration | ~1,560 | 8 |
 | Onboarding | ~630 | 5 |
-| LLM Providers + Queue + Cache | ~4,000 | 9 |
+| LLM Providers + Queue + Cache | ~5,210 | 9 |
 | Extensions | ~9,100 | 51 |
 | Security | ~800 | 6 |
-| Channels | ~6,500 | 22 |
-| Container | ~830 | 6 |
+| Channels | ~7,900 | 22 |
+| Container | ~870 | 6 |
 | Memory | ~840 | 4 |
-| Config + RBAC | ~700 | 6 |
+| Config + RBAC | ~800 | 6 |
 | Departments | ~300 | 3 |
 | Users | ~955 | 3 |
-| Eval harness (B-060) | ~1,860 | 9 |
+| Eval harness (B-060) | ~2,350 | 10 |
 | Runtime | ~47 | 2 |
-| Logging | ~360 | 4 |
+| Logging | ~620 | 5 |
 | Utils | ~200 | 4 |
-| Root (cli, etc.) | ~1,410 | 5 |
-| **Исходники** | **~34,500** | **~160** |
-| **Тесты** | **~30,300** | **~139** |
-| **Тест-кейсов pytest** | **1476** | |
+| Root (cli, etc.) | ~1,480 | 5 |
+| **Исходники** | **~39,680** | **166** |
+| **Тесты** | **~35,550** | **~149** |
+| **Тест-кейсов pytest** | **1666** | |
 
 ---
 

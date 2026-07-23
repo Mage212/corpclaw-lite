@@ -136,12 +136,22 @@ class _HTMLTextExtractor(HTMLParser):
 
 
 def _is_private_ip(ip_str: str) -> bool:
-    """Check if an IP address is in a private/reserved range."""
+    """Return True if the address must not be contacted (SSRF deny).
+
+    Blocks non-global addresses: RFC1918 private, loopback, link-local,
+    reserved, multicast, and CGNAT (100.64/10) — anything where
+    ``ipaddress.IPv*Address.is_global`` is False. Literal hostnames that are
+    not IPs return False here and are checked via DNS resolution.
+    """
     try:
         addr = ipaddress.ip_address(ip_str)
-        return addr.is_private or addr.is_reserved or addr.is_loopback
     except ValueError:
         return False
+    # Multicast can report is_global=True on some Python versions — still deny.
+    if addr.is_multicast or addr.is_unspecified:
+        return True
+    # is_global is False for private, loopback, link-local, reserved, CGNAT, etc.
+    return not addr.is_global
 
 
 def _check_url_safety(url: str) -> str | None:

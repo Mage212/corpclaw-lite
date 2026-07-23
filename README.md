@@ -130,21 +130,42 @@ Open `http://127.0.0.1:5173`; Vite proxies `/api` and `/ws` to the backend on po
 If `container.enabled=true`, Docker must be running and `CORPCLAW_IPC_SECRET` must be set. If the
 React build is missing, the backend returns an explicit warning page instead of a blank UI.
 
+### Container isolation (defaults and dev escape hatch)
+
+| Mode | Config | Required env |
+|------|--------|--------------|
+| **Production (default)** | `container.enabled: true` | Docker running + `CORPCLAW_IPC_SECRET` |
+| **Local host tools (dev)** | `container.enabled: false` | `CORPCLAW_ALLOW_HOST_TOOLS=1` |
+| **Telegram/Web without Docker** | `container.enabled: false` | `CORPCLAW_ALLOW_HOST_TOOLS=1` **and** `CORPCLAW_ENFORCE_PROD_CONTAINER=false` |
+
+Without the env opt-in, startup fails with `StartupConfigurationError` (DC-016). Do not use
+host tools for multi-user production deploys.
+
+**Other closed-contour defaults (v0.2.3):**
+- `logging.capture_enabled: false` — raw LLM payload capture is opt-in only.
+- Department `default` is **office-without-web** (office subagents, no `web_fetch` / research).
+- File tools resolve under `workspaces/user_<id>/` even when containers are off (DC-017).
+
 ## Features
 
 | Feature | Description |
 |---------|-------------|
 | ReAct Agent Loop | Reasoning+acting with budget guards and loop detection |
 | LLM Router | Route tasks to specific providers (local/cloud) |
-| Model Presets | Per-model inference params and reasoning strategies |
+| Model + Sampling Profiles | Orthogonal `ModelProfile` (model properties) + `SamplingProfile` (task/phase properties) with per-call `RequestOptions` override (D-056) |
+| PhasePolicy | Per-phase thinking control — research gathering off, aggregation on; closing mode off |
+| Workflow-finalize Guard | Bounded nudge → restrict → auto-finalize cascade — research subagents always produce a report, never lose accumulated work on budget exhaustion |
+| Raw LLM Capture | Opt-in raw request/response logging to `logs/llm_payloads.jsonl` (default **off**, DC-037) with field-level allowlist + credential scrubbing — for debugging and future fine-tune dataset collection |
 | XML Tool Calling | Fallback parser for local LLMs without function calling |
 | 29 Built-in Tools | File ops, SQL queries, charts, PDF, Excel workbook/inspection, web search/fetch, research workflows, and more |
-| Docker Sandbox | Per-user containers with resource limits and network deny-by-default |
+| Docker Sandbox | Per-user containers with resource limits and network deny-by-default; host-tools require explicit env opt-in (DC-016) |
+| Workspace Isolation (dev+prod) | Per-user `workspaces/user_<id>/` via contextvar for path-validated tools even when containers are off (DC-017) |
 | ToolGuard | 31 YAML security rules with LLM-based Smart Approvals |
 | 5 Skills + 5 Subagents | Markdown skills with scope filtering and isolated subagents; plugins are a framework (no plugins shipped) |
 | Private Extensions Overlay | Keep corporate customizations in a separate private repo, composed at runtime — no private files in this public repo ([docs](CONTRIBUTING.md#private-extensions-overlay)) |
 | TF-IDF Matching | Bilingual (RU+EN) semantic skill selection |
-| Web + Telegram Channels | Browser chat, collapsible file manager, single statusline, approvals, rate limiting |
+| Web + Telegram Channels | Browser chat (Mistral.ai-style redesign: multi-chat history, Fast/Think/Research depth modes, extensions manager, agent context), collapsible file manager, single statusline, approvals, rate limiting |
+| Per-chat LLM-context Persistence | Full LLM-facing context (tool_calls + reasoning) stored per web chat → restore on chat switch, compress-any-chat, and capture correlation for dataset collection (B-063) |
 | Workspace Isolation | Unified per-human workspace across linked Telegram and web logins |
 | Auto-Calibration | Adapt prompts for specific local models |
 | RBAC | 10 departments with per-department permissions |

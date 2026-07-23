@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic_settings import BaseSettings
 
 from corpclaw_lite.agent.guards import (
@@ -15,13 +15,17 @@ __all__ = [
     "AgentSettings",
     "CompressionSettings",
     "ContainerSettings",
+    "DepthModeSettings",
     "ExtensionsSettings",
     "LLMSettings",
     "LoggingSettings",
     "PersistentCacheSettings",
+    "PhasePolicySettings",
     "QueueSettings",
     "ResearchSettings",
     "RoutingRule",
+    "MemoryWorkerSettings",
+    "SchedulerSettings",
     "Settings",
     "SkillsSettings",
     "SlotAffinitySettings",
@@ -35,14 +39,100 @@ class RoutingRule(BaseModel):
     """Rule for routing tasks to specific providers with model selection.
 
     Each rule specifies a provider (registered via ``PROVIDER_*__*`` env vars),
-    a model from that provider, and an optional preset.
+    a model from that provider, and profile selection for inference/thinking.
+
+    Profile selection (D-056) — two equivalent styles:
+
+    - **New (preferred):** ``sampling`` references a SamplingProfile in
+      ``config/model_presets.yaml`` (``sampling:`` block). ``model_profile``
+      optionally overrides the ModelProfile; if absent it is inferred from the
+      SamplingProfile's ``model`` field or looked up by the rule's ``model``.
+    - **Legacy (back-compat):** ``preset`` references a combined ModelPreset
+      (the old ``presets:`` block). Internally split into a
+      (ModelProfile, SamplingProfile) pair sharing the preset name.
+
+    If both ``sampling`` and ``preset`` are set, ``sampling`` wins.
     """
 
     task_kind: str | None = None
     subagent_id: str | None = None
     provider: str = "default"
     model: str | None = None
+    # D-056 split-profile references (preferred):
+    model_profile: str | None = None
+    sampling: str | None = None
+    # DEPRECATED: legacy combined preset (back-compat → split internally).
     preset: str | None = None
+
+
+class PhasePolicySettings(BaseModel):
+    """Phase-based per-call thinking overrides (D-056 PR2).
+
+    Configures :class:`~corpclaw_lite.agent.phase_policy.DefaultPhasePolicy`,
+    which switches model thinking on/off/budget per-call based on the current
+    task phase, via the per-call ``RequestOptions`` contextvar.
+
+    Enabled by default (``enabled: true``): the policy is a no-op for the main
+    agent in its default phase (no override returned), so it only takes effect
+    in closing mode (budget pressure) and for workflow subagents (research).
+    """
+
+    enabled: bool = True
+    # Semantic primary signal: tool names whose presence in the previous turn
+    # marks the aggregation/finalization phase (about to write the final report).
+    aggregation_markers: list[str] = ["research_list_facts"]
+    # Semantic signal: tool names whose presence in the previous turn marks the
+    # gathering phase (still collecting raw material).
+    gathering_tools: list[str] = [
+        "research_search",
+        "research_fetch_source",
+        "research_read_source",
+        "research_list_sources",
+        "research_store_fact",
+    ]
+    # Per-phase thinking overrides (Literal matches ThinkingOverride.mode).
+    closing_thinking: Literal["default", "off", "budget"] = "off"
+    gathering_thinking: Literal["default", "off", "budget"] = "off"
+    aggregation_thinking: Literal["default", "off", "budget"] = "default"
+
+    @field_validator(
+        "closing_thinking", "gathering_thinking", "aggregation_thinking", mode="before"
+    )
+    @classmethod
+    def _coerce_thinking_yaml_bool(cls, v: Any) -> Any:
+        """Coerce YAML-bool forms (``off``→False, ``on``→True) to string literals.
+
+        YAML 1.1 parses unquoted ``off``/``on``/``yes``/``no`` as booleans; an
+        operator writing ``closing_thinking: off`` gets ``False`` and the
+        Literal rejects it. Maps: ``False``/``off``→``"off"``,
+        ``True``/``on``/``yes``/``None``→``"default"``.
+        """
+        if v is False or v == "off":
+            return "off"
+        if v is True or v in ("on", "yes") or v is None:
+            return "default"
+        return v
+
+
+class DepthModeSettings(BaseModel):
+    """Mapping from abstract depth modes (fast/think) to per-model sampling profiles.
+
+    Etap 3 (Sprint 3A). The UI exposes a depth selector (Fast/Think) orthogonal
+    to the Chat/Work section (tools on/off). Each depth resolves to a named
+    SamplingProfile in ``config/model_presets.yaml`` keyed by the route's model,
+    so every model can carry its own official inference/thinking parameters
+    (e.g. gemma4-fast vs qwen-instruct-general — different temp/top_k). The
+    resolution goes through ``LLMRouter.with_overrides(sampling_name=...)`` so
+    the full profile (thinking_mode + inference_overrides) is applied — no raw
+    thinking override that bypasses the preset system (spec §7).
+
+    - ``fast`` / ``think``: ``{model_name: sampling_profile_name}`` lookups.
+    - ``default``: which depth a new chat starts in.
+    """
+
+    fast: dict[str, str] = {}
+    think: dict[str, str] = {}
+    default: Literal["fast", "think"] = "think"
 
 
 class SlotAffinitySettings(BaseModel):
@@ -96,6 +186,10 @@ class LLMSettings(BaseModel):
     This model only contains routing rules that map tasks to providers + models.
     """
 
+    # S3-16: a typo in a routing/concurrency/queue key silently changed agent
+    # behaviour; forbid unknown keys on safety-critical nested models.
+    model_config = ConfigDict(extra="forbid")
+
     routing: list[RoutingRule] = []
     max_concurrent_requests: int = 4
     queue: QueueSettings = QueueSettings()
@@ -103,6 +197,10 @@ class LLMSettings(BaseModel):
 
 class ContainerSettings(BaseModel):
     """Settings for Docker container sandboxes."""
+
+    # S3-16: typos in isolation/capability fields must surface, not silently drop
+    # hardening (e.g. a misspelled strict_capabilities would disable cap_drop).
+    model_config = ConfigDict(extra="forbid")
 
     # Set to false to disable container isolation (dev/test mode — runs on host)
     enabled: bool = True
@@ -113,8 +211,19 @@ class ContainerSettings(BaseModel):
     max_memory: str = "512m"
     cpus: float = 0.5
     idle_timeout_seconds: int = 600
-    max_per_user: int = 1
-    strict_capabilities: bool = False  # Set to True on Linux production for cap_drop ALL + seccomp
+    # Global cap on simultaneous container *creations* (Path B of ensure_running).
+    # Idempotent "already-running" checks (Path A) bypass this, so the per-message
+    # hot path is never serialized. Per-user 1-container invariant is guaranteed by
+    # ContainerManager._get_lock, not by this setting.
+    max_concurrent_containers: int = 20
+    strict_capabilities: bool = (
+        True  # cap_drop ALL + seccomp + explicit non-root user. Set False only for dev/debug.
+    )
+    # When strict_capabilities is True, fail container creation if the seccomp
+    # profile is missing instead of silently running with Docker's wider default.
+    # Set False only for environments where the profile path is known-unavailable
+    # (e.g. minimal CI) and the operator accepts the reduced isolation.
+    seccomp_missing_fatal: bool = True
     # Timeout for the outer docker exec call (host-side IPC envelope)
     ipc_timeout_seconds: float = 120.0
 
@@ -130,16 +239,36 @@ class CompressionSettings(BaseModel):
     prune_min_messages: int = 10
 
 
+class ToolSurfaceSettings(BaseModel):
+    """B-107 / DC-036: phase-aware tool schema + BM25 soft-hint.
+
+    Hard filter recomputes schema from base only on phase transition (D-087).
+    Soft-hint is cache-safe (messages tail). Research mandate path stays separate.
+    """
+
+    enabled: bool = True
+    soft_hint_enabled: bool = True
+    soft_hint_top_k: int = 5
+    # Profiles that apply hard phase filter (office = document/data/filesystem).
+    hard_filter_profiles: list[str] = ["office"]
+
+
 class AgentSettings(BaseModel):
     """Settings for the AgentLoop."""
+
+    # S3-16: a typo in a budget/guard/streaming key would silently change agent
+    # behaviour; forbid unknown keys on this safety-critical model.
+    model_config = ConfigDict(extra="forbid")
 
     max_steps: int = 15
     max_tool_calls: int = 30
     max_wall_time_ms: int = 300000
     soft_deadline_ratio: float = 0.85
     max_history: int = 20
-    consolidation_threshold: int = 30
-    consolidation_enabled: bool = True
+    # Hard cap on orchestrator shutdown (SIGINT/SIGTERM). A hung MCP disconnect,
+    # container stop or websocket close cannot hold the process past this bound;
+    # a second signal force-exits. Keeps `await orchestrator.stop()` bounded.
+    shutdown_timeout_seconds: float = 30.0
     approval_mode: Literal["manual", "smart", "off"] = "manual"
     compression: CompressionSettings = CompressionSettings()
     llm_timeout_seconds: int = 120
@@ -155,6 +284,18 @@ class AgentSettings(BaseModel):
     # pre-B-060 behaviour (guards on with original thresholds).
     result_dedup_guard: ResultDedupGuardConfig = ResultDedupGuardConfig()
     planning_text_guard: PlanningTextGuardConfig = PlanningTextGuardConfig()
+    # D-056 PR2: per-call thinking overrides based on task phase
+    # (closing mode / research gathering / research aggregation). The policy is
+    # a no-op for the main agent in its default phase, so enabling it by default
+    # does not change main-agent behaviour unless the budget runs out.
+    phase_policy: PhasePolicySettings = PhasePolicySettings()
+    # Etap 3: user-selectable depth modes (Fast/Think). Each resolves to a
+    # per-model SamplingProfile name applied via router.with_overrides.
+    depth_modes: DepthModeSettings = DepthModeSettings()
+    # B-107: tool-surface phase filter + BM25 soft-hint (orthogonal to phase_policy).
+    tool_surface: ToolSurfaceSettings = ToolSurfaceSettings()
+    # B-095: max fraction of context window for sticky pinned files (hard cap).
+    pin_context_ratio: float = 0.25
 
 
 class WebSettings(BaseModel):
@@ -172,6 +313,10 @@ class WebSettings(BaseModel):
 class WebChannelSettings(BaseModel):
     """Settings for the browser-based user channel."""
 
+    # S3-16: typos in auth/upload/rate-limit keys silently weaken the channel;
+    # forbid unknown keys on this safety-critical model.
+    model_config = ConfigDict(extra="forbid")
+
     host: str = "127.0.0.1"
     port: int = 8090
     workspace_base: Path = Path("workspaces")
@@ -180,6 +325,14 @@ class WebChannelSettings(BaseModel):
     login_rate_limit_per_minute: int = 5
     login_lockout_threshold: int = 5
     login_lockout_seconds: int = 300
+    # B-071: trusted reverse-proxy IPs. When request.remote is in this set, the
+    # real client IP is read from X-Forwarded-For; otherwise the socket peer is
+    # used. Empty (default) = never trust XFF (correct for direct/localhost deploys).
+    trusted_proxies: list[str] = []
+    # B-071: per-username failure cap independent of source IP — defeats a
+    # distributed brute-force where many IPs hammer one account. Set above the
+    # per-IP threshold so it only trips under a coordinated attack.
+    max_login_failures_per_username: int = 20
     password_min_length: int = 12
     password_max_length: int = 256
     session_ttl_hours: int = 12
@@ -220,6 +373,10 @@ class TelegramSettings(BaseModel):
     whitelist: list[int] = []
     default_department: str = "default"
     admin_ids: list[int] = []
+    # When False (default), the bot only answers in private chats so a group
+    # cannot observe another user's workflow, files or approval prompts.
+    # Set True only for a deliberately shared/group deployment.
+    allow_groups: bool = False
 
     # Fallback transport — manual IP overrides (empty = DoH auto-discovery)
     fallback_ips: list[str] = []
@@ -258,6 +415,11 @@ class ExtensionsSettings(BaseModel):
     paths are skipped by ``resolve_dirs``.
     """
 
+    # S3-16: a typo in extra_paths would silently disable the private overlay,
+    # loading public defaults instead of corporate extensions. Forbid unknown
+    # keys on this safety-critical model.
+    model_config = ConfigDict(extra="forbid")
+
     extra_paths: list[str] = []
 
 
@@ -268,9 +430,76 @@ class LoggingSettings(BaseModel):
     console_level: str = "INFO"
     log_dir: str = "logs"
     health_port: int = 8080
+    # Bind address for the /health HTTP server. Defaults to loopback only so the
+    # unauthenticated operational endpoint is not exposed on shared/Internet-facing
+    # hosts. Override to "0.0.0.0" only behind a restricting reverse proxy.
+    health_host: str = "127.0.0.1"
     trace_enabled: bool = True
     trace_level: Literal["metadata", "debug_preview", "full"] = "metadata"
     trace_preview_chars: int = 200
+    # D-056 post-0.2.0: raw LLM request/response capture (opt-in, disabled by
+    # default). Writes logs/llm_payloads.jsonl with allowlisted fields. Used for
+    # diagnostics (what the model actually receives/returns) and future
+    # fine-tuning dataset collection.
+    capture_enabled: bool = False
+    capture_fields: list[str] = Field(
+        default_factory=lambda: [
+            "request.model",
+            "request.messages",
+            "request.tools",
+            "request.params",
+            "request.extra_body",
+            "response.content",
+            "response.reasoning",
+            "response.tool_calls",
+            "response.usage",
+            "response.finish_reason",
+        ]
+    )
+    capture_dir: str = "logs"
+
+
+class SchedulerSettings(BaseModel):
+    """B-118 / DC-030: agent-on-schedule backbone (web-owned poll)."""
+
+    enabled: bool = True
+    poll_seconds: float = 30.0
+    # pending + active combined hard cap per user
+    max_tasks_per_user: int = 3
+    timezone: str = "Europe/Moscow"
+    pending_ttl_days: int = 14
+    # Relative paths resolve against project DATA_DIR / PROJECT_ROOT in service wire
+    db_path: str = "data/scheduler.db"
+    # H1: claim lease TTL — stale claims reclaimable after this many seconds
+    claim_ttl_seconds: float = 900.0
+    # H5: hard caps on propose/accept text fields
+    max_task_text_chars: int = 16_000
+    max_schedule_text_chars: int = 500
+
+
+class MemoryWorkerSettings(BaseModel):
+    """B-109 / DC-027 Layer 2+3: background memory curator (web-owned)."""
+
+    # Master switch — deploy must opt in; per-user opt-in still required.
+    enabled: bool = False
+    interval_hours: float = 24.0
+    quiet_hours_start: str = "22:00"
+    quiet_hours_end: str = "07:00"
+    # null → use scheduler.timezone at runtime
+    timezone: str | None = None
+    max_users_per_tick: int = 20
+    max_sessions: int = 5
+    max_messages_per_session: int = 40
+    max_transcript_chars: int = 24_000
+    max_entries_per_run: int = 20
+    notify_on_update: bool = False
+    keep_history_backups: bool = False
+    # Relative to PROJECT_ROOT unless absolute
+    bootstrap_users_dir: str = "config/bootstrap/users"
+    # Optional entries snapshot dir (relative to DATA_DIR)
+    entries_backup_dir: str = "memory_backups"
+    # Sleep between idle wake checks when waiting for quiet hours (seconds)
+    poll_seconds: float = 300.0
 
 
 class Settings(BaseSettings):
@@ -286,5 +515,7 @@ class Settings(BaseSettings):
     skills: SkillsSettings = SkillsSettings()
     extensions: ExtensionsSettings = ExtensionsSettings()
     logging: LoggingSettings = LoggingSettings()
+    scheduler: SchedulerSettings = SchedulerSettings()
+    memory_worker: MemoryWorkerSettings = MemoryWorkerSettings()
 
     model_config = {"env_nested_delimiter": "__"}

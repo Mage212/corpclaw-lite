@@ -41,6 +41,7 @@ def _disable_containers() -> None:  # type: ignore[misc]
 
     Also rewrites routing rules to use 'ollama' provider (matching _PROVIDER_ENV)
     since settings.yaml may reference different provider names (e.g. 'lmstudio').
+    DC-016: host tools require CORPCLAW_ALLOW_HOST_TOOLS=1.
     """
     from corpclaw_lite.config import loader as config_loader
     from corpclaw_lite.config.settings import (
@@ -67,7 +68,10 @@ def _disable_containers() -> None:  # type: ignore[misc]
         )
         return settings
 
-    with patch.object(config_loader, "load_settings", side_effect=_mock_load):
+    with (
+        patch.object(config_loader, "load_settings", side_effect=_mock_load),
+        patch.dict(os.environ, {"CORPCLAW_ALLOW_HOST_TOOLS": "1"}, clear=False),
+    ):
         yield  # type: ignore[misc]
 
 
@@ -179,14 +183,14 @@ def test_compressor_enabled_by_default() -> None:
     assert stack.loop._compressor is not None
 
 
-def test_consolidator_enabled_by_default() -> None:
-    """MemoryConsolidator should be wired when consolidation_enabled=True (default)."""
+def test_consolidator_removed_after_b105() -> None:
+    """B-105: MemoryConsolidator is gone; AgentLoop has no consolidator field."""
     from corpclaw_lite.agent.factory import build_agent_stack
 
     with patch.dict(os.environ, _PROVIDER_ENV, clear=False):
         stack = build_agent_stack()
 
-    assert stack.loop._consolidator is not None
+    assert not hasattr(stack.loop, "_consolidator")
 
 
 def test_tool_guard_loaded() -> None:
@@ -302,16 +306,22 @@ def test_container_enabled_registers_ipc_proxies() -> None:
     assert not isinstance(full_web_search, IPCToolProxy)
 
 
-def test_main_agent_tool_classes_has_four_factory_tools() -> None:
-    """Main agent should have exactly 4 factory tools (inspection + routing)."""
+def test_main_agent_tool_classes_has_five_factory_tools() -> None:
+    """Main agent: filesystem inspect + excel_inspect + apply_fill_plan."""
     from corpclaw_lite.agent.factory import _main_agent_tool_classes
 
     main_tools = {t.name for t in _main_agent_tool_classes()}
-    assert main_tools == {"read_file", "list_files", "search_files", "excel_inspect"}
+    assert main_tools == {
+        "read_file",
+        "list_files",
+        "search_files",
+        "excel_inspect",
+        "apply_fill_plan",
+    }
 
 
 def test_all_tool_classes_has_full_set() -> None:
-    """Full tool set should include all 14 factory tools."""
+    """Full tool set should include all factory tools (incl. apply_fill_plan)."""
     from corpclaw_lite.agent.factory import _all_tool_classes
 
     all_names = {t.name for t in _all_tool_classes()}
@@ -330,6 +340,7 @@ def test_all_tool_classes_has_full_set() -> None:
         "pdf_reader",
         "excel_inspect",
         "excel_workbook",
+        "apply_fill_plan",
     }
     assert all_names == expected
 
@@ -358,3 +369,14 @@ def test_calibrated_tool_overrides_apply_to_both_registries(
 
     assert main_registry.to_schemas()[0]["function"]["description"] == "Calibrated read description"
     assert full_registry.to_schemas()[0]["function"]["description"] == "Calibrated read description"
+
+
+def test_build_agent_stack_uses_router_override() -> None:
+    """D-056 PR3: router_override is used instead of building one from settings."""
+    from corpclaw_lite.agent.factory import build_agent_stack
+
+    sentinel = MagicMock(name="override-provider")
+    with patch.dict(os.environ, _PROVIDER_ENV, clear=False):
+        stack = build_agent_stack(router_override=sentinel)
+    # The loop's provider is the injected override, not a freshly built router.
+    assert stack.loop.provider is sentinel

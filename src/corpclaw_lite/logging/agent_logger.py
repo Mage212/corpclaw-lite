@@ -20,6 +20,9 @@ def setup_logging(
     trace_enabled: bool = True,
     trace_level: str = "metadata",
     trace_preview_chars: int = 200,
+    capture_enabled: bool = False,
+    capture_fields: list[str] | None = None,
+    capture_dir: Path | str | None = None,
 ) -> None:
     """Configure root logging with two handlers:
 
@@ -29,7 +32,10 @@ def setup_logging(
     Both handlers strip credentials via CredentialScrubber.
     Call this once at application startup before any loggers are used.
     """
-    from corpclaw_lite.security.credential_scrubber import CredentialScrubber
+    from corpclaw_lite.security.credential_scrubber import (
+        CredentialScrubber,
+        CredentialScrubbingFormatter,
+    )
 
     log_path = Path(log_dir)
     log_path.mkdir(parents=True, exist_ok=True)
@@ -45,7 +51,9 @@ def setup_logging(
         encoding="utf-8",
     )
     text_handler.setLevel(file_level)
-    text_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    text_handler.setFormatter(
+        CredentialScrubbingFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    )
     text_handler.addFilter(CredentialScrubber())
 
     root = logging.getLogger()
@@ -56,7 +64,7 @@ def setup_logging(
     # Console handler — cleaner output for operators watching stdout
     console = logging.StreamHandler()
     console.setLevel(con_level)
-    console.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+    console.setFormatter(CredentialScrubbingFormatter("%(levelname)s: %(message)s"))
     console.addFilter(CredentialScrubber())
     root.addHandler(console)
 
@@ -77,6 +85,15 @@ def setup_logging(
         preview_chars=trace_preview_chars,
     )
 
+    # D-056 post-0.2.0: raw request/response payload capture (opt-in).
+    from corpclaw_lite.logging.payload import setup_payload_logging
+
+    setup_payload_logging(
+        log_dir=capture_dir or log_path,
+        enabled=capture_enabled,
+        fields=capture_fields,
+    )
+
 
 class AgentLogger:
     """
@@ -87,7 +104,10 @@ class AgentLogger:
     """
 
     def __init__(self, log_dir: Path | str = "logs") -> None:
-        from corpclaw_lite.security.credential_scrubber import CredentialScrubber
+        from corpclaw_lite.security.credential_scrubber import (
+            CredentialScrubber,
+            CredentialScrubbingFormatter,
+        )
 
         self._path = Path(log_dir) / "agent_activity.jsonl"
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -97,6 +117,7 @@ class AgentLogger:
             backupCount=5,
             encoding="utf-8",
         )
+        self._handler.setFormatter(CredentialScrubbingFormatter("%(message)s"))
         self._handler.addFilter(CredentialScrubber())
         self._logger = logging.getLogger("agent_activity")
         self._logger.addHandler(self._handler)

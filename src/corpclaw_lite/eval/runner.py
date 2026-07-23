@@ -20,7 +20,7 @@ import os
 import shutil
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from corpclaw_lite.calibration.trajectory import Trajectory, TrajectoryRecorder
 from corpclaw_lite.eval.scenarios import EvalScenario, ScenarioTurn
@@ -38,8 +38,6 @@ __all__ = [
 ]
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable
-
     from corpclaw_lite.agent.loop import AgentLoop
     from corpclaw_lite.eval.judge import LLMJudge
     from corpclaw_lite.users.models import User
@@ -146,8 +144,8 @@ class EvalRunner:
                     scenario.id,
                     len(scenario.turns),
                 )
-                self._setup_workspace(scenario)
                 try:
+                    self._setup_workspace(scenario)
                     run_result = await self._run_scenario(scenario)
                     score = await self._score_scenario_async(run_result)
                     results.append(score)
@@ -163,16 +161,11 @@ class EvalRunner:
                     results.append(self._crash_score(scenario, e))
                 finally:
                     self._cleanup_workspace(scenario)
-                    if self._agent_loop.memory:
-                        await self._agent_loop.memory.clear(str(self._user.id))
-                        # B-060: also clear stored memory_facts so a scenario's
-                        # memory_store calls do not leak into the next scenario
-                        # (memory.clear() only wipes the conversation, not facts).
-                        clear_facts = getattr(self._agent_loop.memory, "clear_facts", None)
-                        if callable(clear_facts):
-                            await cast("Callable[[str], Awaitable[None]]", clear_facts)(
-                                str(self._user.id)
-                            )
+                    memory = self._agent_loop.memory
+                    if memory is not None:
+                        # B-106: SQLiteMemory is facts-only; clear between scenarios
+                        # so memory_store in s1 cannot leak into s2's recall.
+                        await memory.clear_facts(str(self._user.id))
 
                 if on_progress is not None:
                     on_progress(scenario.id, results[-1].passed, idx + 1, len(scenarios))
@@ -185,12 +178,17 @@ class EvalRunner:
     async def _run_scenario(self, scenario: EvalScenario) -> ScenarioRunResult:
         """Execute every turn of the scenario, sharing memory across turns."""
         turn_results: list[TurnRunResult] = []
+        # Pre-build FILES_BRIEF once (structural, values-free) for {{FILES_BRIEF}}.
+        files_brief = self._build_files_brief()
         for turn_idx, turn in enumerate(scenario.turns):
             recorder = TrajectoryRecorder(f"{scenario.id}#turn{turn_idx}")
             try:
+                message = turn.user_message
+                if "{{FILES_BRIEF}}" in message and files_brief:
+                    message = message.replace("{{FILES_BRIEF}}", files_brief)
                 answer, stats = await self._agent_loop.run(
                     user=self._user,
-                    message=turn.user_message,
+                    message=message,
                     system_prompt=self._system_prompt,
                     trajectory_recorder=recorder,
                     few_shots=self._few_shots,
@@ -312,16 +310,18 @@ class EvalRunner:
             full.write_text(content, encoding="utf-8")
         for dest, src in scenario.setup.copy_from_corpus:
             if self._corpus_dir is None:
-                logger.warning(
-                    "[eval] Scenario %s wants %s from corpus but no corpus_dir set",
-                    scenario.id,
-                    src,
+                raise FileNotFoundError(
+                    f"[eval] Scenario {scenario.id} requires corpus fixture '{src}' "
+                    f"(dest={dest}) but no corpus_dir is set. "
+                    f"Pass --corpus-dir or use generated_workbooks."
                 )
-                continue
             src_path = self._corpus_dir / src
             if not src_path.exists():
-                logger.warning("[eval] Corpus fixture missing: %s", src_path)
-                continue
+                raise FileNotFoundError(
+                    f"[eval] Scenario {scenario.id} requires corpus fixture '{src}' "
+                    f"at {src_path}, but the file does not exist. "
+                    f"Pass --corpus-dir or use generated_workbooks."
+                )
             dest_path = self._workspace_dir / dest
             dest_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(src_path, dest_path)
@@ -334,19 +334,62 @@ class EvalRunner:
                 generate_image(generator_id, dest_path)
             except ValueError as e:
                 logger.warning("[eval] %s: %s", scenario.id, e)
+        # Deterministic xlsx fixtures for office scenarios.
+        for dest, generator_id in scenario.setup.generated_workbooks:
+            from corpclaw_lite.eval.corpus_fixtures import generate_workbook
+
+            dest_path = self._workspace_dir / dest
+            generate_workbook(generator_id, dest_path)
+        # Synthetic media-report workspaces (deterministic, no corpus needed).
+        if getattr(scenario.setup, "generate_noisy_completed_month", False):
+            import sys
+
+            tests_dir = str(Path(__file__).resolve().parents[2] / "tests")
+            if tests_dir not in sys.path:
+                sys.path.insert(0, tests_dir)
+            from support.noisy_completed_month_fixture import (  # type: ignore[import-not-found]
+                build_noisy_workspace,  # type: ignore[reportUnknownVariableType]
+            )
+
+            build_noisy_workspace(self._workspace_dir)  # type: ignore[no-redef]
+        if getattr(scenario.setup, "generate_dual_type", False):
+            import sys
+
+            tests_dir = str(Path(__file__).resolve().parents[2] / "tests")
+            if tests_dir not in sys.path:
+                sys.path.insert(0, tests_dir)
+            from support.dual_type_fixture import (  # type: ignore[import-not-found]
+                build_dual_type_workspace,  # type: ignore[reportUnknownVariableType]
+            )
+
+            build_dual_type_workspace(self._workspace_dir)  # type: ignore[no-redef]
 
     def _cleanup_workspace(self, scenario: EvalScenario) -> None:
-        if scenario.setup is None:
-            return
-        all_paths = [p for p, _ in scenario.setup.files]
-        all_paths += [d for d, _ in scenario.setup.copy_from_corpus]
-        all_paths += [d for d, _ in scenario.setup.generated_images]
-        for rel_path in all_paths:
-            full = self._workspace_dir / rel_path
-            if full.exists():
-                full.unlink()
-        for rel_path in all_paths:
-            parent = (self._workspace_dir / rel_path).parent
-            while parent != self._workspace_dir and parent.exists() and not any(parent.iterdir()):
-                parent.rmdir()
-                parent = parent.parent
+        import shutil
+
+        for child in self._workspace_dir.iterdir():
+            if child.is_file() or child.is_symlink():
+                child.unlink()
+            elif child.is_dir():
+                shutil.rmtree(child)
+
+    def _build_files_brief(self) -> str:
+        """Build a structural (values-free) FILES_BRIEF for {{FILES_BRIEF}} injection.
+
+        Scans xlsx files in the workspace and renders their sheet/column layout
+        so the model can construct a FillPlan without calling excel_inspect first.
+        """
+        xlsx_files = sorted(self._workspace_dir.glob("*.xlsx"))
+        if not xlsx_files:
+            return ""
+        try:
+            from corpclaw_lite.agent.workbook_brief import (
+                build_workbook_brief,
+                format_files_brief_for_agent,
+            )
+
+            bundle = build_workbook_brief(xlsx_files)
+            return format_files_brief_for_agent(bundle)
+        except Exception:
+            logger.debug("[eval] FILES_BRIEF build failed, leaving placeholder empty")
+            return ""

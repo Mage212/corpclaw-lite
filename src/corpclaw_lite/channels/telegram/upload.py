@@ -5,8 +5,12 @@ Ported from CorpClaw v1 ``telegram.py`` with simplifications.
 
 from __future__ import annotations
 
+import logging
 import ntpath
 import os
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "ALLOWED_EXTENSIONS",
@@ -164,15 +168,51 @@ def build_agent_directive(relative_path: str, caption: str | None) -> str:
         )
 
     safe_path = _sanitize_for_prompt(relative_path)
+    brief_suffix = _xlsx_brief_suffix(relative_path)
     if caption:
         safe_caption = _sanitize_for_prompt(caption)
-        return (
+        base = (
             f"Пользователь загрузил файл '{safe_path}'. Выполни только явно указанное "
             f"в подписи действие над этим файлом и не делай ничего сверх этого: {safe_caption}"
         )
+        return f"{base}{brief_suffix}"
 
     return (
         f"Пользователь загрузил файл '{safe_path}'. Сообщи кратко, что файл сохранен, "
         "и что для дальнейшей обработки нужно явно указать действие. "
-        "Не выполняй других действий."
+        f"Не выполняй других действий.{brief_suffix}"
     )
+
+
+def _xlsx_brief_suffix(relative_path: str) -> str:
+    """Append FILES_BRIEF for xlsx uploads (parity with web attach)."""
+    suffix = Path(relative_path).suffix.lower()
+    if suffix not in {".xlsx", ".xlsm"}:
+        return ""
+    try:
+        from corpclaw_lite.agent.workbook_brief import (
+            build_workbook_brief,
+            format_files_brief_for_agent,
+        )
+        from corpclaw_lite.security.path_validator import resolve_and_validate_path
+
+        resolved = resolve_and_validate_path(relative_path)
+        if not resolved.is_file():
+            return ""
+        bundle = build_workbook_brief([resolved])
+        if not bundle.files:
+            return ""
+        bundle.files[0].path = relative_path
+        bundle.files[0].name = Path(relative_path).name
+        brief = format_files_brief_for_agent(bundle)
+        return f"\n\n{brief}"
+    except Exception as exc:
+        # DC-008: fail loudly — never swallow exceptions silently. The brief is
+        # best-effort; on failure we fall back to the plain attach directive,
+        # but log the cause so operators can see why the model lost its brief.
+        logger.warning(
+            "xlsx brief failed for %s: %s — falling back to plain attach",
+            relative_path,
+            exc,
+        )
+        return ""

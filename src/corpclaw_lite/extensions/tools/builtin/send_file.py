@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
 from corpclaw_lite.extensions.tools.builtin._path_utils import resolve_container_path
 from corpclaw_lite.extensions.tools.builtin.files import resolve_and_validate_path
+from corpclaw_lite.extensions.tools.context import get_tool_execution_context
 
 __all__ = [
     "MAX_FILE_SIZE",
@@ -53,6 +54,9 @@ class SendFileTool(Tool):
         self._workspace_base = workspace_base
 
     async def execute(self, *, user: User | None = None, **kwargs: Any) -> str:
+        context = get_tool_execution_context()
+        if user is None and context is not None:
+            user = context.user
         path = kwargs.get("path")
         caption = kwargs.get("caption", "")
 

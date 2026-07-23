@@ -1,6 +1,6 @@
 [project]
 name = "corpclaw-lite"
-version = "0.1.13"
+version = "0.3.0"
 description = "CorpClaw Lite - streamlined agent project"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -25,6 +25,7 @@ dependencies = [
     "matplotlib>=3.9.0",
     "pypdf>=4.0.0",
     "ddgs>=9.14.4",
+    "croniter>=6.2.4",
 ]
 
 [project.scripts]
@@ -45,7 +46,7 @@ venv = ".venv"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-pythonpath = ["src"]
+pythonpath = ["src", "tests"]
 testpaths = ["tests"]
 addopts = "--ignore=tests/debug --ignore=tests/live_llm --ignore=tests/eval_live"
 markers = [
