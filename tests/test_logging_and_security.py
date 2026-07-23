@@ -267,3 +267,20 @@ class TestHealthCounters:
         assert stats["llm_calls"] == 2
         assert stats["tool_errors"] == 1
         assert stats["guard_blocks"] == 1
+
+
+def test_health_server_defaults_to_loopback() -> None:
+    """S3-11: run_health_server must default to 127.0.0.1, not 0.0.0.0."""
+    import inspect
+
+    from corpclaw_lite.logging import health
+
+    sig = inspect.signature(health.run_health_server)
+    assert sig.parameters["host"].default == "127.0.0.1"
+
+
+def test_logging_settings_health_host_default_loopback() -> None:
+    """S3-11: LoggingSettings.health_host defaults to loopback."""
+    from corpclaw_lite.config.settings import LoggingSettings
+
+    assert LoggingSettings().health_host == "127.0.0.1"

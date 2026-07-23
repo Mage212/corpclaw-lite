@@ -9,11 +9,14 @@ Environment variables required:
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 
 from corpclaw_lite.channels.telegram.orchestrator import TelegramBotOrchestrator
 from corpclaw_lite.config.loader import load_settings
 from corpclaw_lite.paths import PROJECT_ROOT
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "run_telegram_bot",
@@ -31,7 +34,17 @@ async def run_telegram_bot(token: str) -> None:
     except asyncio.CancelledError:
         pass
     finally:
-        await orchestrator.stop()
+        # S3-10: bound shutdown so a hung MCP disconnect, container stop or
+        # websocket close cannot hold the process past shutdown_timeout_seconds.
+        try:
+            await asyncio.wait_for(
+                orchestrator.stop(), timeout=settings.agent.shutdown_timeout_seconds
+            )
+        except TimeoutError:
+            logger.warning(
+                "Telegram shutdown exceeded %.1fs; forcing exit.",
+                settings.agent.shutdown_timeout_seconds,
+            )
 
 
 if __name__ == "__main__":
