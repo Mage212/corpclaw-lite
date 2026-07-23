@@ -195,7 +195,7 @@ async def test_record_read_for_excel_workbook_read_action(
     )
     assert file_state.has_read(path=str(f), task_id="r1") is True
 
-    # action=fill → NOT recorded as a read.
+    # action=fill → NOT recorded as a read via ToolRegistry (fill is a write).
     file_state.reset()
     await registry.execute(
         "excel_workbook",
@@ -204,3 +204,48 @@ async def test_record_read_for_excel_workbook_read_action(
         run_id="r1",
     )
     assert file_state.has_read(path=str(f), task_id="r1") is False
+
+
+@pytest.mark.asyncio
+async def test_excel_workbook_fill_by_date_no_unread_warning(
+    tmp_path: Path, user: User, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FileTrackedTool treats fill_by_date as an implicit source read (no false warning)."""
+    monkeypatch.chdir(tmp_path)
+    f = tmp_path / "template.xlsx"
+    f.write_bytes(b"fake")
+
+    class FakeExcelTool(Tool):
+        name = "excel_workbook"
+        description = "excel"
+        params = [
+            ToolParam(name="path", type="string", description=""),
+            ToolParam(name="action", type="string", description=""),
+        ]
+        risk_level = RiskLevel.MEDIUM
+
+        async def execute(self, **kwargs: Any) -> str:
+            return "SUCCESS: wrote 1 gap value(s) to 'Daily' → completed.xlsx."
+
+    file_state = FileStateRegistry()
+    dao = FileChangeDAO(db_path=tmp_path / "test.db")
+    store = FileSnapshotStore(workspace_base=tmp_path)
+    wrapped = FileTrackedTool(
+        FakeExcelTool(),
+        dao=dao,
+        snapshot_store=store,
+        path_param="path",
+        tracks_output=True,
+        file_state=file_state,
+    )
+
+    result = await wrapped.execute(
+        path=str(f),
+        action="fill_by_date",
+        user=user,
+        run_id="r-fill",
+    )
+    assert "File state warning" not in result
+    assert "have not read" not in result
+    assert "SUCCESS:" in result
+    assert file_state.has_read(path=str(f), task_id="r-fill") is True

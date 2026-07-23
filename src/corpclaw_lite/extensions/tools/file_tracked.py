@@ -203,6 +203,19 @@ class FileTrackedTool(ScopedTool):
         # mirroring the existing excel_workbook read-before-write warning.
         stale_warning: str | None = None
         if self._file_state is not None:
+            # excel_workbook fill / fill_by_date load the full workbook themselves,
+            # so treat the call as an implicit read of the source path and avoid a
+            # false "have not read it in this run" warning that triggers model retries.
+            action = kwargs.get("action")
+            if self._tool.name == "excel_workbook" and action in ("fill", "fill_by_date"):
+                try:
+                    self._file_state.record_read_path(source_path, task_id=run_id)
+                except (ValueError, OSError, TypeError) as exc:
+                    # CR-24: record_read_path swallows OSError internally; anything
+                    # escaping is a logic bug or a broken file_state. Narrow the
+                    # catch so unexpected exceptions still surface to the caller.
+                    logger.debug("file_tracked: record_read_path skipped: %s", exc, exc_info=True)
+
             check_path = (
                 str(source_path)
                 if self._tracks_output
@@ -219,8 +232,10 @@ class FileTrackedTool(ScopedTool):
                 after_path_for_note = self._resolve_output_path(source_path, kwargs)
                 if after_path_for_note is not None:
                     self._file_state.note_write(path=str(after_path_for_note), task_id=run_id)
-            except Exception:
-                logger.debug("file_tracked: note_write skipped", exc_info=True)
+            except (ValueError, OSError, TypeError) as exc:
+                # CR-24: note_write is best-effort bookkeeping. Narrow the catch
+                # so unexpected exceptions surface to the caller.
+                logger.debug("file_tracked: note_write skipped: %s", exc, exc_info=True)
 
         if stale_warning is not None:
             result = f"[File state warning] {stale_warning}\n\n{result}"

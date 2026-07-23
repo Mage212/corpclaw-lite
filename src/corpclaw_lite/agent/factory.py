@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -133,6 +134,7 @@ def _build_router(settings: Settings | None = None) -> Provider:
 
 def _all_tool_classes() -> list[Any]:
     """Return ALL tool classes (for subagent filtering and container registry)."""
+    from corpclaw_lite.extensions.tools.builtin.apply_fill_plan import ApplyFillPlanTool
     from corpclaw_lite.extensions.tools.builtin.chart_generate import ChartGenerateTool
     from corpclaw_lite.extensions.tools.builtin.convert_format import ConvertFormatTool
     from corpclaw_lite.extensions.tools.builtin.diff_text import DiffTextTool
@@ -165,6 +167,7 @@ def _all_tool_classes() -> list[Any]:
         PdfReaderTool(),
         ExcelInspectTool(),
         ExcelWorkbookTool(),
+        ApplyFillPlanTool(),
     ]
 
 
@@ -186,9 +189,9 @@ _SUBAGENT_ONLY_TOOLS = {
 def _main_agent_tool_classes() -> list[Any]:
     """Return tool classes for the main agent (lightweight, routing-oriented).
 
-    Heavy data tools (table_query, normalize_excel, etc.) are excluded —
-    the main agent should use ``excel_inspect`` to understand a file and
-    then ``dispatch_subagent`` for actual work.
+    Heavy data tools (table_query, normalize_excel, excel_workbook, etc.) are
+    excluded. Main keeps ``excel_inspect`` for ad-hoc exploration and
+    ``apply_fill_plan`` for the FILES_BRIEF → FillPlan production path.
     """
     return [t for t in _all_tool_classes() if t.name not in _SUBAGENT_ONLY_TOOLS]
 
@@ -267,6 +270,7 @@ def _build_extensions_stack(
     skill_matcher: SkillMatcher | None = None,
     skill_registry: SkillRegistry | None = None,
     full_tool_registry: ToolRegistry | None = None,
+    approval_callback: Callable[[str, str], Awaitable[bool]] | None = None,
 ) -> SubagentRegistry:
     """Register subagents, MCP, host-side tools."""
     from corpclaw_lite.agent.subagent import SubagentDispatcher
@@ -307,6 +311,7 @@ def _build_extensions_stack(
             skill_registry=skill_registry,
             research_runtime=research_runtime,
             workspace_base=workspace_base,
+            approval_callback=approval_callback,
         )
         registry.register(
             DispatchSubagentTool(
@@ -480,6 +485,8 @@ def build_agent_stack(
     *,
     router_override: Provider | None = None,
     host_tools_surface: HostToolsSurface = "dev",
+    workspace_override: Path | None = None,
+    approval_callback: Callable[[str, str], Awaitable[bool]] | None = None,
 ) -> AgentStack:
     """Build and return the complete agent stack from config + env.
 
@@ -494,6 +501,8 @@ def build_agent_stack(
         host_tools_surface: DC-016 gate surface. ``"dev"`` enforces Level 1
             (CORPCLAW_ALLOW_HOST_TOOLS) when containers are off; ``"multiuser"``
             also enforces Level 2 for telegram/web.
+        workspace_override: explicit workspace root for isolated harnesses.
+        approval_callback: optional approval channel shared by main and subagent loops.
     """
     from corpclaw_lite.config.loader import load_settings
     from corpclaw_lite.config.providers import ProviderRegistry
@@ -549,7 +558,9 @@ def build_agent_stack(
                 f"Failed to initialise ContainerIPC: {e}. Is CORPCLAW_IPC_SECRET set in .env?"
             ) from e
 
-        workspace_base = (PROJECT_ROOT / container_cfg.workspace_base).resolve()
+        workspace_base = (
+            workspace_override or (PROJECT_ROOT / container_cfg.workspace_base).resolve()
+        )
         container_manager = ContainerManager(
             settings=container_cfg,
             network_policy=network_policy,
@@ -571,7 +582,9 @@ def build_agent_stack(
         )
         container_ipc = None
         # Still set workspace_base so DC-017 contextvar can isolate per-user paths.
-        workspace_base = (PROJECT_ROOT / container_cfg.workspace_base).resolve()
+        workspace_base = (
+            workspace_override or (PROJECT_ROOT / container_cfg.workspace_base).resolve()
+        )
         _register_local_tools(registry)
         logger.warning(
             "Container isolation DISABLED (container.enabled=false) — "
@@ -620,6 +633,7 @@ def build_agent_stack(
         skill_matcher=skill_matcher,
         skill_registry=skill_registry,
         full_tool_registry=full_tool_reg,
+        approval_callback=approval_callback,
     )
     memory, compressor = _build_memory_stack(
         agent_settings, provider, registry, full_tool_registry=full_tool_reg
@@ -696,6 +710,7 @@ def build_agent_stack(
             compressor=compressor,
             default_system_prompt=system_prompt,
             workspace_base=workspace_base,
+            approval_callback=approval_callback,
             file_change_dao=file_change_dao,
             # Etap 3: registries + depth mapping for Fast/Think override.
             preset_registry=depth_preset_registry,

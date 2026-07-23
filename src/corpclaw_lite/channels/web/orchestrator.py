@@ -23,7 +23,7 @@ from corpclaw_lite.agent.file_snapshots import FileSnapshotStore
 from corpclaw_lite.agent.inline_attach import (
     MaterializeError,
     attachment_metadata_list,
-    compose_inline_attachments,
+    compose_attachments_with_workbook_brief,
     materialize_attachment,
     ui_placeholder_for_attachments,
 )
@@ -2773,7 +2773,11 @@ class WebChannelOrchestrator:
                 pending = []
                 if run_session_id is not None:
                     pending = self._pending_attachments.pop_all(user.id, run_session_id)
-                composed = compose_inline_attachments(pending, text)
+                composed = compose_attachments_with_workbook_brief(
+                    pending,
+                    text,
+                    workspace=self._workspace_for(user),
+                )
                 if not composed.strip():
                     # Restore pending if we reject empty send (no text and no attach).
                     if run_session_id is not None:

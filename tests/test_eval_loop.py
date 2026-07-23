@@ -35,6 +35,14 @@ class _FakeStats:
         self.status = "ok"
 
 
+class _FakeRegistry:
+    def get(self, _name: str) -> None:
+        return None
+
+    def items(self) -> dict[str, Any]:
+        return {}
+
+
 class _FakeAgentLoop:
     """Returns a scripted answer; records guard settings seen at construction
     time so the test can assert the A/B override was applied."""
@@ -43,6 +51,9 @@ class _FakeAgentLoop:
         self._answer = answer
         self._guard_state_seen = guard_state_seen
         self.memory = _FakeMemory()
+        # Required by EvalLoop._run_pass (DC-017 workspace retarget).
+        self._workspace_base = Path("/tmp/fake-workspaces")
+        self._registry = _FakeRegistry()
 
     async def run(self, **kwargs: Any) -> tuple[str, _FakeStats]:
         return self._answer, _FakeStats()
@@ -51,8 +62,10 @@ class _FakeAgentLoop:
 class _FakeStack:
     def __init__(self, answer: str, guard_state_seen: list[str]) -> None:
         self.loop = _FakeAgentLoop(answer, guard_state_seen)
-        self.few_shots: list[dict[str, Any]] | None = None
-        self.tool_registry = None
+        self.few_shots: list[dict[str, Any]] | None = [
+            {"user": "Узнай прогноз погоды на завтра в Москве.", "assistant": {"content": "нет"}}
+        ]
+        self.tool_registry = _FakeRegistry()
         self.skill_matcher = None
         self.skill_registry = None
 
@@ -72,7 +85,7 @@ def _patch_orchestration(
     import corpclaw_lite.agent.factory as factory_module
     import corpclaw_lite.config.bootstrap as bootstrap_module
 
-    def fake_build(settings: Any) -> _FakeStack:
+    def fake_build(settings: Any, **_kwargs: Any) -> _FakeStack:
         # Record the guard state the loop applied before building the stack.
         guard_state_seen.append(
             f"dedup={settings.agent.result_dedup_guard.enabled},"
@@ -96,6 +109,64 @@ def _exact_match_scenario(sid: str, expected: str) -> EvalScenario:
         category="office",
         turns=[ScenarioTurn(user_message=f"q for {sid}", expected_answer=expected)],
     )
+
+
+@pytest.mark.asyncio
+async def test_inject_few_shots_false_passes_none_to_runner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Auto-debug path must not inject cross-topic calibrated few-shots."""
+    seen: list[str] = []
+    scenarios = [_exact_match_scenario("s1", "3650")]
+    _patch_orchestration(monkeypatch, "3650", seen, scenarios)
+
+    captured_few_shots: list[Any] = []
+    real_runner = loop_module.EvalRunner
+
+    class _CapturingRunner(real_runner):  # type: ignore[valid-type,misc]
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            captured_few_shots.append(kwargs.get("few_shots"))
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(loop_module, "EvalRunner", _CapturingRunner)
+
+    ev = EvalLoop(
+        ab_guards=False,
+        output_dir=tmp_path,
+        workspace_base=tmp_path / "ws",
+        inject_few_shots=False,
+    )
+    await ev.run()
+    assert captured_few_shots == [None]
+
+
+@pytest.mark.asyncio
+async def test_inject_few_shots_true_passes_stack_few_shots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[str] = []
+    scenarios = [_exact_match_scenario("s1", "3650")]
+    _patch_orchestration(monkeypatch, "3650", seen, scenarios)
+
+    captured_few_shots: list[Any] = []
+    real_runner = loop_module.EvalRunner
+
+    class _CapturingRunner(real_runner):  # type: ignore[valid-type,misc]
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            captured_few_shots.append(kwargs.get("few_shots"))
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(loop_module, "EvalRunner", _CapturingRunner)
+
+    ev = EvalLoop(
+        ab_guards=False,
+        output_dir=tmp_path,
+        workspace_base=tmp_path / "ws",
+        inject_few_shots=True,
+    )
+    await ev.run()
+    assert captured_few_shots and captured_few_shots[0] is not None
+    assert "погоды" in captured_few_shots[0][0]["user"]
 
 
 @pytest.mark.asyncio
@@ -200,7 +271,7 @@ def _patch_rotating_answers(
 
     call_state = {"idx": 0}
 
-    def fake_build(settings: Any) -> _FakeStack:
+    def fake_build(settings: Any, **_kwargs: Any) -> _FakeStack:
         idx = call_state["idx"]
         call_state["idx"] += 1
         answer = answers[idx % len(answers)] if answers else "3650"

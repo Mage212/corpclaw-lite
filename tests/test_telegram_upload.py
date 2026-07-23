@@ -1,5 +1,10 @@
 """Tests for Telegram upload path sanitization and helpers."""
 
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+
 from corpclaw_lite.channels.telegram.upload import (
     build_agent_directive,
     is_image,
@@ -50,3 +55,45 @@ def test_build_agent_directive():
 
     d4 = build_agent_directive("doc.pdf", caption="Summarize")
     assert "Summarize" in d4
+
+
+def test_xlsx_brief_failure_is_logged_not_swallowed(
+    tmp_path: Path,
+    monkeypatch,
+    caplog,
+) -> None:
+    """CR-2: an exception building the FILES_BRIEF must be logged (DC-008),
+    not silently swallowed. The directive still returns, just without the brief.
+    """
+    import openpyxl
+
+    from corpclaw_lite.agent import workbook_brief as wb_mod
+
+    # A real xlsx so the suffix code-path reaches build_workbook_brief.
+    xlsx = tmp_path / "report.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    assert ws is not None
+    ws.title = "Daily"
+    ws["A1"] = "Дата"
+    wb.save(str(xlsx))
+    wb.close()
+
+    def _boom(_paths):
+        raise RuntimeError("simulated brief failure")
+
+    # build_workbook_brief is imported lazily inside _xlsx_brief_suffix, so we
+    # patch it on its source module (workbook_brief) to intercept the call.
+    monkeypatch.setattr(wb_mod, "build_workbook_brief", _boom)
+    monkeypatch.chdir(tmp_path)
+
+    with caplog.at_level(logging.WARNING, logger="corpclaw_lite.channels.telegram.upload"):
+        directive = build_agent_directive("report.xlsx", caption=None)
+
+    # Directive returned (fallback path), no crash.
+    assert "Пользователь загрузил файл" in directive
+    # The exception was logged, not swallowed.
+    assert any(
+        "xlsx brief failed" in rec.message and "simulated brief failure" in rec.message
+        for rec in caplog.records
+    ), f"expected warning log, got: {[r.message for r in caplog.records]}"

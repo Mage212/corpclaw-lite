@@ -1,0 +1,23 @@
+scenarios:
+  - id: generic_workbook_fill
+    category: office_fill
+    severity: normal
+    description: Fill date and label targets from explicitly named synthetic sources.
+    setup:
+      generated_workbooks:
+        - dest: "target.xlsx"
+          generator: "fill_target"
+        - dest: "daily_source.xlsx"
+          generator: "fill_date_source"
+        - dest: "key_source.xlsx"
+          generator: "fill_key_source"
+    turns:
+      - user_message: >
+          Fill target.xlsx and save the result as completed.xlsx. Map DailyData from
+          daily_source.xlsx to the Daily sheet by Date, and Labels from key_source.xlsx
+          to ByLabel by Name. Fill only empty Value cells through 2030-03-09. For Daily,
+          update D1 using source_min and preserve its existing format.
+        expected_tools: ["apply_fill_plan"]
+        success_criteria: >
+          completed.xlsx exists; Daily contains 100 and 7, ByLabel contains 11 and 13,
+          and the reporting period starts on 2030-03-08.

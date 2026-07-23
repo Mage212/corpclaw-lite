@@ -9,6 +9,7 @@ from corpclaw_lite.agent.context import ContextBuilder
 from corpclaw_lite.agent.loop import AgentConfig, AgentLoop, RunStats
 from corpclaw_lite.agent.loop_state import TurnTokens
 from corpclaw_lite.config.settings import AgentSettings
+from corpclaw_lite.extensions.tools.base import Tool
 from corpclaw_lite.extensions.tools.registry import ToolRegistry
 from corpclaw_lite.llm.base import (
     LLMResponse,
@@ -45,6 +46,40 @@ class MockProvider(Provider):
         system: str | None = None,
     ) -> AsyncIterator[StreamChunk]:
         raise NotImplementedError()
+
+
+@pytest.mark.asyncio
+async def test_files_brief_does_not_hide_excel_inspect(test_user: User) -> None:
+    class InspectTool(Tool):
+        name = "excel_inspect"
+        description = "Inspect workbook structure"
+        params = []
+
+        async def execute(self, **kwargs: Any) -> str:
+            return "ok"
+
+    class RecordingProvider(MockProvider):
+        seen_tools: list[dict[str, Any]] | None = None
+
+        async def chat(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]] | None = None,
+            system: str | None = None,
+        ) -> LLMResponse:
+            self.seen_tools = tools
+            return await super().chat(messages, tools=tools, system=system)
+
+    registry = ToolRegistry()
+    registry.register(InspectTool())
+    provider = RecordingProvider([LLMResponse(content="Structure reviewed")])
+    loop = AgentLoop(AgentConfig(provider, registry, AgentSettings()))
+
+    await loop.run(test_user, "FILES_BRIEF (deterministic, no LLM): analyze this workbook")
+
+    assert provider.seen_tools is not None
+    names = {schema["function"]["name"] for schema in provider.seen_tools}
+    assert "excel_inspect" in names
 
 
 @pytest.fixture
