@@ -1,7 +1,9 @@
 ---
-name: workbook-fill
+id: workbook-fill
 description: Fill an Excel template from explicitly mapped workbook sources
-allowed_departments: ["*"]
+version: "1.0.0"
+allowed_for: ["*"]
+scope: ["main"]
 keywords:
   - fill workbook
   - fill spreadsheet

@@ -1,11 +1,11 @@
 rules:
-  # Blocking dangerous system removals (covers rm -rf, rm -r -f, rm -fr, etc.)
+  # Blocking dangerous system removals (covers rm -rf, rm -fr, rm -r -f, etc.)
   - id: DANGEROUS_RM
     description: "Attempting to run destructive rm command."
     tool: "exec_script"
     severity: CRITICAL
     match_param: "script"
-    match_pattern: "rm\\s+(-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*|(-[a-zA-Z]*f[a-zA-Z]*\\s+-[a-zA-Z]*r|-[a-zA-Z]*r[a-zA-Z]*\\s+-[a-zA-Z]*f)|--recursive|--force)"
+    match_pattern: "rm\\s+(-[a-zA-Z]*[rf][a-zA-Z]*[rf][a-zA-Z]*|(-[a-zA-Z]*f[a-zA-Z]*\\s+-[a-zA-Z]*r|-[a-zA-Z]*r[a-zA-Z]*\\s+-[a-zA-Z]*f)|--recursive|--force)"
     require_approval: false
 
   # Preventing directory traversal attacks — read_file
