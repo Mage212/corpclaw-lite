@@ -39,6 +39,11 @@ config/calibrated/*
 # Per-user onboarding profiles (auto-generated, contain personal data)
 config/bootstrap/users/
 
+# Local test fixtures with commercial client data — never commit (see AGENTS.md §4)
+templates_for_testing/
+# Local dev/diagnostic scripts (model-specific, not part of public codebase)
+scripts/dev/
+
 # Debug test workspaces (created by tests/debug/ integration tests)
 tests/debug/.workspace/
 
