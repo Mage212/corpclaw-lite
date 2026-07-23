@@ -88,7 +88,65 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Exit non-zero when pass rate is below this 0..1 threshold",
     )
+    parser.add_argument(
+        "--judge",
+        nargs="?",
+        const="cloud",
+        default="cloud",
+        metavar="PROVIDER",
+        help="Enable the LLM judge using PROVIDER (default: cloud). "
+        "Pass --judge none to disable (deterministic-only fallback).",
+    )
+    parser.add_argument(
+        "--judge-ensemble",
+        type=int,
+        default=1,
+        help="Number of judge calls per turn (median, default 1)",
+    )
     return parser.parse_args()
+
+
+def _build_judge(provider_name: str, ensemble: int):
+    """Build an LLMJudge from a named provider in the env registry.
+
+    Reads the ``task_kind: eval`` routing rule to get the model, then constructs
+    a standalone provider via ProviderRegistry + build_provider. Returns None
+    (deterministic-only) when the provider is not registered or lacks an API key.
+    """
+    sys.path.insert(0, str(_PROJECT_ROOT / "src"))
+    from corpclaw_lite.config.loader import load_settings
+    from corpclaw_lite.config.providers import ProviderRegistry
+    from corpclaw_lite.llm.router import build_provider
+
+    settings = load_settings(_PROJECT_ROOT / "config" / "settings.yaml")
+    registry = ProviderRegistry.from_env()
+    conn = registry.get(provider_name)
+    if conn is None:
+        print(
+            f"⚠️  Judge provider '{provider_name}' not registered"
+            " — using deterministic-only scoring."
+        )
+        return None
+
+    # Resolve the model from the eval routing rule.
+    model = "glm-5.2"
+    for rule in settings.llm.routing:
+        if getattr(rule, "task_kind", None) == "eval":
+            model = rule.model
+            break
+
+    provider = build_provider(conn, model)
+    if provider is None:
+        print(
+            f"⚠️  Judge provider '{provider_name}' could not be built"
+            " (missing API key?) — deterministic-only."
+        )
+        return None
+
+    from corpclaw_lite.eval.judge import LLMJudge
+
+    print(f"⚖️  Judge enabled: provider={provider_name} model={model} ensemble={ensemble}")
+    return LLMJudge(provider=provider, ensemble=ensemble)
 
 
 def _load_scenarios_safe(scenarios_path: Path) -> list:
@@ -192,6 +250,11 @@ async def _run(args: argparse.Namespace) -> int:
     sys.path.insert(0, str(_PROJECT_ROOT / "src"))
     from corpclaw_lite.eval.loop import EvalLoop
 
+    # Build the LLM judge from the cloud provider (unless --judge none).
+    judge_raw = args.judge
+    judge_provider = judge_raw if judge_raw and judge_raw.lower() not in ("none", "off") else None
+    judge = _build_judge(judge_provider, args.judge_ensemble) if judge_provider else None
+
     output_dir.mkdir(parents=True, exist_ok=True)
 
     ev = EvalLoop(
@@ -199,7 +262,7 @@ async def _run(args: argparse.Namespace) -> int:
         corpus_dir=corpus_dir if corpus_dir and corpus_dir.exists() else None,
         output_dir=output_dir,
         ab_guards=args.ab,
-        judge=None,
+        judge=judge,
         # Cross-topic calibrated few-shots (weather, etc.) contaminate debug runs.
         inject_few_shots=False,
         workspace_base=workspace_override,
