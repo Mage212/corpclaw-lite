@@ -371,3 +371,36 @@ class TestSlotAffinity:
         assert entry.slot_kind == "simple"
         assert entry.backend_extra_body == {}
         await q.release(entry, 1.0)
+
+    @pytest.mark.asyncio
+    async def test_cancel_after_slot_lock_before_semaphore_releases_both(self) -> None:
+        q = LLMRequestQueue(
+            max_concurrent=1,
+            strategy="slot_affinity",
+            slot_affinity=SlotAffinityConfig(
+                enabled=True,
+                provider_names=("llamacpp",),
+                sticky_slot_ids=(0,),
+                overflow_slot_ids=(),
+            ),
+        )
+        # A non-matching provider consumes only the global semaphore.
+        holder = await q.acquire("holder", provider_name="other")
+        waiter = asyncio.create_task(q.acquire("u1", provider_name="llamacpp"))
+        for _ in range(100):
+            if q._slots[0].lock.locked():
+                break
+            await asyncio.sleep(0.001)
+        assert q._slots[0].lock.locked()
+        assert not waiter.done()
+
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        assert not q._slots[0].lock.locked()
+        assert q.queue_length == 0
+
+        await q.release(holder, 0.1)
+        next_entry = await asyncio.wait_for(q.acquire("u2", provider_name="llamacpp"), timeout=0.5)
+        assert next_entry.slot_id == 0
+        await q.release(next_entry, 0.1)

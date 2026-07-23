@@ -195,7 +195,7 @@ async def test_record_read_for_excel_workbook_read_action(
     )
     assert file_state.has_read(path=str(f), task_id="r1") is True
 
-    # action=fill → NOT recorded as a read.
+    # action=fill → NOT recorded as a read via ToolRegistry (fill is a write).
     file_state.reset()
     await registry.execute(
         "excel_workbook",
@@ -204,3 +204,232 @@ async def test_record_read_for_excel_workbook_read_action(
         run_id="r1",
     )
     assert file_state.has_read(path=str(f), task_id="r1") is False
+
+
+@pytest.mark.asyncio
+async def test_excel_workbook_fill_by_date_no_unread_warning(
+    tmp_path: Path, user: User, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FileTrackedTool treats fill_by_date as an implicit source read (no false warning)."""
+    monkeypatch.chdir(tmp_path)
+    f = tmp_path / "template.xlsx"
+    f.write_bytes(b"fake")
+
+    class FakeExcelTool(Tool):
+        name = "excel_workbook"
+        description = "excel"
+        params = [
+            ToolParam(name="path", type="string", description=""),
+            ToolParam(name="action", type="string", description=""),
+        ]
+        risk_level = RiskLevel.MEDIUM
+
+        async def execute(self, **kwargs: Any) -> str:
+            return "SUCCESS: wrote 1 gap value(s) to 'Daily' → completed.xlsx."
+
+    file_state = FileStateRegistry()
+    dao = FileChangeDAO(db_path=tmp_path / "test.db")
+    store = FileSnapshotStore(workspace_base=tmp_path)
+    wrapped = FileTrackedTool(
+        FakeExcelTool(),
+        dao=dao,
+        snapshot_store=store,
+        path_param="path",
+        tracks_output=True,
+        file_state=file_state,
+    )
+
+    result = await wrapped.execute(
+        path=str(f),
+        action="fill_by_date",
+        user=user,
+        run_id="r-fill",
+    )
+    assert "File state warning" not in result
+    assert "have not read" not in result
+    assert "SUCCESS:" in result
+    assert file_state.has_read(path=str(f), task_id="r-fill") is True
+
+
+# ── apply_fill_plan + FileTrackedTool integration ────────────────────────────
+
+
+class _FakeApplyFillPlanTool(Tool):
+    """Minimal apply_fill_plan stand-in: parses plan, writes output file."""
+
+    name = "apply_fill_plan"
+    description = "apply fill plan"
+    params = [ToolParam(name="plan", type="string", description="")]
+    risk_level = RiskLevel.MEDIUM
+    parallel_safe = False
+    terminal = False
+
+    async def execute(self, **kwargs: Any) -> str:
+        import json
+
+        plan = kwargs.get("plan")
+        if isinstance(plan, str):
+            plan = json.loads(plan)
+        output = plan.get("output_path", "output.xlsx")
+        Path(output).write_bytes(b"fake-output-content")
+        return f"SUCCESS: apply_fill_plan finished.\nwrote to {output}"
+
+
+def _make_simple_plan_json(template: str, output: str) -> str:
+    """Build a minimal valid plan JSON for tests."""
+    import json
+
+    return json.dumps(
+        {
+            "template": template,
+            "output_path": output,
+            "cutoff": "2026-07-12",
+            "sheets": [
+                {
+                    "sheet": "Daily",
+                    "match_mode": "date",
+                    "date_column": "A",
+                    "value_column": "B",
+                    "aggregate": "sum",
+                    "sources": [
+                        {
+                            "file": "source_a.xlsx",
+                            "sheet": "Report",
+                            "date_column": "A",
+                            "value_column": "B",
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_apply_fill_plan_creates_output_and_journals(
+    tmp_path: Path, user: User, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """apply_fill_plan wrapped in FileTrackedTool: output created + change journaled."""
+
+    monkeypatch.chdir(tmp_path)
+    # Prepare template + source.
+    (tmp_path / "template.xlsx").write_bytes(b"fake-template")
+    (tmp_path / "source_a.xlsx").write_bytes(b"fake-source")
+
+    file_state = FileStateRegistry()
+    dao = FileChangeDAO(db_path=tmp_path / "test.db")
+    store = FileSnapshotStore(workspace_base=tmp_path)
+    wrapped = FileTrackedTool(
+        _FakeApplyFillPlanTool(),
+        dao=dao,
+        snapshot_store=store,
+        path_param="plan",
+        tracks_output=False,
+        file_state=file_state,
+    )
+
+    plan_json = _make_simple_plan_json("template.xlsx", "target_report.xlsx")
+    result = await wrapped.execute(plan=plan_json, user=user, run_id="r1")
+
+    assert "SUCCESS:" in result
+    assert (tmp_path / "target_report.xlsx").exists()
+
+    # Change should be journaled (op=create since output didn't exist before).
+    changes = await dao.list_for_run("r1")
+    assert any(c.file_path.endswith("target_report.xlsx") for c in changes)
+
+
+@pytest.mark.asyncio
+async def test_apply_fill_plan_detects_stale_write(
+    tmp_path: Path, user: User, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If a sibling run wrote to the output path, apply_fill_plan gets a warning."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "template.xlsx").write_bytes(b"fake-template")
+    (tmp_path / "source_a.xlsx").write_bytes(b"fake-source")
+    # Pre-create output and register a sibling write.
+    (tmp_path / "target_report.xlsx").write_bytes(b"sibling-content")
+
+    file_state = FileStateRegistry()
+    file_state.note_write(path=str(tmp_path / "target_report.xlsx"), task_id="sibling-run")
+
+    dao = FileChangeDAO(db_path=tmp_path / "test.db")
+    store = FileSnapshotStore(workspace_base=tmp_path)
+    wrapped = FileTrackedTool(
+        _FakeApplyFillPlanTool(),
+        dao=dao,
+        snapshot_store=store,
+        path_param="plan",
+        tracks_output=False,
+        file_state=file_state,
+    )
+
+    plan_json = _make_simple_plan_json("template.xlsx", "target_report.xlsx")
+    result = await wrapped.execute(plan=plan_json, user=user, run_id="r2")
+
+    assert "[File state warning]" in result
+
+
+@pytest.mark.asyncio
+async def test_apply_fill_plan_implicit_read_no_false_warning(
+    tmp_path: Path, user: User, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """apply_fill_plan reads template + sources internally; no false 'have not read'."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "template.xlsx").write_bytes(b"fake-template")
+    (tmp_path / "source_a.xlsx").write_bytes(b"fake-source")
+
+    file_state = FileStateRegistry()
+    dao = FileChangeDAO(db_path=tmp_path / "test.db")
+    store = FileSnapshotStore(workspace_base=tmp_path)
+    wrapped = FileTrackedTool(
+        _FakeApplyFillPlanTool(),
+        dao=dao,
+        snapshot_store=store,
+        path_param="plan",
+        tracks_output=False,
+        file_state=file_state,
+    )
+
+    plan_json = _make_simple_plan_json("template.xlsx", "target_report.xlsx")
+    result = await wrapped.execute(plan=plan_json, user=user, run_id="r3")
+
+    assert "have not read" not in result
+    assert "SUCCESS:" in result
+    # Template and source should be recorded as reads.
+    assert file_state.has_read(path=str(tmp_path / "template.xlsx"), task_id="r3")
+    assert file_state.has_read(path=str(tmp_path / "source_a.xlsx"), task_id="r3")
+
+
+@pytest.mark.asyncio
+async def test_apply_fill_plan_backup_on_modify(
+    tmp_path: Path, user: User, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When output already exists, apply_fill_plan takes a backup before overwriting."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "template.xlsx").write_bytes(b"fake-template")
+    (tmp_path / "source_a.xlsx").write_bytes(b"fake-source")
+    # Pre-existing output → should be backed up.
+    (tmp_path / "target_report.xlsx").write_bytes(b"old-content")
+
+    file_state = FileStateRegistry()
+    dao = FileChangeDAO(db_path=tmp_path / "test.db")
+    store = FileSnapshotStore(workspace_base=tmp_path)
+    wrapped = FileTrackedTool(
+        _FakeApplyFillPlanTool(),
+        dao=dao,
+        snapshot_store=store,
+        path_param="plan",
+        tracks_output=False,
+        file_state=file_state,
+    )
+
+    plan_json = _make_simple_plan_json("template.xlsx", "target_report.xlsx")
+    result = await wrapped.execute(plan=plan_json, user=user, run_id="r4")
+
+    assert "SUCCESS:" in result
+    # Change should be journaled as op=modify (output existed before).
+    changes = await dao.list_for_run("r4")
+    target_changes = [c for c in changes if c.file_path.endswith("target_report.xlsx")]
+    assert target_changes, "expected a journaled change for target_report.xlsx"
+    assert target_changes[0].op == "modify"

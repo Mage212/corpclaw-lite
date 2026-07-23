@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -68,6 +69,37 @@ class TestWhitelist:
         m2 = UserManager(db_path=db)
         assert m2.is_allowed(111) is True
 
+    def test_two_existing_managers_observe_removal(self, tmp_path: Path) -> None:
+        db = str(tmp_path / "data" / "users.db")
+        m1 = UserManager(db_path=db)
+        m2 = UserManager(db_path=db)
+        m1.add_to_whitelist(111, "default")
+        assert m2.is_allowed(111) is True
+        assert m1.remove_from_whitelist(111) is True
+        assert m2.is_allowed(111) is False
+
+    def test_legacy_json_imports_once_and_is_not_reimported(self, tmp_path: Path) -> None:
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        (data_dir / "whitelist.json").write_text(
+            json.dumps([{"telegram_id": 111, "department": "hr"}])
+        )
+        db = str(data_dir / "users.db")
+        first = UserManager(db_path=db)
+        assert first.get_whitelist_department(111) == "hr"
+        assert first.remove_from_whitelist(111) is True
+
+        # The rollback artifact remains, but the marker makes SQLite canonical.
+        second = UserManager(db_path=db)
+        assert second.is_allowed(111) is False
+
+    def test_invalid_legacy_json_fails_closed_without_marker(self, tmp_path: Path) -> None:
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        (data_dir / "revoked_sessions.json").write_text("not-json")
+        with pytest.raises(RuntimeError, match="Cannot migrate legacy revocations"):
+            UserManager(db_path=str(data_dir / "users.db"))
+
 
 class TestRevokedSessions:
     def test_revoke_and_check(self, manager: UserManager) -> None:
@@ -87,3 +119,12 @@ class TestRevokedSessions:
 
         m2 = UserManager(db_path=db)
         assert m2.is_session_revoked(111) is True
+
+    def test_two_existing_managers_observe_unrevoke(self, tmp_path: Path) -> None:
+        db = str(tmp_path / "data" / "users.db")
+        m1 = UserManager(db_path=db)
+        m2 = UserManager(db_path=db)
+        m1.revoke_session(111)
+        assert m2.is_session_revoked(111) is True
+        m1.unrevoke_session(111)
+        assert m2.is_session_revoked(111) is False

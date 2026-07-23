@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from corpclaw_lite.departments.manager import DepartmentConfig, DepartmentManager
+from corpclaw_lite.departments.permissions import PermissionChecker
 from corpclaw_lite.extensions.skills.loader import SkillLoader
 from corpclaw_lite.extensions.skills.registry import SkillRegistry
 from corpclaw_lite.users.models import User
@@ -48,6 +50,18 @@ def test_skill_registry(tmp_path: Path) -> None:
     # Dev sees s1 (*) and s2 (dev)
     allowed_d = registry.get_allowed_skills(user_dev)
     assert len(allowed_d) == 2
+
+
+def test_skill_registry_intersects_skill_and_department_permissions(tmp_path: Path) -> None:
+    (tmp_path / "allowed.md").write_text("---\nid: allowed\nallowed_for: ['*']\n---\nok")
+    (tmp_path / "denied.md").write_text("---\nid: denied\nallowed_for: ['*']\n---\nno")
+    manager = DepartmentManager()
+    manager._departments["engineering"] = DepartmentConfig({"allowed_skills": ["allowed"]})
+    registry = SkillRegistry(permission_checker=PermissionChecker(manager))
+    registry.load_directory(tmp_path)
+
+    user = User(id=1, name="Eng", department="engineering")
+    assert [skill.id for skill in registry.get_allowed_skills(user)] == ["allowed"]
 
 
 def test_skill_registry_overlay_replace(tmp_path: Path) -> None:

@@ -325,3 +325,30 @@ def test_build_docker_args_strict_capabilities_opt_out() -> None:
     assert not any(s.startswith("seccomp=") for s in args["security_opt"])
     # no-new-privileges is always on regardless of the flag
     assert "no-new-privileges:true" in args["security_opt"]
+
+
+# ── S3-16: safety-critical nested settings forbid unknown keys ────────────────
+
+
+def test_safety_critical_settings_forbid_unknown_keys() -> None:
+    """A typo/legacy key in a safety-critical settings model is rejected, not ignored."""
+    import pytest
+    from pydantic import ValidationError
+
+    from corpclaw_lite.config.settings import (
+        AgentSettings,
+        ContainerSettings,
+        ExtensionsSettings,
+        LLMSettings,
+        WebChannelSettings,
+    )
+
+    for model in (
+        LLMSettings,
+        ContainerSettings,
+        AgentSettings,
+        WebChannelSettings,
+        ExtensionsSettings,
+    ):
+        with pytest.raises(ValidationError, match="extra_forbidden"):
+            model.model_validate({"totally_unknown_field": 1})

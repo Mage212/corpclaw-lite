@@ -13,6 +13,7 @@ import logging
 from typing import TYPE_CHECKING, Any, cast
 
 from corpclaw_lite.agent.constants import PLACEHOLDER
+from corpclaw_lite.agent.context import normalize_transcript
 from corpclaw_lite.config.settings import CompressionSettings
 from corpclaw_lite.llm.tokenizer_client import estimate_tokens_heuristic
 
@@ -133,13 +134,14 @@ class ContextCompressor:
         """Multi-phase compression pipeline.
 
         1. Prune old tool results (cheap, no LLM)
-        2. Protect head (system + first exchange)
+        2. Protect the first canonical exchange
         3. Protect tail by token budget
         4. Summarize middle with structured prompt
         5. Sanitize tool pairs (fix orphaned tool_call/result)
         """
+        messages = normalize_transcript(messages).messages
         if len(messages) < 5:
-            return messages
+            return self._sanitize_tool_pairs(messages)
 
         # Note: prune_old_tool_results is already called by the loop before compress(),
         # so we skip it here to avoid double-pruning.
@@ -183,7 +185,9 @@ class ContextCompressor:
             len(messages),
             len(result),
         )
-        return result
+        # A provider response is data, not authority.  Keep the invariant even
+        # when a custom compressor accidentally emits a system-role summary.
+        return normalize_transcript(result).messages
 
     def _sanitize_tool_pairs(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Fix orphaned tool_call/result pairs.

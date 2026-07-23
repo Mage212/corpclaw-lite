@@ -12,6 +12,8 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+import pytest
+
 # ── agent_logger / CredentialScrubber integration ────────────────────────────────
 
 
@@ -104,6 +106,47 @@ class TestCredentialScrubber:
         scrubber.filter(record)
         assert pat not in record.getMessage()
         assert "***REDACTED***" in record.getMessage()
+
+    @pytest.mark.parametrize(
+        "token",
+        [
+            "sk-proj-" + "A" * 30,
+            "sk-ant-" + "B" * 30,
+            "hf_" + "C" * 30,
+            "glpat-" + "D" * 30,
+            "github_pat_" + "E" * 30,
+        ],
+    )
+    def test_scrubs_modern_token_formats(self, token: str) -> None:
+        from corpclaw_lite.security.credential_scrubber import scrub_text
+
+        assert token not in scrub_text(f"token={token}")
+
+    def test_formatter_scrubs_exception_traceback(self) -> None:
+        import io
+
+        from corpclaw_lite.security.credential_scrubber import (
+            CredentialScrubber,
+            CredentialScrubbingFormatter,
+        )
+
+        token = "sk-proj-" + "Z" * 30
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        handler.addFilter(CredentialScrubber())
+        handler.setFormatter(CredentialScrubbingFormatter("%(message)s"))
+        logger = logging.getLogger("credential-traceback-test")
+        logger.handlers = [handler]
+        logger.propagate = False
+        logger.setLevel(logging.ERROR)
+        try:
+            raise RuntimeError(f"backend rejected {token}")
+        except RuntimeError:
+            logger.exception("request failed")
+
+        rendered = stream.getvalue()
+        assert token not in rendered
+        assert "***REDACTED***" in rendered
 
     def test_scrubs_string_args(self) -> None:
         from corpclaw_lite.security.credential_scrubber import CredentialScrubber
@@ -224,3 +267,20 @@ class TestHealthCounters:
         assert stats["llm_calls"] == 2
         assert stats["tool_errors"] == 1
         assert stats["guard_blocks"] == 1
+
+
+def test_health_server_defaults_to_loopback() -> None:
+    """S3-11: run_health_server must default to 127.0.0.1, not 0.0.0.0."""
+    import inspect
+
+    from corpclaw_lite.logging import health
+
+    sig = inspect.signature(health.run_health_server)
+    assert sig.parameters["host"].default == "127.0.0.1"
+
+
+def test_logging_settings_health_host_default_loopback() -> None:
+    """S3-11: LoggingSettings.health_host defaults to loopback."""
+    from corpclaw_lite.config.settings import LoggingSettings
+
+    assert LoggingSettings().health_host == "127.0.0.1"

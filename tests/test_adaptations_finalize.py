@@ -140,8 +140,11 @@ async def test_stage_c_programmatic_when_b_returns_text() -> None:
             system=kwargs.get("system"),
         )
 
+    executed: list[ToolCall] = []
+
     async def exec_tc(tc: ToolCall, user: Any, stats: Any) -> str:
-        raise AssertionError("stage B should not execute tool when no tool_calls")
+        executed.append(tc)
+        return f"## Report\n{tc.arguments.get('answer', '')}"
 
     user = MagicMock()
     user.id = 2
@@ -161,8 +164,10 @@ async def test_stage_c_programmatic_when_b_returns_text() -> None:
     )
     assert out is not None
     assert "partial findings" in out
-    assert tool.executed_with is not None
-    assert tool.executed_with.get("answer") == "partial findings"
+    assert len(executed) == 1
+    assert executed[0].id == "auto-finalize-run-f"
+    assert executed[0].arguments["answer"] == "partial findings"
+    assert tool.executed_with is None
 
 
 @pytest.mark.asyncio
@@ -178,8 +183,11 @@ async def test_stage_b_timeout_falls_to_stage_c() -> None:
             system=kwargs.get("system"),
         )
 
+    executed: list[ToolCall] = []
+
     async def exec_tc(tc: ToolCall, user: Any, stats: Any) -> str:
-        raise AssertionError("should not run")
+        executed.append(tc)
+        return "## Report\nempty"
 
     user = MagicMock()
     user.id = 3
@@ -199,7 +207,8 @@ async def test_stage_b_timeout_falls_to_stage_c() -> None:
     )
     assert out is not None
     assert "empty" in out or "Report" in out
-    assert tool.executed_with is not None
+    assert len(executed) == 1
+    assert tool.executed_with is None
 
 
 @pytest.mark.asyncio
@@ -232,6 +241,90 @@ async def test_missing_terminal_returns_none() -> None:
         execute_tool_call=exec_tc,
     )
     assert out is None
+
+
+@pytest.mark.asyncio
+async def test_stage_c_guard_rejection_is_not_success() -> None:
+    tool = _TerminalTool()
+    reg = _registry(tool)
+    provider = _MockProvider(LLMResponse(content="partial findings"))
+
+    async def call_llm(p: Provider, **kwargs: Any) -> LLMResponse:
+        return await p.chat(
+            messages=kwargs["messages"],
+            tools=kwargs.get("tools"),
+            system=kwargs.get("system"),
+        )
+
+    async def exec_tc(tc: ToolCall, user: Any, stats: Any) -> str:
+        return "Error: approval is required but unavailable"
+
+    user = MagicMock()
+    user.id = 5
+    out = await auto_finalize_cascade(
+        _context(),
+        _stats(),
+        user,
+        "research_finalize",
+        RuntimeError("budget"),
+        registry=reg,
+        provider=provider,
+        llm_timeout_seconds=5.0,
+        notify_position=False,
+        notify_interval_seconds=30.0,
+        call_llm=call_llm,
+        execute_tool_call=exec_tc,
+    )
+    assert out is None
+    assert tool.executed_with is None
+
+
+@pytest.mark.asyncio
+async def test_stage_b_rejection_does_not_retry_terminal_in_stage_c() -> None:
+    """One guarded rejection is final; the cascade must not replay the action."""
+    tool = _TerminalTool()
+    reg = _registry(tool)
+    provider = _MockProvider(
+        LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCall(id="stage-b", name="research_finalize", arguments={"answer": "draft"})
+            ],
+        )
+    )
+    executed: list[str] = []
+
+    async def call_llm(p: Provider, **kwargs: Any) -> LLMResponse:
+        return await p.chat(
+            messages=kwargs["messages"],
+            tools=kwargs.get("tools"),
+            system=kwargs.get("system"),
+        )
+
+    async def exec_tc(tc: ToolCall, user: Any, stats: Any) -> str:
+        _ = user, stats
+        executed.append(tc.id)
+        return "Error: approval denied"
+
+    user = MagicMock()
+    user.id = 6
+    out = await auto_finalize_cascade(
+        _context(),
+        _stats(),
+        user,
+        "research_finalize",
+        RuntimeError("budget"),
+        registry=reg,
+        provider=provider,
+        llm_timeout_seconds=5.0,
+        notify_position=False,
+        notify_interval_seconds=30.0,
+        call_llm=call_llm,
+        execute_tool_call=exec_tc,
+    )
+
+    assert out is None
+    assert executed == ["stage-b"]
 
 
 def test_resolve_target_provider_passthrough() -> None:

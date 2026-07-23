@@ -204,24 +204,34 @@ async def test_web_delete_rejects_symlink_escape(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_web_copy_dereferences_safe_symlinks(tmp_path: Path) -> None:
-    """B-072: copytree uses symlinks=False, so a symlink whose target is inside
-    the workspace is dereferenced (content copied, not the link)."""
+async def test_web_copy_rejects_nested_symlinks_and_cleans_destination(tmp_path: Path) -> None:
+    """Nested links are rejected even when their target is inside the workspace."""
     workspace = tmp_path / "ws"
     workspace.mkdir()
     await make_directory(workspace, "", "source")
     await make_directory(workspace, "", "destination")
     (workspace / "data.txt").write_text("inside")
-    # Symlink to an in-workspace file — allowed, dereferenced on copy.
     safe_link = workspace / "source" / "link_to_data"
     os.symlink(workspace / "data.txt", safe_link)
-    copied = await copy_paths(workspace, ["source"], "destination")
-    assert copied == ["destination/source"]
-    # The copy contains the dereferenced content, not a symlink.
-    copied_link = workspace / "destination" / "source" / "link_to_data"
-    assert copied_link.exists()
-    assert not copied_link.is_symlink()
-    assert copied_link.read_text() == "inside"
+    with pytest.raises(PermissionError, match="Symbolic links cannot be copied"):
+        await copy_paths(workspace, ["source"], "destination")
+    assert not (workspace / "destination" / "source").exists()
+
+
+@pytest.mark.asyncio
+async def test_web_copy_rejects_nested_external_symlink(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    source = workspace / "source"
+    destination = workspace / "destination"
+    source.mkdir(parents=True)
+    destination.mkdir()
+    secret = tmp_path / "host-secret.txt"
+    secret.write_text("must-not-copy")
+    os.symlink(secret, source / "leak.txt")
+
+    with pytest.raises(PermissionError, match="Symbolic links cannot be copied"):
+        await copy_paths(workspace, ["source"], "destination")
+    assert not (destination / "source").exists()
 
 
 @pytest.mark.asyncio
@@ -1166,8 +1176,8 @@ def _build_service(tmp_path: Path) -> tuple[AgentRequestService, UserManager]:
 
 
 @pytest.mark.asyncio
-async def test_build_system_prompt_injects_instructions_and_tone(tmp_path: Path) -> None:
-    """B-111: saved agent-context instructions + tone via loop.assemble_system_prompt."""
+async def test_build_system_prompt_excludes_persisted_user_preferences(tmp_path: Path) -> None:
+    """System preview contains trusted policy, not persisted user-controlled text."""
     service, user_manager = _build_service(tmp_path)
     user = User(id=3, name="Vadim", department="engineering")
 
@@ -1176,10 +1186,10 @@ async def test_build_system_prompt_injects_instructions_and_tone(tmp_path: Path)
 
     assert prompt is not None
     assert "BASE SOUL" in prompt
-    assert "Always cite sources." in prompt
-    assert "Be concise" in prompt
-    # Path A "You are talking to…" removed — identity is only in run() Current User Context.
+    assert "Always cite sources." not in prompt
+    assert "Be concise" not in prompt
     assert "You are talking to" not in prompt
+    assert "untrusted user-provided data" in prompt
 
 
 @pytest.mark.asyncio
@@ -1205,11 +1215,13 @@ async def test_tone_directive_reaches_agent_loop_via_service_run(tmp_path: Path)
     from corpclaw_lite.llm.base import LLMResponse, Provider
 
     captured_systems: list[str] = []
+    captured_messages: list[list[dict[str, Any]]] = []
 
     class SpyProvider(AsyncMock):
         async def chat(self, messages, tools=None, system=None, **kwargs):  # type: ignore[no-untyped-def]
             if system:
                 captured_systems.append(system)
+            captured_messages.append(messages)
             return LLMResponse(content="ok", tool_calls=[])
 
     user_manager = UserManager(db_path=str(tmp_path / "users.db"))
@@ -1247,10 +1259,14 @@ async def test_tone_directive_reaches_agent_loop_via_service_run(tmp_path: Path)
 
     assert captured_systems, "provider.chat must receive a system prompt"
     joined = "\n".join(captured_systems)
-    assert "Be precise." in joined
-    assert "Be thorough" in joined
-    assert "Current User Context:" in joined
-    assert "Vadim" in joined
+    assert "Be precise." not in joined
+    assert "Be thorough" not in joined
+    assert "Vadim" not in joined
+    current = str(captured_messages[0][-1]["content"])
+    assert '"personal_instructions": "Be precise."' in current
+    assert '"tone_preference": "Be thorough' in current
+    assert '"name": "Vadim"' in current
+    assert "Current user request:\nhi" in current
 
 
 @pytest.mark.asyncio

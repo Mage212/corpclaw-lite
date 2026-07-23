@@ -86,13 +86,12 @@ class UserManager:
     ) -> None:
         self._db = Path(db_path)
         self._db.parent.mkdir(parents=True, exist_ok=True)
+        self._whitelist_path = self._db.parent / "whitelist.json"
+        self._revoked_path = self._db.parent / "revoked_sessions.json"
         self._password_min_length = max(1, password_min_length)
         self._password_max_length = max(self._password_min_length, password_max_length)
         self._init_db()
-        self._whitelist_path = self._db.parent / "whitelist.json"
-        self._revoked_path = self._db.parent / "revoked_sessions.json"
-        self._whitelist_cache: list[dict[str, int | str]] | None = None
-        self._revoked_cache: set[int] | None = None
+        self._migrate_legacy_auth_json()
 
     def _init_db(self) -> None:
         with db_connect(self._db) as conn:
@@ -109,6 +108,31 @@ class UserManager:
                     is_admin INTEGER NOT NULL DEFAULT 0,
                     disabled INTEGER NOT NULL DEFAULT 0,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS telegram_whitelist (
+                    telegram_id INTEGER PRIMARY KEY,
+                    department TEXT NOT NULL DEFAULT 'default',
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS telegram_revocations (
+                    telegram_id INTEGER PRIMARY KEY,
+                    revoked_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS app_metadata (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
                 )
                 """
             )
@@ -162,6 +186,85 @@ class UserManager:
                     updated_at TEXT NOT NULL DEFAULT ''
                 )
                 """
+            )
+
+    @staticmethod
+    def _read_legacy_whitelist(path: Path) -> list[tuple[int, str]]:
+        if not path.exists():
+            return []
+        try:
+            raw: object = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise RuntimeError(f"Cannot migrate legacy whitelist {path}: {exc}") from exc
+        if not isinstance(raw, list):
+            raise RuntimeError(f"Cannot migrate legacy whitelist {path}: expected a JSON list")
+        result: list[tuple[int, str]] = []
+        for entry in raw:
+            if not isinstance(entry, dict):
+                raise RuntimeError(f"Cannot migrate legacy whitelist {path}: invalid entry")
+            telegram_id = entry.get("telegram_id")
+            department = entry.get("department", "default")
+            if isinstance(telegram_id, bool) or not isinstance(telegram_id, int):
+                raise RuntimeError(f"Cannot migrate legacy whitelist {path}: invalid telegram_id")
+            if not isinstance(department, str) or not department:
+                raise RuntimeError(f"Cannot migrate legacy whitelist {path}: invalid department")
+            result.append((telegram_id, department))
+        return result
+
+    @staticmethod
+    def _read_legacy_revocations(path: Path) -> list[int]:
+        if not path.exists():
+            return []
+        try:
+            raw: object = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise RuntimeError(f"Cannot migrate legacy revocations {path}: {exc}") from exc
+        if not isinstance(raw, list):
+            raise RuntimeError(f"Cannot migrate legacy revocations {path}: expected a JSON list")
+        result: list[int] = []
+        for item in raw:
+            if isinstance(item, bool) or not isinstance(item, (int, str)):
+                raise RuntimeError(f"Cannot migrate legacy revocations {path}: invalid id")
+            try:
+                result.append(int(item))
+            except ValueError as exc:
+                raise RuntimeError(f"Cannot migrate legacy revocations {path}: invalid id") from exc
+        return result
+
+    def _migrate_legacy_auth_json(self) -> None:
+        """Import the pre-Sprint-1 JSON stores once; SQLite is canonical afterwards."""
+        with db_connect(self._db) as conn:
+            marker = conn.execute(
+                "SELECT 1 FROM app_metadata WHERE key = 'auth_json_import_v1'"
+            ).fetchone()
+        if marker is not None:
+            return
+
+        whitelist = self._read_legacy_whitelist(self._whitelist_path)
+        revoked = self._read_legacy_revocations(self._revoked_path)
+        with db_connect(self._db) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            marker = conn.execute(
+                "SELECT 1 FROM app_metadata WHERE key = 'auth_json_import_v1'"
+            ).fetchone()
+            if marker is not None:
+                return
+            conn.executemany(
+                "INSERT OR IGNORE INTO telegram_whitelist (telegram_id, department) VALUES (?, ?)",
+                whitelist,
+            )
+            conn.executemany(
+                "INSERT OR IGNORE INTO telegram_revocations (telegram_id) VALUES (?)",
+                [(telegram_id,) for telegram_id in revoked],
+            )
+            conn.execute(
+                "INSERT INTO app_metadata (key, value) VALUES ('auth_json_import_v1', 'done')"
+            )
+        if whitelist or revoked:
+            logger.info(
+                "Imported legacy auth JSON into SQLite (whitelist=%d, revoked=%d)",
+                len(whitelist),
+                len(revoked),
             )
 
     def create_user(
@@ -374,16 +477,27 @@ class UserManager:
         return user
 
     def set_web_password(self, username: str, password: str) -> bool:
-        """Set a local web user's password. Returns False if the user is missing."""
+        """Set a local web user's password. Returns False if the user is missing.
+
+        S3-08: all existing web sessions for the user are invalidated atomically,
+        so a session established before a password rotation (e.g. after suspected
+        compromise) cannot remain valid until its TTL.
+        """
         clean_username = self.normalize_username(username)
         self._validate_password(password)
         password_hash = self.hash_password(password)
         with db_connect(self._db) as conn:
-            cur = conn.execute(
+            row = conn.execute(
+                "SELECT id FROM users WHERE username = ?", (clean_username,)
+            ).fetchone()
+            if row is None:
+                return False
+            conn.execute(
                 "UPDATE users SET password_hash = ? WHERE username = ?",
                 (password_hash, clean_username),
             )
-        return bool(cur.rowcount)
+            conn.execute("DELETE FROM web_sessions WHERE user_id = ?", (int(row[0]),))
+        return True
 
     def merge_web_user(
         self,
@@ -939,62 +1053,51 @@ class UserManager:
     # ── Whitelist ─────────────────────────────────────────────────────────────
 
     def _load_whitelist(self) -> list[dict[str, int | str]]:
-        """Load whitelist entries from JSON file (cached)."""
-        if self._whitelist_cache is not None:
-            return self._whitelist_cache
-        if not self._whitelist_path.exists():
-            return []
-        try:
-            data = json.loads(self._whitelist_path.read_text("utf-8"))
-            if isinstance(data, list):
-                self._whitelist_cache = data  # type: ignore[assignment]
-                return data  # type: ignore[return-value]
-        except Exception as e:
-            logger.warning("Failed to load whitelist: %s", e)
-        return []
-
-    def _save_whitelist(self, entries: list[dict[str, int | str]]) -> None:
-        """Save whitelist entries to JSON file (atomic write) and update cache."""
-        self._whitelist_path.parent.mkdir(parents=True, exist_ok=True)
-        from corpclaw_lite.utils.fs import atomic_write_text
-
-        atomic_write_text(self._whitelist_path, json.dumps(entries, indent=2), encoding="utf-8")
-        self._whitelist_cache = entries
+        """Load the canonical whitelist directly from SQLite."""
+        with db_connect(self._db) as conn:
+            rows = conn.execute(
+                "SELECT telegram_id, department FROM telegram_whitelist ORDER BY telegram_id"
+            ).fetchall()
+        return [
+            {"telegram_id": int(telegram_id), "department": str(department)}
+            for telegram_id, department in rows
+        ]
 
     def seed_whitelist(self, telegram_ids: list[int], default_department: str) -> None:
         """Merge config-based whitelist IDs into the persistent file.
 
         Only adds IDs that are not already present. Called once at startup.
         """
-        entries = self._load_whitelist()
-        existing_ids = {e["telegram_id"] for e in entries}
-        added = 0
-        for tid in telegram_ids:
-            if tid not in existing_ids:
-                entries.append({"telegram_id": tid, "department": default_department})
-                added += 1
+        with db_connect(self._db) as conn:
+            before = conn.total_changes
+            conn.executemany(
+                "INSERT OR IGNORE INTO telegram_whitelist (telegram_id, department) VALUES (?, ?)",
+                [(tid, default_department) for tid in telegram_ids],
+            )
+            added = conn.total_changes - before
         if added:
-            self._save_whitelist(entries)
             logger.info("Seeded %d IDs into whitelist", added)
 
     def add_to_whitelist(self, telegram_id: int, department: str = "default") -> None:
         """Add a telegram_id to the persistent whitelist."""
-        entries = self._load_whitelist()
-        existing_ids = {e["telegram_id"] for e in entries}
-        if telegram_id in existing_ids:
+        with db_connect(self._db) as conn:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO telegram_whitelist (telegram_id, department) VALUES (?, ?)",
+                (telegram_id, department),
+            )
+        if not cur.rowcount:
             logger.info("telegram_id=%d already in whitelist", telegram_id)
             return
-        entries.append({"telegram_id": telegram_id, "department": department})
-        self._save_whitelist(entries)
         logger.info("Added telegram_id=%d to whitelist (dept=%s)", telegram_id, department)
 
     def remove_from_whitelist(self, telegram_id: int) -> bool:
         """Remove a telegram_id from the persistent whitelist. Returns True if found."""
-        entries = self._load_whitelist()
-        new_entries = [e for e in entries if e.get("telegram_id") != telegram_id]
-        if len(new_entries) == len(entries):
+        with db_connect(self._db) as conn:
+            cur = conn.execute(
+                "DELETE FROM telegram_whitelist WHERE telegram_id = ?", (telegram_id,)
+            )
+        if not cur.rowcount:
             return False
-        self._save_whitelist(new_entries)
         logger.info("Removed telegram_id=%d from whitelist", telegram_id)
         return True
 
@@ -1004,59 +1107,48 @@ class UserManager:
 
     def is_allowed(self, telegram_id: int) -> bool:
         """Check if telegram_id is in the whitelist (deny-by-default)."""
-        entries = self._load_whitelist()
-        if not entries:
-            return False  # deny all when empty
-        return any(e.get("telegram_id") == telegram_id for e in entries)
+        with db_connect(self._db) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM telegram_whitelist WHERE telegram_id = ?", (telegram_id,)
+            ).fetchone()
+        return row is not None
 
     def get_whitelist_department(self, telegram_id: int) -> str:
         """Return department for a whitelisted telegram_id, or 'default'."""
-        for e in self._load_whitelist():
-            if e.get("telegram_id") == telegram_id:
-                dept = e.get("department", "default")
-                return str(dept)
-        return "default"
+        with db_connect(self._db) as conn:
+            row = conn.execute(
+                "SELECT department FROM telegram_whitelist WHERE telegram_id = ?", (telegram_id,)
+            ).fetchone()
+        return str(row[0]) if row is not None else "default"
 
     # ── Revoked Sessions ──────────────────────────────────────────────────────
 
     def _load_revoked(self) -> set[int]:
-        if self._revoked_cache is not None:
-            return self._revoked_cache
-        if not self._revoked_path.exists():
-            return set()
-        try:
-            data = json.loads(self._revoked_path.read_text("utf-8"))
-            if isinstance(data, list):
-                result = {int(item) for item in data if isinstance(item, (int, float, str))}  # type: ignore[misc]
-                self._revoked_cache = result
-                return result
-        except Exception as e:
-            logger.warning("Failed to load revoked sessions: %s", e)
-        return set()
-
-    def _save_revoked(self, revoked: set[int]) -> None:
-        self._revoked_path.parent.mkdir(parents=True, exist_ok=True)
-        from corpclaw_lite.utils.fs import atomic_write_text
-
-        atomic_write_text(self._revoked_path, json.dumps(sorted(revoked)), encoding="utf-8")
-        self._revoked_cache = revoked
+        with db_connect(self._db) as conn:
+            rows = conn.execute("SELECT telegram_id FROM telegram_revocations").fetchall()
+        return {int(row[0]) for row in rows}
 
     def revoke_session(self, telegram_id: int) -> None:
         """Block a user from interacting with the bot."""
-        revoked = self._load_revoked()
-        revoked.add(telegram_id)
-        self._save_revoked(revoked)
+        with db_connect(self._db) as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO telegram_revocations (telegram_id) VALUES (?)",
+                (telegram_id,),
+            )
         logger.info("Session revoked for telegram_id=%d", telegram_id)
 
     def unrevoke_session(self, telegram_id: int) -> None:
         """Unblock a previously revoked user."""
-        revoked = self._load_revoked()
-        revoked.discard(telegram_id)
-        self._save_revoked(revoked)
+        with db_connect(self._db) as conn:
+            conn.execute("DELETE FROM telegram_revocations WHERE telegram_id = ?", (telegram_id,))
 
     def is_session_revoked(self, telegram_id: int) -> bool:
         """Check if a user's session is revoked."""
-        return telegram_id in self._load_revoked()
+        with db_connect(self._db) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM telegram_revocations WHERE telegram_id = ?", (telegram_id,)
+            ).fetchone()
+        return row is not None
 
     # ── Async wrappers (for use from event loop) ─────────────────────────────
 

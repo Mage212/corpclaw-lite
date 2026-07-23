@@ -90,6 +90,62 @@ def test_load_file_merge_budget_override(tmp_path: Path) -> None:
     assert dept.budget.max_tool_calls == 60
 
 
+def test_budget_only_overlay_inherits_profile_and_all_allowlists(tmp_path: Path) -> None:
+    default = tmp_path / "config" / "departments.yaml"
+    overlay = tmp_path / "overlay" / "config" / "departments.yaml"
+    _write_depts(
+        default,
+        {
+            "eng": {
+                "description": "Engineering",
+                "profile": "office",
+                "allowed_tools": ["read_file"],
+                "allowed_skills": ["code-review"],
+                "allowed_plugins": ["git"],
+                "allowed_subagents": ["execution-agent"],
+                "allowed_mcp": ["internal-git"],
+            }
+        },
+    )
+    _write_depts(overlay, {"eng": {"budget": {"max_iterations": 25}}})
+
+    mgr = DepartmentManager()
+    mgr.load_file(default)
+    mgr.load_file(overlay, merge=True)
+
+    dept = mgr.get_department("eng")
+    assert dept is not None
+    assert dept.name == "Engineering"
+    assert dept.profile == "office"
+    assert dept.allowed_tools == ["read_file"]
+    assert dept.allowed_skills == ["code-review"]
+    assert dept.allowed_plugins == ["git"]
+    assert dept.allowed_subagents == ["execution-agent"]
+    assert dept.allowed_mcp == ["internal-git"]
+
+
+def test_invalid_overlay_is_atomic(tmp_path: Path) -> None:
+    default = tmp_path / "config" / "departments.yaml"
+    overlay = tmp_path / "overlay" / "config" / "departments.yaml"
+    _write_depts(default, {"eng": {"allowed_tools": ["read_file"]}})
+    _write_depts(
+        overlay,
+        {
+            "eng": {"allowed_tools": ["write_file"]},
+            "broken": {"allowed_tools": "*"},
+        },
+    )
+
+    mgr = DepartmentManager()
+    mgr.load_file(default)
+    mgr.load_file(overlay, merge=True)
+
+    eng = mgr.get_department("eng")
+    assert eng is not None
+    assert eng.allowed_tools == ["read_file"]
+    assert mgr.get_department("broken") is None
+
+
 def test_load_file_merge_budget_inherited_when_absent(tmp_path: Path) -> None:
     """When the overlay has no budget block, the default budget is inherited."""
     default = tmp_path / "config" / "departments.yaml"

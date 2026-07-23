@@ -80,6 +80,10 @@ class ScenarioSetup:
     generated_workbooks: list[tuple[str, str]] = field(
         default_factory=lambda: list[tuple[str, str]]()
     )
+    # Synthetic media-report workspace generators (deterministic, no corpus).
+    # When True, _setup_workspace calls the matching support fixture builder.
+    generate_noisy_completed_month: bool = False
+    generate_dual_type: bool = False
 
 
 @dataclass
@@ -121,6 +125,8 @@ def _parse_setup(raw: dict[str, Any] | None) -> ScenarioSetup | None:
         copy_from_corpus=copy_from_corpus,
         generated_images=generated_images,
         generated_workbooks=generated_workbooks,
+        generate_noisy_completed_month=bool(raw.get("generate_noisy_completed_month", False)),
+        generate_dual_type=bool(raw.get("generate_dual_type", False)),
     )
 
 

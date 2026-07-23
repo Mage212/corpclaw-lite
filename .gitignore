@@ -39,6 +39,11 @@ config/calibrated/*
 # Per-user onboarding profiles (auto-generated, contain personal data)
 config/bootstrap/users/
 
+# Local test fixtures with commercial client data — never commit (see AGENTS.md §4)
+templates_for_testing/
+# Local dev/diagnostic scripts (model-specific, not part of public codebase)
+scripts/dev/
+
 # Debug test workspaces (created by tests/debug/ integration tests)
 tests/debug/.workspace/
 
@@ -76,6 +81,16 @@ run_eval_*.py
 
 # Eval harness working directory (materialised scenarios per pass)
 .eval_workspace/
+.eval_workspace_worker_*/
+
+# Local binary fixtures for auto-debug / live model tests (xlsx etc.)
+# Contains real client workbooks — must never be committed.
+templates_for_testing/**
+!templates_for_testing/README.md
+
+# Local one-off diagnostics (keep README tracked)
+scripts/dev/**
+!scripts/dev/README.md
 
 # Visual companion brainstorming artifacts
 .superpowers/

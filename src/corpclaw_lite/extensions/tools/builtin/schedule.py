@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
+from corpclaw_lite.extensions.tools.context import get_tool_execution_context
 from corpclaw_lite.scheduler.service import SchedulerError, SchedulerService
 
 __all__ = [
@@ -17,6 +18,11 @@ __all__ = [
 
 if TYPE_CHECKING:
     from corpclaw_lite.users.models import User
+
+
+def _context_user(user: User | None) -> User | None:
+    context = get_tool_execution_context()
+    return context.user if user is None and context is not None else user
 
 
 class ScheduleProposeTool(Tool):
@@ -53,6 +59,7 @@ class ScheduleProposeTool(Tool):
         self._scheduler = scheduler
 
     async def execute(self, *, user: User | None = None, **kwargs: Any) -> str:
+        user = _context_user(user)
         if user is None:
             return "Error: User context is required for schedule_propose."
         title = kwargs.get("title")
@@ -90,6 +97,7 @@ class ScheduleListTool(Tool):
         self._scheduler = scheduler
 
     async def execute(self, *, user: User | None = None, **kwargs: Any) -> str:
+        user = _context_user(user)
         if user is None:
             return "Error: User context is required for schedule_list."
         tasks = await self._scheduler.list_for_user(user, statuses=["pending", "active", "paused"])
@@ -120,6 +128,7 @@ class ScheduleCancelTool(Tool):
         self._scheduler = scheduler
 
     async def execute(self, *, user: User | None = None, **kwargs: Any) -> str:
+        user = _context_user(user)
         if user is None:
             return "Error: User context is required."
         task_id = kwargs.get("task_id")
@@ -147,6 +156,7 @@ class SchedulePauseTool(Tool):
         self._scheduler = scheduler
 
     async def execute(self, *, user: User | None = None, **kwargs: Any) -> str:
+        user = _context_user(user)
         if user is None:
             return "Error: User context is required."
         task_id = kwargs.get("task_id")
@@ -174,6 +184,7 @@ class ScheduleResumeTool(Tool):
         self._scheduler = scheduler
 
     async def execute(self, *, user: User | None = None, **kwargs: Any) -> str:
+        user = _context_user(user)
         if user is None:
             return "Error: User context is required."
         task_id = kwargs.get("task_id")

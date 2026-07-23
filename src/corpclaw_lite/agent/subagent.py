@@ -5,7 +5,7 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -115,6 +115,7 @@ class SubagentDispatcher:
         skill_registry: SkillRegistry | None = None,
         research_runtime: ResearchRuntime | None = None,
         workspace_base: Path | None = None,
+        approval_callback: Callable[[str, str], Awaitable[bool]] | None = None,
     ) -> None:
         self._provider = provider
         self._main_registry = main_registry
@@ -125,6 +126,7 @@ class SubagentDispatcher:
         self._skill_registry = skill_registry
         self._research_runtime = research_runtime
         self._workspace_base = workspace_base
+        self._approval_callback = approval_callback
 
     async def dispatch(
         self,
@@ -213,7 +215,11 @@ class SubagentDispatcher:
 
             from corpclaw_lite.paths import PROJECT_ROOT
 
+            # Resolve relative prompt_path against PROJECT_ROOT so eval/chdir into
+            # a per-run workspace still finds config/bootstrap/subagents/*.md.
             prompt_file = Path(spec.prompt_path)
+            if not prompt_file.is_absolute():
+                prompt_file = PROJECT_ROOT / prompt_file
 
             # Check for calibrated override first
             calibrated_prompt = (
@@ -282,7 +288,7 @@ class SubagentDispatcher:
         else:
             surface_profile = "office"
 
-        # Setup isolated loop — pass security guards through from parent
+        # Setup isolated loop — pass security guards + approval channel from parent
         loop = AgentLoop(
             AgentConfig(
                 provider=effective_provider,
@@ -292,6 +298,7 @@ class SubagentDispatcher:
                 tool_guard=self._tool_guard,
                 permission_checker=self._permission_checker,
                 workspace_base=self._workspace_base,
+                approval_callback=self._approval_callback,
                 # B-047: workflow-finalize guard wiring. When the spec declares a
                 # terminal tool (research-agent → research_finalize), the inner loop
                 # nudges/restricts toward it as the budget runs out.
@@ -350,10 +357,8 @@ class SubagentDispatcher:
                 if on_subagent_llm_queue_status is not None:
                     on_subagent_llm_queue_status(subagent_name, status)
 
-            # B-060: when the parent wants visibility into the subagent's tool
-            # calls, record them in an inner recorder and merge into the parent
-            # trajectory after the run completes. This is how the eval harness
-            # sees table_query/excel_workbook/etc. that ran inside the dispatch.
+            # When the parent wants nested visibility, capture and merge the
+            # isolated subagent trajectory.
             inner_recorder = (
                 TrajectoryRecorder(f"{spec.id}#inner")
                 if parent_trajectory_recorder is not None

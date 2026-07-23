@@ -30,12 +30,29 @@ def _make_mock_container(
     name: str = "corpclaw_agent_1",
     status: str = "running",
     started_at: str = "2020-01-01T00:00:00Z",
+    *,
+    image: str = "corpclaw-agent-base:latest",
+    labels: dict[str, str] | None = None,
 ) -> MagicMock:
-    """Create a mock Docker container with common attributes."""
+    """Create a mock Docker container with common attributes.
+
+    By default the container carries the policy labels written at create time,
+    so it satisfies ``_existing_matches_policy`` (the happy-path reuse/restart
+    tests). Tests that exercise mismatch detection override *image*/*labels*.
+    """
     c = MagicMock()
     c.name = name
     c.status = status
     c.attrs = {"State": {"StartedAt": started_at}}
+    c.image.tags = [image] if image else []
+    default_labels = {
+        "corpclaw.image": image,
+        "corpclaw.strict_capabilities": "True",
+        "corpclaw.network": "default",
+    }
+    if labels is not None:
+        default_labels.update(labels)
+    c.labels = default_labels
     return c
 
 
@@ -128,6 +145,51 @@ def test_ensure_running_stopped_restarts(manager) -> None:
     assert name == "corpclaw_agent_10"
     container.restart.assert_called_once()
     assert manager.managed_container_names() == ["corpclaw_agent_10"]
+
+
+# ── S3-01: container reuse re-validation ──────────────────────────────────────
+
+
+def test_ensure_running_recreates_on_image_mismatch(manager) -> None:
+    """A container whose image differs from settings must be recreated, not reused."""
+    stale = _make_mock_container(
+        name="corpclaw_agent_10", status="running", image="evil-image:latest"
+    )
+    manager._client.containers.get.return_value = stale
+    manager._client.containers.run.return_value = MagicMock()
+
+    name = manager.ensure_running(user_id=10)
+    assert name == "corpclaw_agent_10"
+    # Stale container was force-removed, then a fresh one created with policy.
+    stale.stop.assert_called_once()
+    stale.remove.assert_called_once_with(force=True)
+    manager._client.containers.run.assert_called_once()
+
+
+def test_ensure_running_recreates_on_unlabelled_container(manager) -> None:
+    """A container without corpclaw generation labels (externally created) is recreated."""
+    external = _make_mock_container(name="corpclaw_agent_10", status="running")
+    # No corpclaw labels — simulates `docker run` by another actor.
+    external.labels = {}
+    manager._client.containers.get.return_value = external
+    manager._client.containers.run.return_value = MagicMock()
+
+    manager.ensure_running(user_id=10)
+    external.remove.assert_called_once_with(force=True)
+    manager._client.containers.run.assert_called_once()
+
+
+def test_existing_matches_policy_strict_capabilities_mismatch(manager) -> None:
+    """A strict_capabilities label mismatch returns False (recreate needed)."""
+    c = _make_mock_container(labels={"corpclaw.strict_capabilities": "False"})
+    manager.settings.strict_capabilities = True
+    assert manager._existing_matches_policy(c) is False
+
+
+def test_existing_matches_policy_matches(manager) -> None:
+    """A fully-matching container returns True (reuse/restart path)."""
+    c = _make_mock_container()
+    assert manager._existing_matches_policy(c) is True
 
 
 # ── Test 19: ensure_running non-NotFound error ────────────────────────────────

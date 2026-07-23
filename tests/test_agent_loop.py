@@ -9,6 +9,7 @@ from corpclaw_lite.agent.context import ContextBuilder
 from corpclaw_lite.agent.loop import AgentConfig, AgentLoop, RunStats
 from corpclaw_lite.agent.loop_state import TurnTokens
 from corpclaw_lite.config.settings import AgentSettings
+from corpclaw_lite.extensions.tools.base import Tool
 from corpclaw_lite.extensions.tools.registry import ToolRegistry
 from corpclaw_lite.llm.base import (
     LLMResponse,
@@ -45,6 +46,40 @@ class MockProvider(Provider):
         system: str | None = None,
     ) -> AsyncIterator[StreamChunk]:
         raise NotImplementedError()
+
+
+@pytest.mark.asyncio
+async def test_files_brief_does_not_hide_excel_inspect(test_user: User) -> None:
+    class InspectTool(Tool):
+        name = "excel_inspect"
+        description = "Inspect workbook structure"
+        params = []
+
+        async def execute(self, **kwargs: Any) -> str:
+            return "ok"
+
+    class RecordingProvider(MockProvider):
+        seen_tools: list[dict[str, Any]] | None = None
+
+        async def chat(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]] | None = None,
+            system: str | None = None,
+        ) -> LLMResponse:
+            self.seen_tools = tools
+            return await super().chat(messages, tools=tools, system=system)
+
+    registry = ToolRegistry()
+    registry.register(InspectTool())
+    provider = RecordingProvider([LLMResponse(content="Structure reviewed")])
+    loop = AgentLoop(AgentConfig(provider, registry, AgentSettings()))
+
+    await loop.run(test_user, "FILES_BRIEF (deterministic, no LLM): analyze this workbook")
+
+    assert provider.seen_tools is not None
+    names = {schema["function"]["name"] for schema in provider.seen_tools}
+    assert "excel_inspect" in names
 
 
 @pytest.fixture
@@ -438,7 +473,8 @@ async def test_history_order(test_user: User, empty_registry: ToolRegistry, tmp_
     msgs = captured_messages[0]
     roles = [(m.get("role"), m.get("content")) for m in msgs]
     user_contents = [c for r, c in roles if r == "user"]
-    assert user_contents.index("old question") < user_contents.index("new question")
+    current = next(c for c in user_contents if "Current user request:\nnew question" in c)
+    assert user_contents.index("old question") < user_contents.index(current)
 
 
 @pytest.mark.asyncio
@@ -521,6 +557,59 @@ async def test_loop_stops_on_progress_guard(test_user: User, empty_registry: Too
     # Should not have used all 20 responses
     assert provider.call_count < 20
     assert stats.status == "loop"
+
+
+@pytest.mark.asyncio
+async def test_loop_fallback_is_persisted_before_context_reset(
+    test_user: User, empty_registry: ToolRegistry, tmp_path: Path
+) -> None:
+    from corpclaw_lite.agent.context_target import (
+        get_context_session_id,
+        get_context_user_id,
+    )
+    from corpclaw_lite.channels.web.chat_context_store import ChatContextStore
+    from corpclaw_lite.channels.web.chat_store import WebChatStore
+
+    class FailingTool:
+        name = "fail_tool"
+        description = "fail"
+        params: list[Any] = []
+        terminal = False
+
+        async def execute(self, **kwargs: Any) -> str:
+            return "Error: repeated failure"
+
+    empty_registry._tools["fail_tool"] = FailingTool()  # type: ignore[attr-defined]
+    db = tmp_path / "loop-fallback.db"
+    web_store = WebChatStore(db)
+    context_store = ChatContextStore(db)
+    session_id = await web_store.create_session(user_id=str(test_user.id), section="chat")
+    provider = MockProvider(
+        responses=[
+            LLMResponse(
+                content="",
+                tool_calls=[ToolCall(id=str(i), name="fail_tool", arguments={})],
+            )
+            for i in range(20)
+        ]
+    )
+    loop = AgentLoop(
+        AgentConfig(
+            provider,
+            empty_registry,
+            AgentSettings(max_steps=20, max_tool_calls=100),
+            chat_context_store=context_store,
+        )
+    )
+
+    result, stats = await loop.run(test_user, "do it", session_id=session_id)
+
+    transcript = await context_store.list_context(session_id, user_id=str(test_user.id))
+    assert stats.status == "loop"
+    assert transcript[-1]["role"] == "assistant"
+    assert transcript[-1]["content"] == result
+    assert get_context_session_id() is None
+    assert get_context_user_id() is None
 
 
 @pytest.mark.asyncio
@@ -684,6 +773,7 @@ async def test_subagent_status_callbacks_passed_to_tool_runtime_context(
 ) -> None:
     """Subagent status callbacks should reach runtime-aware tools."""
     captured_kwargs: dict[str, Any] = {}
+    captured_context: list[Any] = []
 
     class FakeDispatchTool:
         name = "dispatch_subagent"
@@ -692,7 +782,10 @@ async def test_subagent_status_callbacks_passed_to_tool_runtime_context(
         parallel_safe = False
 
         async def execute(self, **kwargs: Any) -> str:
+            from corpclaw_lite.extensions.tools.context import get_tool_execution_context
+
             captured_kwargs.update(kwargs)
+            captured_context.append(get_tool_execution_context())
             return "subagent result"
 
     empty_registry._tools["dispatch_subagent"] = FakeDispatchTool()  # type: ignore
@@ -748,20 +841,23 @@ async def test_subagent_status_callbacks_passed_to_tool_runtime_context(
     assert result == "Done."
     assert started_tools == ["dispatch_subagent"]
     assert stats.tools_used == ["dispatch_subagent"]
-    # B-079: registry gets adapters that forward to EventSink (not the raw kwargs).
+    # Runtime callbacks live in the non-serialized execution context. Business
+    # kwargs remain exactly the model-declared arguments.
+    assert captured_kwargs == {"subagent_id": "worker", "task": "work"}
+    assert captured_context[0] is not None
+    runtime = captured_context[0]
     for key in (
         "on_subagent_tool_start",
         "on_subagent_tool_batch_start",
         "on_subagent_llm_stage",
         "on_subagent_llm_queue_status",
     ):
-        assert key in captured_kwargs
-        assert callable(captured_kwargs[key])
+        assert callable(getattr(runtime, key))
     # Functional path: adapters invoke user callbacks.
-    captured_kwargs["on_subagent_tool_start"]("worker", "read_file")
-    captured_kwargs["on_subagent_tool_batch_start"]("worker", ["a", "b"])
-    captured_kwargs["on_subagent_llm_stage"]("worker", "model_waiting")
-    captured_kwargs["on_subagent_llm_queue_status"](
+    runtime.on_subagent_tool_start("worker", "read_file")
+    runtime.on_subagent_tool_batch_start("worker", ["a", "b"])
+    runtime.on_subagent_llm_stage("worker", "model_waiting")
+    runtime.on_subagent_llm_queue_status(
         "worker",
         LLMQueueStatus(
             user_id="u",
@@ -1495,19 +1591,17 @@ async def test_agent_loop_raw_xml_final_falls_back_after_repair_failure(
 
 
 @pytest.mark.asyncio
-async def test_closing_mode_reduces_schema_before_llm_call(
+async def test_main_agent_closing_mode_preserves_task_tool_schema(
     test_user: User, empty_registry: ToolRegistry
 ) -> None:
-    """A long iteration that straddles the wall-clock soft deadline must still trigger
-    closing mode: by the next LLM call the schema is reduced to terminal tools only.
+    """A main-agent deadline must not invent a workflow terminal contract.
 
-    B-046 fix: previously the check ran once per iteration, so an iteration that started
-    just under the deadline and ran past it would only enter closing mode the iteration
-    *after* next — by which point asyncio.wait_for might cancel the whole run.
+    ``terminal=True`` means direct-return semantics for a tool such as read_image;
+    it does not mean that every text request should be forced through that tool.
     """
 
-    # A non-terminal tool the model keeps calling, plus a terminal one it could call
-    # to finalize. Closing mode must narrow the schema to the terminal tool.
+    # A non-terminal tool plus an unrelated direct-return tool.  Closing mode
+    # must keep the main agent's task surface intact.
     class GatherTool:
         name = "gather"
         description = "gather"
@@ -1542,8 +1636,8 @@ async def test_closing_mode_reduces_schema_before_llm_call(
             captured_tools.append(list(tools or []))
             return await super().chat(messages, tools=tools, system=system)
 
-    # Tiny deadline: 0.1 * 200ms = 20ms. The model keeps calling `gather`; after 20ms
-    # the next chat() call must see a schema containing only `finalize`.
+    # Tiny deadline: 0.1 * 200ms = 20ms. The model keeps calling `gather`, so
+    # later calls definitely happen in closing mode.
     settings = AgentSettings(
         max_steps=10,
         max_tool_calls=30,
@@ -1568,10 +1662,182 @@ async def test_closing_mode_reduces_schema_before_llm_call(
     ]
     # Early calls see both tools.
     assert "gather" in tool_names_per_call[0]
-    # After the deadline (within a few calls given the 20ms window), a later call sees
-    # only the terminal tool — closing mode engaged before that LLM call.
-    narrowed = [names for names in tool_names_per_call if names == {"finalize"}]
-    assert narrowed, f"expected a schema narrowed to {{finalize}}, got {tool_names_per_call}"
+    assert all(names == {"gather", "finalize"} for names in tool_names_per_call)
+    assert stats.status in {"ok", "budget"}
+
+
+@pytest.mark.asyncio
+async def test_workflow_closing_keeps_required_before_terminal(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    """Soft closing cannot remove a configured prerequisite from the final funnel."""
+
+    class WorkflowTool:
+        description = "workflow"
+        params: list[Any] = []
+        parallel_safe = False
+        terminal = False
+        risk_level = None
+
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        async def execute(self, **kwargs: Any) -> str:
+            if self.name == "gather":
+                await asyncio.sleep(0.015)
+            return "ok"
+
+    gather = WorkflowTool("gather")
+    prerequisite = WorkflowTool("research_list_facts")
+    terminal = WorkflowTool("research_finalize")
+    terminal.terminal = True
+    empty_registry._tools[gather.name] = gather  # type: ignore[attr-defined]
+    empty_registry._tools[prerequisite.name] = prerequisite  # type: ignore[attr-defined]
+    empty_registry._tools[terminal.name] = terminal  # type: ignore[attr-defined]
+
+    captured_tools: list[set[str]] = []
+
+    class CapturingProvider(MockProvider):
+        async def chat(self, messages, tools=None, system=None):  # type: ignore[override]
+            captured_tools.append(
+                {str(tool.get("function", {}).get("name", "")) for tool in (tools or [])}
+            )
+            return await super().chat(messages, tools=tools, system=system)
+
+    provider = CapturingProvider(
+        responses=[
+            LLMResponse(
+                content="",
+                tool_calls=[ToolCall(id=f"g{i}", name="gather", arguments={})],
+            )
+            for i in range(4)
+        ]
+        + [LLMResponse(content="done")]
+    )
+    loop = AgentLoop(
+        AgentConfig(
+            provider,
+            empty_registry,
+            AgentSettings(
+                max_steps=10,
+                max_tool_calls=30,
+                max_wall_time_ms=200,
+                soft_deadline_ratio=0.1,
+            ),
+            terminal_tool="research_finalize",
+            required_before_terminal=["research_list_facts"],
+        )
+    )
+
+    await loop.run(test_user, "research", channel="test")
+
+    closing_schema = {"research_list_facts", "research_finalize"}
+    assert closing_schema in captured_tools
+    assert {"research_finalize"} not in captured_tools
+
+
+@pytest.mark.asyncio
+async def test_tool_budget_rejects_complete_batch_before_execution(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    executed: list[str] = []
+
+    class CountingTool:
+        description = "count"
+        params: list[Any] = []
+        terminal = False
+        parallel_safe = True
+        risk_level = None
+
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        async def execute(self, **kwargs: Any) -> str:
+            executed.append(self.name)
+            return "ok"
+
+    empty_registry._tools["one"] = CountingTool("one")  # type: ignore[attr-defined]
+    empty_registry._tools["two"] = CountingTool("two")  # type: ignore[attr-defined]
+    provider = MockProvider(
+        responses=[
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCall(id="one", name="one", arguments={}),
+                    ToolCall(id="two", name="two", arguments={}),
+                ],
+            )
+        ]
+    )
+    loop = AgentLoop(
+        AgentConfig(
+            provider,
+            empty_registry,
+            AgentSettings(max_steps=5, max_tool_calls=1),
+        )
+    )
+
+    result, stats = await loop.run(test_user, "run both")
+
+    assert stats.status == "budget"
+    assert "2/1" in result
+    assert executed == []
+
+
+@pytest.mark.asyncio
+async def test_mixed_terminal_batch_is_protocol_closed_without_execution(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    executed: list[str] = []
+    captured_messages: list[list[dict[str, Any]]] = []
+
+    class CountingTool:
+        description = "count"
+        params: list[Any] = []
+        parallel_safe = True
+
+        def __init__(self, name: str, *, terminal: bool) -> None:
+            self.name = name
+            self.terminal = terminal
+
+        async def execute(self, **kwargs: Any) -> str:
+            executed.append(self.name)
+            return "ok"
+
+    empty_registry._tools["gather"] = CountingTool(  # type: ignore[attr-defined]
+        "gather", terminal=False
+    )
+    empty_registry._tools["finalize"] = CountingTool(  # type: ignore[attr-defined]
+        "finalize", terminal=True
+    )
+
+    class CapturingProvider(MockProvider):
+        async def chat(self, messages, tools=None, system=None):  # type: ignore[override]
+            captured_messages.append([dict(message) for message in messages])
+            return await super().chat(messages, tools=tools, system=system)
+
+    provider = CapturingProvider(
+        responses=[
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCall(id="g", name="gather", arguments={}),
+                    ToolCall(id="f", name="finalize", arguments={}),
+                ],
+            ),
+            LLMResponse(content="done"),
+        ]
+    )
+    loop = AgentLoop(AgentConfig(provider, empty_registry, AgentSettings(max_steps=5)))
+
+    result, stats = await loop.run(test_user, "finish")
+
+    assert result == "done"
+    assert stats.status == "ok"
+    assert executed == []
+    tool_results = [m for m in captured_messages[1] if m.get("role") == "tool"]
+    assert [m.get("tool_call_id") for m in tool_results] == ["g", "f"]
+    assert all(str(m.get("content", "")).startswith("Error:") for m in tool_results)
 
 
 # ── B-047: workflow-finalize guard (nudge + restrict) ────────────────────────
@@ -1950,6 +2216,84 @@ async def test_auto_finalize_stage_c_programmatic(
 
 
 @pytest.mark.asyncio
+async def test_auto_finalize_stage_c_obeys_tool_guard(
+    test_user: User, empty_registry: ToolRegistry
+) -> None:
+    from corpclaw_lite.security.tool_guard import ApprovalRequest, ToolGuard
+
+    executions = 0
+
+    class SearchTool:
+        name = "research_search"
+        description = "search"
+        params: list[Any] = []
+        terminal = False
+        parallel_safe = True
+        risk_level = None
+
+        async def execute(self, **kwargs: Any) -> str:
+            return "results"
+
+    class FinalizeTool:
+        name = "research_finalize"
+        description = "finalize"
+        params: list[Any] = []
+        terminal = True
+        parallel_safe = True
+        risk_level = None
+
+        async def execute(self, **kwargs: Any) -> str:
+            nonlocal executions
+            executions += 1
+            return "should not execute"
+
+    class FinalizeApprovalGuard(ToolGuard):
+        async def check(  # type: ignore[override]
+            self, tool_name: str, arguments: Any, risk_level: str | None = None
+        ) -> None:
+            if tool_name == "research_finalize":
+                raise ApprovalRequest(action=tool_name, details="finalize approval")
+
+    empty_registry._tools["research_search"] = SearchTool()  # type: ignore[attr-defined]
+    empty_registry._tools["research_finalize"] = FinalizeTool()  # type: ignore[attr-defined]
+    provider = MockProvider(
+        responses=[
+            LLMResponse(
+                content="",
+                tool_calls=[ToolCall(id="1", name="research_search", arguments={})],
+            ),
+            LLMResponse(
+                content="",
+                tool_calls=[ToolCall(id="2", name="research_search", arguments={})],
+            ),
+            LLMResponse(content="partial report"),
+        ]
+    )
+    approvals: list[str] = []
+
+    async def deny(action: str, details: str) -> bool:
+        approvals.append(action)
+        return False
+
+    loop = AgentLoop(
+        AgentConfig(
+            provider,
+            empty_registry,
+            AgentSettings(max_steps=3, max_tool_calls=100),
+            terminal_tool="research_finalize",
+            tool_guard=FinalizeApprovalGuard(),
+        )
+    )
+
+    result, stats = await loop.run(test_user, "research", approval_callback=deny)
+
+    assert stats.status == "budget"
+    assert "resource limit" in result.lower()
+    assert approvals == ["research_finalize"]
+    assert executions == 0
+
+
+@pytest.mark.asyncio
 async def test_auto_finalize_skipped_for_main_agent(
     test_user: User, empty_registry: ToolRegistry
 ) -> None:
@@ -2239,7 +2583,7 @@ async def test_compress_now_persists_compressed_context(
 
         async def compress(self, messages: list[dict[str, Any]], **_: Any) -> list[dict[str, Any]]:
             return [
-                {"role": "system", "content": "[Context Summary] compressed"},
+                {"role": "user", "content": "[Context Summary] compressed"},
                 {"role": "user", "content": "latest"},
             ]
 
@@ -2349,8 +2693,8 @@ async def test_agent_loop_persists_full_context_with_session_id(
     await loop.run(test_user, "call echo", session_id=session_id, channel="test")
 
     ctx = await store.list_context(session_id, user_id=str(test_user.id))
-    # Expected: user / assistant(tool_calls) / tool / assistant(final) / system tools note
-    assert len(ctx) == 5
+    # Canonical transcript: user / assistant(tool_calls) / tool / assistant(final).
+    assert len(ctx) == 4
     assert ctx[0]["role"] == "user"
     assert ctx[0]["content"] == "call echo"
     assert ctx[1]["role"] == "assistant"
@@ -2362,8 +2706,6 @@ async def test_agent_loop_persists_full_context_with_session_id(
     assert ctx[2]["name"] == "echo"
     assert ctx[3]["role"] == "assistant"
     assert ctx[3]["content"] == "Done!"
-    assert ctx[4]["role"] == "system"
-    assert "echo" in str(ctx[4]["content"])
 
 
 @pytest.mark.asyncio
@@ -2513,8 +2855,8 @@ def test_build_from_full_history_converts_arguments_json_string(test_user: User)
     assert args == '{"path": "x.txt", "content": "hi"}'  # json.dumps of the parsed dict
 
 
-def test_build_from_full_history_merges_system_messages(test_user: User) -> None:
-    """system messages from history merge into the system prompt (not mid-context)."""
+def test_build_from_full_history_discards_system_messages(test_user: User) -> None:
+    """Legacy stored system text is data and cannot gain system authority."""
     full_history = [
         {"role": "system", "content": "Tools called in this turn: list_files"},
         {"role": "user", "content": "hi"},
@@ -2523,15 +2865,13 @@ def test_build_from_full_history_merges_system_messages(test_user: User) -> None
     builder = ContextBuilder.build_from_full_history(
         test_user, "next", full_history, system_prompt_override="BASE"
     )
-    assert "Execution history:" in builder.system_prompt
-    assert "Tools called in this turn: list_files" in builder.system_prompt
-    # No system role in messages (merged away)
+    assert builder.system_prompt == "BASE"
+    assert "Tools called in this turn: list_files" not in builder.system_prompt
     assert all(m["role"] != "system" for m in builder.messages)
 
 
 def test_build_from_full_history_strips_leading_assistant(test_user: User) -> None:
-    """S2-audit F1: leading assistant messages are merged into the system prompt,
-    not emitted as the first message (Qwen3.5 chat-template requires user-first)."""
+    """Leading assistant fragments are dropped and never elevated to system."""
     full_history = [
         {"role": "assistant", "content": "[Conversation summary]: ..."},
         {"role": "user", "content": "what next?"},
@@ -2540,8 +2880,8 @@ def test_build_from_full_history_strips_leading_assistant(test_user: User) -> No
     builder = ContextBuilder.build_from_full_history(
         test_user, "thanks", full_history, system_prompt_override="BASE"
     )
-    assert "Previous context:" in builder.system_prompt
-    assert "[Conversation summary]: ..." in builder.system_prompt
+    assert builder.system_prompt == "BASE"
+    assert "[Conversation summary]: ..." not in builder.system_prompt
     # First message must be user (not assistant)
     assert builder.messages[0]["role"] == "user"
 
@@ -2556,7 +2896,7 @@ def test_build_from_full_history_strips_leading_tool(test_user: User) -> None:
     builder = ContextBuilder.build_from_full_history(
         test_user, "next", full_history, system_prompt_override="BASE"
     )
-    assert "Previous context:" in builder.system_prompt
+    assert builder.system_prompt == "BASE"
     assert builder.messages[0]["role"] == "user"
     # No tool-role message in the built context (stripped)
     assert all(m["role"] != "tool" for m in builder.messages)
@@ -2606,7 +2946,7 @@ async def test_compress_now_syncs_context_store(
         async def compress(self, messages, **_):
             # Return a 2-message summary (simulates real compression).
             return [
-                {"role": "system", "content": "[Summary] compressed"},
+                {"role": "user", "content": "[Summary] compressed"},
                 {"role": "user", "content": "latest"},
             ]
 
@@ -2734,7 +3074,7 @@ async def test_run_ignores_facts_as_transcript_when_session_store_empty(
     roles = [m["role"] for m in captured]
     assert "tool" not in roles
     assert not any(m.get("content") == "old answer" for m in captured)
-    assert any(m.get("content") == "follow up" for m in captured)
+    assert any("Current user request:\nfollow up" in str(m.get("content")) for m in captured)
 
 
 # --- B-063 S3: compress-any-chat (compress from context-store) ---
@@ -2784,7 +3124,7 @@ async def test_compress_from_context_store_full_schema(
     class StubCompressor:
         async def compress(self, messages, **_):
             return [
-                {"role": "system", "content": "[Summary] compressed"},
+                {"role": "user", "content": "[Summary] compressed"},
                 {"role": "user", "content": "latest"},
             ]
 
@@ -2860,7 +3200,7 @@ class _AlwaysCompressStub:
         self.compress_calls += 1
         self.last_input_len = len(messages)
         return [
-            {"role": "system", "content": "[Summary] mid-run"},
+            {"role": "user", "content": "[Summary] mid-run"},
             {"role": "user", "content": "latest"},
         ]
 
@@ -3074,8 +3414,7 @@ async def test_capture_context_populated_during_run(
 async def test_terminal_tool_no_double_persist(
     test_user: User, empty_registry: ToolRegistry, tmp_path: Path
 ) -> None:
-    """B1 fix: terminal tool result is persisted as assistant (via _save_turn)
-    but NOT as a separate tool-role message in the context store."""
+    """Terminal runs persist a complete tool protocol plus one final answer."""
     from corpclaw_lite.channels.web.chat_context_store import ChatContextStore
     from corpclaw_lite.channels.web.chat_store import WebChatStore
     from corpclaw_lite.extensions.tools.base import Tool, ToolParam
@@ -3112,18 +3451,18 @@ async def test_terminal_tool_no_double_persist(
     await loop.run(test_user, "echo", session_id=session_id, channel="web")
 
     ctx = await store.list_context(session_id, user_id=str(test_user.id))
-    # user, assistant(tool_calls), assistant(final), system tools note — NO tool-role.
-    assert len(ctx) == 4
-    assert all(m["role"] != "tool" for m in ctx)
+    # user -> assistant(tool_calls) -> tool(result) -> assistant(final).
+    assert [m["role"] for m in ctx] == ["user", "assistant", "tool", "assistant"]
+    assert ctx[2]["tool_call_id"] == "c1"
     assert ctx[2]["content"] == "DIRECT:hi"
-    assert ctx[3]["role"] == "system"
+    assert ctx[3]["content"] == "DIRECT:hi"
+    assert all(m["role"] != "system" for m in ctx)
 
 
-def test_build_from_full_history_preserves_tool_calls_in_leading_strip(
+def test_build_from_full_history_drops_leading_tool_calls_without_elevation(
     test_user: User,
 ) -> None:
-    """B2 fix: leading assistant with tool_calls → tool_calls info preserved in
-    the merged system prompt text."""
+    """Orphaned leading calls are dropped without being copied into system text."""
     full_history = [
         {
             "role": "assistant",
@@ -3141,7 +3480,8 @@ def test_build_from_full_history_preserves_tool_calls_in_leading_strip(
     builder = ContextBuilder.build_from_full_history(
         test_user, "next", full_history, system_prompt_override="BASE"
     )
-    assert "Tool call: list_files" in builder.system_prompt
+    assert builder.system_prompt == "BASE"
+    assert "list_files" not in builder.system_prompt
     assert builder.messages[0]["role"] == "user"
 
 

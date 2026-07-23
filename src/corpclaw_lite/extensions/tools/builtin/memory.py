@@ -4,6 +4,7 @@ import json
 from typing import TYPE_CHECKING, Any, cast
 
 from corpclaw_lite.extensions.tools.base import RiskLevel, Tool, ToolParam
+from corpclaw_lite.extensions.tools.context import get_tool_execution_context
 
 __all__ = [
     "MemoryRecallTool",
@@ -84,6 +85,9 @@ class MemoryStoreTool(Tool):
         self._memory = memory
 
     async def execute(self, *, user: User | None = None, **kwargs: Any) -> str:
+        context = get_tool_execution_context()
+        if user is None and context is not None:
+            user = context.user
         if user is None:
             return "Error: User context is required for memory_store."
 
@@ -137,6 +141,9 @@ class MemoryRecallTool(Tool):
         self._memory = memory
 
     async def execute(self, *, user: User | None = None, **kwargs: Any) -> str:
+        context = get_tool_execution_context()
+        if user is None and context is not None:
+            user = context.user
         query: str | None = kwargs.get("query")
 
         if user is None:

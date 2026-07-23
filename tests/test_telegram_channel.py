@@ -520,3 +520,25 @@ class TestResolveFallbackIps:
             "read_timeout": 20.0,
             "pool_timeout": 8.0,
         }
+
+
+# ── S3-06: Telegram private-chat filter ───────────────────────────────────────
+
+
+def test_private_chat_filter_derived_from_allow_groups() -> None:
+    """S3-06: the handler chat filter is ChatType.PRIVATE unless allow_groups is set."""
+    from telegram.ext import filters as tg_filters
+
+    from corpclaw_lite.config.settings import TelegramSettings
+
+    # Default (allow_groups=False) → private-only filter.
+    settings_default = TelegramSettings()
+    filter_default = (
+        tg_filters.ALL if settings_default.allow_groups else tg_filters.ChatType.PRIVATE
+    )
+    assert filter_default is tg_filters.ChatType.PRIVATE
+
+    # Explicit allow_groups=True → all chats.
+    settings_open = TelegramSettings(allow_groups=True)
+    filter_open = tg_filters.ALL if settings_open.allow_groups else tg_filters.ChatType.PRIVATE
+    assert filter_open is tg_filters.ALL

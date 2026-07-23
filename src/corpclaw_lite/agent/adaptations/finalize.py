@@ -19,6 +19,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
+from corpclaw_lite.extensions.tools.base import TOOL_ERROR_PREFIX
 from corpclaw_lite.llm.base import LLMResponse, Provider, ToolCall
 from corpclaw_lite.llm.router import LLMRouter, QueuedProvider
 from corpclaw_lite.logging import health
@@ -195,7 +196,7 @@ async def auto_finalize_cascade(
         response = None
 
     # If B produced a terminal tool call, execute it directly.
-    if response and response.tool_calls:
+    if response and len(response.tool_calls) == 1:
         tc = response.tool_calls[0]
         if tc.name == terminal_tool:
             try:
@@ -206,7 +207,19 @@ async def auto_finalize_cascade(
                     terminal_tool,
                     len(result),
                 )
-                return result
+                if not result.startswith(TOOL_ERROR_PREFIX):
+                    return result
+                logger.warning(
+                    "[user=%s] auto-finalize stage B was rejected: %s",
+                    user.id,
+                    result[:200],
+                )
+                # A guarded execution already made an authorization/approval
+                # decision. Replaying the same terminal action through Stage C
+                # would prompt twice after a denial and undermine the meaning of
+                # that decision. Stage C is only for a missing/plain-text Stage B
+                # response, not for retrying a rejected tool execution.
+                return None
             except Exception:
                 logger.warning(
                     "[user=%s] auto-finalize stage B: terminal tool execute "
@@ -217,14 +230,6 @@ async def auto_finalize_cascade(
 
     # ── Stage C: programmatic finalize ──────────────────────────────────
     emergency_answer = (response.content if response and response.content else "") or ""
-    tool = registry.get(terminal_tool)
-    if tool is None:
-        logger.warning(
-            "[user=%s] auto-finalize: terminal tool '%s' not found in registry",
-            user.id,
-            terminal_tool,
-        )
-        return None
     try:
         log_event(
             "auto_finalize_programmatic",
@@ -232,7 +237,19 @@ async def auto_finalize_cascade(
             terminal_tool=terminal_tool,
             emergency_answer_len=len(emergency_answer),
         )
-        result = await tool.execute(user=user, answer=emergency_answer)
+        synthetic_call = ToolCall(
+            id=f"auto-finalize-{stats.run_id}",
+            name=terminal_tool,
+            arguments={"answer": emergency_answer},
+        )
+        result = await execute_tool_call(synthetic_call, user, stats)
+        if result.startswith(TOOL_ERROR_PREFIX):
+            logger.warning(
+                "[user=%s] auto-finalize stage C was rejected: %s",
+                user.id,
+                result[:200],
+            )
+            return None
         logger.info(
             "[user=%s] auto-finalize stage C: programmatic %s, result_len=%d",
             user.id,

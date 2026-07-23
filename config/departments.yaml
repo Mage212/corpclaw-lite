@@ -11,8 +11,8 @@
 # the department budget wins). The `budget:` block is still parsed for
 # back-compat but no longer applied in the agent loop.
 #
-# Main agent tools (inspection + routing):
-#   read_file, list_files, search_files, excel_inspect
+# Main agent tools (inspection + routing + brief fill):
+#   read_file, list_files, search_files, excel_inspect, apply_fill_plan
 # Host-side tools (registered separately):
 #   web_fetch, web_search, read_image, memory_store, memory_recall,
 #   dispatch_subagent, send_file
@@ -26,6 +26,9 @@ departments:
     # No host-side web egress; office subagents (document/data/execution/filesystem)
     # instead of research-only. send_file stays on main for two-step delivery.
     description: "Default department for unclassified users (office Work, no web egress)"
+    allowed_skills: ["*"]
+    allowed_plugins: ["*"]
+    allowed_mcp: ["*"]
     allowed_tools:
       - read_file
       - list_files
@@ -35,6 +38,7 @@ departments:
       - read_image
       - dispatch_subagent
       - excel_inspect
+      - apply_fill_plan
       - send_file
     allowed_subagents:
       - filesystem-agent
@@ -44,6 +48,9 @@ departments:
 
   engineering:
     description: "Software engineering and IT teams"
+    allowed_skills: ["*"]
+    allowed_plugins: ["*"]
+    allowed_mcp: ["*"]
     allowed_tools:
       - "*"
     allowed_subagents:
@@ -55,6 +62,9 @@ departments:
 
   it:
     description: "IT support and infrastructure"
+    allowed_skills: ["*"]
+    allowed_plugins: ["*"]
+    allowed_mcp: ["*"]
     allowed_tools:
       - read_file
       - list_files
@@ -64,6 +74,7 @@ departments:
       - read_image
       - dispatch_subagent
       - excel_inspect
+      - apply_fill_plan
       - web_fetch
       - web_search
       - send_file
@@ -74,6 +85,9 @@ departments:
 
   marketing:
     description: "Marketing and communications"
+    allowed_skills: ["*"]
+    allowed_plugins: ["*"]
+    allowed_mcp: ["*"]
     allowed_tools:
       - read_file
       - list_files
@@ -86,12 +100,16 @@ departments:
       - read_image
       - dispatch_subagent
       - excel_inspect
+      - apply_fill_plan
     allowed_subagents:
       - document-agent
       - research-agent
 
   finance:
     description: "Finance and accounting"
+    allowed_skills: ["*"]
+    allowed_plugins: ["*"]
+    allowed_mcp: ["*"]
     allowed_tools:
       - read_file
       - list_files
@@ -102,6 +120,7 @@ departments:
       - read_image
       - dispatch_subagent
       - excel_inspect
+      - apply_fill_plan
       - web_fetch
       - web_search
     allowed_subagents:
@@ -111,6 +130,9 @@ departments:
 
   hr:
     description: "Human resources"
+    allowed_skills: ["*"]
+    allowed_plugins: ["*"]
+    allowed_mcp: ["*"]
     allowed_tools:
       - read_file
       - list_files
@@ -121,6 +143,7 @@ departments:
       - read_image
       - dispatch_subagent
       - excel_inspect
+      - apply_fill_plan
       - web_fetch
       - web_search
     allowed_subagents:
@@ -129,6 +152,9 @@ departments:
 
   analytics:
     description: "Data analytics and BI"
+    allowed_skills: ["*"]
+    allowed_plugins: ["*"]
+    allowed_mcp: ["*"]
     allowed_tools:
       - read_file
       - list_files
@@ -141,6 +167,7 @@ departments:
       - read_image
       - dispatch_subagent
       - excel_inspect
+      - apply_fill_plan
     allowed_subagents:
       - data-agent
       - document-agent
@@ -148,6 +175,9 @@ departments:
 
   product:
     description: "Product management"
+    allowed_skills: ["*"]
+    allowed_plugins: ["*"]
+    allowed_mcp: ["*"]
     allowed_tools:
       - read_file
       - list_files
@@ -159,6 +189,7 @@ departments:
       - read_image
       - dispatch_subagent
       - excel_inspect
+      - apply_fill_plan
       - send_file
     allowed_subagents:
       - document-agent
@@ -166,6 +197,9 @@ departments:
 
   admin:
     description: "System administrators — full access"
+    allowed_skills: ["*"]
+    allowed_plugins: ["*"]
+    allowed_mcp: ["*"]
     allowed_tools:
       - "*"
     allowed_subagents:
@@ -177,6 +211,9 @@ departments:
 
   development:
     description: "Software development team"
+    allowed_skills: ["*"]
+    allowed_plugins: ["*"]
+    allowed_mcp: ["*"]
     allowed_tools:
       - "*"
     allowed_subagents:

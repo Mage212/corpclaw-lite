@@ -277,8 +277,8 @@ class LLMRequestQueue:
                 active_count = len(self._active)
             if semaphore_acquired:
                 self._semaphore.release()
-                if slot_lock_acquired and selected_slot is not None and selected_slot.lock.locked():
-                    selected_slot.lock.release()
+            if slot_lock_acquired and selected_slot is not None and selected_slot.lock.locked():
+                selected_slot.lock.release()
             health.increment("llm_queue_cancelled")
             log_event(
                 "llm_queue_cancelled",

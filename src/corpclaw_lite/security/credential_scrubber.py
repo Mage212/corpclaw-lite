@@ -5,6 +5,7 @@ import os
 import re
 
 __all__ = [
+    "CredentialScrubbingFormatter",
     "CredentialScrubber",
     "scrub_text",
 ]
@@ -35,7 +36,11 @@ class CredentialScrubber(logging.Filter):
     """
 
     PATTERNS: tuple[re.Pattern[str], ...] = (
-        re.compile(r"sk-[a-zA-Z0-9]{20,}"),  # OpenAI / Anthropic
+        re.compile(r"sk-(?:proj|ant|svcacct)-[a-zA-Z0-9_-]{16,}"),
+        re.compile(r"sk-[a-zA-Z0-9_-]{20,}"),  # OpenAI-compatible legacy keys
+        re.compile(r"\bhf_[a-zA-Z0-9]{20,}"),  # Hugging Face
+        re.compile(r"\bglpat-[a-zA-Z0-9_-]{16,}"),  # GitLab PAT
+        re.compile(r"\bgithub_pat_[a-zA-Z0-9_]{20,}"),  # GitHub fine-grained PAT
         re.compile(r"\bbot\d{6,}:[A-Za-z0-9_-]{20,}"),  # Telegram bot token in URLs
         re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{20,}"),  # Raw Telegram bot token
         re.compile(r"ghp_[a-zA-Z0-9]{20,}"),  # GitHub PAT (sync with tool_guard_rules)
@@ -96,3 +101,10 @@ class CredentialScrubber(logging.Filter):
         if ipc_secret and len(ipc_secret) > 8:
             res = res.replace(ipc_secret, self.MASK)
         return res
+
+
+class CredentialScrubbingFormatter(logging.Formatter):
+    """Scrub the final formatted record, including formatter-created traceback text."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        return scrub_text(super().format(record))

@@ -25,6 +25,7 @@ __all__ = [
     "DEFAULT_SPREADSHEET_ROW_LIMIT",
     "InlineAttachment",
     "MaterializeError",
+    "compose_attachments_with_workbook_brief",
     "compose_inline_attachments",
     "materialize_attachment",
     "truncate_text_to_token_budget",
@@ -90,6 +91,68 @@ def compose_inline_attachments(
 ) -> str:
     """Compose attachment blocks before user text (D-087 message-local)."""
     blocks = [item.inject_block() for item in attachments]
+    body = "\n\n".join(blocks)
+    text = user_text.strip()
+    if body and text:
+        return f"{body}\n\n{text}"
+    if body:
+        return body
+    return text
+
+
+def compose_attachments_with_workbook_brief(
+    attachments: list[InlineAttachment],
+    user_text: str,
+    *,
+    workspace: Path | None = None,
+) -> str:
+    """Compose attaches; merge all pending xlsx into one FILES_BRIEF.
+
+    Non-spreadsheet attaches keep per-file inject blocks. When one or more
+    spreadsheet attaches are pending, their individual briefs are replaced by a
+    single aggregated ``format_files_brief_for_agent`` block.
+    """
+    if not attachments:
+        return user_text.strip()
+
+    sheets = [a for a in attachments if a.kind == "spreadsheet"]
+    others = [a for a in attachments if a.kind != "spreadsheet"]
+    if not sheets:
+        return compose_inline_attachments(attachments, user_text)
+
+    from corpclaw_lite.agent.workbook_brief import (
+        build_workbook_brief,
+        format_files_brief_for_agent,
+    )
+
+    paths: list[Path] = []
+    rels: list[str] = []
+    for item in sheets:
+        if workspace is not None:
+            candidate = (workspace / item.path).resolve()
+            if candidate.is_file():
+                paths.append(candidate)
+                rels.append(item.path)
+                continue
+        # Fallback: materialize already put a per-file brief in content — keep
+        # absolute path from content header when workspace resolve fails.
+        paths.append(Path(item.path))
+        rels.append(item.path)
+
+    try:
+        bundle = build_workbook_brief(paths)
+        for fb, rel in zip(bundle.files, rels, strict=False):
+            fb.path = rel
+            fb.name = Path(rel).name
+        brief_text = format_files_brief_for_agent(bundle)
+        agg_flags = f"~{sum(s.tokens for s in sheets)} tokens (aggregated brief)"
+        sheet_block = f"[Attached spreadsheets ({agg_flags})]\n```\n{brief_text}\n```"
+    except Exception as exc:
+        logger.warning("aggregated workbook brief failed: %s — per-file fallback", exc)
+        return compose_inline_attachments(attachments, user_text)
+
+    blocks = [item.inject_block() for item in others]
+    blocks.append(sheet_block)
     body = "\n\n".join(blocks)
     text = user_text.strip()
     if body and text:
@@ -367,24 +430,40 @@ def _excerpt_csv(target: Path, rel: str) -> str:
 
 
 def _excerpt_xlsx(target: Path, rel: str) -> str:
-    from openpyxl import load_workbook
+    """Compact deterministic FILES_BRIEF for xlsx (replaces 50-row dump)."""
+    from corpclaw_lite.agent.workbook_brief import (
+        build_workbook_brief,
+        format_files_brief_for_agent,
+    )
 
-    wb = load_workbook(target, read_only=True, data_only=True)
     try:
-        parts: list[str] = [f"Excel preview of {rel}. Sheets: {', '.join(wb.sheetnames)}"]
-        for sheet_name in wb.sheetnames[:3]:
-            ws = wb[sheet_name]
-            rows: list[str] = []
-            for i, row in enumerate(ws.iter_rows(values_only=True)):
-                if i >= DEFAULT_SPREADSHEET_ROW_LIMIT:
-                    rows.append(f"… (more rows; limit {DEFAULT_SPREADSHEET_ROW_LIMIT})")
-                    break
-                cells = ["" if c is None else str(c) for c in row[:20]]
-                rows.append("\t".join(cells))
-            parts.append(f"## Sheet: {sheet_name}\n" + "\n".join(rows))
-        return "\n\n".join(parts)
-    finally:
-        wb.close()
+        bundle = build_workbook_brief([target])
+        if not bundle.files:
+            raise ValueError("empty brief")
+        # Present path as the workspace-relative attach path for the model.
+        bundle.files[0].path = rel
+        bundle.files[0].name = Path(rel).name
+        return format_files_brief_for_agent(bundle)
+    except Exception as exc:
+        logger.warning("workbook brief failed for %s: %s — falling back to row preview", rel, exc)
+        from openpyxl import load_workbook
+
+        wb = load_workbook(target, read_only=True, data_only=True)
+        try:
+            parts: list[str] = [f"Excel preview of {rel}. Sheets: {', '.join(wb.sheetnames)}"]
+            for sheet_name in wb.sheetnames[:3]:
+                ws = wb[sheet_name]
+                rows: list[str] = []
+                for i, row in enumerate(ws.iter_rows(values_only=True)):
+                    if i >= DEFAULT_SPREADSHEET_ROW_LIMIT:
+                        rows.append(f"… (more rows; limit {DEFAULT_SPREADSHEET_ROW_LIMIT})")
+                        break
+                    cells = ["" if c is None else str(c) for c in row[:20]]
+                    rows.append("\t".join(cells))
+                parts.append(f"## Sheet: {sheet_name}\n" + "\n".join(rows))
+            return "\n\n".join(parts)
+        finally:
+            wb.close()
 
 
 def _materialize_pdf(target: Path, rel: str) -> str:

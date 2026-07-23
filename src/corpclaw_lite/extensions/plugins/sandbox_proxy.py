@@ -35,6 +35,31 @@ logger = logging.getLogger(__name__)
 
 _SANDBOX_WORKER_PATH = Path(__file__).parent / "sandbox_worker.py"
 _EXECUTE_TIMEOUT = 30.0
+# Cap on a single plugin JSON-RPC response line. Prevents a malicious or buggy
+# plugin from exhausting agent memory with an unbounded line.
+_MAX_RESPONSE_BYTES = 8 * 1024 * 1024  # 8 MiB
+
+
+async def _read_bounded_line(stream: asyncio.StreamReader, max_bytes: int) -> bytes:
+    """Read one newline-terminated line from *stream*, capped at *max_bytes*.
+
+    Raises :class:`asyncio.LimitOverrunError` on overflow so the caller can kill
+    the plugin subprocess. Manual chunked read because ``StreamReader.readuntil``'s
+    bound is not exposed in the asyncio type stubs.
+    """
+    buf = bytearray()
+    while True:
+        chunk = await stream.read(4096)
+        if not chunk:
+            return bytes(buf)
+        buf.extend(chunk)
+        if b"\n" in buf:
+            nl = buf.index(b"\n")
+            return bytes(buf[: nl + 1])
+        if len(buf) > max_bytes:
+            raise asyncio.LimitOverrunError(
+                "plugin response exceeded byte limit", consumed=len(buf)
+            )
 
 
 def introspect_tool(tool_path: Path) -> dict[str, Any] | None:
@@ -146,7 +171,18 @@ class PluginToolProxy(Tool):
 
                 if proc.stdout is None:
                     return f"Error: plugin subprocess for {self.name} has no stdout"
-                line = await asyncio.wait_for(proc.stdout.readline(), timeout=_EXECUTE_TIMEOUT)
+                stdout = proc.stdout
+                try:
+                    line = await asyncio.wait_for(
+                        _read_bounded_line(stdout, _MAX_RESPONSE_BYTES),
+                        timeout=_EXECUTE_TIMEOUT,
+                    )
+                except asyncio.LimitOverrunError:
+                    await self.kill()
+                    return (
+                        f"Error: plugin subprocess for {self.name} response exceeded "
+                        f"{_MAX_RESPONSE_BYTES} byte limit"
+                    )
 
                 if not line:
                     self._process = None

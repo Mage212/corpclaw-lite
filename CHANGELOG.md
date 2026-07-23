@@ -4,201 +4,94 @@
 
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/).
 
-## [Unreleased]
+## [0.3.0] — 2026-07-23
+
+**Minor** `0.2.7 → 0.3.0`. Security hardening (3 спринта), детерминистический
+Excel-fill pipeline, cloud LLM judge в eval-харнессе, и закрытие пробелов в
+file-tracking для production-инструментов.
 
 ### Added
 
-- **B-109 PR1 foundations (DC-027 Layer 2+3).** `MemoryWorkerSettings` config
-  block; `user_memory_worker` opt-in table in users.db with sync/async CRUD
-  (`enable`/`disable`/`status`/`list_enabled`/`update_run`); merge helpers
-  (`.md` backup + atomic write + disclaimer ensure, strict JSON response parser,
-  merge-only entry application via `SQLiteMemory.store_entry`); transcript
-  gatherer from recent non-system chat sessions. CLI `memory-worker enable
-  /disable/status`. Worker runtime + LLM loop in PR2.
-- **B-109 PR2 worker runtime (DC-027 Layer 2+3).** `MemoryWorkerService`
-  (asyncio poll loop, quiet hours, busy gate, one-shot LLM call, merge-only
-  write with backup + audit). Routing `memory_worker` → `maintenance` load class
-  (overflow). Web orchestrator start/stop wiring. CLI `memory-worker run -u`.
-  Opt-in default off; corp HR-safe.
+- **Детерминистический Excel-fill pipeline.** Модель больше не получает полную
+  свободу исследования файлов (read → inspect → iterate), что затягивало и
+  иногда ломало процесс. Теперь при загрузке xlsx-файла в Telegram или Web
+  канал автоматически генерирует **FILES_BRIEF** — детерминистический
+  структурный обзор (листы, колонки, роли, period cells) без значений. Модель
+  получает готовую карту файлов и принимает лишь одно решение: как
+  сопоставить источники с шаблоном. Затем один вызов `apply_fill_plan`
+  выполняет всё заполнение детерминистически (Python читает источники,
+  вычисляет period, пишет результат). `workbook_fill.md` skill направляет
+  модель по этому пути. Результат: score 9.55–10.0 с cloud-судьёй на
+  реальных отчётах (против ~5.6 fallback без судьи).
+- **Auto-debug harness.** `scripts/auto_debug.py` — standalone eval-раннер с
+  A/B guards, multi-seed aggregation, и интеграцией cloud LLM-судьи
+  (`--judge cloud`). Сценарии в `config/debug_scenarios.yaml` используют
+  синтетические генераторы workbooks (без коммерческих данных). Поддержка
+  `{{FILES_BRIEF}}` template-injection и synthetic workspace generators
+  (`generate_noisy_completed_month`, `generate_dual_type`) в eval-runner.
+- **Cloud LLM judge в eval.** `auto_debug.py --judge cloud` подключает
+  cloud-провайдер (glm-5.2) как 7-мерного судью: передаёт полный transcript
+  (user message + tool calls + results + final answer), получает оценки по
+  rubric (correctness, tool_selection, completeness, efficiency, и др.).
+- **Memory worker (B-109 PR1+PR2).** `MemoryWorkerSettings` config block;
+  `user_memory_worker` opt-in table; `MemoryWorkerService` (asyncio poll loop,
+  quiet hours, busy gate, one-shot LLM call, merge-only write). Routing
+  `memory_worker` → `maintenance` load class. CLI `memory-worker enable/disable/
+  status/run`. Opt-in default off.
+- **Memora-style memory entries (B-108).** `memory_entries` (abstraction +
+  value + cues) + hybrid FTS5 recall. Tools `memory_store`/`memory_recall`
+  accept abstraction/value/cues with legacy back-compat.
+- **Schedule system (B-118/B-140/B-141/B-143).** SchedulerService + REST API +
+  web UI «Задачи» + Telegram inline consent + LLM parse-assist.
+- **Headless-run (B-119) + proactive-send (B-120).** Запуск агента без
+  inbound-сообщения; proactive push в system session.
+- **Review/revert UX (B-117).** List agent file mutations, text/binary diff,
+  revert via snapshot restore.
 
 ### Fixed
 
-- **Scheduler status-guarded transitions.** `accept`/`dismiss`/`pause`/`resume`
-  now use an atomic optimistic-lock `update_guarded` (mirrors `claim_task`)
-  instead of read-check-then-blind-update, preventing cross-channel races where
-  the last writer wins with a stale snapshot.
-- **Inbox schedule card: Accept disabled for unrecognized schedules.**
-  `ScheduleConfirmCard` now disables the Accept button when `schedule_kind` is
-  `unset` (matching `ScheduleView`) and shows a hint to open «Задачи» for
-  parse-assist, instead of failing with a backend 400.
-- **B-108 FTS durability.** Do not drop `memory_entries_fts` on every
-  `SQLiteMemory` init; rebuild from `memory_entries` when row counts diverge
-  (restart / dual-process partial fill). Exact-cue boost applied once in the
-  FTS recall path (no double-count).
-
-### Added
-
-- **B-108 Memora-style memory entries.** Replace flat `memory_facts` with
-  `memory_entries` (primary_abstraction + memory_value + cue_indices) and
-  hybrid recall (FTS5 + exact cue boost, LIKE fallback). Tools
-  `memory_store`/`memory_recall` accept abstraction/value/cues with legacy
-  key/value back-compat. Clean-start drop of `memory_facts`. Foundation for
-  B-109 memory-worker.
-- **B-143 PR3 LLM parse-assist.** `POST /api/schedule/{id}/parse-assist` —
-  one optional LLM call maps free-form `schedule_text` → validated formula
-  (`every Nh` / cron / ISO); never on poll. Deterministic parse skips LLM.
-  ScheduleView: «Разобрать» when `kind=unset`, show interpretation, then
-  «Подтвердить так». Human accept still required.
-- **B-143 PR2 Telegram schedule consent.** Inline ✅/❌ on
-  `schedule_propose` notify (when `TELEGRAM_BOT_TOKEN` is set for web outbound
-  and/or telegram process). Callbacks `sc:a:|sc:d:` →
-  `SchedulerService.accept/dismiss` (TG process, no poll ownership).
-- **B-143 PR1 web schedule confirm card.** `schedule_propose` notify carries
-  `metadata.kind=schedule_confirm` + `task_id`; system-inbox FE card with
-  Подтвердить / Отклонить / «В Задачи» via B-141 REST. Chat history payload
-  includes message metadata (cards survive reload).
-
-### Fixed
-
-- **Post-review hardening (F1–F7).** `SECURITY.md` documents process-local
-  `UserRunGate` and IPC secret host-argv visibility; C6 regression test ensures
-  budget resumes if queue slot fails before `on_acquired`; ownership-404 tests
-  for `build_diff` / `revert_change`; TTL expire clears `dedup_key` so abandoned
-  proposals can be re-proposed (explicit dismiss still latches); `UserNotifier`
-  pushes web+Telegram concurrently (`asyncio.gather`, D-084); subagent timeout
-  handoff failures log with `exc_info`.
-- **Reliability sprint 2.** Mid-run context compress allowed after a *complete*
-  tool batch (incomplete tool_call/result pairs still blocked). Non-research
-  subagent wall timeouts write a partial handoff journal instead of only a bare
-  error. Process-local `UserRunGate` shares 1-in-flight locking across web/
-  headless and Telegram. Queue wait uses budget pause with finally-safe resume.
-- **Security hardening sprint 1.** User merge no longer fails on post-D-078
-  facts-only `memory.db` (legacy `messages` table optional). `web_fetch` SSRF
-  denies non-global addresses including CGNAT `100.64/10`. Extension reload API
-  requires admin. `ChatContextStore.list_context` / `clear_context` require
-  `user_id`. IPC secret is not stored in long-lived container env; passed only
-  via `docker exec -e` to the short-lived worker (idle CMD is `sleep infinity`).
-
-### Added
-
-- **B-140 web UI «Задачи».** Sidebar entry + `ScheduleView`: list
-  pending/active/paused/history, Accept / Edit+Accept / Dismiss / Pause /
-  Resume against B-141 REST. Not a Chat/Work tab. Pending badge on nav;
-  system notify text points to «Откройте Задачи» (B-143-lite, no in-chat
-  card yet).
-- **B-141 schedule REST API.** HTTP lifecycle for consent-first tasks:
-  `GET /api/schedule`, `GET /api/schedule/{id}`,
-  `POST …/accept|dismiss|pause|resume` (CSRF + session). Thin wrap over
-  `SchedulerService` for web UI (B-140). No agent self-accept; no `run-now`.
-
-### Fixed
-
-- **B-118 hardening (H1–H5).** Scheduler claim-before-run (`claimed_at` /
-  `claim_token`, TTL reclaim) so crash/restart and multi-process `run-now` do
-  not double-fire; execute-time deny of `schedule_*` on `channel=system`;
-  atomic pending insert (limit + live dedup); interval first fire is
-  `now + period` (not immediate); task/schedule text caps; removed unused
-  `_dispatch(force=…)`.
-
-### Added
-
-- **B-118 / DC-030 SchedulerService + agent-on-schedule.** Separate
-  `data/scheduler.db`, consent-first proposals (`schedule_propose` → pending),
-  human `schedule accept/dismiss` (CLI), max **3** pending+active tasks per
-  user, web-owned poll (~30s) → `run_headless(source=scheduled)` with current
-  datetime injected into the prompt. Busy users skip+retry; headless cannot
-  use `schedule_*` tools. Telegram does not own the poll loop.
-- **B-120 / DC-032 proactive-send (UserNotifier).** Deliver a message without an
-  inbound chat turn: always persist to the durable per-user **system** session
-  (B-119), then best-effort push to process-local sinks — WebSocket
-  `proactive_message` (+ `chat_list_changed`) and/or Telegram
-  `bot.send_message` when `telegram_id` is set. Parallel multichannel (not
-  TG-only fallback). CLI: `corpclaw-lite notify-user -u <id> -m "…"`. Headless
-  completion hooks push with `persist=False` (no double-write). Web FE: pinned
-  «Система» inbox (read-only). AdminNotifier unchanged (admin errors only).
-  Multi-process note: DB is always shared; live push only in the process that
-  registered the sink (no Redis bus in MVP).
-- **B-119 / DC-031 headless-run.** `AgentRequestService.run_headless` starts a
-  task without inbound chat: DC-011 skip-if-busy, durable per-user **system**
-  session (`channel=system`), UI transcript + `source` metadata, non-sticky
-  LLM queue tag (`task_kind=headless`). CLI:
-  `corpclaw-lite headless-run -u <id> -t "…"`.
-- **B-117 / DC-042 review/revert UX (web-first).** List agent file mutations
-  (`GET /api/files/changes`), text/binary diff
-  (`GET /api/files/changes/{id}/diff`), revert via snapshot restore +
-  `mark_reverted` (`POST …/revert`). FileExplorer panel «Изменения агента».
-  Built on B-040 journal + `FileSnapshotStore`.
-
-### Fixed
-
-- **DC-013 Phase 3 hardening (H1/H2/H3).** FE resolves attach/pin session via
-  viewed chat **or** active chat (`contextSessionId`) so ops work after
-  activate-on-send / new chat when `chatId` is null. Attach/estimate baseline is
-  `max(server_usage, client) + pending + pin_tokens` — client cannot undercut
-  server usage; sticky pins always count (conservative after turn).
-- **B-094 budget hardening.** Attach baseline is cumulative (`usage + Σ pending`
-  tokens; same-path re-attach does not double-count). Text that would full-BLOCK
-  is auto-chunked before failing (unless `chunked=false`). Attach/detach/pending
-  require session ownership via `get_session` (404 if missing).
-
-### Added
-
-- **B-095 Pin + B-096 FE (DC-013).** Sticky pins re-injected each turn from
-  durable `web_chat_pins` (no compressor marked-blocks). Hard cap
-  `pin_context_ratio` default **25%** of context. HTTP pin/unpin/list. FileExplorer
-  menu: «В контекст (один раз)» / «Закрепить»; pin chips + ContextSizeBar pin
-  segment.
-- **B-094 Inline attachment (DC-013).** Pending workspace-file attach into the
-  next user message: materialize text/image/spreadsheet/pdf, budget-gate on
-  attach, optional chunked text, compose message-local blocks (D-087). HTTP
-  `POST /api/files/attach-context`, `detach-context`, `GET pending-context`.
-  UI transcript stores short text + `metadata.attachments` for future chips
-  (B-096). No Pin / FileExplorer menu yet.
-- **B-093 Budget-gate (DC-013).** Pre-flight context budget check for
-  add-to-context: `evaluate_budget` / `estimate_content_budget` (thresholds
-  0.85 warn / 0.95 block / 0.5 offer_chunked; BLOCK disables chunked). HTTP
-  `POST /api/files/estimate-context` (text files only; client or server
-  baseline; uses B-092 TokenizerClient). No attach inject / FE yet (B-094/096).
-- **B-092 TokenizerClient (DC-013).** Offline-safe token estimate for upcoming
-  add-to-context budget gate: llama.cpp native `POST /tokenize` when reachable,
-  byte-length heuristic fallback with `approximate` flag, in-process content-hash
-  LRU cache. Does **not** use LLM queue/slots. Live smoke:
-  `tests/live_llm/test_tokenize.py` (opt-in).
-- **B-091 web access toggle (DC-012, B+).** Work UI «Веб» toggles main-agent
-  `web_fetch` (default ON). Cache-safe (D-087): tail hint `[Web access] OFF` +
-  execute deny; does **not** rewrite SOUL/tools schema. Does **not** register
-  `web_search` on main (research subagent unchanged). WS `web_access_change` /
-  `web_access` like depth_mode.
-- **B-090 is_running (DC-011).** In-flight gate stores optional `session_id`+`title`
-  for agent runs; HTTP 409 / WS errors include `running_session_id` /
-  `running_session_title`; WS `session_running_state` + chat list `is_running`
-  badge («выполняется»). Short mutations hold the mutex without a badge.
-  Web only; no ETA. DC-008 `active_user_count` unchanged.
-- **DC-008 system_load (backend + UI).** WebSocket event `system_load` with
-  count-only ambient GPU/user load (`active_count`, `max_concurrent`,
-  `waiting_count`, `active_users`, `load_level`, `updated_at`). Broadcast to all
-  connected web clients on connect, workflow start/finish, LLM queue wait
-  updates, and a soft poll (~20s). Always-on `SystemLoadBar` under the web
-  topbar (idle/busy/saturated tones). No personal/PII fields (D-088).
-- **DC-008 review fixes.** Queue `on_load_changed` fires on acquire/release so
-  ambient bar tracks `active_count` even without waiters; zero-capacity
-  load_level edge case; FE guards malformed WS payloads in the chat handler.
-
-### Fixed
-
-- **B-111 audit:** main-agent SOUL base is re-read via `BootstrapLoader.get_system_prompt()`
-  each turn (mtime/overlay/calibration), not frozen from factory `default_system_prompt`.
-- **B-124 mid-run compress store-first.** Auto-compress during a multi-iter turn
-  rewrites `ChatContextStore` (compress durable `list_context`, then
-  `replace_context`) instead of only shrinking in-memory `state.context.messages`.
-  Trigger still uses the live window; no-session (CLI/subagent) stays memory-only.
-  Shared helper `_compress_store_transcript` powers on-demand `_compress_chat` too.
+- **Security & Correctness Sprint 3 (15 находок).** Container reuse теперь
+  revalidates image/network/capability/seccomp settings (fail-open закрыт);
+  seccomp profile missing → fail-fast вместо silent skip; IPC secret
+  передаётся через stdin worker'а, не в `docker exec` argv (видно через ps);
+  MCP/plugin subprocess reads bounded (8 MiB cap); Docker build pinned через
+  `uv export --frozen` с хешами; Telegram handlers только ChatType.PRIVATE
+  (default); raw exception text больше не уходит пользователю; password change
+  инвалидирует web sessions; REST upload rate-limited + `client_max_size`;
+  shutdown bounded (`asyncio.wait_for`); `/health` default loopback;
+  calibration filenames contained + atomic apply/rollback; memory value cap +
+  fallback recall LIMIT; `memory-worker run` CLI fix (AttributeError); nested
+  settings models `extra="forbid"` (LLM/Container/Agent/WebChannel/Extensions).
+- **Security & Correctness Sprint 2.** ToolExecutionContext isolates runtime
+  identity/callbacks from plugin/MCP business args; tool batches reserve
+  budget atomically; persisted user data at user authority; Anthropic native
+  ReAct history + bounded streaming + signed-thinking replay; closing mode
+  preserves finalisation funnel; loop-exhaustion answers saved before teardown.
+- **Security & Correctness Sprint 1.** Directory copy rejects nested symlinks;
+  department overlays preserve omitted policy fields; skill prompts respect
+  department RBAC; Telegram whitelist/revocations migrated to SQLite;
+  credential scrubbing covers modern token formats + formatted tracebacks;
+  native tool calls limited to offered schema; queue cancellation releases
+  partial acquisitions; terminal-tool history protocol-complete; scheduler
+  claims atomic.
+- **FileTracked wrapping для apply_fill_plan.** Production fill-path теперь
+  журналируется (B-040) и детектит cross-agent stale-writes (B-058). Раньше
+  `apply_fill_plan` обходил FileTrackedTool — его записи были невидимы для
+  change journal и stale-write detector.
+- **Scheduler status-guarded transitions.** Atomic optimistic-lock
+  `update_guarded` prevents cross-channel races.
+- **B-108 FTS durability.** Rebuild from `memory_entries` when row counts
+  diverge; single cue boost (no double-count).
+- **Post-review hardening (F1–F7).** Budget resume on queue slot failure;
+  ownership-404 tests; TTL expire clears dedup_key; concurrent multichannel
+  push.
 
 ### Docs
 
-- **B-125 post-2B memory model.** AGENTS.md / CLAUDE.md / ARCHITECTURE.md: sole
-  `ChatContextStore` transcript, facts-only `SQLiteMemory`, no consolidator /
-  dual-write / `_compress_from_memory` language.
+- **B-125 post-2B memory model.** AGENTS.md / ARCHITECTURE.md updated: sole
+  `ChatContextStore` transcript, facts-only `SQLiteMemory`.
+
+## [Unreleased]
 
 ## [0.2.7] — 2026-07-14
 

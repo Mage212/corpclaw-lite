@@ -82,6 +82,11 @@ class LoopState:
     tools_schema: list[dict[str, Any]] | None
     task_run: TaskRun
     mem_key: str
+    # Regenerated persisted-user data is provider input for this run only.  The
+    # durable store intentionally contains the raw user message, so store-first
+    # compression must restore this envelope in memory before the next LLM call.
+    ephemeral_user_message: str | None = None
+    durable_user_message: str | None = None
     prev_turn_tools: list[str] = field(default_factory=lambda: [])
     current_turn_tools: list[str] = field(default_factory=lambda: [])
     last_actual_total_tokens: int | None = None
@@ -95,3 +100,5 @@ class LoopState:
     empty_response_retries: int = 0
     # B-118 H2: channel for this run (e.g. "system" headless) — execute-time denylist.
     channel: str | None = None
+    # One-shot after successful apply_fill_plan (anti-repeat close).
+    apply_fill_close_nudge_injected: bool = False

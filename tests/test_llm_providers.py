@@ -50,6 +50,20 @@ def _openai_settings(base_url: str = "http://localhost:11434/v1") -> ProviderSet
 
 
 class TestAnthropicProvider:
+    @staticmethod
+    def _tools(*names: str) -> list[dict[str, Any]]:
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": "test tool",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+            for name in names
+        ]
+
     def _text_response(self, text: str) -> MagicMock:
         block = MagicMock()
         block.type = "text"
@@ -107,7 +121,7 @@ class TestAnthropicProvider:
             mock_mod.AsyncAnthropic.return_value = mock_client
             provider = AnthropicProvider(_anthropic_settings())
 
-        result = await provider.chat(messages=[], tools=None)
+        result = await provider.chat(messages=[], tools=self._tools("read_file"))
 
         assert len(result.tool_calls) == 1
         tc = result.tool_calls[0]
@@ -142,7 +156,7 @@ class TestAnthropicProvider:
             mock_mod.AsyncAnthropic.return_value = mock_client
             provider = AnthropicProvider(_anthropic_settings())
 
-        result = await provider.chat(messages=[])
+        result = await provider.chat(messages=[], tools=self._tools("read_file"))
 
         assert result.content == "Читаю файл."
         assert len(result.tool_calls) == 1
@@ -252,12 +266,90 @@ class TestOpenAIProvider:
             mock_mod.AsyncOpenAI.return_value = mock_client
             provider = OpenAIProvider(_openai_settings())
 
-        result = await provider.chat(messages=[])
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_files",
+                    "description": "List files",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
+        result = await provider.chat(messages=[], tools=tools)
 
         assert len(result.tool_calls) == 1
         assert result.tool_calls[0].name == "list_files"
         assert result.tool_calls[0].arguments == {"path": "/"}
         assert result.usage.total_tokens == 30
+
+    @pytest.mark.asyncio
+    async def test_provider_metadata_is_stripped_from_actual_openai_payload(self) -> None:
+        from corpclaw_lite.llm.openai import OpenAIProvider
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = AsyncMock(return_value=self._text_resp("done"))
+        with patch("corpclaw_lite.llm.openai.openai") as mock_mod:
+            mock_mod.AsyncOpenAI.return_value = mock_client
+            provider = OpenAIProvider(_openai_settings())
+
+        canonical = [
+            {"role": "user", "content": "read"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "toolu_1",
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": "{}"},
+                        "_provider_metadata": {
+                            "anthropic": {
+                                "opaque_thinking": [
+                                    {"type": "thinking", "thinking": "private", "signature": "sig"}
+                                ]
+                            }
+                        },
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "toolu_1", "content": "contents"},
+        ]
+
+        await provider.chat(canonical)
+
+        sent = mock_client.chat.completions.create.await_args.kwargs["messages"]
+        assert "_provider_metadata" not in sent[1]["tool_calls"][0]
+        assert "provider_metadata" not in sent[1]["tool_calls"][0]
+        assert "sig" not in json.dumps(sent)
+        # Sanitization must not destroy the durable canonical carrier.
+        assert canonical[1]["tool_calls"][0]["_provider_metadata"]["anthropic"]
+
+    @pytest.mark.asyncio
+    async def test_native_tool_call_outside_offered_schema_is_rejected(self) -> None:
+        from corpclaw_lite.llm.openai import OpenAIProvider
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = AsyncMock(
+            return_value=self._tool_resp("exec_script", {"script": "id"})
+        )
+        with patch("corpclaw_lite.llm.openai.openai") as mock_mod:
+            mock_mod.AsyncOpenAI.return_value = mock_client
+            provider = OpenAIProvider(_openai_settings())
+
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_files",
+                    "description": "List files",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
+        result = await provider.chat(messages=[], tools=tools)
+
+        assert result.tool_calls == []
 
     @pytest.mark.asyncio
     async def test_empty_tool_calls_list(self) -> None:

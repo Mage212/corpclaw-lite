@@ -80,12 +80,18 @@ async def test_send_tool_call_success(ipc, auth) -> None:
         result = await ipc.send_tool_call(user_id=1, tool_name="read_file", args={"path": "/a"})
 
     assert result == "file contents here"
-    # Secret is injected only on docker exec, not container create env.
-    cmd = mock_exec.call_args[0]
+    # S3-03: the IPC secret must NOT appear in the docker exec argv (visible via
+    # ps/proc). It is delivered over stdin as the first line instead.
+    cmd = list(mock_exec.call_args[0])
     assert "docker" in cmd
-    assert "-e" in cmd
-    env_flag_idx = list(cmd).index("-e")
-    assert cmd[env_flag_idx + 1].startswith("CORPCLAW_IPC_SECRET=")
+    assert "-e" not in cmd
+    assert not any(isinstance(a, str) and a.startswith("CORPCLAW_IPC_SECRET=") for a in cmd)
+    # The secret travels as the first stdin line, followed by the signed payload.
+    input_bytes = proc.communicate.call_args.kwargs.get("input", b"")
+    lines = input_bytes.decode("utf-8").splitlines()
+    assert len(lines) >= 2
+    assert lines[0] == "test-secret-key-for-ci"
+    assert lines[1].startswith("{")  # signed JSON payload
 
 
 # ── Test 4: send_tool_call error status ───────────────────────────────────────
@@ -287,7 +293,9 @@ async def test_tool_timeout_propagated_in_payload(ipc, auth) -> None:
 
     assert result == "ok"
 
-    # Decode the signed payload sent to the container
-    signed_msg = json.loads(sent_input.decode("utf-8"))
+    # Decode the signed payload sent to the container. The input is now a
+    # two-line stdin protocol (S3-03): line 1 is the secret, line 2 the JSON.
+    lines = sent_input.decode("utf-8").splitlines()
+    signed_msg = json.loads(lines[1])
     inner = auth.verify(signed_msg)
     assert inner["tool_timeout"] == 25.0  # 30.0 - 5.0

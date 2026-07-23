@@ -73,7 +73,7 @@ async def test_agent_loop_with_session_context_store(
     assistant_texts = [m["content"] for m in messages if m.get("role") == "assistant"]
 
     assert "What is my name?" in user_texts
-    assert "Can you remind me again?" in user_texts
+    assert any("Current user request:\nCan you remind me again?" in text for text in user_texts)
     assert any(isinstance(t, str) and "Your name is Test Loop User." in t for t in assistant_texts)
 
     # Transcript persisted only in context store (B-103).
@@ -81,12 +81,12 @@ async def test_agent_loop_with_session_context_store(
     roles = [m["role"] for m in ctx]
     assert roles.count("user") >= 2
     assert any(m.get("content") == "I remember now." for m in ctx if m.get("role") == "assistant")
-    assert any(m.get("role") == "system" for m in ctx)
+    assert all(m.get("role") != "system" for m in ctx)
 
 
 @pytest.mark.asyncio
-async def test_tool_marker_saved_in_context_store(tmp_path: Path) -> None:
-    """Tool usage note is stored as system role in ChatContextStore (B-103)."""
+async def test_tool_protocol_replaces_system_marker_in_context_store(tmp_path: Path) -> None:
+    """Structured calls/results are durable; no authoritative system marker is stored."""
 
     class FakeTool:
         name = "normalize_excel"
@@ -133,9 +133,13 @@ async def test_tool_marker_saved_in_context_store(tmp_path: Path) -> None:
     ctx = await store.list_context(session_id, user_id=str(user.id))
     assistant_msgs = [m for m in ctx if m["role"] == "assistant"]
     assert any("File normalized successfully." in str(m.get("content", "")) for m in assistant_msgs)
-    system_msgs = [m for m in ctx if m["role"] == "system"]
-    assert len(system_msgs) >= 1
-    assert any("normalize_excel" in str(m.get("content", "")) for m in system_msgs)
+    assert all(m["role"] != "system" for m in ctx)
+    assert any(
+        m.get("role") == "assistant"
+        and m.get("tool_calls")
+        and m["tool_calls"][0]["function"]["name"] == "normalize_excel"
+        for m in ctx
+    )
 
 
 @pytest.mark.asyncio

@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic_settings import BaseSettings
 
 from corpclaw_lite.agent.guards import (
@@ -186,6 +186,10 @@ class LLMSettings(BaseModel):
     This model only contains routing rules that map tasks to providers + models.
     """
 
+    # S3-16: a typo in a routing/concurrency/queue key silently changed agent
+    # behaviour; forbid unknown keys on safety-critical nested models.
+    model_config = ConfigDict(extra="forbid")
+
     routing: list[RoutingRule] = []
     max_concurrent_requests: int = 4
     queue: QueueSettings = QueueSettings()
@@ -193,6 +197,10 @@ class LLMSettings(BaseModel):
 
 class ContainerSettings(BaseModel):
     """Settings for Docker container sandboxes."""
+
+    # S3-16: typos in isolation/capability fields must surface, not silently drop
+    # hardening (e.g. a misspelled strict_capabilities would disable cap_drop).
+    model_config = ConfigDict(extra="forbid")
 
     # Set to false to disable container isolation (dev/test mode — runs on host)
     enabled: bool = True
@@ -211,6 +219,11 @@ class ContainerSettings(BaseModel):
     strict_capabilities: bool = (
         True  # cap_drop ALL + seccomp + explicit non-root user. Set False only for dev/debug.
     )
+    # When strict_capabilities is True, fail container creation if the seccomp
+    # profile is missing instead of silently running with Docker's wider default.
+    # Set False only for environments where the profile path is known-unavailable
+    # (e.g. minimal CI) and the operator accepts the reduced isolation.
+    seccomp_missing_fatal: bool = True
     # Timeout for the outer docker exec call (host-side IPC envelope)
     ipc_timeout_seconds: float = 120.0
 
@@ -243,11 +256,19 @@ class ToolSurfaceSettings(BaseModel):
 class AgentSettings(BaseModel):
     """Settings for the AgentLoop."""
 
+    # S3-16: a typo in a budget/guard/streaming key would silently change agent
+    # behaviour; forbid unknown keys on this safety-critical model.
+    model_config = ConfigDict(extra="forbid")
+
     max_steps: int = 15
     max_tool_calls: int = 30
     max_wall_time_ms: int = 300000
     soft_deadline_ratio: float = 0.85
     max_history: int = 20
+    # Hard cap on orchestrator shutdown (SIGINT/SIGTERM). A hung MCP disconnect,
+    # container stop or websocket close cannot hold the process past this bound;
+    # a second signal force-exits. Keeps `await orchestrator.stop()` bounded.
+    shutdown_timeout_seconds: float = 30.0
     approval_mode: Literal["manual", "smart", "off"] = "manual"
     compression: CompressionSettings = CompressionSettings()
     llm_timeout_seconds: int = 120
@@ -291,6 +312,10 @@ class WebSettings(BaseModel):
 
 class WebChannelSettings(BaseModel):
     """Settings for the browser-based user channel."""
+
+    # S3-16: typos in auth/upload/rate-limit keys silently weaken the channel;
+    # forbid unknown keys on this safety-critical model.
+    model_config = ConfigDict(extra="forbid")
 
     host: str = "127.0.0.1"
     port: int = 8090
@@ -348,6 +373,10 @@ class TelegramSettings(BaseModel):
     whitelist: list[int] = []
     default_department: str = "default"
     admin_ids: list[int] = []
+    # When False (default), the bot only answers in private chats so a group
+    # cannot observe another user's workflow, files or approval prompts.
+    # Set True only for a deliberately shared/group deployment.
+    allow_groups: bool = False
 
     # Fallback transport — manual IP overrides (empty = DoH auto-discovery)
     fallback_ips: list[str] = []
@@ -386,6 +415,11 @@ class ExtensionsSettings(BaseModel):
     paths are skipped by ``resolve_dirs``.
     """
 
+    # S3-16: a typo in extra_paths would silently disable the private overlay,
+    # loading public defaults instead of corporate extensions. Forbid unknown
+    # keys on this safety-critical model.
+    model_config = ConfigDict(extra="forbid")
+
     extra_paths: list[str] = []
 
 
@@ -396,6 +430,10 @@ class LoggingSettings(BaseModel):
     console_level: str = "INFO"
     log_dir: str = "logs"
     health_port: int = 8080
+    # Bind address for the /health HTTP server. Defaults to loopback only so the
+    # unauthenticated operational endpoint is not exposed on shared/Internet-facing
+    # hosts. Override to "0.0.0.0" only behind a restricting reverse proxy.
+    health_host: str = "127.0.0.1"
     trace_enabled: bool = True
     trace_level: Literal["metadata", "debug_preview", "full"] = "metadata"
     trace_preview_chars: int = 200

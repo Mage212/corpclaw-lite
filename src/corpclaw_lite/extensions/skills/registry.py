@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from corpclaw_lite.extensions.skills.base import Skill
 from corpclaw_lite.extensions.skills.loader import SkillLoader
@@ -13,12 +14,16 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
+if TYPE_CHECKING:
+    from corpclaw_lite.departments.permissions import PermissionChecker
+
 
 class SkillRegistry:
     """Manages loaded skills and provides access control."""
 
-    def __init__(self) -> None:
+    def __init__(self, permission_checker: PermissionChecker | None = None) -> None:
         self._skills: dict[str, Skill] = {}
+        self._permission_checker = permission_checker
 
     def load_directory(self, skills_dir: Path | str, *, allow_replace: bool = False) -> None:
         """Load all .md files from a directory.
@@ -74,4 +79,6 @@ class SkillRegistry:
             skill
             for skill in self._skills.values()
             if "*" in skill.allowed_for or user.department in skill.allowed_for
+            if self._permission_checker is None
+            or self._permission_checker.can_use_skill(user, skill.id)
         ]

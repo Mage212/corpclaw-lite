@@ -52,6 +52,11 @@ class EvalLoop:
             A/B mode; in single-pass mode they are ignored. Each seed is a full
             A/B (2 passes) with isolated workspace and memory; the aggregation
             takes the per-scenario median to filter sampling noise.
+        inject_few_shots: when True (default), pass stack.few_shots into
+            EvalRunner. Set False for auto-debug / skilled scenarios so
+            cross-topic calibrated examples (e.g. weather) do not contaminate
+            the turn.
+        auto_approve_high_risk: opt-in approval callback for headless runs.
     """
 
     def __init__(
@@ -65,24 +70,38 @@ class EvalLoop:
         workspace_base: Path | str | None = None,
         on_scenario_progress: Callable[[str, bool, int, int], None] | None = None,
         seeds: int = 1,
+        inject_few_shots: bool = True,
+        auto_approve_high_risk: bool = False,
     ) -> None:
         self._scenarios_path = (
-            Path(scenarios_path)
+            Path(scenarios_path).expanduser().resolve()
             if scenarios_path
-            else (PROJECT_ROOT / "config" / "eval_scenarios.yaml")
+            else (PROJECT_ROOT / "config" / "eval_scenarios.yaml").resolve()
         )
         self._judge = judge
-        self._corpus_dir = Path(corpus_dir) if corpus_dir else None
-        self._output_dir = Path(output_dir) if output_dir else (PROJECT_ROOT / "reports" / "eval")
+        self._corpus_dir = Path(corpus_dir).expanduser().resolve() if corpus_dir else None
+        self._output_dir = (
+            Path(output_dir).expanduser().resolve()
+            if output_dir
+            else (PROJECT_ROOT / "reports" / "eval").resolve()
+        )
         self._ab_guards = ab_guards
         self._settings_path = (
-            Path(settings_path) if settings_path else (PROJECT_ROOT / "config" / "settings.yaml")
+            Path(settings_path).expanduser().resolve()
+            if settings_path
+            else (PROJECT_ROOT / "config" / "settings.yaml").resolve()
         )
         self._workspace_base = (
-            Path(workspace_base) if workspace_base else (PROJECT_ROOT / ".eval_workspace")
+            Path(workspace_base).expanduser().resolve()
+            if workspace_base
+            else (PROJECT_ROOT / ".eval_workspace").resolve()
         )
         self._on_progress = on_scenario_progress
         self._seeds = max(1, seeds)
+        # Auto-debug / skilled Excel runs: calibrated few-shots (e.g. Moscow weather)
+        # contaminate the turn and can pull the model into unrelated web_fetch.
+        self._inject_few_shots = inject_few_shots
+        self._auto_approve_high_risk = auto_approve_high_risk
 
     async def run(self) -> ABReport | PassReport | MultiSeedReport:
         """Run the eval and return the report.
@@ -183,7 +202,19 @@ class EvalLoop:
             settings.agent.result_dedup_guard = ResultDedupGuardConfig(enabled=False)
             settings.agent.planning_text_guard = PlanningTextGuardConfig(enabled=False)
 
-        stack = build_agent_stack(settings)
+        pass_root = self._workspace_base / label
+
+        async def _eval_auto_approve(action: str, details: str) -> bool:
+            del details
+            logger.info("[eval] auto-approving high-risk action: %s", action)
+            return True
+
+        approval_callback = _eval_auto_approve if self._auto_approve_high_risk else None
+        stack = build_agent_stack(
+            settings,
+            workspace_override=pass_root,
+            approval_callback=approval_callback,
+        )
         agent_loop = stack.loop
 
         # Enrich the judge with the main agent's actual tool surface so it does
@@ -200,12 +231,15 @@ class EvalLoop:
             department="engineering",
         )
         # B-111: AgentLoop assembles base + user layers; do not pass a second SOUL.
-        workspace = self._workspace_base / label
+        from corpclaw_lite.extensions.tools.builtin._path_utils import user_workspace_path
+
+        pass_root.mkdir(parents=True, exist_ok=True)
+        workspace = user_workspace_path(pass_root, eval_user)
+        if workspace.exists():
+            import shutil
+
+            shutil.rmtree(workspace)
         workspace.mkdir(parents=True, exist_ok=True)
-        # Clear any leftover files from a previous run of this pass.
-        for child in workspace.iterdir():
-            if child.is_file():
-                child.unlink()
 
         runner = EvalRunner(
             agent_loop=agent_loop,
@@ -213,11 +247,12 @@ class EvalLoop:
             system_prompt=None,
             workspace_dir=workspace,
             corpus_dir=self._corpus_dir,
-            few_shots=stack.few_shots,
+            few_shots=stack.few_shots if self._inject_few_shots else None,
             judge=self._judge,
         )
         logger.info("[eval] Starting pass '%s' (guards=%s)", label, guards_enabled)
         scores = await runner.run_all(scenarios, on_progress=self._on_progress)
+
         return PassReport(label=label, scenario_scores=scores)
 
     # ─────────────────────────── reporting ───────────────────────────────

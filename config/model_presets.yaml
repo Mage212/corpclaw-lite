@@ -33,12 +33,12 @@ models:
       presence_penalty: 1.5
       repetition_penalty: 1.0
 
-  # ── Gemma 4 (26B QAT) ─────────────────────────────────────────────────────
+  # ── Gemma 4 (26B A4B) ─────────────────────────────────────────────────────
   # Native reasoning_content. Official rec: temperature=1.0, top_p=0.95, top_k=64
   # (single set for all modes). DO NOT lower temperature below ~0.7: gemma4
   # becomes non-deterministically unstable at thinking-OFF (degenerate output).
-  gemma4-26b-qat:
-    description: "Gemma 4 26B QAT with native reasoning_content"
+  gemma4-26b-a4b:
+    description: "Gemma 4 26B A4B with native reasoning_content"
     thinking_parser:
       source: "native"
     default_inference:
@@ -50,12 +50,12 @@ sampling:
   # ── Gemma 4 (single recommendation for all modes) ─────────────────────────
   gemma4-default:
     description: "Gemma 4 natural thinking (official rec)"
-    model: gemma4-26b-qat
+    model: gemma4-26b-a4b
     thinking_mode: default
 
   gemma4-fast:
     description: "Gemma 4 without thinking — fast mode"
-    model: gemma4-26b-qat
+    model: gemma4-26b-a4b
     thinking_mode: off
 
   # ── Qwen 3 (4 canonical modes per official recommendation) ────────────────

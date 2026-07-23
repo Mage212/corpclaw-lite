@@ -40,7 +40,11 @@ import time
 from pathlib import Path
 from typing import Any
 
-from corpclaw_lite.security.credential_scrubber import CredentialScrubber, scrub_text
+from corpclaw_lite.security.credential_scrubber import (
+    CredentialScrubber,
+    CredentialScrubbingFormatter,
+    scrub_text,
+)
 
 __all__ = [
     "DEFAULT_CAPTURE_FIELDS",
@@ -126,6 +130,7 @@ class PayloadCaptureLogger:
             backupCount=3,
             encoding="utf-8",
         )
+        handler.setFormatter(CredentialScrubbingFormatter("%(message)s"))
         handler.addFilter(CredentialScrubber())
         self._logger.addHandler(handler)
 
