@@ -1,7 +1,7 @@
 # CorpClaw Lite — Архитектура проекта
 
-> Версия документа: 2026-07-13
-> Версия проекта: 0.2.6 — Phase 2A complete; Sprint 2B.1 channel-scoped sessions
+> Версия документа: 2026-07-23
+> Версия проекта: 0.3.0 — Security hardening (Sprint 1–3), deterministic Excel-fill pipeline, cloud judge, scheduler, memory worker
 
 ---
 
@@ -1386,3 +1386,49 @@ uv run pytest tests/ -v
 uv run ruff check src/ --fix && uv run ruff format src/
 uv run pyright src/
 ```
+
+---
+
+## 13. Excel-fill pipeline (v0.3.0)
+
+Детерминистический пайплайн заполнения Excel-отчётов. При загрузке xlsx-файла
+в Telegram или Web канал автоматически генерирует **FILES_BRIEF** — структурный
+обзор (листы, колонки, роли, period cells) без значений. Модель читает brief и
+вызывает `apply_fill_plan` один раз с region-mapping планом. Python читает
+источники, вычисляет period и заполняет шаблон детерминистически.
+
+**Ключевые модули:**
+- `agent/fill_plan.py` — FillPlan dataclass + parse + resolve + apply
+- `agent/workbook_brief.py` — build_workbook_brief + format_files_brief_for_agent
+- `extensions/tools/builtin/apply_fill_plan.py` — ApplyFillPlanTool (main agent)
+- `extensions/tools/builtin/excel_workbook.py` — fill_by_date/fill_by_key engine
+
+## 14. Scheduler (B-118/DC-030)
+
+Consent-first cron-задачи: агент предлагает расписание → человек подтверждает →
+задача выполняется в headless-режиме. Web UI «Задачи», Telegram inline consent,
+REST API.
+
+**Ключевые модули:** `scheduler/service.py`, `scheduler/store.py`, `scheduler/models.py`
+
+## 15. Auto-debug harness (B-060, debugging tool)
+
+Отладочный инструмент для тестирования модели и инструментов в обход production-каналов.
+Использует тот же AgentLoop через build_agent_stack, но в изолированном workspace.
+Поддержка cloud LLM judge (7-dimension rubric), A/B guards, multi-seed.
+
+**Ключевые модули:** `eval/loop.py`, `eval/runner.py`, `eval/judge.py`, `scripts/auto_debug.py`
+
+## 16. Memory worker (B-109/DC-027)
+
+Background curation: периодически читает recent transcripts и извлекает
+структурированные факты в memory_entries. Opt-in per user, quiet-hours aware.
+
+**Ключевые модули:** `memory/worker.py`, `memory/worker_merge.py`
+
+## 17. Headless-run / proactive-send (B-119/B-120)
+
+Запуск агента без inbound-сообщения (headless-run) и proactive push в system
+session (notify-user). Используется scheduler'ом и для admin-уведомлений.
+
+**Ключевые модули:** `channels/service.py` (run_headless), `channels/user_notifier.py`

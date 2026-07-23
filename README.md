@@ -157,11 +157,11 @@ host tools for multi-user production deploys.
 | Workflow-finalize Guard | Bounded nudge → restrict → auto-finalize cascade — research subagents always produce a report, never lose accumulated work on budget exhaustion |
 | Raw LLM Capture | Opt-in raw request/response logging to `logs/llm_payloads.jsonl` (default **off**, DC-037) with field-level allowlist + credential scrubbing — for debugging and future fine-tune dataset collection |
 | XML Tool Calling | Fallback parser for local LLMs without function calling |
-| 29 Built-in Tools | File ops, SQL queries, charts, PDF, Excel workbook/inspection, web search/fetch, research workflows, and more |
+| 35 Built-in Tools | File ops, SQL queries, charts, PDF, Excel workbook/inspection, apply_fill_plan (Excel fill), schedule tools, web search/fetch, research workflows, and more |
 | Docker Sandbox | Per-user containers with resource limits and network deny-by-default; host-tools require explicit env opt-in (DC-016) |
 | Workspace Isolation (dev+prod) | Per-user `workspaces/user_<id>/` via contextvar for path-validated tools even when containers are off (DC-017) |
 | ToolGuard | 31 YAML security rules with LLM-based Smart Approvals |
-| 5 Skills + 5 Subagents | Markdown skills with scope filtering and isolated subagents; plugins are a framework (no plugins shipped) |
+| 6 Skills + 5 Subagents | Markdown skills with scope filtering and isolated subagents; plugins are a framework (no plugins shipped) |
 | Private Extensions Overlay | Keep corporate customizations in a separate private repo, composed at runtime — no private files in this public repo ([docs](CONTRIBUTING.md#private-extensions-overlay)) |
 | TF-IDF Matching | Bilingual (RU+EN) semantic skill selection |
 | Web + Telegram Channels | Browser chat (Mistral.ai-style redesign: multi-chat history, Fast/Think/Research depth modes, extensions manager, agent context), collapsible file manager, single statusline, approvals, rate limiting |
@@ -170,6 +170,35 @@ host tools for multi-user production deploys.
 | Auto-Calibration | Adapt prompts for specific local models |
 | RBAC | 10 departments with per-department permissions |
 | Closed-Loop Ready | Local LLMs, no internet required, all data stored locally |
+| Auto-debug Harness | Eval harness with cloud LLM judge (`--judge cloud`), A/B guard testing, synthetic fixtures |
+
+## Excel Report Filling
+
+When a user uploads xlsx files, the channel auto-generates a **FILES_BRIEF** — a
+structural overview (sheets, columns, roles) without cell values. The model reads
+this brief, decides how to map source files to the template, and calls
+`apply_fill_plan` once. Python then fills the template deterministically — no
+model-transcribed values, no iterative read/write cycles. Score 9.5–10.0 with
+cloud judge on real reports.
+
+## Scheduler
+
+Cron-based agent tasks with consent-first proposals. Web UI «Задачи»,
+Telegram inline Accept/Dismiss, REST API. Tasks run via headless
+`AgentLoop.run()` with current datetime injected into the prompt.
+
+## Auto-debug Harness
+
+`scripts/auto_debug.py` is a **debugging tool** (not production) for testing
+model behavior and tool improvements in isolation. Supports A/B guard testing,
+multi-seed aggregation, and cloud LLM judge scoring via `--judge cloud` with a
+7-dimension rubric. Uses synthetic test fixtures (no commercial data).
+
+## Memory Worker
+
+Background memory curation: periodically reads recent chat transcripts and
+extracts structured facts (abstraction + value + cues) into `memory_entries`.
+Opt-in per user; quiet-hours aware.
 
 ## Documentation
 

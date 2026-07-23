@@ -21,7 +21,7 @@ Split (D-056) of the legacy combined ``ModelPreset`` into two orthogonal layers:
 
 This split removes duplicate presets (e.g. the old ``gemma4-thinking`` and
 ``gemma4-fast`` — one model, differing only in temperature/thinking — collapse
-into one ``gemma4-26b-qat`` ModelProfile + two SamplingProfiles) and makes
+into one ``gemma4-26b-a4b`` ModelProfile + two SamplingProfiles) and makes
 per-call override orthogonal to per-model config.
 
 YAML format (``config/model_presets.yaml``)::

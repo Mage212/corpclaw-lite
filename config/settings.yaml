@@ -106,6 +106,9 @@ agent:
   llm_stream_max_reasoning_chars: 12000
   llm_stream_status_updates: true
   vision_max_image_bytes: 10485760
+  # Bounded orchestrator shutdown (SIGINT/SIGTERM). A hung MCP/container/websocket
+  # close cannot hold the process past this many seconds.
+  shutdown_timeout_seconds: 30.0
   compression:
     enabled: true
     max_context_tokens: 64000
@@ -206,6 +209,7 @@ container:
   idle_timeout_seconds: 600
   max_concurrent_containers: 20
   strict_capabilities: true  # cap_drop ALL + seccomp + explicit non-root user (Sprint 1, B-064)
+  seccomp_missing_fatal: true  # fail-fast if seccomp profile absent (Sprint 3)
   ipc_timeout_seconds: 120.0
 
 telegram:
@@ -214,6 +218,7 @@ telegram:
   whitelist: []
   default_department: "default"
   admin_ids: []
+  allow_groups: false  # only private chats by default (Sprint 3); set true for shared/group bots
 
   # Fallback transport — manual IP overrides (empty = DoH auto-discovery)
   # When api.telegram.org is unreachable, requests are retried via these IPs
@@ -283,6 +288,7 @@ logging:
   console_level: "INFO"
   log_dir: "logs"
   health_port: 8080
+  health_host: "127.0.0.1"  # loopback-only for unauthenticated /health (Sprint 3)
   trace_enabled: true
   trace_level: "metadata"
   trace_preview_chars: 200
