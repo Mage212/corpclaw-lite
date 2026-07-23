@@ -1,9 +1,20 @@
-"""Standalone auto-debug runner — запускает EvalLoop и выводит детальный трейс.
+"""Auto-debug harness — отладочный инструмент для быстрого тестирования модели.
+
+НЕ является production-решением. Это блок для отладки поведения модели и
+проверки новых/улучшенных инструментов в обход Telegram/Web каналов.
+Использует тот же AgentLoop.run() через build_agent_stack(), но в изолированном
+workspace с детерминированными fixtures и optional cloud LLM судьёй.
+
+Назначение:
+  - Быстрая проверка поведения модели на новых инструментах
+  - Regression-тестирование Excel-fill pipeline (apply_fill_plan)
+  - A/B сравнение с/без guards (--ab)
+  - Оценка качества через cloud-судью (--judge cloud, 7-dimension rubric)
 
 Использование:
-    uv run python scripts/auto_debug.py
-    uv run python scripts/auto_debug.py --scenarios config/debug_scenarios.yaml
-    uv run python scripts/auto_debug.py --output reports/debug
+    CORPCLAW_ALLOW_HOST_TOOLS=1 uv run python scripts/auto_debug.py
+    CORPCLAW_ALLOW_HOST_TOOLS=1 uv run python scripts/auto_debug.py --judge cloud
+    CORPCLAW_ALLOW_HOST_TOOLS=1 uv run python scripts/auto_debug.py --scenarios config/debug_scenarios.yaml
 
 Переменные окружения:
     CORPCLAW_ALLOW_HOST_TOOLS=1   — обязательно (dev-режим без контейнера)
