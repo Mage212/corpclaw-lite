@@ -248,6 +248,7 @@ async def _run(args: argparse.Namespace) -> int:
     print(f"   Mode:    {'A/B (guards on/off)' if args.ab else 'single-pass (guards on)'}")
 
     sys.path.insert(0, str(_PROJECT_ROOT / "src"))
+    sys.path.insert(0, str(_PROJECT_ROOT / "tests"))
     from corpclaw_lite.eval.loop import EvalLoop
 
     # Build the LLM judge from the cloud provider (unless --judge none).

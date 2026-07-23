@@ -178,12 +178,17 @@ class EvalRunner:
     async def _run_scenario(self, scenario: EvalScenario) -> ScenarioRunResult:
         """Execute every turn of the scenario, sharing memory across turns."""
         turn_results: list[TurnRunResult] = []
+        # Pre-build FILES_BRIEF once (structural, values-free) for {{FILES_BRIEF}}.
+        files_brief = self._build_files_brief()
         for turn_idx, turn in enumerate(scenario.turns):
             recorder = TrajectoryRecorder(f"{scenario.id}#turn{turn_idx}")
             try:
+                message = turn.user_message
+                if "{{FILES_BRIEF}}" in message and files_brief:
+                    message = message.replace("{{FILES_BRIEF}}", files_brief)
                 answer, stats = await self._agent_loop.run(
                     user=self._user,
-                    message=turn.user_message,
+                    message=message,
                     system_prompt=self._system_prompt,
                     trajectory_recorder=recorder,
                     few_shots=self._few_shots,
@@ -335,6 +340,29 @@ class EvalRunner:
 
             dest_path = self._workspace_dir / dest
             generate_workbook(generator_id, dest_path)
+        # Synthetic media-report workspaces (deterministic, no corpus needed).
+        if getattr(scenario.setup, "generate_noisy_completed_month", False):
+            import sys
+
+            tests_dir = str(Path(__file__).resolve().parents[2] / "tests")
+            if tests_dir not in sys.path:
+                sys.path.insert(0, tests_dir)
+            from support.noisy_completed_month_fixture import (  # type: ignore[import-not-found]
+                build_noisy_workspace,  # type: ignore[reportUnknownVariableType]
+            )
+
+            build_noisy_workspace(self._workspace_dir)  # type: ignore[no-redef]
+        if getattr(scenario.setup, "generate_dual_type", False):
+            import sys
+
+            tests_dir = str(Path(__file__).resolve().parents[2] / "tests")
+            if tests_dir not in sys.path:
+                sys.path.insert(0, tests_dir)
+            from support.dual_type_fixture import (  # type: ignore[import-not-found]
+                build_dual_type_workspace,  # type: ignore[reportUnknownVariableType]
+            )
+
+            build_dual_type_workspace(self._workspace_dir)  # type: ignore[no-redef]
 
     def _cleanup_workspace(self, scenario: EvalScenario) -> None:
         import shutil
@@ -344,3 +372,24 @@ class EvalRunner:
                 child.unlink()
             elif child.is_dir():
                 shutil.rmtree(child)
+
+    def _build_files_brief(self) -> str:
+        """Build a structural (values-free) FILES_BRIEF for {{FILES_BRIEF}} injection.
+
+        Scans xlsx files in the workspace and renders their sheet/column layout
+        so the model can construct a FillPlan without calling excel_inspect first.
+        """
+        xlsx_files = sorted(self._workspace_dir.glob("*.xlsx"))
+        if not xlsx_files:
+            return ""
+        try:
+            from corpclaw_lite.agent.workbook_brief import (
+                build_workbook_brief,
+                format_files_brief_for_agent,
+            )
+
+            bundle = build_workbook_brief(xlsx_files)
+            return format_files_brief_for_agent(bundle)
+        except Exception:
+            logger.debug("[eval] FILES_BRIEF build failed, leaving placeholder empty")
+            return ""
