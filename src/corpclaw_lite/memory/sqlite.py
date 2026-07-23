@@ -27,6 +27,11 @@ _WS_RE = re.compile(r"\s+")
 _MAX_ABSTRACTION_LEN = 120
 _MAX_CUES = 16
 _MAX_CUE_LEN = 64
+# Cap stored fact value length so an unbounded model/agent value cannot bloat the
+# memory table (and thus the context budget when recalled).
+_MAX_VALUE_LEN = 8000
+# Cap on the fallback full-scan used to boost short-token cue matches.
+_FALLBACK_RECALL_LIMIT = 500
 _FTS_WEIGHT = 2.0
 _CUE_EXACT_WEIGHT = 1.0
 
@@ -264,6 +269,10 @@ class SQLiteMemory:
             raise StorageError("primary_abstraction is required")
         if not value:
             raise StorageError("memory_value is required")
+        # Bound the stored value so an unbounded agent/model value cannot bloat
+        # the memory table and the context budget when later recalled.
+        if len(value) > _MAX_VALUE_LEN:
+            value = value[:_MAX_VALUE_LEN].rstrip()
         new_cues = _normalize_cues(cues)
         try:
             with db_connect(self.db_path) as conn:
@@ -441,7 +450,9 @@ class SQLiteMemory:
                 fts_score += _CUE_EXACT_WEIGHT
             scored.append(self._row_to_entry(r, score=fts_score))
 
-        # Also boost exact cue matches that FTS might miss (short tokens)
+        # Also boost exact cue matches that FTS might miss (short tokens). Bounded
+        # by _FALLBACK_RECALL_LIMIT so a user with many entries does not load them
+        # all into memory; the FTS path above already covered the top-ranked rows.
         try:
             with db_connect(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
@@ -449,8 +460,9 @@ class SQLiteMemory:
                     """
                     SELECT id, primary_abstraction, memory_value, cue_indices_json
                     FROM memory_entries WHERE user_id = ?
+                    LIMIT ?
                     """,
-                    (str(user_id),),
+                    (str(user_id), _FALLBACK_RECALL_LIMIT),
                 ).fetchall()
         except Exception:
             all_rows = []

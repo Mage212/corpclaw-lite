@@ -933,11 +933,18 @@ def cmd_memory_worker_run(user_id: int) -> None:
     """Run the memory worker once for a specific user (ops/debug)."""
     from corpclaw_lite.agent.factory import build_agent_stack
     from corpclaw_lite.config.bootstrap import BootstrapLoader
+    from corpclaw_lite.config.loader import load_settings
     from corpclaw_lite.extensions.paths import resolve_dirs
     from corpclaw_lite.memory.worker import MemoryWorkerService
     from corpclaw_lite.paths import PROJECT_ROOT
 
-    stack = build_agent_stack()
+    # S3-15: load the full Settings (not AgentSettings) so resolve_dirs can read
+    # extensions.extra_paths and the worker can read settings.memory_worker. The
+    # previous code indexed stack.loop._settings (an AgentSettings), which lacks
+    # those fields — the command always raised AttributeError, masked by two
+    # `type: ignore[attr-defined]` directives.
+    settings = load_settings(PROJECT_ROOT / "config" / "settings.yaml")
+    stack = build_agent_stack(settings)
     um = stack.user_manager
     user = um.get_by_id(user_id)
     if user is None:
@@ -946,9 +953,9 @@ def cmd_memory_worker_run(user_id: int) -> None:
     if stack.loop.memory is None or stack.chat_store is None or stack.chat_context_store is None:
         raise SystemExit("Agent stack missing memory/chat stores.")
 
-    bootstrap_dirs = resolve_dirs("bootstrap", stack.loop._settings, PROJECT_ROOT)  # type: ignore[attr-defined]
+    bootstrap_dirs = resolve_dirs("bootstrap", settings, PROJECT_ROOT)
     worker = MemoryWorkerService(
-        settings=stack.loop._settings.memory_worker,  # type: ignore[attr-defined]
+        settings=settings.memory_worker,
         user_manager=um,
         memory=stack.loop.memory,
         chat_store=stack.chat_store,

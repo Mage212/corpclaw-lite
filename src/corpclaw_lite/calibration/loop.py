@@ -242,8 +242,8 @@ class CalibrationLoop:
             reasoning = proposed.get("reasoning", "—")
             print(f"  Analysis: {reasoning}")
 
-            # Apply changes
-            editor.apply(proposed["changes"])
+            # Apply changes (None-safe: an analyzer that omits "changes" is a no-op)
+            editor.apply(proposed.get("changes"))
 
             # Rebuild stack with new config
             new_settings = load_settings(self._project_root / "config" / "settings.yaml")

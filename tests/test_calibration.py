@@ -397,6 +397,45 @@ class TestConfigEditor:
         # Should not raise
         editor.rollback()
 
+    def test_apply_rejects_traversal_filename(self, tmp_path: Path) -> None:
+        """S3-12: a model-supplied key with a path separator or .. is rejected."""
+        editor = ConfigEditor(tmp_path)
+        # Establish a known good state first.
+        editor.apply({"system_prompt": {"SOUL.md": "good"}})
+        good_content = (tmp_path / "config" / "calibrated" / "bootstrap" / "SOUL.md").read_text()
+
+        # A traversal key must be rejected, not written outside the tree.
+        with pytest.raises(ValueError, match="Unsafe calibration filename"):
+            editor.apply({"system_prompt": {"../../etc/evil.md": "pwned"}})
+
+        # The good state is restored by the rollback-on-failure path (S3-13).
+        assert (
+            tmp_path / "config" / "calibrated" / "bootstrap" / "SOUL.md"
+        ).read_text() == good_content
+        assert not (tmp_path / "etc" / "evil.md").exists()
+
+    def test_apply_rolls_back_on_partial_failure(self, tmp_path: Path) -> None:
+        """S3-13: a write failure mid-apply restores the pre-apply state."""
+        editor = ConfigEditor(tmp_path)
+        editor.apply({"system_prompt": {"SOUL.md": "original"}})
+        original = (tmp_path / "config" / "calibrated" / "bootstrap" / "SOUL.md").read_text()
+
+        # Poison the target so a write part-way through fails. We inject a
+        # traversal filename in the *second* section (skills), so the system_prompt
+        # write succeeds but the skills write raises ValueError.
+        with pytest.raises(ValueError):
+            editor.apply(
+                {
+                    "system_prompt": {"SOUL.md": "transient"},
+                    "skills": {"../escape": "bad"},
+                }
+            )
+
+        # Rollback restored the pre-apply state; the transient write is gone.
+        assert (
+            tmp_path / "config" / "calibrated" / "bootstrap" / "SOUL.md"
+        ).read_text() == original
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Integration: ToolRegistry overrides
