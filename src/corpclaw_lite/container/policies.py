@@ -8,7 +8,12 @@ from corpclaw_lite.security.network_policy import NetworkPolicy
 
 __all__ = [
     "build_docker_args",
+    "ContainerPolicyError",
 ]
+
+
+class ContainerPolicyError(Exception):
+    """Raised when a container security policy cannot be satisfied (fail-fast)."""
 
 
 def build_docker_args(
@@ -46,6 +51,14 @@ def build_docker_args(
             "CORPCLAW_USER_ID": str(user_id),
             "PYTHONUNBUFFERED": "1",
         },
+        # Generation label lets ensure_running detect a container created under a
+        # different policy/image and recreate it, so a pre-existing or stale
+        # container with the same name cannot be silently reused as the sandbox.
+        "labels": {
+            "corpclaw.image": settings.image,
+            "corpclaw.strict_capabilities": str(settings.strict_capabilities),
+            "corpclaw.network": "none" if network_policy is not None else "default",
+        },
     }
 
     # Hardening is ON by default (strict_capabilities defaults True). It drops ALL
@@ -62,10 +75,27 @@ def build_docker_args(
         seccomp_path = PROJECT_ROOT / seccomp_profile_path
         if seccomp_path.exists():
             args["security_opt"].append(f"seccomp={seccomp_path}")
+        elif settings.seccomp_missing_fatal:
+            # Fail fast instead of silently running with Docker's wider default
+            # seccomp profile. The deny-by-default profile is the load-bearing
+            # syscall filter; dropping it weakens isolation without any signal.
+            raise ContainerPolicyError(
+                f"Seccomp profile not found at {seccomp_path} and "
+                "container.strict_capabilities + container.seccomp_missing_fatal are both True. "
+                "Either place the profile, set seccomp_missing_fatal=false to accept Docker's "
+                "default, or set strict_capabilities=false for dev/debug."
+            )
+        else:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "Seccomp profile %s missing; running with Docker default (reduced isolation)",
+                seccomp_path,
+            )
 
     # Do NOT inject CORPCLAW_IPC_SECRET into the long-lived container env.
-    # Secret is passed only on each docker exec (-e) from ContainerIPC so idle
-    # PID 1 never holds it in /proc/*/environ (security-hardening sprint1).
+    # Secret is passed on each docker exec via the worker's stdin (security-hardening
+    # sprint 3), so idle PID 1 never holds it in /proc/*/environ or argv.
 
     if network_policy:
         net_args: dict[str, Any] = dict(network_policy.to_docker_args())

@@ -351,3 +351,51 @@ def test_load_extensions_overlay_plugin_overrides_default_tool(tmp_path: Path, m
     assert tool is not None
     # Overlay description wins (overlay registered last with allow_replace=True).
     assert tool.description == "overlay impl"
+
+
+# ── S3-04: plugin subprocess bounded read ─────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_plugin_bounded_read_rejects_oversize_line():
+    """A plugin response line exceeding the byte cap raises LimitOverrunError."""
+    import asyncio
+
+    from corpclaw_lite.extensions.plugins.sandbox_proxy import _read_bounded_line
+
+    class _FakeStream:
+        def __init__(self, data: bytes) -> None:
+            self._data = data
+            self._pos = 0
+
+        async def read(self, n: int) -> bytes:
+            chunk = self._data[self._pos : self._pos + n]
+            self._pos += len(chunk)
+            return chunk
+
+    # Feed >64 bytes of data with no newline → must raise once the cap is crossed.
+    stream = _FakeStream(b"x" * 4096 * 2)
+    with pytest.raises(asyncio.LimitOverrunError):
+        await _read_bounded_line(stream, max_bytes=64)
+
+
+@pytest.mark.asyncio
+async def test_plugin_bounded_read_returns_line():
+    """A normal newline-terminated line is returned in full."""
+
+    from corpclaw_lite.extensions.plugins.sandbox_proxy import _read_bounded_line
+
+    class _FakeStream:
+        def __init__(self, data: bytes) -> None:
+            self._data = data
+            self._pos = 0
+
+        async def read(self, n: int) -> bytes:
+            chunk = self._data[self._pos : self._pos + n]
+            self._pos += len(chunk)
+            return chunk
+
+    payload = b'{"jsonrpc":"2.0","result":"ok"}\n'
+    stream = _FakeStream(payload)
+    line = await _read_bounded_line(stream, max_bytes=8 * 1024 * 1024)
+    assert line == payload
