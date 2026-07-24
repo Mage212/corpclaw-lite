@@ -105,19 +105,52 @@ class SQLiteMemory:
         self._init_db()
 
     def _init_db(self) -> None:
-        """Create entries tables; drop legacy memory_facts / messages (clean start).
+        """Create entries tables; drop legacy memory_facts / messages once (S1-09).
 
         FTS is durable: never drop ``memory_entries_fts`` on init. If the FTS
         row count diverges from ``memory_entries`` (empty after crash, partial
         dual-process fill), rebuild from the primary table.
+
+        S1-09: the legacy DROPs are gated behind a one-time migration marker in
+        ``app_metadata`` (mirroring UserManager's pattern). A second SQLiteMemory
+        instance, a CLI subcommand, or a restart during an in-flight writer can
+        no longer silently drop live legacy tables — the DROP runs exactly once
+        per database file.
         """
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             with db_connect(self.db_path) as conn:
                 conn.execute("PRAGMA journal_mode=WAL")
-                # Clean-start migrations (dev phase, D-078 / B-108).
-                conn.execute("DROP TABLE IF EXISTS messages")
-                conn.execute("DROP TABLE IF EXISTS memory_facts")
+                # app_metadata holds one-time migration markers (S1-09).
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS app_metadata (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
+                    )
+                    """
+                )
+                # Gate the legacy clean-start DROPs behind a marker so they run
+                # exactly once per DB file. Before this, every SQLiteMemory()
+                # instantiation re-ran the DROPs.
+                marker = conn.execute(
+                    "SELECT 1 FROM app_metadata WHERE key = 'memory_legacy_drop_v1'"
+                ).fetchone()
+                if marker is None:
+                    conn.execute("BEGIN IMMEDIATE")
+                    # Double-checked locking: re-check under the write lock.
+                    marker = conn.execute(
+                        "SELECT 1 FROM app_metadata WHERE key = 'memory_legacy_drop_v1'"
+                    ).fetchone()
+                    if marker is None:
+                        # Clean-start migrations (dev phase, D-078 / B-108).
+                        conn.execute("DROP TABLE IF EXISTS messages")
+                        conn.execute("DROP TABLE IF EXISTS memory_facts")
+                        conn.execute(
+                            "INSERT INTO app_metadata (key, value)"
+                            " VALUES ('memory_legacy_drop_v1', 'done')"
+                        )
+                    conn.commit()
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS memory_entries (
