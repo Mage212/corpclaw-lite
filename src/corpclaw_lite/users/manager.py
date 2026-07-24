@@ -1203,26 +1203,27 @@ class UserManager:
         return await anyio.to_thread.run_sync(partial(self.get_agent_context, user_id))
 
     def set_agent_context(self, user_id: int, *, instructions: str, tone: str) -> None:
-        """Upsert the user's agent context (personal instructions + tone)."""
+        """Upsert the user's agent context (personal instructions + tone).
+
+        S1-11: DB write errors now propagate (callers handle them) instead of
+        being swallowed — a silently-lost instruction/tone update is a data-loss
+        bug with no signal to the API layer.
+        """
         if tone not in ("default", "concise", "detailed"):
             tone = "default"
         instructions = instructions.strip()[:10000]  # cap at 10k chars
-        try:
-            with db_connect(self._db) as conn:
-                conn.execute(
-                    """
-                    INSERT INTO user_agent_context (user_id, instructions, tone, updated_at)
-                    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-                    ON CONFLICT(user_id) DO UPDATE SET
-                        instructions = excluded.instructions,
-                        tone = excluded.tone,
-                        updated_at = CURRENT_TIMESTAMP
-                    """,
-                    (int(user_id), instructions, tone),
-                )
-                conn.commit()
-        except Exception as e:
-            logger.warning("Failed to set agent context for user %s: %s", user_id, e)
+        with db_connect(self._db) as conn:
+            conn.execute(
+                """
+                INSERT INTO user_agent_context (user_id, instructions, tone, updated_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    instructions = excluded.instructions,
+                    tone = excluded.tone,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (int(user_id), instructions, tone),
+            )
 
     async def async_set_agent_context(self, user_id: int, *, instructions: str, tone: str) -> None:
         """Async wrapper around set_agent_context."""
@@ -1233,22 +1234,23 @@ class UserManager:
     # ── B-109: Memory worker opt-in + run history ───────────────────────────
 
     def set_memory_worker_enabled(self, user_id: int, enabled: bool) -> None:
-        """Opt a user in/out of the background memory worker (B-109)."""
+        """Opt a user in/out of the background memory worker (B-109).
+
+        S1-11: DB write errors now propagate (callers handle them) instead of
+        being swallowed.
+        """
         now = datetime.now(UTC).isoformat()
-        try:
-            with db_connect(self._db) as conn:
-                conn.execute(
-                    """
-                    INSERT INTO user_memory_worker (user_id, enabled, updated_at)
-                    VALUES (?, ?, ?)
-                    ON CONFLICT(user_id) DO UPDATE SET
-                        enabled = excluded.enabled,
-                        updated_at = excluded.updated_at
-                    """,
-                    (int(user_id), 1 if enabled else 0, now),
-                )
-        except Exception as e:
-            logger.warning("Failed to set memory_worker state for user %s: %s", user_id, e)
+        with db_connect(self._db) as conn:
+            conn.execute(
+                """
+                INSERT INTO user_memory_worker (user_id, enabled, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    enabled = excluded.enabled,
+                    updated_at = excluded.updated_at
+                """,
+                (int(user_id), 1 if enabled else 0, now),
+            )
 
     async def async_set_memory_worker_enabled(self, user_id: int, enabled: bool) -> None:
         """Async wrapper around set_memory_worker_enabled."""
@@ -1302,17 +1304,25 @@ class UserManager:
         *,
         status: str,
         error: str | None = None,
+        advance_last_run_at: bool = False,
     ) -> None:
         """Record the outcome of a memory-worker run for the user.
 
         Does NOT auto-enable: if no row exists, inserts with ``enabled=0`` so the
         opt-in guarantee is preserved (worker should only call this for already
         opted-in users, but defense-in-depth).
+
+        S1-11: ``advance_last_run_at`` controls whether ``last_run_at`` is bumped
+        to now. Only a genuinely completed run (``status="ok"``) should advance
+        it — skip/error outcomes must NOT demote the user in the
+        ``_sort_users_by_last_run`` ordering, otherwise a consistently-busy user
+        is starved (its skip sets a fresh timestamp every tick). status/error are
+        always recorded for observability.
         """
         now = datetime.now(UTC).isoformat()
         truncated_error = error[:2000] if error else None
-        try:
-            with db_connect(self._db) as conn:
+        with db_connect(self._db) as conn:
+            if advance_last_run_at:
                 conn.execute(
                     """
                     INSERT INTO user_memory_worker (
@@ -1327,8 +1337,22 @@ class UserManager:
                     """,
                     (int(user_id), now, status, truncated_error, now),
                 )
-        except Exception as e:
-            logger.warning("Failed to update memory_worker run for user %s: %s", user_id, e)
+            else:
+                # Record status/error but leave last_run_at untouched so the user
+                # is not demoted in the run-ordering sort.
+                conn.execute(
+                    """
+                    INSERT INTO user_memory_worker (
+                        user_id, enabled, last_status, last_error, updated_at
+                    )
+                    VALUES (?, 0, ?, ?, ?)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        last_status = excluded.last_status,
+                        last_error = excluded.last_error,
+                        updated_at = excluded.updated_at
+                    """,
+                    (int(user_id), status, truncated_error, now),
+                )
 
     async def async_update_memory_worker_run(
         self,
@@ -1336,8 +1360,15 @@ class UserManager:
         *,
         status: str,
         error: str | None = None,
+        advance_last_run_at: bool = False,
     ) -> None:
         """Async wrapper around update_memory_worker_run."""
         await anyio.to_thread.run_sync(
-            partial(self.update_memory_worker_run, user_id, status=status, error=error)
+            partial(
+                self.update_memory_worker_run,
+                user_id,
+                status=status,
+                error=error,
+                advance_last_run_at=advance_last_run_at,
+            )
         )

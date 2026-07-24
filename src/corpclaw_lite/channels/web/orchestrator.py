@@ -2149,9 +2149,15 @@ class WebChannelOrchestrator:
             instructions = ""
         if not isinstance(tone, str):
             tone = "default"
-        await self._stack.user_manager.async_set_agent_context(
-            user.id, instructions=instructions, tone=tone
-        )
+        # S1-11: set_agent_context now propagates DB errors; map to 5xx so the
+        # user is not silently told "ok" when the write failed.
+        try:
+            await self._stack.user_manager.async_set_agent_context(
+                user.id, instructions=instructions, tone=tone
+            )
+        except Exception:
+            logger.exception("Failed to persist agent context for user %s", user.id)
+            raise web.HTTPInternalServerError(reason="Failed to save agent context") from None
         return web.json_response({"ok": True})
 
     async def _handle_preview_agent_context(self, request: web.Request) -> web.Response:
