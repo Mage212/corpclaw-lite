@@ -266,7 +266,9 @@ class MemoryWorkerService:
         md_changed = self._write_md(user_id, update.md)
         entries_applied = await apply_worker_entries(self._memory, mem_key, update.entries)
 
-        await self._user_manager.async_update_memory_worker_run(user_id, status="ok")
+        await self._user_manager.async_update_memory_worker_run(
+            user_id, status="ok", advance_last_run_at=True
+        )
         log_event(
             "memory_worker_run",
             "",

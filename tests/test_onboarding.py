@@ -371,3 +371,63 @@ def test_finalization_prompt_has_placeholders() -> None:
         "department",
     ]:
         assert f"{{{key}}}" in FINALIZATION_PROMPT
+
+
+# ── S1-10: onboarding answer sanitization ──────────────────────────────────
+
+
+def test_finalization_prompt_format_with_brace_in_answer() -> None:
+    """S1-10: braces in answers must not break .format or mismatch placeholders."""
+    from corpclaw_lite.onboarding.finalizer import FINALIZATION_PROMPT, _safe_answer
+
+    # An answer containing {__class__} / {x} / stray braces must not raise.
+    prompt = FINALIZATION_PROMPT.format(
+        preferred_name=_safe_answer("Alice {__class__}"),
+        communication_style=_safe_answer("concise {x}"),
+        preferred_language=_safe_answer("ru"),
+        work_context=_safe_answer("finance"),
+        typical_tasks=_safe_answer("reports"),
+        additional_notes=_safe_answer("note { with stray } braces"),
+        department="finance",
+    )
+    # The braces are escaped so they appear literally in the rendered prompt.
+    assert "{__class__}" in prompt
+    assert "{x}" in prompt
+
+
+def test_safe_answer_caps_length() -> None:
+    """S1-10: an oversized answer is truncated before entering the prompt."""
+    from corpclaw_lite.onboarding.finalizer import _MAX_ANSWER_CHARS, _safe_answer
+
+    huge = "A" * (_MAX_ANSWER_CHARS * 3)
+    result = _safe_answer(huge)
+    assert len(result) == _MAX_ANSWER_CHARS
+
+
+def test_safe_answer_handles_none_and_empty() -> None:
+    from corpclaw_lite.onboarding.finalizer import _safe_answer
+
+    assert _safe_answer(None) == ""
+    assert _safe_answer("") == ""
+
+
+@pytest.mark.asyncio
+async def test_save_bootstrap_caps_oversized_instructions(tmp_path: Path) -> None:
+    """S1-10: _save_bootstrap truncates oversized LLM output."""
+    from corpclaw_lite.onboarding.finalizer import (
+        _MAX_BOOTSTRAP_CHARS,
+        OnboardingFinalizer,
+    )
+
+    users_dir = tmp_path / "users"
+    fin = OnboardingFinalizer(
+        provider=MagicMock(),
+        memory=MagicMock(),
+        bootstrap_users_dir=users_dir,
+        user_manager=MagicMock(),
+    )
+    huge = "X" * (_MAX_BOOTSTRAP_CHARS * 2)
+    fin._save_bootstrap(user_id=42, instructions=huge)
+    content = (users_dir / "42.md").read_text(encoding="utf-8")
+    # The instructions section is capped (the file has a small fixed header too).
+    assert content.count("X") == _MAX_BOOTSTRAP_CHARS
