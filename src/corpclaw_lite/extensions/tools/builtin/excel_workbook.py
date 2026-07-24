@@ -66,6 +66,37 @@ def _is_formula(value: Any) -> bool:
     return isinstance(value, str) and value.startswith("=")
 
 
+# Characters that spreadsheet applications interpret as the start of a formula.
+# Writing such a value verbatim into a cell turns it into a live formula (CWE-1236
+# CSV/Formula Injection) when the output .xlsx is opened by a human. Prefixing a
+# leading single quote forces the cell to text in Excel/LibreOffice/Numbers.
+_FORMULA_INJECTION_PREFIXES: tuple[str, ...] = ("=", "+", "-", "@")
+
+
+def sanitize_cell_value(value: Any) -> Any:
+    """Neutralise CSV/Excel formula injection (CWE-1236) on cell writes.
+
+    Strings that begin with a formula-trigger character (=, +, @) are
+    prefixed with a single quote so the spreadsheet stores them as literal
+    text instead of evaluating them as a formula (DDE commands, HYPERLINK,
+    etc.). Numbers and non-string values pass through unchanged. A leading
+    minus is only treated as a trigger when the remainder is not a number —
+    a plain negative-number string (e.g. ``"-5"``) is written as-is.
+    """
+    if not isinstance(value, str) or not value:
+        return value
+    first = value[0]
+    if first in ("=", "+", "@"):
+        return f"'{value}"
+    if first == "-":
+        # Quote only if it's not a plain negative number (e.g. "-5", "-5.5").
+        try:
+            float(value)
+        except ValueError:
+            return f"'{value}"
+    return value
+
+
 def _expand_cell_refs(refs: set[str]) -> set[str]:
     """Expand any A1:B2 ranges into their individual cell coordinates."""
     from openpyxl.utils import range_boundaries
@@ -652,7 +683,7 @@ def _apply_fill_common(
             continue
         planned.append(f"{display_key}→{addr}={val}")
         if not dry_run:
-            cell.value = val
+            cell.value = sanitize_cell_value(val)
             filled_addresses.add(addr)
             matched.append(addr)
         else:
@@ -669,7 +700,7 @@ def _apply_fill_common(
         elif dry_run:
             period_note = f" Would set {period_cell}={period_value!r}."
         else:
-            pcell.value = period_value
+            pcell.value = sanitize_cell_value(period_value)
             filled_addresses.add(period_cell.replace("$", ""))
             period_note = f" Set {period_cell}={period_value!r}."
 
@@ -982,7 +1013,7 @@ def _fill_cells(
                 if isinstance(cell, MergedCell):
                     skipped_merged.append(addr)
                     continue
-                cell.value = value
+                cell.value = sanitize_cell_value(value)
                 filled.append(addr)
             except Exception as e:
                 return f"Error writing to {addr}: {e}"

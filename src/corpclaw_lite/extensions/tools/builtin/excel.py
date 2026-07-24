@@ -187,8 +187,10 @@ def _create_normalized_workbook(
     for col_idx, col_type in col_types.items():
         col_formats[col_idx] = "General" if col_type == "numeric" else "@"
 
+    from corpclaw_lite.extensions.tools.builtin.excel_workbook import sanitize_cell_value
+
     for col_idx, header in enumerate(headers, start=1):
-        cell = ws.cell(row=1, column=col_idx, value=header)
+        cell = ws.cell(row=1, column=col_idx, value=sanitize_cell_value(header))
         cell.font = header_font
         cell.border = thin_border
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
@@ -196,7 +198,7 @@ def _create_normalized_workbook(
 
     for row_idx, row in enumerate(rows, start=2):
         for col_idx, value in enumerate(row, start=1):
-            cell = ws.cell(row=row_idx, column=col_idx, value=value)
+            cell = ws.cell(row=row_idx, column=col_idx, value=sanitize_cell_value(value))
             cell.border = thin_border
             cell.alignment = Alignment(vertical="center")
             cell.number_format = col_formats.get(col_idx, "@")

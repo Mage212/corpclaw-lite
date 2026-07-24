@@ -35,8 +35,13 @@ _SQL_READ_ONLY_ERROR = (
     "Error: table_query only supports read-only SELECT/WITH queries against loaded tables. "
     "Use the 'path' parameter to load files; file-reading SQL functions and DDL/DML are blocked."
 )
+_SQL_MULTI_STATEMENT_ERROR = (
+    "Error: table_query does not support multi-statement queries (the ';' separator "
+    "is blocked to prevent statement chaining). Run one query at a time."
+)
 _BLOCKED_SQL_PATTERNS = [
     r"\bATTACH\b",
+    r"\bCALL\b",
     r"\bCOPY\b",
     r"\bCREATE\b",
     r"\bDELETE\b",
@@ -47,6 +52,8 @@ _BLOCKED_SQL_PATTERNS = [
     r"\bINSERT\b",
     r"\bINSTALL\b",
     r"\bLOAD\b",
+    r"\bPRAGMA\b",
+    r"\bSET\b",
     r"\bTRUNCATE\b",
     r"\bUPDATE\b",
     r"\bread_csv\s*\(",
@@ -282,6 +289,24 @@ def _validate_read_only_query(query: str) -> str | None:
     for pattern in _BLOCKED_SQL_PATTERNS:
         if re.search(pattern, stripped, flags=re.IGNORECASE):
             return _SQL_READ_ONLY_ERROR
+
+    # S1-08: reject multi-statement queries. DuckDB executes ';' separated
+    # statements in a single execute() call; block the separator (outside
+    # single-quoted string literals) so a second statement cannot sneak past
+    # the first-token / blocked-keyword checks. '' inside a literal is an
+    # escaped quote, handled by consuming the next char.
+    in_literal = False
+    i = 0
+    while i < len(stripped):
+        ch = stripped[i]
+        if ch == "'":
+            if in_literal and i + 1 < len(stripped) and stripped[i + 1] == "'":
+                i += 2  # escaped quote ''
+                continue
+            in_literal = not in_literal
+        elif ch == ";" and not in_literal:
+            return _SQL_MULTI_STATEMENT_ERROR
+        i += 1
     return None
 
 
@@ -300,6 +325,10 @@ def _run_query(
 
     conn = duckdb.connect(":memory:")
     try:
+        # NOTE: enable_external_access is disabled AFTER data loading (see
+        # below) — the load step itself uses read_csv_auto/read_parquet, which
+        # require external access. Setting it here would block legitimate
+        # loading of the data file.
         ext = path.suffix.lower()
         # Escape single quotes in path to prevent SQL injection via file names.
         p = str(path).replace("'", "''")
@@ -356,7 +385,11 @@ def _run_query(
         count = conn.execute("SELECT COUNT(*) FROM data").fetchone()
         count_str = str(count[0]) if count else "0"
 
-        # Execute user query.
+        # Disable external file access before executing the user query. This is
+        # defense-in-depth on top of the read-only guard: even if a file-reading
+        # function somehow passed the regex, DuckDB refuses to touch the
+        # filesystem. It is set AFTER loading because read_csv_auto/read_parquet
+        # (used above to load the data) require external access.
         conn.execute("SET enable_external_access=false")
         result = conn.execute(query)
         columns = [desc[0] for desc in result.description] if result.description else []
