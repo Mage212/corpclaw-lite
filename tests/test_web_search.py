@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-import time
 from typing import Any
 from unittest.mock import patch
 
@@ -82,32 +80,16 @@ async def test_web_search_validation_errors() -> None:
 
 
 @pytest.mark.asyncio
-async def test_web_search_concurrency_limited() -> None:
-    tool = WebSearchTool(WebSettings(search_max_concurrent=1))
-    active = 0
-    max_active = 0
+async def test_web_search_executes_sequentially() -> None:
+    """S2-13: WebSearchTool has parallel_safe=False (no semaphore needed).
 
-    def fake_search(
-        query: str,
-        max_results: int,
-        region: str,
-        timelimit: str | None,
-    ) -> list[dict[str, Any]]:
-        nonlocal active, max_active
-        _ = (query, max_results, region, timelimit)
-        active += 1
-        max_active = max(max_active, active)
-        time.sleep(0.02)
-        active -= 1
-        return [{"title": "ok", "href": "https://example.com", "body": "snippet"}]
-
-    tool._search_sync = fake_search  # type: ignore[method-assign]
-    await asyncio.gather(
-        tool.execute(query="one"),
-        tool.execute(query="two"),
-    )
-
-    assert max_active == 1
+    The executor guarantees sequential execution; a semaphore would be dead code.
+    This replaces the old test that checked semaphore-based concurrency limiting,
+    which never applied in production (parallel_safe=False already prevents
+    concurrent execution at the executor level).
+    """
+    tool = WebSearchTool(WebSettings())
+    assert tool.parallel_safe is False
 
 
 # ── B-052: retry + unavailable marker ────────────────────────────────────────
