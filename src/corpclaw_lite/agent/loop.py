@@ -76,6 +76,7 @@ from corpclaw_lite.exceptions import ContainerIPCError, StorageError
 from corpclaw_lite.extensions.tools.base import TOOL_ERROR_PREFIX
 from corpclaw_lite.extensions.tools.registry import ToolRegistry
 from corpclaw_lite.llm.base import (
+    AsyncCloseable,
     LLMResponse,
     LLMStreamEvent,
     Provider,
@@ -789,7 +790,19 @@ class AgentLoop:
         emit_status("model_waiting")
 
         if not self._settings.llm_streaming_enabled or not isinstance(provider, StreamingProvider):
-            return await provider.chat(messages=messages, tools=tools, system=system)
+            # S1-03: bound the non-streaming call so a hung backend (local LLM
+            # stalled on prompt processing, or a half-open cloud connection)
+            # cannot block an agent slot for the SDK's 600s default. The
+            # TimeoutError propagates to the caller's ``except TimeoutError``
+            # handler, which finalizes the run with status="timeout".
+            try:
+                return await asyncio.wait_for(
+                    provider.chat(messages=messages, tools=tools, system=system),
+                    timeout=self._settings.llm_timeout_seconds,
+                )
+            except TimeoutError:
+                log_event("llm_chat_timeout", run_id, iteration=iteration, path="non_stream")
+                raise
 
         health.increment("llm_stream_calls")
         if stats is not None:
@@ -950,7 +963,16 @@ class AgentLoop:
                 elapsed_ms=round((time.monotonic() - started_at) * 1000, 1),
             )
             logger.warning("LLM streaming failed; falling back to chat(): %s", e)
-            return await provider.chat(messages=messages, tools=tools, system=system)
+            # S1-03: bound the fallback chat() too — the degraded scenario that
+            # triggered the fallback is exactly when a hang is most likely.
+            try:
+                return await asyncio.wait_for(
+                    provider.chat(messages=messages, tools=tools, system=system),
+                    timeout=self._settings.llm_timeout_seconds,
+                )
+            except TimeoutError:
+                log_event("llm_chat_timeout", run_id, iteration=iteration, path="stream_fallback")
+                raise
         finally:
             monitor_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -1848,6 +1870,17 @@ class AgentLoop:
             return msg, state.stats
         finally:
             self._finalize_turn(tokens)
+            # S1-01: close the run-scoped override-router (depth-mode / headless
+            # path) so its freshly-built provider HTTP clients do not leak on
+            # every run. ``self._provider`` is the shared process-lifetime router
+            # and is closed by the orchestrator at shutdown — never here.
+            if effective_provider is not self._provider and isinstance(
+                effective_provider, AsyncCloseable
+            ):
+                try:
+                    await effective_provider.aclose()
+                except Exception:
+                    logger.debug("Failed to close override provider", exc_info=True)
 
     async def _build_turn_context(
         self,

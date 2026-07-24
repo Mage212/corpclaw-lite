@@ -115,7 +115,13 @@ def build_provider(
         from corpclaw_lite.llm.anthropic import AnthropicProvider
 
         settings = ProviderSettings(
-            type="anthropic", model=model, api_key=conn.api_key, base_url=conn.base_url
+            type="anthropic",
+            model=model,
+            api_key=conn.api_key,
+            base_url=conn.base_url,
+            connect_timeout=conn.connect_timeout,
+            read_timeout=conn.read_timeout,
+            max_retries=conn.max_retries,
         )
         return AnthropicProvider(
             settings,
@@ -128,7 +134,15 @@ def build_provider(
     from corpclaw_lite.llm.openai import OpenAIProvider
 
     api_key = conn.api_key or "dummy"  # local models may not need a real key
-    settings = ProviderSettings(type="openai", model=model, api_key=api_key, base_url=conn.base_url)
+    settings = ProviderSettings(
+        type="openai",
+        model=model,
+        api_key=api_key,
+        base_url=conn.base_url,
+        connect_timeout=conn.connect_timeout,
+        read_timeout=conn.read_timeout,
+        max_retries=conn.max_retries,
+    )
     return OpenAIProvider(
         settings,
         preset=preset,
@@ -224,6 +238,8 @@ class LLMRouter:
         queue: LLMRequestQueue | None = None,
         provider_meta: dict[int, ProviderMeta] | None = None,
         cache_manager: LLMCacheManager | None = None,
+        *,
+        owned_providers: set[Provider] | None = None,
     ) -> None:
         self._providers = providers
         self._default_provider = default_provider
@@ -232,6 +248,13 @@ class LLMRouter:
         self._queue = queue
         self._provider_meta = provider_meta or {}
         self._cache_manager = cache_manager
+        # S1-01: providers this router OWNS (built by it) and must close on
+        # aclose(). Providers passed in from a parent router (e.g. non-overridden
+        # routes in with_overrides) stay owned by the parent and are NOT closed
+        # here, avoiding double-close. None = router does not own anything
+        # (legacy callers / external construction).
+        self._owned_providers: set[Provider] = owned_providers or set()
+        self._closed = False
         logger.info(
             "LLMRouter ready: %d provider instances, %d routing rules, queue=%s",
             len(providers),
@@ -436,6 +459,8 @@ class LLMRouter:
                     provider_api_keys=provider_api_keys,
                 )
 
+        # S1-01: from_settings built every provider via _get_or_create → the
+        # router owns all of them and must close them on aclose().
         return cls(
             providers,
             default_provider,
@@ -444,7 +469,32 @@ class LLMRouter:
             queue=queue,
             provider_meta=provider_meta,
             cache_manager=cache_manager,
+            owned_providers=set(cache.values()),
         )
+
+    async def aclose(self) -> None:
+        """Close provider HTTP clients this router owns (S1-01).
+
+        Only providers built by this router (``owned_providers``) are closed;
+        providers shared with a parent router (e.g. non-overridden routes in a
+        ``with_overrides`` router) are left for the parent to close. Idempotent.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        # Dedup by identity — a provider may appear in both _providers and
+        # _routing/_default_provider; closing it once is enough.
+        seen: set[int] = set()
+        for provider in self._owned_providers:
+            if id(provider) in seen:
+                continue
+            seen.add(id(provider))
+            aclose = getattr(provider, "aclose", None)
+            if aclose is not None:
+                try:
+                    await aclose()
+                except Exception:
+                    logger.warning("Failed to close provider %r", provider, exc_info=True)
 
     def _wrap_provider(
         self,
@@ -657,6 +707,11 @@ class LLMRouter:
         new_meta: dict[int, ProviderMeta] = {}
         new_default: Provider | None = None
         new_default_name: str | None = None
+        # S1-01: track freshly-built providers so the override-router owns them
+        # and closes them on aclose(). Parent providers reused as fallbacks
+        # (preserve, conn-missing, build-failed, default-fallback) are owned by
+        # the parent router and must NOT be closed here.
+        built_providers: set[Provider] = set()
 
         def _should_override(task_kind: str | None, subagent_id: str | None) -> bool:
             if apply_to == "default_only":
@@ -776,6 +831,7 @@ class LLMRouter:
             new_routing.append((task_kind, subagent_id, built, provider_name))
             new_providers[f"{provider_name}:{effective_model}"] = built
             new_meta[id(built)] = (provider_name, effective_model, profile_label)
+            built_providers.add(built)
             if task_kind == "default" and new_default is None:
                 new_default = built
                 new_default_name = provider_name
@@ -796,6 +852,7 @@ class LLMRouter:
             queue=self._queue,
             provider_meta=new_meta,
             cache_manager=self._cache_manager,
+            owned_providers=built_providers,
         )
 
     async def mark_user_cache_reset(self, user_id: str) -> None:

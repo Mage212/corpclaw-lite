@@ -8,6 +8,7 @@ from typing import Any, Literal, Protocol, runtime_checkable
 from pydantic import BaseModel, Field
 
 __all__ = [
+    "AsyncCloseable",
     "BackendRequestOptions",
     "LLMResponse",
     "LLMStreamEvent",
@@ -327,4 +328,19 @@ class VisionProvider(Protocol):
         system: str | None = None,
     ) -> LLMResponse:
         """Send a chat request with an inline base64 image."""
+        ...
+
+
+@runtime_checkable
+class AsyncCloseable(Protocol):
+    """Optional lifecycle contract: close underlying resources (HTTP clients).
+
+    Providers and routers implement this so orchestrators and run-scoped
+    override-routers can release ``httpx.AsyncClient`` connection pools at
+    shutdown instead of leaking them. Aditive to ``Provider`` — objects that do
+    not implement it are left untouched by callers.
+    """
+
+    async def aclose(self) -> None:
+        """Close underlying resources. Idempotent."""
         ...

@@ -737,6 +737,7 @@ class LLMCacheManager:
         max_age_seconds = self._config.max_age_days * 24 * 3600
         total = sum(max(0, entry.file_size_bytes) for entry in entries)
         deleted = 0
+        skipped_active = 0
         log_event(
             "llm_cache_prune_started",
             "unknown",
@@ -751,6 +752,16 @@ class LLMCacheManager:
             over_budget = total > self._config.max_total_bytes
             if not too_old and not over_budget:
                 continue
+            # S1-04: re-check actives immediately before the (awaiting) delete.
+            # Between the ``active_keys`` snapshot above and here, another
+            # coroutine's ``prepare()`` may have made this scope active. Deleting
+            # it now would erase a live slot's cache file — a direct violation of
+            # the "don't touch active scopes" rule (AGENTS.md §7.2).
+            async with self._slot_lock:
+                current_keys = {scope.key for scope in self._slot_scopes.values()}
+            if entry.scope.key in current_keys:
+                skipped_active += 1
+                continue
             if await self._delete_cache_entry(entry):
                 total -= max(0, entry.file_size_bytes)
                 deleted += 1
@@ -759,6 +770,7 @@ class LLMCacheManager:
             "unknown",
             deleted=deleted,
             remaining_bytes=total,
+            skipped_active=skipped_active,
         )
 
     def _should_use_cache(self, entry: QueueEntry) -> bool:
