@@ -431,3 +431,45 @@ async def test_save_bootstrap_caps_oversized_instructions(tmp_path: Path) -> Non
     content = (users_dir / "42.md").read_text(encoding="utf-8")
     # The instructions section is capped (the file has a small fixed header too).
     assert content.count("X") == _MAX_BOOTSTRAP_CHARS
+
+
+@pytest.mark.asyncio
+async def test_save_fallback_bootstrap_caps_oversized_answers(tmp_path: Path) -> None:
+    """S1-10: _save_fallback_bootstrap also caps answers + total file length.
+
+    The fallback path is reached when LLM finalization fails — exactly when a
+    crafted oversized answer would otherwise persist uncapped to the per-user
+    .md (→ system prompt). Both the LLM path and this fallback must be bounded.
+    """
+    from corpclaw_lite.onboarding.finalizer import (
+        _MAX_ANSWER_CHARS,
+        _MAX_BOOTSTRAP_CHARS,
+        OnboardingFinalizer,
+    )
+
+    users_dir = tmp_path / "users"
+    fin = OnboardingFinalizer(
+        provider=MagicMock(),
+        memory=MagicMock(),
+        bootstrap_users_dir=users_dir,
+        user_manager=MagicMock(),
+    )
+    # Oversized answers in every field.
+    huge = "Z" * (_MAX_ANSWER_CHARS * 5)
+    fin._save_fallback_bootstrap(
+        user_id=7,
+        answers={
+            "preferred_name": huge,
+            "communication_style": huge,
+            "preferred_language": huge,
+            "work_context": huge,
+        },
+        department="finance",
+    )
+    content = (users_dir / "7.md").read_text(encoding="utf-8")
+    # Total file is capped.
+    assert len(content) <= _MAX_BOOTSTRAP_CHARS
+    # No single answer exceeds the per-answer cap (the header has no 'Z').
+    # Each field appears once; even one full _MAX_ANSWER_CHARS run would fit,
+    # so the key assertion is the total-file cap above.
+    assert "Z" in content  # the (truncated) answers are present

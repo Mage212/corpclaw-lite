@@ -121,6 +121,8 @@ def build_provider(
             base_url=conn.base_url,
             connect_timeout=conn.connect_timeout,
             read_timeout=conn.read_timeout,
+            write_timeout=conn.write_timeout,
+            pool_timeout=conn.pool_timeout,
             max_retries=conn.max_retries,
         )
         return AnthropicProvider(
@@ -141,6 +143,8 @@ def build_provider(
         base_url=conn.base_url,
         connect_timeout=conn.connect_timeout,
         read_timeout=conn.read_timeout,
+        write_timeout=conn.write_timeout,
+        pool_timeout=conn.pool_timeout,
         max_retries=conn.max_retries,
     )
     return OpenAIProvider(

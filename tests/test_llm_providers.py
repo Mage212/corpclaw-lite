@@ -474,6 +474,8 @@ class TestProviderTimeoutRetry:
             base_url="http://localhost:11434/v1",
             connect_timeout=5.0,
             read_timeout=300.0,
+            write_timeout=250.0,
+            pool_timeout=200.0,
             max_retries=3,
         )
         with patch("corpclaw_lite.llm.openai.openai") as mock_mod:
@@ -482,6 +484,8 @@ class TestProviderTimeoutRetry:
 
         kwargs = mock_mod.AsyncOpenAI.call_args.kwargs
         assert isinstance(kwargs["timeout"], httpx.Timeout)
+        assert kwargs["timeout"].write == 250.0
+        assert kwargs["timeout"].pool == 200.0
         assert kwargs["max_retries"] == 3
 
     def test_anthropic_provider_passes_timeout_and_max_retries(self) -> None:
@@ -495,6 +499,8 @@ class TestProviderTimeoutRetry:
             api_key="sk-ant-test123",
             connect_timeout=7.0,
             read_timeout=120.0,
+            write_timeout=110.0,
+            pool_timeout=90.0,
             max_retries=2,
         )
         with patch("corpclaw_lite.llm.anthropic.anthropic") as mock_mod:
@@ -503,14 +509,22 @@ class TestProviderTimeoutRetry:
 
         kwargs = mock_mod.AsyncAnthropic.call_args.kwargs
         assert isinstance(kwargs["timeout"], httpx.Timeout)
+        assert kwargs["timeout"].write == 110.0
+        assert kwargs["timeout"].pool == 90.0
         assert kwargs["max_retries"] == 2
 
     def test_default_timeouts_when_unset(self) -> None:
-        """Defaults match the OpenAI SDK (no regression for existing deployments)."""
+        """Defaults match the OpenAI/Anthropic SDK exactly (no regression)."""
         from corpclaw_lite.config.providers import ProviderConnection
 
         conn = ProviderConnection(type="openai", api_key="x", base_url="http://x")
-        # Defaults mirror the OpenAI SDK: connect 10s, read 600s, no retries.
-        assert conn.connect_timeout == 10.0
+        # Defaults mirror the SDK: connect 5s, read/write/pool 600s, 2 retries.
+        assert conn.connect_timeout == 5.0
         assert conn.read_timeout == 600.0
-        assert conn.max_retries == 0
+        assert conn.write_timeout == 600.0
+        assert conn.pool_timeout == 600.0
+        assert conn.max_retries == 2
+        # Regression guard: write/pool must NOT be tied to connect (a prior bug
+        # set write=connect=10s, breaking large request bodies for all deploys).
+        assert conn.write_timeout != conn.connect_timeout
+        assert conn.pool_timeout != conn.connect_timeout

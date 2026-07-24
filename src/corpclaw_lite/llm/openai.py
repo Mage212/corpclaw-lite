@@ -157,15 +157,15 @@ class OpenAIProvider(Provider):
         self._preset = preset  # kept for back-compat introspection (deprecated)
         self._model_profile = model_profile
         self._sampling = sampling
-        # S1-02: explicit transport timeout + retry. Defaults match the OpenAI SDK
-        # (connect 10s, read 600s) but local-LLM stacks with large contexts must
-        # raise READ_TIMEOUT via env. max_retries defaults to 0 — agent-level
-        # asyncio.wait_for around provider.chat() is the primary timeout guard.
+        # S1-02: explicit transport timeout + retry. Defaults mirror the OpenAI
+        # SDK exactly (connect 5s, read/write/pool 600s, max_retries 2) so
+        # existing deployments are unaffected. Local-LLM stacks with large
+        # contexts should raise READ_TIMEOUT via env.
         timeout = httpx.Timeout(
             connect=settings.connect_timeout,
             read=settings.read_timeout,
-            write=settings.connect_timeout,
-            pool=settings.connect_timeout,
+            write=settings.write_timeout,
+            pool=settings.pool_timeout,
         )
         api_key = settings.api_key or "dummy"  # local models may not need a real key
         client_kwargs: dict[str, Any] = {
