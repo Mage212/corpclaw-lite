@@ -127,6 +127,35 @@ async def test_default_tool_guard_private_ip_rules_do_not_match_arxiv_ids() -> N
 
 
 @pytest.mark.asyncio
+async def test_ssrf_rules_block_cgnat_and_link_local_ranges() -> None:
+    """S1-05: SSRF YAML rules must cover CGNAT (100.64/10) and link-local
+    (169.254/16) ranges, matching the code-level ``not addr.is_global`` check.
+    """
+    rules_path = Path(__file__).resolve().parents[1] / "config" / "tool_guard_rules.yaml"
+    guard = ToolGuard()
+    guard.load_file(rules_path)
+
+    # CGNAT range — must be blocked (both fetch rules).
+    with pytest.raises(ApprovalRequest, match="WEB_FETCH_PRIVATE_IP"):
+        await guard.check("web_fetch", {"url": "http://100.64.0.1/"})
+    with pytest.raises(ApprovalRequest, match="WEB_FETCH_PRIVATE_IP"):
+        await guard.check("web_fetch", {"url": "http://100.127.255.255/"})
+    with pytest.raises(ApprovalRequest, match="RESEARCH_FETCH_PRIVATE_IP"):
+        await guard.check("research_fetch_source", {"url": "http://100.100.10.20/"})
+
+    # Link-local — must be blocked (both fetch rules).
+    with pytest.raises(ApprovalRequest, match="WEB_FETCH_PRIVATE_IP"):
+        await guard.check("web_fetch", {"url": "http://169.254.170.2/"})
+    with pytest.raises(ApprovalRequest, match="RESEARCH_FETCH_PRIVATE_IP"):
+        await guard.check("research_fetch_source", {"url": "http://169.254.169.254/"})
+
+    # Boundary: addresses just outside CGNAT must NOT be blocked by these rules.
+    # (100.63.x and 100.128.x are public.)
+    await guard.check("web_fetch", {"url": "http://100.63.0.1/"})
+    await guard.check("web_fetch", {"url": "http://100.128.0.1/"})
+
+
+@pytest.mark.asyncio
 async def test_toolguard_rm_separate_flags(tmp_path: Path) -> None:
     rules_file = tmp_path / "rules.yaml"
     rules_file.write_text(

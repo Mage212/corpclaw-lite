@@ -413,3 +413,86 @@ class TestTableQueryTool:
         )
         assert "Error" in result
         assert "NoSuchSheet" in result
+
+
+# ── S1-08: multi-statement + SET/PRAGMA/CALL blocking ──────────────────────
+
+
+@pytest.mark.asyncio
+async def test_blocks_multi_statement_semicolon(
+    tool: TableQueryTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S1-08: the ';' separator is blocked outside string literals."""
+    monkeypatch.chdir(tmp_path)
+    _create_csv(tmp_path / "data.csv", "a,b\n1,2\n")
+
+    result = await tool.execute(path="data.csv", query="SELECT 1; SELECT 2")
+    assert "Error" in result
+    assert "multi-statement" in result
+
+
+@pytest.mark.asyncio
+async def test_blocks_semicolon_with_second_statement(
+    tool: TableQueryTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S1-08: a chained second statement after ';' is blocked."""
+    monkeypatch.chdir(tmp_path)
+    _create_csv(tmp_path / "data.csv", "a,b\n1,2\n")
+
+    result = await tool.execute(path="data.csv", query="SELECT * FROM data; DROP TABLE data")
+    assert "Error" in result
+
+
+@pytest.mark.asyncio
+async def test_blocks_set_statement(
+    tool: TableQueryTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S1-08: SET keyword is blocked even as the first statement."""
+    monkeypatch.chdir(tmp_path)
+    _create_csv(tmp_path / "data.csv", "a,b\n1,2\n")
+
+    result = await tool.execute(path="data.csv", query="SET enable_external_access=true")
+    assert "Error" in result
+    assert "read-only" in result
+
+
+@pytest.mark.asyncio
+async def test_blocks_pragma_and_call(
+    tool: TableQueryTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S1-08: PRAGMA and CALL are blocked (state-changing)."""
+    monkeypatch.chdir(tmp_path)
+    _create_csv(tmp_path / "data.csv", "a,b\n1,2\n")
+
+    for keyword in ("PRAGMA database_size", "CALL some_proc()"):
+        result = await tool.execute(path="data.csv", query=keyword)
+        assert "Error" in result
+        assert "read-only" in result
+
+
+@pytest.mark.asyncio
+async def test_semicolon_inside_string_literal_allowed(
+    tool: TableQueryTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S1-08: a ';' inside a single-quoted literal must NOT trigger the block."""
+    monkeypatch.chdir(tmp_path)
+    _create_csv(tmp_path / "data.csv", "name\nO'Brien\n")
+
+    # WHERE clause with a literal containing ';' — valid, single statement.
+    result = await tool.execute(path="data.csv", query="SELECT * FROM data WHERE name = 'a;b'")
+    assert "multi-statement" not in result
+
+
+@pytest.mark.asyncio
+async def test_cte_and_subquery_still_work(
+    tool: TableQueryTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S1-08 regression: WITH (CTE) and subqueries remain valid."""
+    monkeypatch.chdir(tmp_path)
+    _create_csv(tmp_path / "data.csv", "a,b\n1,2\n3,4\n")
+
+    result = await tool.execute(
+        path="data.csv",
+        query="WITH t AS (SELECT * FROM data) SELECT COUNT(*) AS n FROM t",
+    )
+    assert "2" in result  # two rows
