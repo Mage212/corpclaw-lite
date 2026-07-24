@@ -44,7 +44,8 @@ class TestDetectLoopForResults:
         # now a fully-successful batch
         assert guard.detect_loop_for_results([("list_files", _SUCCESS)]) is False
         assert guard.state.same_error_count == 0
-        assert guard.state.last_tool_error_signature is None
+        # S1-13: the sliding window is cleared on a fully-successful batch.
+        assert len(guard.state.recent_signatures) == 0
 
     def test_same_error_same_tool_one_turn_no_loop(self) -> None:
         """[error, error, error] for the SAME tool in ONE turn must NOT loop.
@@ -106,4 +107,31 @@ class TestReset:
         assert guard.state.same_error_count == 1
         guard.reset()
         assert guard.state.same_error_count == 0
-        assert guard.state.last_tool_error_signature is None
+        # S1-13: reset clears the sliding window.
+        assert len(guard.state.recent_signatures) == 0
+
+
+# ── S1-13: ping-pong detection ─────────────────────────────────────────────
+
+
+class TestPingPongDetection:
+    """S1-13: the sliding window catches ping-pong between two distinct
+    error signatures ([A]→[B]→[A]→[B]), which the old single-signature
+    comparison missed."""
+
+    def test_ping_pong_between_two_signatures_detected(self) -> None:
+        guard = SimpleProgressGuard(SimpleProgressGuardConfig(max_same_tool_error=2))
+        err_a = "Error: permission denied"
+        err_b = "Error: not found"
+        # Turn 1: [A], Turn 2: [B], Turn 3: [A] — A recurs within the window.
+        assert guard.detect_loop_for_results([("read_file", err_a)]) is False
+        assert guard.detect_loop_for_results([("read_file", err_b)]) is False
+        assert guard.detect_loop_for_results([("read_file", err_a)]) is True
+
+    def test_two_distinct_signatures_without_recurrence_no_loop(self) -> None:
+        """Two different errors that don't repeat are not a loop."""
+        guard = SimpleProgressGuard(SimpleProgressGuardConfig(max_same_tool_error=3))
+        assert guard.detect_loop_for_results([("read_file", "Error: one")]) is False
+        assert guard.detect_loop_for_results([("read_file", "Error: two")]) is False
+        # A third distinct error — none recur, no loop.
+        assert guard.detect_loop_for_results([("read_file", "Error: three")]) is False

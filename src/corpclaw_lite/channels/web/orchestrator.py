@@ -783,6 +783,29 @@ class WebChannelOrchestrator:
             self._ws_tickets.pop(token, None)
         return len(expired)
 
+    def _prune_login_attempts(self) -> int:
+        """S1-12: evict stale login-attempt tracking entries.
+
+        Removes entries whose lockout has expired AND whose 60s failure window
+        is empty after pruning old timestamps. Active lockouts are preserved so
+        brute-force protection is not weakened. Without this, username
+        enumeration / fuzzing grows ``_login_attempts`` unboundedly.
+        """
+        now = time.time()
+        window_start = now - 60
+        stale: list[str] = []
+        for key, state in self._login_attempts.items():
+            # Prune old failures within the window for an accurate count.
+            state.failures = [ts for ts in state.failures if ts >= window_start]
+            if state.lockout_until > now:
+                continue  # active lockout — keep
+            if state.failures:
+                continue  # recent failures within the window — keep
+            stale.append(key)
+        for key in stale:
+            self._login_attempts.pop(key, None)
+        return len(stale)
+
     @staticmethod
     def _origin_matches_request(request: web.Request) -> bool:
         # B-074/L4: require an Origin header and a host match. Browsers always
@@ -3274,6 +3297,7 @@ class WebChannelOrchestrator:
             removed = self._stack.user_manager.prune_expired_web_sessions()
             grants_removed = self._prune_download_grants()
             tickets_removed = self._prune_ws_tickets()
+            login_removed = self._prune_login_attempts()
             chat_removed = 0
             if self._chat_store is not None:
                 try:
@@ -3291,6 +3315,8 @@ class WebChannelOrchestrator:
                 logger.info("Pruned %d expired web download grants", grants_removed)
             if tickets_removed:
                 logger.info("Pruned %d expired web socket tickets", tickets_removed)
+            if login_removed:
+                logger.info("Pruned %d stale login-attempt entries", login_removed)
             if chat_removed:
                 logger.info("Pruned %d archived web chat session(s)", chat_removed)
 

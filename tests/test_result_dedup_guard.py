@@ -47,13 +47,19 @@ def test_detect_same_tool_different_results_not_loop() -> None:
 
     Simulates a file changing between reads. Argument-based dedup would wrongly
     flag this; result-based dedup correctly sees different outputs.
+
+    S1-13: dedup now counts CONSECUTIVE identical results only. A result that
+    reappears after intervening different results (A→B→C→A) does NOT trip the
+    guard — the model did productive work in between, so this is legitimate
+    re-verification, not a stuck loop.
     """
     guard = _guard()
     assert guard.detect("read_file", "state A") is False
     assert guard.detect("read_file", "state B") is False
     assert guard.detect("read_file", "state C") is False
-    # A *second* appearance of an already-seen result (even interleaved with
-    # different ones) is still a repeat — that is correct dedup behaviour.
+    # S1-13: a repeat after intervening different results is NOT a loop.
+    assert guard.detect("read_file", "state A") is False
+    # ...but an immediate consecutive repeat (A→A) IS a loop signal.
     assert guard.detect("read_file", "state A") is True
 
 

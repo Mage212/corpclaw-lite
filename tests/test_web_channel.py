@@ -2460,3 +2460,41 @@ async def test_restore_user_context_succeeds_without_memory_shadow(tmp_path: Pat
 
     restored = await service.restore_user_context(user, session_id)
     assert restored is True
+
+
+# ── S1-12: login-attempts prune ────────────────────────────────────────────
+
+
+def test_prune_login_attempts_evicts_stale_keeps_active() -> None:
+    """S1-12: _prune_login_attempts removes expired/no-failure entries but
+    preserves active lockouts so brute-force protection is not weakened."""
+    from corpclaw_lite.channels.web.orchestrator import WebChannelOrchestrator, _LoginAttemptState
+
+    orch = WebChannelOrchestrator(Settings())
+    now = time.time()
+    # (1) stale entry: lockout expired, no recent failures → evicted.
+    orch._login_attempts["ip:1:user:a"] = _LoginAttemptState(failures=[], lockout_until=now - 100)
+    # (2) active lockout → kept.
+    orch._login_attempts["ip:2:user:b"] = _LoginAttemptState(
+        failures=[now - 5], lockout_until=now + 200
+    )
+    # (3) recent failure within window (no lockout) → kept.
+    orch._login_attempts["ip:3:user:c"] = _LoginAttemptState(failures=[now - 10], lockout_until=0.0)
+    # (4) stale entry with old failure outside window → evicted.
+    orch._login_attempts["ip:4:user:d"] = _LoginAttemptState(
+        failures=[now - 120], lockout_until=now - 50
+    )
+
+    removed = orch._prune_login_attempts()
+    assert removed == 2  # ip:1 and ip:4 evicted
+    assert "ip:1:user:a" not in orch._login_attempts
+    assert "ip:4:user:d" not in orch._login_attempts
+    assert "ip:2:user:b" in orch._login_attempts  # active lockout kept
+    assert "ip:3:user:c" in orch._login_attempts  # recent failure kept
+
+
+def test_prune_login_attempts_empty_is_noop() -> None:
+    from corpclaw_lite.channels.web.orchestrator import WebChannelOrchestrator
+
+    orch = WebChannelOrchestrator(Settings())
+    assert orch._prune_login_attempts() == 0
