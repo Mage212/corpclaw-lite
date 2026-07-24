@@ -922,11 +922,47 @@ class AnthropicProvider(Provider):
             try:
                 arguments = json.loads(raw_arguments)
             except json.JSONDecodeError as exc:
-                raise ValueError(f"Malformed streamed tool arguments for {part['name']}") from exc
+                # S2-01: degrade instead of crashing the run. The non-streamed
+                # path (_parse_response) already skips malformed tool calls with
+                # a warning; the streamed path must match so a single malformed
+                # streamed tool call does not crash the main-agent run
+                # (llm_streaming_enabled is the default main-agent path).
+                logger.warning(
+                    "Rejected streamed Anthropic tool call with malformed arguments: %s (%s)",
+                    part["name"],
+                    exc,
+                )
+                log_event(
+                    "native_tool_call_rejected",
+                    get_run_id() or "unknown",
+                    tool=part["name"],
+                    reason="malformed_streamed_arguments",
+                )
+                continue
             if not isinstance(arguments, dict):
-                raise ValueError(f"Tool arguments for {part['name']} must be an object")
+                logger.warning(
+                    "Rejected streamed Anthropic tool call with non-object arguments: %s",
+                    part["name"],
+                )
+                log_event(
+                    "native_tool_call_rejected",
+                    get_run_id() or "unknown",
+                    tool=part["name"],
+                    reason="non_object_streamed_arguments",
+                )
+                continue
             if not part["id"]:
-                raise ValueError("Anthropic streamed tool call requires a non-empty id")
+                logger.warning(
+                    "Rejected streamed Anthropic tool call without an id: %s",
+                    part["name"],
+                )
+                log_event(
+                    "native_tool_call_rejected",
+                    get_run_id() or "unknown",
+                    tool=part["name"],
+                    reason="missing_streamed_id",
+                )
+                continue
             tool_calls.append(
                 ToolCall(
                     id=part["id"],
