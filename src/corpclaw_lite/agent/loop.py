@@ -790,19 +790,12 @@ class AgentLoop:
         emit_status("model_waiting")
 
         if not self._settings.llm_streaming_enabled or not isinstance(provider, StreamingProvider):
-            # S1-03: bound the non-streaming call so a hung backend (local LLM
-            # stalled on prompt processing, or a half-open cloud connection)
-            # cannot block an agent slot for the SDK's 600s default. The
-            # TimeoutError propagates to the caller's ``except TimeoutError``
-            # handler, which finalizes the run with status="timeout".
-            try:
-                return await asyncio.wait_for(
-                    provider.chat(messages=messages, tools=tools, system=system),
-                    timeout=self._settings.llm_timeout_seconds,
-                )
-            except TimeoutError:
-                log_event("llm_chat_timeout", run_id, iteration=iteration, path="non_stream")
-                raise
+            # The caller wraps this whole call in asyncio.wait_for(timeout=
+            # llm_timeout_seconds) (see the call sites below), which is the
+            # single source of bounding — a TimeoutError there finalizes the run
+            # with status="timeout". No inner wait_for is needed (and an inner
+            # one with the same timeout would be shadowed dead code).
+            return await provider.chat(messages=messages, tools=tools, system=system)
 
         health.increment("llm_stream_calls")
         if stats is not None:
@@ -963,16 +956,9 @@ class AgentLoop:
                 elapsed_ms=round((time.monotonic() - started_at) * 1000, 1),
             )
             logger.warning("LLM streaming failed; falling back to chat(): %s", e)
-            # S1-03: bound the fallback chat() too — the degraded scenario that
-            # triggered the fallback is exactly when a hang is most likely.
-            try:
-                return await asyncio.wait_for(
-                    provider.chat(messages=messages, tools=tools, system=system),
-                    timeout=self._settings.llm_timeout_seconds,
-                )
-            except TimeoutError:
-                log_event("llm_chat_timeout", run_id, iteration=iteration, path="stream_fallback")
-                raise
+            # Same as the non-streaming path: the caller's outer wait_for bounds
+            # this fallback chat() — no inner wait_for needed.
+            return await provider.chat(messages=messages, tools=tools, system=system)
         finally:
             monitor_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

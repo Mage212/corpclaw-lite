@@ -99,15 +99,15 @@ class AnthropicProvider(Provider):
         if not settings.api_key:
             raise ValueError("Anthropic requires an API key in settings")
 
-        # S1-02: explicit transport timeout + retry. Cloud (Anthropic) typically
-        # responds faster than local LLMs, but operators can still tune via env.
-        # max_retries defaults to 0 — agent-level asyncio.wait_for around
-        # provider.chat() is the primary timeout guard.
+        # S1-02: explicit transport timeout + retry. Defaults mirror the
+        # Anthropic SDK exactly (connect 5s, read/write/pool 600s,
+        # max_retries 2) so existing deployments are unaffected. Operators can
+        # still tune all four via env.
         timeout = httpx.Timeout(
             connect=settings.connect_timeout,
             read=settings.read_timeout,
-            write=settings.connect_timeout,
-            pool=settings.connect_timeout,
+            write=settings.write_timeout,
+            pool=settings.pool_timeout,
         )
         client_kwargs: dict[str, Any] = {
             "api_key": settings.api_key,

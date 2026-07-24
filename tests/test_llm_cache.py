@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any, cast
 
@@ -301,12 +302,17 @@ async def test_prune_deletes_old_entry_when_not_active(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_prune_skips_scope_that_became_active_mid_prune(tmp_path: Path) -> None:
     """S1-04: TOCTOU fix — prune must not delete a scope that became active
-    between the active_keys snapshot and the per-entry delete.
+    between the active_keys snapshot and the per-entry re-check.
 
-    Reproduces the race: the scope is registered as active (as a concurrent
-    ``prepare()`` would) during the ``_store.list_all()`` await — after the
-    snapshot is taken but before the per-entry re-check. The re-check under
-    ``_slot_lock`` must skip the delete.
+    Reproduces the real race: ``prune`` takes the active_keys snapshot, then
+    iterates entries. The first entry's ``await _delete_cache_entry`` yields
+    control; a concurrent ``prepare()`` registers the SECOND entry's scope as
+    active during that await. By the time the second entry's re-check runs
+    (after the first delete's await), the scope is active and the re-check must
+    skip it.
+
+    Without the S1-04 re-check, the second entry is deleted (the snapshot missed
+    the late activation), so this test FAILS when the re-check is removed.
     """
     client = FakeSlotCacheClient()
     manager = LLMCacheManager(
@@ -314,25 +320,76 @@ async def test_prune_skips_scope_that_became_active_mid_prune(tmp_path: Path) ->
         provider_base_urls={"llamacpp": "http://llama:8080/v1"},
         client=client,
     )
-    scope = await _seed_old_entry(manager, age_seconds=31 * 24 * 3600)
+    # Two old entries: "first" will be deleted (its delete await yields control,
+    # during which we activate "second"'s scope); "second" must survive.
+    first_scope = manager.build_scope(
+        user_id="u_first",
+        conversation_id="default",
+        agent_id="main",
+        provider_name="llamacpp",
+        model="gpt-oss",
+        preset="default",
+        system="s1",
+        tools=[],
+    )
+    second_scope = manager.build_scope(
+        user_id="u_second",
+        conversation_id="default",
+        agent_id="main",
+        provider_name="llamacpp",
+        model="gpt-oss",
+        preset="default",
+        system="s2",
+        tools=[],
+    )
+    import time
 
-    # Simulate a concurrent prepare(): register the scope active as a side
-    # effect of the store snapshot await (the suspension point between the
-    # active_keys snapshot and the per-entry loop). The snapshot taken inside
-    # prune runs BEFORE this, so active_keys does NOT include the scope; the
-    # per-entry re-check (added in S1-04) runs AFTER and must see it.
-    store = cast(Any, manager)._store
-    real_list_all = store.list_all
+    from corpclaw_lite.llm.cache import LLMCacheMetadata
 
-    async def racing_list_all() -> list[LLMCacheMetadata]:
-        entries = await real_list_all()
-        cast(Any, manager)._slot_scopes[0] = scope
-        return entries
+    now = time.time()
+    age = 31 * 24 * 3600
+    for scope in (first_scope, second_scope):
+        await cast(Any, manager)._store.upsert(
+            LLMCacheMetadata(
+                scope=scope,
+                filename=scope.filename,
+                token_count=1000,
+                file_size_bytes=100_000,
+                prompt_tokens=1000,
+                cached_tokens=800,
+                prompt_n=200,
+                created_at=now - age,
+                last_used_at=now - age,
+                last_saved_at=now - age,
+                save_count=1,
+                restore_count=0,
+            )
+        )
 
-    store.list_all = racing_list_all  # type: ignore[method-assign]
+    # Wrap _delete_cache_entry: when the FIRST entry is deleted, register the
+    # second scope active (simulating a concurrent prepare() during the await),
+    # then perform the real delete. The second entry's re-check then sees the
+    # active scope and skips it.
+    real_delete = manager._delete_cache_entry
+
+    async def racing_delete(entry: LLMCacheMetadata) -> bool:
+        if entry.scope.key == first_scope.key:
+            # Yield control so this is a real suspension point, then activate
+            # the second scope as a concurrent prepare() would.
+            await asyncio.sleep(0)
+            cast(Any, manager)._slot_scopes[0] = second_scope
+        return await real_delete(entry)
+
+    cast(Any, manager)._delete_cache_entry = racing_delete  # type: ignore[method-assign]
 
     await manager.prune()
 
-    # The entry survived: the re-check saw the now-active scope and skipped it.
-    remaining = await real_list_all()
-    assert any(m.scope.key == scope.key for m in remaining)
+    # first was deleted (its delete completed normally); second survived because
+    # its scope was activated during first's delete await — so by the time the
+    # second entry's re-check ran, the scope was active and the delete was
+    # skipped. Without the S1-04 re-check, second would have been deleted too.
+    store = cast(Any, manager)._store
+    remaining = await store.list_all()
+    remaining_keys = {m.scope.key for m in remaining}
+    assert first_scope.key not in remaining_keys  # genuinely deleted
+    assert second_scope.key in remaining_keys  # survived via late-activation re-check

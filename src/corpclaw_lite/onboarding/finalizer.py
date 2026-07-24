@@ -278,11 +278,16 @@ class OnboardingFinalizer:
         answers: dict[str, str],
         department: str,
     ) -> None:
-        """Generate a minimal bootstrap from raw answers (no LLM)."""
-        name = answers.get("preferred_name", f"user_{user_id}")
-        style = answers.get("communication_style", "")
-        language = answers.get("preferred_language", "")
-        context = answers.get("work_context", "")
+        """Generate a minimal bootstrap from raw answers (no LLM).
+
+        S1-10: each answer is capped at ``_MAX_ANSWER_CHARS`` and the whole file
+        at ``_MAX_BOOTSTRAP_CHARS`` so a crafted oversized answer cannot bloat
+        the per-user system prompt when the LLM finalization path is unavailable.
+        """
+        name = str(answers.get("preferred_name", f"user_{user_id}"))[:_MAX_ANSWER_CHARS]
+        style = str(answers.get("communication_style", ""))[:_MAX_ANSWER_CHARS]
+        language = str(answers.get("preferred_language", ""))[:_MAX_ANSWER_CHARS]
+        context = str(answers.get("work_context", ""))[:_MAX_ANSWER_CHARS]
 
         lines = [
             "---",
@@ -307,7 +312,8 @@ class OnboardingFinalizer:
 
         self._users_dir.mkdir(parents=True, exist_ok=True)
         path = self._users_dir / f"{user_id}.md"
-        path.write_text("\n".join(lines), encoding="utf-8")
+        content = "\n".join(lines)[:_MAX_BOOTSTRAP_CHARS]
+        path.write_text(content, encoding="utf-8")
 
     async def _save_facts(self, user_id: int, facts: list[tuple[str, str]]) -> None:
         """Write LLM-structured facts to memory_facts."""

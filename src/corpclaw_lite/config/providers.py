@@ -8,9 +8,11 @@ Fields:
     TYPE            — "openai" (default) or "anthropic"
     BASE_URL        — endpoint URL (e.g. http://localhost:11434/v1)
     API_KEY         — authentication key (optional for local providers)
-    CONNECT_TIMEOUT — HTTP connect timeout in seconds (default 10.0)
+    CONNECT_TIMEOUT — HTTP connect timeout in seconds (default 5.0)
     READ_TIMEOUT    — HTTP read timeout in seconds (default 600.0; see note)
-    MAX_RETRIES     — SDK automatic retries on transport errors (default 0)
+    WRITE_TIMEOUT   — HTTP write (request body) timeout in seconds (default 600.0)
+    POOL_TIMEOUT    — connection-pool acquisition timeout in seconds (default 600.0)
+    MAX_RETRIES     — SDK automatic retries on transport errors (default 2)
 
 Example ``.env``::
 
@@ -29,12 +31,12 @@ Example ``.env``::
 The registry stores **connection details only** (no model). Model selection
 happens in routing rules (``config/settings.yaml``).
 
-Timeout/retry defaults: ``READ_TIMEOUT`` defaults to the OpenAI SDK's own
-default (600s) so existing deployments are unaffected, but local-LLM stacks
-with large contexts should raise it explicitly. ``MAX_RETRIES`` defaults to 0
-(agent-level ``asyncio.wait_for`` around ``provider.chat()`` is the primary
-timeout guard; silent SDK retries can mask failures and double-bill cloud
-providers).
+Timeout/retry defaults mirror the OpenAI/Anthropic SDK defaults exactly
+(connect 5s, read/write/pool 600s, max_retries 2) so existing deployments are
+unaffected. Local-LLM stacks with large contexts should raise READ_TIMEOUT
+explicitly. Lower MAX_RETRIES to 0 if SDK retries mask failures or double-bill
+cloud providers — the agent-level ``asyncio.wait_for`` around ``provider.chat()``
+remains the primary timeout guard regardless.
 """
 
 from __future__ import annotations
@@ -54,14 +56,25 @@ logger = logging.getLogger(__name__)
 
 _PROVIDER_PREFIX = "PROVIDER_"
 _FIELD_SEPARATOR = "__"
-_VALID_FIELDS = {"TYPE", "BASE_URL", "API_KEY", "CONNECT_TIMEOUT", "READ_TIMEOUT", "MAX_RETRIES"}
+_VALID_FIELDS = {
+    "TYPE",
+    "BASE_URL",
+    "API_KEY",
+    "CONNECT_TIMEOUT",
+    "READ_TIMEOUT",
+    "WRITE_TIMEOUT",
+    "POOL_TIMEOUT",
+    "MAX_RETRIES",
+}
 
-# Defaults deliberately mirror the OpenAI SDK defaults so existing deployments
-# keep their prior behaviour. Local-LLM stacks with large contexts should raise
-# READ_TIMEOUT explicitly; see the module docstring.
-_DEFAULT_CONNECT_TIMEOUT = 10.0
+# Defaults mirror the OpenAI/Anthropic SDK defaults exactly so existing
+# deployments keep their prior behaviour. Local-LLM stacks with large contexts
+# should raise READ_TIMEOUT explicitly; see the module docstring.
+_DEFAULT_CONNECT_TIMEOUT = 5.0
 _DEFAULT_READ_TIMEOUT = 600.0
-_DEFAULT_MAX_RETRIES = 0
+_DEFAULT_WRITE_TIMEOUT = 600.0
+_DEFAULT_POOL_TIMEOUT = 600.0
+_DEFAULT_MAX_RETRIES = 2
 
 
 def _parse_float(value: str | None, default: float) -> float:
@@ -96,6 +109,8 @@ class ProviderConnection(BaseModel):
     base_url: str | None = None
     connect_timeout: float = _DEFAULT_CONNECT_TIMEOUT
     read_timeout: float = _DEFAULT_READ_TIMEOUT
+    write_timeout: float = _DEFAULT_WRITE_TIMEOUT
+    pool_timeout: float = _DEFAULT_POOL_TIMEOUT
     max_retries: int = _DEFAULT_MAX_RETRIES
 
 
@@ -113,6 +128,8 @@ class ProviderSettings(BaseModel):
     preset: str | None = None
     connect_timeout: float = _DEFAULT_CONNECT_TIMEOUT
     read_timeout: float = _DEFAULT_READ_TIMEOUT
+    write_timeout: float = _DEFAULT_WRITE_TIMEOUT
+    pool_timeout: float = _DEFAULT_POOL_TIMEOUT
     max_retries: int = _DEFAULT_MAX_RETRIES
 
 
@@ -157,6 +174,8 @@ class ProviderRegistry:
                     fields.get("connect_timeout"), _DEFAULT_CONNECT_TIMEOUT
                 ),
                 read_timeout=_parse_float(fields.get("read_timeout"), _DEFAULT_READ_TIMEOUT),
+                write_timeout=_parse_float(fields.get("write_timeout"), _DEFAULT_WRITE_TIMEOUT),
+                pool_timeout=_parse_float(fields.get("pool_timeout"), _DEFAULT_POOL_TIMEOUT),
                 max_retries=_parse_int(fields.get("max_retries"), _DEFAULT_MAX_RETRIES),
             )
             logger.info(
