@@ -463,6 +463,18 @@ class WebChannelOrchestrator:
                     await provider.aclose()
                 except Exception as e:
                     logger.warning("Provider close failed: %s", e)
+        # S2-11: kill plugin subprocess proxies so no orphaned processes remain.
+        if self._stack is not None:
+            from corpclaw_lite.extensions.plugins.sandbox_proxy import PluginToolProxy
+
+            tool_registry = getattr(self._stack, "tool_registry", None)
+            if tool_registry is not None:
+                for tool in tool_registry.list_all():
+                    if isinstance(tool, PluginToolProxy):
+                        try:
+                            await tool.kill()
+                        except Exception as e:
+                            logger.warning("Plugin proxy kill failed: %s", e)
         if self._started:
             logger.info("Web channel stopped cleanly.")
             self._started = False

@@ -69,8 +69,8 @@ class SkillLoader:
             if calibrated_path.exists():
                 instructions = calibrated_path.read_text(encoding="utf-8").strip()
                 logger.debug("Skill '%s': using calibrated instructions", skill_id)
-        except Exception:
-            pass  # Fall back to original instructions on any error
+        except Exception as e:  # S2-14: log instead of silent swallow
+            logger.debug("Skill '%s': calibrated override failed, using original: %s", skill_id, e)
 
         return Skill(
             id=skill_id,

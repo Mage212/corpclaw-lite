@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -31,8 +32,19 @@ class PluginLoader:
             with open(path, encoding="utf-8") as f:
                 data: dict[str, Any] = yaml.safe_load(f) or {}
 
+            name = str(data.get("name", path.parent.name))
+            # S2-12: validate the plugin name — it is used as a dict key and in
+            # paths downstream. Reject empty or malformed identifiers.
+            if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
+                logger.warning(
+                    "Plugin manifest %s has invalid name %r (must match [A-Za-z0-9_-]+), skipping",
+                    path,
+                    name,
+                )
+                return None
+
             return PluginManifest(
-                name=data.get("name", path.parent.name),
+                name=name,
                 version=data.get("version", "1.0.0"),
                 type=data.get("type", "plugin"),
                 description=data.get("description", "No description"),
