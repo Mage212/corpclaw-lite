@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator, Callable
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import openai
 
 from corpclaw_lite.config.providers import ProviderSettings
@@ -156,11 +157,25 @@ class OpenAIProvider(Provider):
         self._preset = preset  # kept for back-compat introspection (deprecated)
         self._model_profile = model_profile
         self._sampling = sampling
+        # S1-02: explicit transport timeout + retry. Defaults match the OpenAI SDK
+        # (connect 10s, read 600s) but local-LLM stacks with large contexts must
+        # raise READ_TIMEOUT via env. max_retries defaults to 0 — agent-level
+        # asyncio.wait_for around provider.chat() is the primary timeout guard.
+        timeout = httpx.Timeout(
+            connect=settings.connect_timeout,
+            read=settings.read_timeout,
+            write=settings.connect_timeout,
+            pool=settings.connect_timeout,
+        )
         api_key = settings.api_key or "dummy"  # local models may not need a real key
+        client_kwargs: dict[str, Any] = {
+            "api_key": api_key,
+            "timeout": timeout,
+            "max_retries": settings.max_retries,
+        }
         if settings.base_url:
-            self._client = openai.AsyncOpenAI(api_key=api_key, base_url=settings.base_url)
-        else:
-            self._client = openai.AsyncOpenAI(api_key=api_key)
+            client_kwargs["base_url"] = settings.base_url
+        self._client = openai.AsyncOpenAI(**client_kwargs)
 
     # OpenAI SDK accepts these top-level params in chat.completions.create().
     # Everything else (top_k, min_p, repeat_penalty, etc.) must go into
@@ -187,6 +202,15 @@ class OpenAIProvider(Provider):
             "parallel_tool_calls",
         }
     )
+
+    async def aclose(self) -> None:
+        """Close the underlying ``AsyncOpenAI`` HTTP client (S1-01).
+
+        Idempotent: the SDK client tolerates repeated close. Required so
+        transient provider instances (override-routers, calibration, tests) do
+        not leak connection pools / keepalive tasks.
+        """
+        await self._client.close()
 
     def _thinking_disabled(self) -> bool:
         """Return True if thinking is turned off by sampling or per-call override.

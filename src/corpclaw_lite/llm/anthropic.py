@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 import anthropic
+import httpx
 
 from corpclaw_lite.config.providers import ProviderSettings
 from corpclaw_lite.llm.base import (
@@ -98,7 +99,21 @@ class AnthropicProvider(Provider):
         if not settings.api_key:
             raise ValueError("Anthropic requires an API key in settings")
 
-        client_kwargs: dict[str, Any] = {"api_key": settings.api_key}
+        # S1-02: explicit transport timeout + retry. Cloud (Anthropic) typically
+        # responds faster than local LLMs, but operators can still tune via env.
+        # max_retries defaults to 0 — agent-level asyncio.wait_for around
+        # provider.chat() is the primary timeout guard.
+        timeout = httpx.Timeout(
+            connect=settings.connect_timeout,
+            read=settings.read_timeout,
+            write=settings.connect_timeout,
+            pool=settings.connect_timeout,
+        )
+        client_kwargs: dict[str, Any] = {
+            "api_key": settings.api_key,
+            "timeout": timeout,
+            "max_retries": settings.max_retries,
+        }
         if settings.base_url:
             client_kwargs["base_url"] = settings.base_url
         self._client = anthropic.AsyncAnthropic(**client_kwargs)
@@ -111,6 +126,15 @@ class AnthropicProvider(Provider):
             tuple[tuple[str | None, str | None, int | None], tuple[str, ...]],
             list[dict[str, str]],
         ] = OrderedDict()
+
+    async def aclose(self) -> None:
+        """Close the underlying ``AsyncAnthropic`` HTTP client (S1-01).
+
+        Idempotent: the SDK client tolerates repeated close. Required so
+        transient provider instances (override-routers, calibration, tests) do
+        not leak connection pools / keepalive tasks.
+        """
+        await self._client.close()
 
     @staticmethod
     def _convert_tool(tool: dict[str, Any]) -> dict[str, Any]:

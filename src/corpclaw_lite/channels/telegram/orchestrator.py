@@ -458,6 +458,20 @@ class TelegramBotOrchestrator:
                         logger.warning("Could not stop container %s: %s", cname, e)
             except Exception as e:
                 logger.warning("Container cleanup failed: %s", e)
+        # S1-01: close LLM provider HTTP clients (connection pools / keepalive
+        # tasks) so the process exits without "Task was destroyed but it is
+        # pending" warnings. ``getattr`` chain is defensive: partial stacks may
+        # not carry a fully-wired loop/provider.
+        if self._stack is not None:
+            from corpclaw_lite.llm.base import AsyncCloseable
+
+            agent_loop = getattr(self._stack, "loop", None)
+            provider = getattr(agent_loop, "provider", None) if agent_loop is not None else None
+            if isinstance(provider, AsyncCloseable):
+                try:
+                    await provider.aclose()
+                except Exception as e:
+                    logger.warning("Provider close failed: %s", e)
         if self._started:
             logger.info("Telegram bot stopped cleanly.")
             self._started = False

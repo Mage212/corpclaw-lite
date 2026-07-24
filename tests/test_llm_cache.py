@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
 from corpclaw_lite.llm.base import LLMResponse, TokenUsage
-from corpclaw_lite.llm.cache import LLMCacheManager, PersistentCacheConfig, SlotCacheActionResult
+from corpclaw_lite.llm.cache import (
+    LLMCacheManager,
+    LLMCacheMetadata,
+    LLMCacheScope,
+    PersistentCacheConfig,
+    SlotCacheActionResult,
+)
 from corpclaw_lite.llm.queue import LLMRequestQueue, SlotAffinityConfig
 
 
@@ -235,3 +242,97 @@ async def test_user_reset_skips_l2_restore_and_erases_slot(tmp_path: Path) -> No
     assert ("erase", 0, None) in client.calls
     assert ("restore", 0, scope.filename) not in client.calls
     await second_queue.release(second_entry, 1.0)
+
+
+# ── S1-04: cache prune TOCTOU ────────────────────────────────────────────────
+
+
+async def _seed_old_entry(manager: LLMCacheManager, *, age_seconds: float) -> LLMCacheScope:
+    """Insert a cache metadata entry old enough to be pruned; return its scope."""
+    import time
+
+    scope = manager.build_scope(
+        user_id="u1",
+        conversation_id="default",
+        agent_id="main",
+        provider_name="llamacpp",
+        model="gpt-oss",
+        preset="default",
+        system="system",
+        tools=[],
+    )
+    now = time.time()
+    metadata = LLMCacheMetadata(
+        scope=scope,
+        filename=scope.filename,
+        token_count=1000,
+        file_size_bytes=100_000,
+        prompt_tokens=1000,
+        cached_tokens=800,
+        prompt_n=200,
+        created_at=now - age_seconds,
+        last_used_at=now - age_seconds,
+        last_saved_at=now - age_seconds,
+        save_count=1,
+        restore_count=0,
+    )
+    await cast(Any, manager)._store.upsert(metadata)
+    return scope
+
+
+@pytest.mark.asyncio
+async def test_prune_deletes_old_entry_when_not_active(tmp_path: Path) -> None:
+    """Baseline: prune removes an old entry when the scope is not active."""
+    client = FakeSlotCacheClient()
+    manager = LLMCacheManager(
+        _config(tmp_path),
+        provider_base_urls={"llamacpp": "http://llama:8080/v1"},
+        client=client,
+    )
+    scope = await _seed_old_entry(manager, age_seconds=31 * 24 * 3600)
+
+    await manager.prune()
+
+    store = cast(Any, manager)._store
+    remaining = await store.list_all()
+    assert not any(m.scope.key == scope.key for m in remaining)
+
+
+@pytest.mark.asyncio
+async def test_prune_skips_scope_that_became_active_mid_prune(tmp_path: Path) -> None:
+    """S1-04: TOCTOU fix — prune must not delete a scope that became active
+    between the active_keys snapshot and the per-entry delete.
+
+    Reproduces the race: the scope is registered as active (as a concurrent
+    ``prepare()`` would) during the ``_store.list_all()`` await — after the
+    snapshot is taken but before the per-entry re-check. The re-check under
+    ``_slot_lock`` must skip the delete.
+    """
+    client = FakeSlotCacheClient()
+    manager = LLMCacheManager(
+        _config(tmp_path),
+        provider_base_urls={"llamacpp": "http://llama:8080/v1"},
+        client=client,
+    )
+    scope = await _seed_old_entry(manager, age_seconds=31 * 24 * 3600)
+
+    # Simulate a concurrent prepare(): register the scope active as a side
+    # effect of the store snapshot await (the suspension point between the
+    # active_keys snapshot and the per-entry loop). The snapshot taken inside
+    # prune runs BEFORE this, so active_keys does NOT include the scope; the
+    # per-entry re-check (added in S1-04) runs AFTER and must see it.
+    store = cast(Any, manager)._store
+    real_list_all = store.list_all
+
+    async def racing_list_all() -> list[LLMCacheMetadata]:
+        entries = await real_list_all()
+        cast(Any, manager)._slot_scopes[0] = scope
+        return entries
+
+    store.list_all = racing_list_all  # type: ignore[method-assign]
+
+    await manager.prune()
+
+    # The entry survived: the re-check saw the now-active scope and skipped it.
+    remaining = await real_list_all()
+    assert any(m.scope.key == scope.key for m in remaining)
