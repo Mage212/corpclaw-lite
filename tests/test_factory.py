@@ -273,7 +273,7 @@ def test_container_enabled_registers_ipc_proxies() -> None:
 
     provider_env = {
         **_PROVIDER_ENV,
-        "CORPCLAW_IPC_SECRET": "test-secret-for-unit-test",
+        "CORPCLAW_IPC_SECRET": "test-secret-for-unit-test-padded-to-32",
     }
     with (
         patch.object(config_loader, "load_settings", side_effect=_mock_load_enabled),

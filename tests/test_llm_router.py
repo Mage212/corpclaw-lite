@@ -12,6 +12,7 @@ Covers:
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
@@ -339,7 +340,6 @@ def test_different_providers_different_instances() -> None:
 def test_preset_applied_from_routing_rule(tmp_path: None) -> None:  # type: ignore[misc]
     """Routing rule with preset name → preset resolved and passed to provider."""
     import textwrap
-    from pathlib import Path
 
     registry = _make_registry()
 
@@ -353,7 +353,7 @@ def test_preset_applied_from_routing_rule(tmp_path: None) -> None:  # type: igno
             inference_params:
               temperature: 0.42
     """)
-    preset_path = Path("/tmp/_test_presets_router.yaml")
+    preset_path = tmp_path / "_test_presets_router.yaml"
     preset_path.write_text(preset_yaml, encoding="utf-8")
     try:
         preset_reg = PresetRegistry.from_yaml(preset_path)
@@ -379,7 +379,6 @@ def test_preset_applied_from_routing_rule(tmp_path: None) -> None:  # type: igno
 def test_sampling_rule_resolves_split_profiles(tmp_path: None) -> None:  # type: ignore[misc]
     """D-056 PR2: routing rule with sampling: → SamplingProfile resolved on provider."""
     import textwrap
-    from pathlib import Path
 
     registry = _make_registry()
 
@@ -399,7 +398,7 @@ def test_sampling_rule_resolves_split_profiles(tmp_path: None) -> None:  # type:
             inference_overrides:
               temperature: 0.2
     """)
-    preset_path = Path("/tmp/_test_sampling_router.yaml")
+    preset_path = tmp_path / "_test_sampling_router.yaml"
     preset_path.write_text(preset_yaml, encoding="utf-8")
     try:
         preset_reg = PresetRegistry.from_yaml(preset_path)
@@ -429,10 +428,9 @@ def test_sampling_rule_resolves_split_profiles(tmp_path: None) -> None:  # type:
         preset_path.unlink(missing_ok=True)
 
 
-def test_sampling_wins_over_legacy_preset_field() -> None:
+def test_sampling_wins_over_legacy_preset_field(tmp_path: Path) -> None:
     """When a rule has both sampling and preset, sampling wins (D-056)."""
     import textwrap
-    from pathlib import Path
 
     from corpclaw_lite.llm.presets import PresetRegistry
 
@@ -451,7 +449,7 @@ def test_sampling_wins_over_legacy_preset_field() -> None:
             inference_params:
               temperature: 0.9
     """)
-    preset_path = Path("/tmp/_test_sampling_wins.yaml")
+    preset_path = tmp_path / "_test_sampling_wins.yaml"
     preset_path.write_text(preset_yaml, encoding="utf-8")
     try:
         preset_reg = PresetRegistry.from_yaml(preset_path)
@@ -727,8 +725,8 @@ def _agent_routes_settings() -> LLMSettings:
 
 def _preset_registry_for_overrides() -> PresetRegistry:
     """A split-format registry with a model profile and two sampling profiles."""
+    import tempfile
     import textwrap
-    from pathlib import Path
 
     yaml = textwrap.dedent("""\
         models:
@@ -746,12 +744,12 @@ def _preset_registry_for_overrides() -> PresetRegistry:
             model: qwen3.5-4b
             thinking_mode: off
     """)
-    p = Path("/tmp/_test_overrides_presets.yaml")
+    p = Path(tempfile.gettempdir()) / "_test_overrides_presets.yaml"
     p.write_text(yaml, encoding="utf-8")
     return PresetRegistry.from_yaml(p)
 
 
-def test_with_overrides_applies_to_all_agent_routes() -> None:
+def test_with_overrides_applies_to_all_agent_routes(tmp_path: Path) -> None:
     """with_overrides(apply_to=all_agent_routes) overrides default/vision/compress/consolidate,
     leaving the non-agent 'eval' route untouched."""
     registry = _make_registry()
@@ -921,7 +919,6 @@ def test_model_match_guard_strips_inference_on_mismatch(tmp_path: None) -> None:
     """A sampling profile authored for model A on a route using model B:
     inference_overrides are stripped, thinking_mode preserved, warning logged."""
     import textwrap
-    from pathlib import Path
 
     from corpclaw_lite.llm.presets import PresetRegistry
 
@@ -941,7 +938,7 @@ def test_model_match_guard_strips_inference_on_mismatch(tmp_path: None) -> None:
             inference_overrides:
               temperature: 0.4
     """)
-    preset_path = Path("/tmp/_test_model_match.yaml")
+    preset_path = tmp_path / "_test_model_match.yaml"
     preset_path.write_text(preset_yaml, encoding="utf-8")
     try:
         preset_reg = PresetRegistry.from_yaml(preset_path)
@@ -971,7 +968,6 @@ def test_model_match_guard_strips_inference_on_mismatch(tmp_path: None) -> None:
 def test_model_match_guard_passes_on_match(tmp_path: None) -> None:
     """When sampling.model == route model, inference_overrides are applied normally."""
     import textwrap
-    from pathlib import Path
 
     from corpclaw_lite.llm.presets import PresetRegistry
 
@@ -988,7 +984,7 @@ def test_model_match_guard_passes_on_match(tmp_path: None) -> None:
             inference_overrides:
               temperature: 0.4
     """)
-    preset_path = Path("/tmp/_test_model_match_ok.yaml")
+    preset_path = tmp_path / "_test_model_match_ok.yaml"
     preset_path.write_text(preset_yaml, encoding="utf-8")
     try:
         preset_reg = PresetRegistry.from_yaml(preset_path)
@@ -1015,7 +1011,6 @@ def test_model_match_guard_passes_on_match(tmp_path: None) -> None:
 def test_model_match_guard_allows_no_model_field(tmp_path: None) -> None:
     """A sampling profile with no `model:` field (legacy-split) is left untouched."""
     import textwrap
-    from pathlib import Path
 
     from corpclaw_lite.llm.presets import PresetRegistry
 
@@ -1031,7 +1026,7 @@ def test_model_match_guard_allows_no_model_field(tmp_path: None) -> None:
             inference_overrides:
               temperature: 0.3
     """)
-    preset_path = Path("/tmp/_test_model_match_none.yaml")
+    preset_path = tmp_path / "_test_model_match_none.yaml"
     preset_path.write_text(preset_yaml, encoding="utf-8")
     try:
         preset_reg = PresetRegistry.from_yaml(preset_path)
@@ -1058,7 +1053,6 @@ def test_model_match_guard_allows_no_model_field(tmp_path: None) -> None:
 def test_with_overrides_model_match_guard(tmp_path: None) -> None:
     """with_overrides(sampling_name=...) also enforces model-match."""
     import textwrap
-    from pathlib import Path
 
     from corpclaw_lite.llm.presets import PresetRegistry
 
@@ -1075,7 +1069,7 @@ def test_with_overrides_model_match_guard(tmp_path: None) -> None:
             inference_overrides:
               temperature: 0.4
     """)
-    preset_path = Path("/tmp/_test_overrides_match.yaml")
+    preset_path = tmp_path / "_test_overrides_match.yaml"
     preset_path.write_text(preset_yaml, encoding="utf-8")
     try:
         preset_reg = PresetRegistry.from_yaml(preset_path)

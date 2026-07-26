@@ -1,49 +1,18 @@
-"""Tests for additional coverage."""
+"""Tests for additional coverage.
 
-import contextlib
+S2-18: the previous blanket-suppress tests (test_dummy_channel_methods,
+test_file_manager_methods) were removed — they used `except Exception: pass`
+with zero assertions, so they passed unconditionally and gave false coverage
+confidence. The handlers they touched are covered by the focused channel
+and file-manager test suites.
+"""
+
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from corpclaw_lite.channels.telegram.channel import TelegramChannel
-from corpclaw_lite.channels.telegram.file_manager import DeleteBrowserHandler
 from corpclaw_lite.config.settings import Settings
-
-
-@pytest.mark.asyncio
-async def test_dummy_channel_methods():
-    def dummy_handler(a, b, c):
-        pass
-
-    ch = TelegramChannel("fake", message_handler=dummy_handler)
-    ch._tool_registry = MagicMock()
-    ch._memory = AsyncMock()
-
-    update = MagicMock()
-    update.effective_chat.send_message = AsyncMock()
-    update.effective_user.id = 123
-    context = MagicMock()
-    context.user_data = {}
-
-    try:
-        await ch._handle_start(update, context)
-        await ch._handle_new(update, context)
-        await ch._handle_chat(update, context)
-        await ch._handle_execute(update, context)
-        await ch._handle_help(update, context)
-    except Exception:
-        pass
-
-
-@pytest.mark.asyncio
-async def test_file_manager_methods():
-    fm = DeleteBrowserHandler(MagicMock())
-    with contextlib.suppress(Exception):
-        await fm.handle_callback(MagicMock(), MagicMock(), "del:ws")
-
-    with contextlib.suppress(Exception):
-        await fm.handle_delete_command(AsyncMock(), MagicMock())
 
 
 @pytest.mark.asyncio
