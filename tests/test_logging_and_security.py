@@ -115,6 +115,14 @@ class TestCredentialScrubber:
             "hf_" + "C" * 30,
             "glpat-" + "D" * 30,
             "github_pat_" + "E" * 30,
+            # H-7 (code review): previously-missed credential formats.
+            "AIza" + "S" * 35,  # Google API key (39 chars total)
+            # Minimal JWT: header.payload.signature, each a base64url segment.
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+            "x-api-key: " + "k" * 32,
+            "authorization: Token " + "t" * 40,
+            "Authorization: Bearer " + "b" * 40,  # scheme + token, title-case header
+            "X-Api-Key: " + "K" * 32,  # case-insensitive header name
         ],
     )
     def test_scrubs_modern_token_formats(self, token: str) -> None:
