@@ -33,10 +33,6 @@ YAML format (``config/model_presets.yaml``)::
 
     sampling:
       qwen3.6-default: {model: qwen3.6-35b-a3b, thinking_mode: default}
-      aux-no-thinking:
-        model: qwen3.6-35b-a3b
-        thinking_mode: off
-        inference_overrides: {temperature: 0.2}
 
 Legacy combined format is still supported (back-compat for overlays)::
 
