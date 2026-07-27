@@ -4,6 +4,59 @@
 
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/).
 
+## [Unreleased]
+
+**Security & data-integrity fixes** по результатам комплексного код-ревью
+(4 High + 2 Medium). Подробности — в коммитах с `(H-N)` / `(M-N)` и в
+`plans/code-review-priorities.md`.
+
+### Security
+
+- **Persistent nonce-store для container IPC (H-1).** Container-воркер
+  запускается fresh на каждый `docker exec` (stateless-дизайн), поэтому
+  in-memory nonce-store всегда был пуст и inbound replay-защита не работала
+  в пределах 300-сек TTL. Добавлен sqlite-backed persistent nonce-store
+  (`/tmp/corpclaw_nonces.db`, writable tmpfs), разделяемый между воркерами
+  одного контейнера. При ошибке открытия auth деградирует на in-memory
+  (verify продолжает работать).
+
+- **Фильтрация env для MCP-серверов (H-3).** MCP-серверы (`npx`/`uvx`/любой
+  бинарник из `mcp_servers.yaml`) наследовали полный `os.environ`, сливая
+  `OPENAI_API_KEY`/`ANTHROPIC_API_KEY`/`CORPCLAW_IPC_SECRET` внешним
+  исполняемым файлам. Новый `mcp/env.py:build_subprocess_env` наследует только
+  allowlist (PATH/HOME/locale/tmp/...) + слои per-server env из YAML, и
+  отбрасывает секреты по denylist (перечисленные токены + префиксы
+  `CORPCLAW_`/`OPENAI_`/`ANTHROPIC_` для будущих переменных).
+
+- **Расширение паттернов credential scrubber'а (H-7).** Добавлены Google API
+  keys (`AIza...`), JWT (`eyJ...`), заголовки `x-api-key:` и `authorization:`
+  (case-insensitive, scheme+token). Ранее эти форматы проходили нескрабленными
+  в логи и tool-результаты. Заодно исправлен устаревший комментарий
+  (`github_pat_` был подписан как "GitHub fine-grained PAT").
+
+### Fixed
+
+- **Reparent всех user-keyed таблиц при merge/migrate (H-4).** `merge_web_user`
+  и `migrate_canonical_ids` переносили только `web_chat_sessions` и
+  `web_chat_messages`, молча осиротив `web_chat_context` (единственный
+  LLM-transcript), `web_chat_pins`, `agent_change_sets`, `agent_file_changes`
+  (в memory.db), `feedback_labels` (feedback.db), `scheduled_tasks`
+  (scheduler.db), а также `onboarding_state` и bootstrap-файл в
+  `merge_web_user`. Т.к. `list_context`/`list_pins` фильтруют `WHERE user_id=?`,
+  target-пользователь терял доступ к своим данным. Теперь reparent охватывает
+  все таблицы; новые `_reparent_feedback`/`_reparent_scheduler` + вызовы
+  onboarding/bootstrap из обоих entry-points.
+
+- **Top-level `Settings` с `extra="forbid"` (M-10).** Опечатка вроде `agem:`
+  вместо `agent:` молча сбрасывала подсистему в дефолты — тот же failure-mode,
+  от которого защищал nested `extra="forbid"` (S3-16). Теперь
+  `SettingsConfigDict(env_nested_delimiter="__", extra="forbid")`.
+
+- **`ipc_timeout_seconds` с нижней границей (M-12).** Container-side
+  tool-timeout = `ipc_timeout_seconds - 5s`; значение < 5s делало его
+  отрицательным → каждый tool call падал с opaque "timed out". Теперь
+  `Field(default=120.0, ge=5.0)` — первый constraint-Field в `config/`.
+
 ## [0.3.1] — 2026-07-27
 
 **Patch** `0.3.0 → 0.3.1`. Замкнута петля обратной связи для осмысленного
