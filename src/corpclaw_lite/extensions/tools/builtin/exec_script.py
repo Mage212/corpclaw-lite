@@ -70,6 +70,11 @@ class ExecScriptTool(Tool):
                 "cwd": str(workspace),
             }
             if sys.platform != "win32":
+                # S2-09: start_new_session creates a new process group so the
+                # timeout handler can kill the whole group. In host (non-container)
+                # mode a script that calls setsid/nohup can escape the group kill
+                # and leave an orphan; production deployment uses the sandbox
+                # container (network_mode: none, cap_drop ALL) where this is bounded.
                 proc_kwargs["start_new_session"] = True
 
             proc = await asyncio.create_subprocess_shell(script, **proc_kwargs)

@@ -100,8 +100,10 @@ def parse_schedule(schedule: str, *, now: datetime | None = None, tz: str = "UTC
             raise ScheduleParseError(f"Invalid cron expression '{raw}': {exc}") from exc
         return ScheduleSpec(kind="cron", expr=raw)
 
-    # ISO timestamp
-    if "T" in raw or re.match(r"^\d{4}-\d{2}-\d{2}", raw):
+    # ISO timestamp — require a time component (T or a space + HH:MM). A bare
+    # date like "2024-09-09" is rejected to avoid a silent midnight one-shot
+    # (S2-08).
+    if "T" in raw or re.match(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}", raw):
         try:
             cleaned = raw.replace("Z", "+00:00")
             dt = datetime.fromisoformat(cleaned)
@@ -112,7 +114,8 @@ def parse_schedule(schedule: str, *, now: datetime | None = None, tz: str = "UTC
             raise ScheduleParseError(f"Invalid timestamp '{raw}': {exc}") from exc
 
     raise ScheduleParseError(
-        f"Invalid schedule '{raw}'. Use: 30m | every 2h | 0 9 * * * | ISO datetime"
+        f"Invalid schedule '{raw}'. Use: 30m | every 2h | 0 9 * * * | ISO datetime "
+        "(a bare date is not accepted — include a time, e.g. 2024-09-09T09:00)"
     )
 
 

@@ -402,7 +402,9 @@ class SQLiteMemory:
             return [self._row_to_entry(r, score=0.0) for r in cursor.fetchall()]
 
     def _sync_recall_like(self, user_id: str, query: str, limit: int) -> list[dict[str, Any]]:
-        like = f"%{query}%"
+        # S2-17: escape LIKE wildcards so % and _ in the query are literal.
+        escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        like = f"%{escaped}%"
         with db_connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.execute(
@@ -411,9 +413,9 @@ class SQLiteMemory:
                 FROM memory_entries
                 WHERE user_id = ?
                   AND (
-                    primary_abstraction LIKE ?
-                    OR memory_value LIKE ?
-                    OR cue_indices_json LIKE ?
+                    primary_abstraction LIKE ? ESCAPE '\\'
+                    OR memory_value LIKE ? ESCAPE '\\'
+                    OR cue_indices_json LIKE ? ESCAPE '\\'
                   )
                 ORDER BY updated_at DESC
                 LIMIT ?
