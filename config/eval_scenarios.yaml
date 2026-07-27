@@ -1,6 +1,6 @@
 # Eval scenario corpus for the GAIA-style eval harness (B-060).
 #
-# 12 scenarios: office tools (Phase 1 file-cowork) + adversarial (Phase 0 guards)
+# 28 scenarios: office tools (Phase 1 file-cowork) + adversarial (Phase 0 guards)
 # + multi-turn retention. Designed to be run twice (guards on/off) to measure
 # whether B-055 (result-dedup) and B-056 (planning-text) guards improve outcomes
 # on local LLMs.

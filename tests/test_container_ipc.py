@@ -21,7 +21,7 @@ from corpclaw_lite.exceptions import ContainerIPCError
 @pytest.fixture(autouse=True)
 def _ipc_secret(monkeypatch: pytest.MonkeyPatch) -> None:
     """Ensure CORPCLAW_IPC_SECRET is set for all tests."""
-    monkeypatch.setenv("CORPCLAW_IPC_SECRET", "test-secret-key-for-ci")
+    monkeypatch.setenv("CORPCLAW_IPC_SECRET", "test-secret-key-for-ci-padded-to-32")
 
 
 @pytest.fixture
@@ -90,7 +90,7 @@ async def test_send_tool_call_success(ipc, auth) -> None:
     input_bytes = proc.communicate.call_args.kwargs.get("input", b"")
     lines = input_bytes.decode("utf-8").splitlines()
     assert len(lines) >= 2
-    assert lines[0] == "test-secret-key-for-ci"
+    assert lines[0] == "test-secret-key-for-ci-padded-to-32"
     assert lines[1].startswith("{")  # signed JSON payload
 
 

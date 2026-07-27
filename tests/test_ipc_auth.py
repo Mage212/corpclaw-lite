@@ -4,8 +4,8 @@ import pytest
 
 from corpclaw_lite.security.ipc_auth import IPCAuth, IPCAuthError
 
-# Must meet the _MIN_SECRET_LENGTH=16 requirement
-_TEST_SECRET = "test_secret_long_enough_for_tests"
+# Must meet the _MIN_SECRET_LENGTH=32 requirement (S2-20)
+_TEST_SECRET = "test_secret_long_enough_for_tests_32chars"
 
 
 def test_ipc_auth_verify_success():

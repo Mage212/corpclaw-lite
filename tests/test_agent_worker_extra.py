@@ -11,7 +11,7 @@ from corpclaw_lite.container.agent_worker import process_request
 def mock_env():
     import os
 
-    os.environ["CORPCLAW_IPC_SECRET"] = "test-secret-at-least-16-chars"
+    os.environ["CORPCLAW_IPC_SECRET"] = "test-secret-at-least-32-chars!!!"
     yield
     os.environ.pop("CORPCLAW_IPC_SECRET", None)
 
@@ -41,7 +41,7 @@ def test_process_request_invalid_json():
 
 
 def test_process_request_success():
-    req = '{"payload": "test"}'
+    req = '{"payload": "test-value-long-enough-for-secret-length"}'
 
     mock_tool = MagicMock()
 
@@ -78,7 +78,7 @@ def test_process_request_success():
 
 
 def test_process_request_auth_failure():
-    req = '{"payload": "test"}'
+    req = '{"payload": "test-value-long-enough-for-secret-length"}'
 
     with (
         patch("sys.stdin.readline", return_value=req),
@@ -154,7 +154,7 @@ def test_process_request_reads_secret_from_stdin():
 
     # Ensure env does NOT carry the secret — worker must get it from stdin only.
     os.environ.pop("CORPCLAW_IPC_SECRET", None)
-    secret = "test-secret-at-least-16-chars"
+    secret = "test-secret-at-least-32-chars!!"
     payload = '{"payload": "test"}'
 
     readline_returns = iter([secret + "\n", payload + "\n"])
@@ -238,7 +238,7 @@ def test_process_request_fallback_timeout_when_payload_missing():
     mock_registry = MagicMock()
     mock_registry.get.return_value = mock_tool
 
-    req = '{"payload": "test"}'
+    req = '{"payload": "test-value-long-enough-for-secret-length"}'
     with (
         patch("sys.stdin.readline", return_value=req),
         patch("builtins.print"),
