@@ -491,3 +491,46 @@ def test_set_web_password_invalidates_existing_sessions(tmp_path) -> None:
 
     # The pre-rotation session is no longer valid.
     assert mgr.get_user_by_session(token) is None
+
+
+# ── S2-06: created_at read from DB ──────────────────────────────────────────
+
+
+def test_created_at_read_from_db_not_field_default(tmp_path) -> None:
+    """S2-06: created_at must come from the DB row, not the field default."""
+    import time
+
+    db = str(tmp_path / "users.db")
+    mgr = UserManager(db_path=db)
+    mgr.create_user(telegram_id=1, department="eng", name="Alice")
+    # Sleep so datetime.now() at read time differs from the stored value.
+    time.sleep(1.1)
+
+    by_tg = mgr.get_by_telegram_id(1)
+    assert by_tg is not None
+    by_id = mgr.get_by_id(by_tg.id)
+    assert by_id is not None
+    listed = mgr.list_users()
+
+    # All getters return the DB stored time, not "now" at read time.
+    assert by_tg.created_at == by_id.created_at
+    assert all(u.created_at == by_tg.created_at for u in listed)
+
+
+# ── S2-07: create_user password without username ───────────────────────────
+
+
+def test_create_user_password_without_username_raises(tmp_path) -> None:
+    """S2-07: a password without a username must raise, not be silently dropped."""
+    db = str(tmp_path / "users.db")
+    mgr = UserManager(db_path=db)
+    with pytest.raises(ValueError, match="password without a username"):
+        mgr.create_user(department="eng", telegram_id=2, password="secret")
+
+
+def test_create_user_username_with_password_works(tmp_path) -> None:
+    """S2-07 regression: username + password still works (validates + stores)."""
+    db = str(tmp_path / "users.db")
+    mgr = UserManager(db_path=db)
+    user = mgr.create_user(department="eng", username="alice", password="good-pass-123")
+    assert user.username == "alice"

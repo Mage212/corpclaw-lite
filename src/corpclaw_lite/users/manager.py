@@ -279,6 +279,11 @@ class UserManager:
     ) -> User:
         """Insert a canonical user and return the DB record."""
         clean_username = self.normalize_username(username) if username is not None else None
+        # S2-07: a password without a username was previously silently dropped.
+        # Make the contract explicit — web login requires a username, so a
+        # password without one is a caller error.
+        if password is not None and clean_username is None:
+            raise ValueError("Cannot set a password without a username")
         password_hash = None
         if clean_username is not None:
             self._validate_password(password or "")
@@ -674,17 +679,7 @@ class UserManager:
             row = conn.execute(
                 "SELECT * FROM users WHERE telegram_id = ?", (telegram_id,)
             ).fetchone()
-        if not row:
-            return None
-        return User(
-            id=row["id"],
-            name=row["name"],
-            department=row["department"],
-            telegram_id=row["telegram_id"],
-            username=row["username"],
-            is_admin=bool(row["is_admin"]),
-            disabled=bool(row["disabled"]),
-        )
+        return self._row_to_user(row) if row else None
 
     def get_by_id(self, user_id: int) -> User | None:
         """Look up a user by internal DB id."""
@@ -778,18 +773,7 @@ class UserManager:
         with db_connect(self._db) as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute("SELECT * FROM users ORDER BY id").fetchall()
-        return [
-            User(
-                id=r["id"],
-                name=r["name"],
-                department=r["department"],
-                telegram_id=r["telegram_id"],
-                username=r["username"],
-                is_admin=bool(r["is_admin"]),
-                disabled=bool(r["disabled"]),
-            )
-            for r in rows
-        ]
+        return [self._row_to_user(r) for r in rows]
 
     @staticmethod
     def _hash_session_token(raw_token: str) -> str:
@@ -1033,6 +1017,15 @@ class UserManager:
 
     @staticmethod
     def _row_to_user(row: sqlite3.Row) -> User:
+        # S2-06: read created_at from the DB row (previously dropped everywhere).
+        created_raw = row["created_at"] if "created_at" in row.keys() else None  # noqa: SIM118
+        if isinstance(created_raw, datetime):
+            created_at = created_raw
+        else:
+            try:
+                created_at = datetime.fromisoformat(str(created_raw))
+            except (ValueError, TypeError):
+                created_at = datetime.now(UTC)
         return User(
             id=row["id"],
             name=row["name"],
@@ -1041,6 +1034,7 @@ class UserManager:
             username=row["username"],
             is_admin=bool(row["is_admin"]),
             disabled=bool(row["disabled"]),
+            created_at=created_at,
         )
 
     def _get_id_by_telegram(self, telegram_id: int) -> int:
