@@ -16,7 +16,6 @@ from corpclaw_lite.channels.telegram.callback_data import (
 from corpclaw_lite.channels.telegram.channel import TelegramChannel
 from corpclaw_lite.users.models import User
 
-
 # ── callback_data unit tests ─────────────────────────────────────────────
 
 
@@ -94,15 +93,11 @@ async def test_handle_feedback_callback_calls_handler(channel: TelegramChannel) 
 
     handler.assert_awaited_once_with(4242, "up", "run-abc", 999)
     update.callback_query.answer.assert_awaited_once()
-    update.callback_query.edit_message_reply_markup.assert_awaited_once_with(
-        reply_markup=None
-    )
+    update.callback_query.edit_message_reply_markup.assert_awaited_once_with(reply_markup=None)
 
 
 @pytest.mark.asyncio
-async def test_handle_feedback_callback_down(
-    channel: TelegramChannel, mock_bot: AsyncMock
-) -> None:
+async def test_handle_feedback_callback_down(channel: TelegramChannel, mock_bot: AsyncMock) -> None:
     """A 👎 tap records rating=down."""
     handler = AsyncMock()
     channel.set_feedback_handler(handler)

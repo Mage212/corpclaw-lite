@@ -91,9 +91,7 @@ async def test_feedback_upsert_reflects_change(
 ) -> None:
     """allow_change=True (default) → re-vote overwrites and the response shows it."""
     orch, _store, user = orch_fb
-    req_up = _request(
-        "POST", "/api/feedback", user, payload={"run_id": "run-1", "rating": "up"}
-    )
+    req_up = _request("POST", "/api/feedback", user, payload={"run_id": "run-1", "rating": "up"})
     await orch._handle_feedback(req_up)
     req_down = _request(
         "POST", "/api/feedback", user, payload={"run_id": "run-1", "rating": "down"}
