@@ -111,3 +111,104 @@ async def test_mcp_client_oversize_response_rejected(mock_process):
 
     with pytest.raises(MCPClientError, match="exceeded"):
         await client.call_tool("tool", {})
+
+
+# ── H-3 (code review): env filtering for untrusted MCP subprocesses ──────────
+
+
+def _init_response_bytes() -> bytes:
+    return (
+        json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": "2024-11-05"}}).encode(
+            "utf-8"
+        )
+        + b"\n"
+    )
+
+
+@pytest.mark.asyncio
+async def test_mcp_connect_does_not_inherit_secrets(mock_process, monkeypatch):
+    """Provider keys and CORPCLAW_IPC_SECRET must never reach an MCP subprocess."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-leaked-key-1234567890")
+    monkeypatch.setenv("CORPCLAW_IPC_SECRET", "x" * 40)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-leaked-1234567890")
+    monkeypatch.setenv("PATH", "/usr/local/bin:/usr/bin")
+
+    client = MCPClient(timeout=1.0)
+    mock_process.stdout.read.return_value = _init_response_bytes()
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_process) as mock_exec:
+        await client.connect(["npx", "server"])
+        passed_env = mock_exec.call_args.kwargs["env"]
+
+    assert "OPENAI_API_KEY" not in passed_env
+    assert "CORPCLAW_IPC_SECRET" not in passed_env
+    assert "ANTHROPIC_API_KEY" not in passed_env
+
+
+@pytest.mark.asyncio
+async def test_mcp_connect_inherits_allowlist_runtime_env(mock_process, monkeypatch):
+    """PATH/HOME/locale must be inherited so npx/uvx can locate their runtime."""
+    monkeypatch.setenv("PATH", "/usr/local/bin:/usr/bin")
+    monkeypatch.setenv("HOME", "/home/agent")
+    monkeypatch.setenv("LANG", "en_US.UTF-8")
+
+    client = MCPClient(timeout=1.0)
+    mock_process.stdout.read.return_value = _init_response_bytes()
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_process) as mock_exec:
+        await client.connect(["npx", "server"])
+        passed_env = mock_exec.call_args.kwargs["env"]
+
+    assert passed_env["PATH"] == "/usr/local/bin:/usr/bin"
+    assert passed_env["HOME"] == "/home/agent"
+    assert passed_env["LANG"] == "en_US.UTF-8"
+
+
+@pytest.mark.asyncio
+async def test_mcp_connect_passes_user_env_from_yaml(mock_process, monkeypatch):
+    """Per-server env declared in mcp_servers.yaml is layered on top of the base."""
+    monkeypatch.setenv("PATH", "/usr/bin")
+    client = MCPClient(timeout=1.0)
+    mock_process.stdout.read.return_value = _init_response_bytes()
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_process) as mock_exec:
+        await client.connect(["npx", "server"], env={"MY_TOOL_KEY": "tool-secret"})
+        passed_env = mock_exec.call_args.kwargs["env"]
+
+    assert passed_env["MY_TOOL_KEY"] == "tool-secret"
+
+
+@pytest.mark.asyncio
+async def test_mcp_connect_filters_secret_user_env(mock_process, monkeypatch):
+    """A secret declared in mcp_servers.yaml env is still dropped (denylist wins)."""
+    monkeypatch.setenv("PATH", "/usr/bin")
+    client = MCPClient(timeout=1.0)
+    mock_process.stdout.read.return_value = _init_response_bytes()
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_process) as mock_exec:
+        await client.connect(
+            ["npx", "server"],
+            env={"CORPCLAW_IPC_SECRET": "should-not-pass", "MY_TOOL_KEY": "ok"},
+        )
+        passed_env = mock_exec.call_args.kwargs["env"]
+
+    assert "CORPCLAW_IPC_SECRET" not in passed_env
+    assert passed_env["MY_TOOL_KEY"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_mcp_connect_drops_corpclaw_prefixed_vars(mock_process, monkeypatch):
+    """Any CORPCLAW_-prefixed var (current or future) is dropped, not just the enumerated ones."""
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("CORPCLAW_PRIVATE_EXTENSIONS", "/secret/overlay")
+    monkeypatch.setenv("CORPCLAW_FUTURE_SECRET", "future-leak")
+
+    client = MCPClient(timeout=1.0)
+    mock_process.stdout.read.return_value = _init_response_bytes()
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_process) as mock_exec:
+        await client.connect(["npx", "server"])
+        passed_env = mock_exec.call_args.kwargs["env"]
+
+    assert "CORPCLAW_PRIVATE_EXTENSIONS" not in passed_env
+    assert "CORPCLAW_FUTURE_SECRET" not in passed_env
