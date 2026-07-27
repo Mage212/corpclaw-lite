@@ -17,6 +17,7 @@ __all__ = [
     "ContainerSettings",
     "DepthModeSettings",
     "ExtensionsSettings",
+    "FeedbackSettings",
     "LLMSettings",
     "LoggingSettings",
     "PersistentCacheSettings",
@@ -478,6 +479,23 @@ class SchedulerSettings(BaseModel):
     max_schedule_text_chars: int = 500
 
 
+class FeedbackSettings(BaseModel):
+    """B-121 / DC-025a: user 👍/👎 labels correlated with LLM payload captures.
+
+    MVP scope (decided 2026-07-27): binary up/down only, no comment; Telegram
+    + Web both covered. Each label carries ``run_id`` — the JOIN key against
+    ``logs/llm_payloads.jsonl`` records (see §7.1.1). Dataset exporter for
+    fine-tuning is a separate task (B-122).
+    """
+
+    enabled: bool = True
+    # Relative paths resolve against PROJECT_ROOT in channel wiring.
+    db_path: str = "data/feedback.db"
+    # If False, once a user has voted on a run they cannot change it (record is
+    # a no-op). Default True — allow changing one's mind (UPSERT semantics).
+    allow_change: bool = True
+
+
 class MemoryWorkerSettings(BaseModel):
     """B-109 / DC-027 Layer 2+3: background memory curator (web-owned)."""
 
@@ -517,6 +535,7 @@ class Settings(BaseSettings):
     extensions: ExtensionsSettings = ExtensionsSettings()
     logging: LoggingSettings = LoggingSettings()
     scheduler: SchedulerSettings = SchedulerSettings()
+    feedback: FeedbackSettings = FeedbackSettings()
     memory_worker: MemoryWorkerSettings = MemoryWorkerSettings()
 
     model_config = {"env_nested_delimiter": "__"}

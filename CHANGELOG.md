@@ -4,6 +4,56 @@
 
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/).
 
+## [0.3.1] — 2026-07-27
+
+**Patch** `0.3.0 → 0.3.1`. Замкнута петля обратной связи для осмысленного
+live-теста: сырые LLM-payload'ы + пользовательская оценка 👍/👎, с JOIN по
+`run_id`. Сама оценка не меняет поведение агента — она даёт ground truth для
+отладки и основу для будущего датасета дообучения (B-122).
+
+### Added
+
+- **User feedback 👍/👎 (B-121 / DC-025a).** Бинарная оценка assistant-ответов в
+  обоих каналах (Telegram inline-кнопки + Web UI). Каждая метка несёт `run_id` —
+  ключ корреляции к `logs/llm_payloads.jsonl`. Хранение в отдельной
+  `data/feedback.db` (mirror `scheduler.db`); UPSERT по `(run_id, user_id)` с
+  `allow_change=true` по умолчанию. Конфиг: `feedback.{enabled,db_path,
+  allow_change}` в `settings.yaml`. MVP — без комментария. Scope: только полные
+  agent runs, не vision-only (`handle_image`).
+
+- **`POST /api/feedback`** endpoint (Web): `{run_id, rating:"up"|"down"}` →
+  `{ok, rating}`, CSRF-защищён, 503 когда feedback выключен, 400 на невалидный
+  payload. См. `channels/web/orchestrator.py:_handle_feedback`.
+
+- **`FeedbackStore`** (`feedback/store.py`) — async SQLite store с `record` /
+  `get` / `list_for_run`, по образцу `scheduler/store.py` (path-injected,
+  `db_connect` context manager, `run_in_thread` wrappers).
+
+- **`run_id` в metadata assistant-сообщений** (Web) — проброс от
+  `AgentLoop.run` до пользовательского сообщения через `metadata.run_id`, один
+  ключ и для DB, и для WebSocket-payload.
+
+### Changed
+
+- **`TelegramChannel.send_message`** теперь возвращает `Message | None` (последней
+  части) и принимает `reply_markup` в `**opts` (форвардится только в последний
+  send-части). Сигнатура изменилась аддитивно — существующие вызовы без
+  `reply_markup` и без использования return value работают как прежде.
+
+- **`capture_enabled` flip в `settings.yaml`** (logging): `false → true` для фазы
+  live-теста. Запись `logs/llm_payloads.jsonl` (raw LLM request/response с
+  credential-scrubbing) включена, чтобы собирать данные для отладки и датасета.
+
+### Tests
+
+- `tests/test_feedback_store.py` (11): insert, UPSERT, `allow_change=False`
+  no-op, per-user изоляция, get/list_for_run, validation, schema idempotency.
+- `tests/test_telegram_feedback.py` (13): `callback_data` encode/parse +
+  Telegram byte-limit, `_handle_callback` fb-ветка (up/down/no-handler),
+  `send_message` regression (с/без reply_markup, multi-part, no-bot).
+- `tests/test_web_feedback.py` (7): 200+persist (up/down), UPSERT reflection,
+  400 (missing run_id / invalid rating / invalid JSON), 503 (store unwired).
+
 ## [0.3.0] — 2026-07-23
 
 **Minor** `0.2.7 → 0.3.0`. Security hardening (3 спринта), детерминистический

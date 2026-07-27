@@ -27,6 +27,7 @@ import {
   parseChatSummary,
   parseDirectoryPayload,
   parseExtensionsPayload,
+  parseFeedbackPayload,
   parseOkPayload,
   parsePathPayload,
   parsePathsPayload,
@@ -199,6 +200,21 @@ export function dismissSchedule(csrf: string, taskId: string): Promise<ScheduleT
       csrf
     }
   );
+}
+
+// B-121: user 👍/👎 on an assistant run. run_id is the agent run identifier
+// (carried in message.metadata.run_id); rating is "up" or "down". Server-side
+// UPSERT respects allow_change.
+export function rateMessage(
+  csrf: string,
+  runId: string,
+  rating: "up" | "down"
+): Promise<{ ok: boolean; rating: "up" | "down" }> {
+  return apiFetch("/api/feedback", parseFeedbackPayload, {
+    method: "POST",
+    csrf,
+    body: JSON.stringify({ run_id: runId, rating })
+  });
 }
 
 export function pauseSchedule(csrf: string, taskId: string): Promise<ScheduleTask> {

@@ -86,6 +86,7 @@ from corpclaw_lite.extensions.plugins.watcher import PluginHotReloader
 from corpclaw_lite.extensions.skills.watcher import SkillHotReloader
 from corpclaw_lite.extensions.subagents.watcher import SubagentHotReloader
 from corpclaw_lite.extensions.tools.builtin.send_file import SendFileTool
+from corpclaw_lite.feedback.store import FeedbackStore
 from corpclaw_lite.llm.tokenizer_client import TokenizerClient
 from corpclaw_lite.logging.agent_logger import AgentLogger, setup_logging
 from corpclaw_lite.memory.file_changes import FileChangeDAO
@@ -184,6 +185,8 @@ class WebChannelOrchestrator:
         self._scheduler: Any | None = None
         # B-109: background memory worker (web-owned; opt-in; quiet hours).
         self._memory_worker: Any | None = None
+        # B-121: 👍/👎 feedback store. None when settings.feedback.enabled=False.
+        self._feedback_store: FeedbackStore | None = None
         self._cleanup_task: asyncio.Task[None] | None = None
         self._container_prune_task: asyncio.Task[None] | None = None
         self._system_load_poll_task: asyncio.Task[None] | None = None
@@ -309,6 +312,15 @@ class WebChannelOrchestrator:
         ):
             stack.tool_registry.register(tool, allow_replace=True)
         self._scheduler.start()
+
+        # B-121: 👍/👎 feedback store. Created when settings.feedback.enabled
+        # (default True). Mirrors the scheduler.db path resolution.
+        if self._settings.feedback.enabled:
+            fb_db = Path(self._settings.feedback.db_path)
+            if not fb_db.is_absolute():
+                fb_db = (PROJECT_ROOT / fb_db).resolve()
+            self._feedback_store = FeedbackStore(fb_db)
+            logger.info("Web feedback store wired (store=%s)", fb_db)
 
         # B-109: memory worker (only if master switch is on).
         if self._settings.memory_worker.enabled and memory is not None:
@@ -512,6 +524,8 @@ class WebChannelOrchestrator:
         app.router.add_post("/api/schedule/{id}/resume", self._handle_schedule_resume)
         # B-143 PR3: optional LLM map free-form schedule → formula (human still accepts).
         app.router.add_post("/api/schedule/{id}/parse-assist", self._handle_schedule_parse_assist)
+        # B-121: user 👍/👎 on an assistant run (body: {run_id, rating}).
+        app.router.add_post("/api/feedback", self._handle_feedback)
         app.router.add_post("/api/chats/{id}/activate", self._handle_activate_chat)
         app.router.add_patch("/api/chats/{id}", self._handle_update_chat)
         app.router.add_delete("/api/chats/{id}", self._handle_delete_chat)
@@ -2343,6 +2357,46 @@ class WebChannelOrchestrator:
             return web.json_response({"error": msg}, status=status)
         return web.json_response({"task": self._schedule_task_payload(task)})
 
+    def _require_feedback_store(self) -> FeedbackStore:
+        """Return the feedback store or 503 if feedback is disabled/unwired."""
+        store = self._feedback_store
+        if store is None:
+            raise web.HTTPServiceUnavailable(text="Feedback is not available.")
+        return store
+
+    async def _handle_feedback(self, request: web.Request) -> web.Response:
+        """B-121: record a 👍/👎 label for an assistant run.
+
+        Body: ``{"run_id": str, "rating": "up"|"down"}``. Returns the persisted
+        rating so the frontend can reflect the choice immediately.
+        """
+        user = self._require_user(request)
+        store = self._require_feedback_store()
+        try:
+            raw_body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON body."}, status=400)
+        body: dict[str, object] = raw_body if isinstance(raw_body, dict) else {}
+        run_id_raw = body.get("run_id")
+        rating_raw = body.get("rating")
+        if not isinstance(run_id_raw, str) or not run_id_raw:
+            return web.json_response({"error": "run_id is required."}, status=400)
+        if not isinstance(rating_raw, str) or rating_raw not in {"up", "down"}:
+            return web.json_response({"error": "rating must be 'up' or 'down'."}, status=400)
+        allow_change = self._settings.feedback.allow_change
+        try:
+            label = await store.record(
+                run_id=run_id_raw,
+                user_id=str(user.id),
+                rating=rating_raw,
+                channel="web",
+                message_ref=None,
+                allow_change=allow_change,
+            )
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        return web.json_response({"ok": True, "rating": label.rating})
+
     async def _handle_schedule_pause(self, request: web.Request) -> web.Response:
         from corpclaw_lite.scheduler.service import SchedulerError
 
@@ -2960,6 +3014,10 @@ class WebChannelOrchestrator:
                         "usage": usage,
                         "status": result.stats.status,
                         "tools_used": result.stats.tools_used,
+                        # B-121: run_id is the JOIN key against
+                        # logs/llm_payloads.jsonl. The frontend reads it from
+                        # metadata.run_id to build 👍/👎 callback_data.
+                        "run_id": result.stats.run_id,
                     },
                 )
                 await self._broadcast_to_user(

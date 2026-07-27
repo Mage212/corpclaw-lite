@@ -2807,6 +2807,51 @@ a {
   text-decoration: none;
 }
 
+/* B-121: 👍/👎 feedback buttons attached to assistant messages. */
+.feedback-buttons {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.feedback-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border-radius: 6px;
+  border: 1px solid #ccd8df;
+  background: rgba(255, 255, 255, 0.96);
+  color: #5a6b78;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.feedback-btn:hover:not(:disabled) {
+  background: var(--accent-2-soft);
+  border-color: rgba(51, 79, 122, 0.3);
+}
+
+.feedback-btn.active {
+  background: var(--accent-2-soft);
+  border-color: rgba(51, 79, 122, 0.45);
+  color: var(--accent-2, #334f7a);
+}
+
+.feedback-btn:disabled {
+  cursor: default;
+  opacity: 0.65;
+}
+
+.feedback-error {
+  font-size: 12px;
+  color: #b42318;
+  margin-left: 4px;
+}
+
 .composer {
   padding: 13px 14px;
   background: rgba(255, 255, 255, 0.96);
