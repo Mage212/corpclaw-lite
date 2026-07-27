@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from corpclaw_lite.agent.guards import (
     PlanningTextGuardConfig,
@@ -226,8 +226,12 @@ class ContainerSettings(BaseModel):
     # Set False only for environments where the profile path is known-unavailable
     # (e.g. minimal CI) and the operator accepts the reduced isolation.
     seccomp_missing_fatal: bool = True
-    # Timeout for the outer docker exec call (host-side IPC envelope)
-    ipc_timeout_seconds: float = 120.0
+    # Timeout for the outer docker exec call (host-side IPC envelope). The
+    # container-side tool timeout is derived as ipc_timeout_seconds - 5s
+    # (ContainerIPC._IPC_OVERHEAD_SECONDS); a value below 5s would make that
+    # inner timeout negative and every tool call fail instantly with an opaque
+    # "timed out" — reject it at config-load time instead.
+    ipc_timeout_seconds: float = Field(default=120.0, ge=5.0)
 
 
 class CompressionSettings(BaseModel):
@@ -538,4 +542,8 @@ class Settings(BaseSettings):
     feedback: FeedbackSettings = FeedbackSettings()
     memory_worker: MemoryWorkerSettings = MemoryWorkerSettings()
 
-    model_config = {"env_nested_delimiter": "__"}
+    # M-10 (code review): a top-level typo (e.g. ``agem:`` instead of ``agent:``)
+    # silently dropped an entire subsystem to defaults — the same failure mode the
+    # nested ``extra="forbid"`` (S3-16) guards against. Forbid unknown keys at the
+    # top level too. ``env_nested_delimiter`` is preserved for env-var binding.
+    model_config = SettingsConfigDict(env_nested_delimiter="__", extra="forbid")
