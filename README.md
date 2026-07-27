@@ -142,7 +142,7 @@ Without the env opt-in, startup fails with `StartupConfigurationError` (DC-016).
 host tools for multi-user production deploys.
 
 **Other closed-contour defaults (v0.2.3):**
-- `logging.capture_enabled: false` — raw LLM payload capture is opt-in only.
+- `logging.capture_enabled: false` by default for closed-contour safety. **Flipped to `true` in the live-test phase (v0.3.1)** to collect raw LLM payloads + 👍/👎 labels for debugging and future fine-tune dataset collection. See the **User Feedback Pipeline** section below.
 - Department `default` is **office-without-web** (office subagents, no `web_fetch` / research).
 - File tools resolve under `workspaces/user_<id>/` even when containers are off (DC-017).
 
@@ -156,6 +156,7 @@ host tools for multi-user production deploys.
 | PhasePolicy | Per-phase thinking control — research gathering off, aggregation on; closing mode off |
 | Workflow-finalize Guard | Bounded nudge → restrict → auto-finalize cascade — research subagents always produce a report, never lose accumulated work on budget exhaustion |
 | Raw LLM Capture | Opt-in raw request/response logging to `logs/llm_payloads.jsonl` (default **off**, DC-037) with field-level allowlist + credential scrubbing — for debugging and future fine-tune dataset collection |
+| User Feedback Pipeline | 👍/👎 on every assistant response (Telegram inline buttons + Web UI), keyed by `run_id` to join against captured payloads — closes the debugging loop for live testing (B-121, v0.3.1) |
 | XML Tool Calling | Fallback parser for local LLMs without function calling |
 | 35 Built-in Tools | File ops, SQL queries, charts, PDF, Excel workbook/inspection, apply_fill_plan (Excel fill), schedule tools, web search/fetch, research workflows, and more |
 | Docker Sandbox | Per-user containers with resource limits and network deny-by-default; host-tools require explicit env opt-in (DC-016) |
@@ -199,6 +200,28 @@ multi-seed aggregation, and cloud LLM judge scoring via `--judge cloud` with a
 Background memory curation: periodically reads recent chat transcripts and
 extracts structured facts (abstraction + value + cues) into `memory_entries`.
 Opt-in per user; quiet-hours aware.
+
+## User Feedback Pipeline
+
+For meaningful live testing (not just "works/doesn't work" but "where exactly
+does the model fail"), CorpClaw Lite closes a feedback loop:
+
+```
+LLM call → logs/llm_payloads.jsonl (run_id) ─────┐
+                                                 │  JOIN by run_id (offline, B-122)
+User taps 👍/👎 → data/feedback.db (run_id) ──────┘
+```
+
+- **LLM payload capture** (`logging/payload.py`) writes one JSONL record per
+  LLM call with `run_id`, full request/response, scrubbed credentials. Default
+  off; **enabled in `settings.yaml` for the live-test phase**.
+- **User 👍/👎** (`feedback/store.py`) — binary rating on every assistant
+  response. Telegram inline buttons (`fb:up:<run_id>` stateless callback_data)
+  and Web UI buttons under each message. Each label carries `run_id` — the JOIN
+  key against the payload logs. UPSERT allows changing one's mind.
+
+The dataset exporter (B-122) joins payloads + labels into a training format for
+future fine-tuning — separate task, needed once live data accumulates.
 
 ## Documentation
 

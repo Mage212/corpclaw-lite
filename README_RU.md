@@ -158,6 +158,7 @@ data/
 | **PhasePolicy** | Per-фазное управление thinking — research gathering off, aggregation on; closing mode off |
 | **Workflow-finalize Guard** | Каскад nudge → restrict → auto-finalize — research-субагенты всегда возвращают отчёт, работа не теряется при исчерпании бюджета |
 | **Raw LLM Capture** | Opt-in логирование сырых request/response в `logs/llm_payloads.jsonl` (по умолчанию **выкл.**, DC-037) с field-level allowlist + scrubbing секретов — для диагностики и датасета дообучения |
+| **Петля обратной связи** | 👍/👎 на каждый ответ агента (Telegram inline-кнопки + Web UI), с ключом `run_id` для JOIN против захваченных payload'ов — замыкает петлю отладки для live-теста (B-121, v0.3.1) |
 | **XML Tool Calling** | Fallback-парсер для локальных LLM без нативного function calling |
 | **Сжатие контекста** | 3-уровневое сжатие для ограниченных контекстных окон |
 | **Smart Approvals** | LLM-оценка риска опасных операций |
@@ -369,7 +370,7 @@ npm run dev
 Без opt-in старт падает с `StartupConfigurationError` (DC-016). Host-tools не для multi-user прода.
 
 **Closed-contour defaults (v0.2.3):**
-- `logging.capture_enabled: false` — захват сырых LLM-пейлоадов только opt-in.
+- `logging.capture_enabled: false` по умолчанию для closed-contour. **Включён в `true` в фазе live-теста (v0.3.1)** — собираем сырые LLM-payload'ы + метки 👍/👎 для отладки и будущего датасета дообучения. См. раздел **Петля обратной связи** ниже.
 - Департамент `default` = **office-without-web** (офисные субагенты, без web/research).
 - File-тулзы резолвят пути в `workspaces/user_<id>/` даже при выключенных контейнерах (DC-017).
 
@@ -481,6 +482,30 @@ CorpClaw Lite спроектирован для работы в **замкнут
 - Bearer-токены, AWS-ключи (`AKIA...`)
 - PEM private keys, URL-credentials (`user:pass@host`)
 - IPC-секрет из переменной окружения
+
+---
+
+## Петля обратной связи (live-тест)
+
+Для осмысленного live-теста (не «работает/не работает», а «где именно сбоит
+модель») в CorpClaw Lite замкнута петля обратной связи:
+
+```
+LLM-вызов → logs/llm_payloads.jsonl (run_id) ─────┐
+                                                  │  JOIN по run_id (офлайн, B-122)
+Пользователь тапает 👍/👎 → data/feedback.db (run_id) ┘
+```
+
+- **LLM payload capture** (`logging/payload.py`) — одна JSONL-запись на LLM-вызов
+  с `run_id`, полным request/response, scrubbing-ом секретов. По умолчанию
+  выкл.; **включён в `settings.yaml` для фазы live-теста**.
+- **Пользовательская оценка 👍/👎** (`feedback/store.py`) — бинарная оценка на
+  каждый ответ агента. Telegram inline-кнопки (`fb:up:<run_id>` stateless
+  callback_data) и Web UI кнопки под сообщением. Каждая метка несёт `run_id` —
+  ключ JOIN против payload-логов. UPSERT разрешает передумать.
+
+Экспортёр датасета (B-122) джойнит payload'ы + метки в training-format для
+будущего дообучения — отдельная задача, нужна после накопления live-данных.
 
 ---
 

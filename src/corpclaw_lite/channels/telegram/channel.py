@@ -120,6 +120,12 @@ class TelegramChannel(Channel):
         # Handler: (telegram_user_id, action "accept"|"dismiss", task_id) → reply text
         self._schedule_action_handler: Callable[[int, str, str], Awaitable[str]] | None = None
 
+        # B-121: user 👍/👎 on assistant runs. Stateless — the run_id is encoded
+        # in callback_data, no side-dict needed. Handler:
+        # (telegram_user_id, rating "up"|"down", run_id, message_id) → None.
+        # The orchestrator registers this and writes the label to FeedbackStore.
+        self._feedback_handler: Callable[[int, str, str, int], Awaitable[None]] | None = None
+
         # Deduplication
         self._processed_ids: set[int] = set()
         self._processed_order: deque[int] = deque()
@@ -462,28 +468,46 @@ class TelegramChannel(Channel):
 
     # ── Send helpers ──────────────────────────────────────────────────────────
 
-    async def send_message(self, user: User, text: str, **opts: Any) -> None:
-        """Send a message with MarkdownV2 formatting and auto-splitting."""
+    async def send_message(self, user: User, text: str, **opts: Any) -> Message | None:
+        """Send a message with MarkdownV2 formatting and auto-splitting.
+
+        ``reply_markup`` (if present in ``opts``) is attached only to the last
+        part — multi-part messages keep one keyboard at the very end. Returns
+        the sent ``Message`` of the last part, or ``None`` if nothing was sent
+        (no app, all sends failed). Callers that don't need either can ignore
+        the return value — the signature change is additive.
+        """
         if not self._app or not self._app.bot:
-            return
+            return None
 
         parts = build_response_parts(text)
-        for part in parts:
+        reply_markup = opts.get("reply_markup")
+        last_message: Message | None = None
+        total = len(parts)
+        for idx, part in enumerate(parts):
+            is_last = idx == total - 1
+            kwargs: dict[str, Any] = {
+                "chat_id": user.telegram_id,
+                "text": part,
+                "parse_mode": "MarkdownV2",
+                "disable_web_page_preview": True,
+            }
+            if is_last and reply_markup is not None:
+                kwargs["reply_markup"] = reply_markup
             try:
-                await self._app.bot.send_message(
-                    chat_id=user.telegram_id,
-                    text=part,
-                    parse_mode="MarkdownV2",
-                    disable_web_page_preview=True,
-                )
+                last_message = await self._app.bot.send_message(**kwargs)
             except Exception:
                 try:
-                    await self._app.bot.send_message(
-                        chat_id=user.telegram_id,
-                        text=part,
-                    )
+                    # MarkdownV2 fallback — retry without parse_mode. The
+                    # reply_markup (if any) still attaches to this last part.
+                    fallback_kwargs = {"chat_id": user.telegram_id, "text": part}
+                    if is_last and reply_markup is not None:
+                        fallback_kwargs["reply_markup"] = reply_markup
+                    last_message = await self._app.bot.send_message(**fallback_kwargs)
                 except Exception as e:
                     logger.error("Failed to send Telegram message to %s: %s", user.telegram_id, e)
+                    last_message = None
+        return last_message
 
     async def send_file(self, user: User, path: Path, caption: str = "") -> None:
         """Send a document wrapper."""
@@ -799,6 +823,18 @@ class TelegramChannel(Channel):
         """Register B-143 schedule consent callback handler (accept/dismiss)."""
         self._schedule_action_handler = handler
 
+    def set_feedback_handler(
+        self, handler: Callable[[int, str, str, int], Awaitable[None]] | None
+    ) -> None:
+        """Register B-121 user feedback callback handler (👍/👎).
+
+        Handler signature: ``(telegram_user_id, rating, run_id, message_id)``.
+        ``rating`` is ``"up"`` or ``"down"``; ``run_id`` is the 32-char hex
+        encoded in callback_data; ``message_id`` is the Telegram message id the
+        buttons were attached to (for reference/storage).
+        """
+        self._feedback_handler = handler
+
     async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
         if not query or not query.message:
@@ -812,6 +848,11 @@ class TelegramChannel(Channel):
         # B-143 PR2: schedule consent (sc:a:|sc:d: + task_id)
         if data.startswith("sc:"):
             await self._handle_schedule_callback(query, data)
+            return
+
+        # B-121: user feedback 👍/👎 (fb:up:|fb:down: + run_id)
+        if data.startswith("fb:"):
+            await self._handle_feedback_callback(query, data)
             return
 
         # Delete-flow callbacks → file manager handler
@@ -888,6 +929,44 @@ class TelegramChannel(Channel):
             await query.edit_message_text(text=result_text)
         except Exception as exc:
             logger.debug("Could not edit schedule message: %s", exc)
+
+    async def _handle_feedback_callback(self, query: Any, data: str) -> None:
+        """B-121: record 👍/👎 for an assistant run, then remove the buttons.
+
+        Stateless: the run_id is encoded in callback_data, so no per-message
+        dict is consulted. After a tap the keyboard is removed so the user
+        cannot re-tap (per-vote re-enablement is a future concern; today the
+        store's UPSERT + allow_change handles re-voting if buttons reappear).
+        """
+        from corpclaw_lite.channels.telegram.callback_data import parse_feedback_callback
+
+        parsed = parse_feedback_callback(data)
+        if parsed is None:
+            await query.answer("Некорректная кнопка.", show_alert=True)
+            return
+        if self._feedback_handler is None:
+            # No handler registered — silently ack so the user's tap doesn't
+            # hang. The orchestrator may not have wired feedback in this run.
+            await query.answer()
+            return
+        rating, run_id = parsed
+        caller_uid = query.from_user.id if query.from_user else None
+        if caller_uid is None:
+            await query.answer("Access denied.", show_alert=True)
+            return
+        message_id = query.message.message_id if query.message else 0
+        try:
+            await self._feedback_handler(caller_uid, rating, run_id, message_id)
+        except Exception:
+            logger.exception("Feedback callback failed rating=%s run_id=%s", rating, run_id)
+            await query.answer("Не удалось сохранить оценку.", show_alert=True)
+            return
+        await query.answer("Спасибо за оценку!")
+        # Remove the keyboard so the buttons don't linger indefinitely.
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception as exc:
+            logger.debug("Could not clear feedback keyboard: %s", exc)
 
     # ── Error handler ─────────────────────────────────────────────────────────
 

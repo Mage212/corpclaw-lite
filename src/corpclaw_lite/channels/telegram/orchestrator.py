@@ -23,6 +23,7 @@ from corpclaw_lite.config.bootstrap import BootstrapLoader
 from corpclaw_lite.container.manager import ContainerManagerError
 from corpclaw_lite.extensions.plugins.watcher import PluginHotReloader
 from corpclaw_lite.extensions.skills.watcher import SkillHotReloader
+from corpclaw_lite.feedback.store import FeedbackStore
 from corpclaw_lite.logging.agent_logger import AgentLogger, setup_logging
 from corpclaw_lite.logging.trace import log_event
 from corpclaw_lite.onboarding.engine import OnboardingEngine
@@ -64,6 +65,8 @@ class TelegramBotOrchestrator:
         self._user_notifier: Any | None = None
         # B-143 PR2: store-backed scheduler for accept/dismiss callbacks (no poll).
         self._scheduler: Any | None = None
+        # B-121: store-backed 👍/👎 labels, keyed by run_id (JOIN vs payload logs).
+        self._feedback_store: FeedbackStore | None = None
         self._bootstrap: BootstrapLoader | None = None
         self._vision_processor: VisionProcessor | None = None
 
@@ -158,6 +161,67 @@ class TelegramBotOrchestrator:
             return "❌ Неизвестное действие."
         except SchedulerError as exc:
             return f"❌ {exc}"
+
+    async def _handle_feedback(
+        self, telegram_id: int, rating: str, run_id: str, message_id: int
+    ) -> None:
+        """B-121: persist a 👍/👎 label to the feedback store.
+
+        ``rating`` is ``"up"`` or ``"down"`` (validated downstream by the store);
+        ``run_id`` is the 32-char hex encoded in callback_data; ``message_id``
+        is the Telegram message id the buttons were attached to.
+        """
+        if self._feedback_store is None:
+            logger.warning("Feedback tap but store is not initialised; run_id=%s", run_id)
+            return
+        user = await self._resolve_user_by_telegram_id(telegram_id)
+        if user is None:
+            logger.warning(
+                "Feedback tap from unknown telegram_id=%s; run_id=%s", telegram_id, run_id
+            )
+            return
+        allow_change = self._settings.feedback.allow_change
+        try:
+            await self._feedback_store.record(
+                run_id=run_id,
+                user_id=str(user.id),
+                rating=rating,
+                channel="telegram",
+                message_ref=str(message_id) if message_id else None,
+                allow_change=allow_change,
+            )
+        except Exception:
+            logger.exception("Failed to record feedback run_id=%s rating=%s", run_id, rating)
+            raise
+
+    def _feedback_opts(self, run_stats: Any) -> dict[str, Any]:
+        """Build send_message kwargs for 👍/👎 buttons.
+
+        Returns ``{"reply_markup": InlineKeyboardMarkup}`` when feedback is
+        enabled and the run produced a run_id; otherwise ``{}`` (no-op, the
+        send path behaves exactly as before).
+        """
+        if self._feedback_store is None or run_stats is None:
+            return {}
+        run_id = getattr(run_stats, "run_id", None)
+        if not run_id:
+            return {}
+        # Lazy imports — keep these Telegram-specific symbols out of module load
+        # so the orchestrator remains importable without the bot wired up.
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        from corpclaw_lite.channels.telegram.callback_data import (
+            feedback_down_data,
+            feedback_up_data,
+        )
+
+        keyboard = [
+            [
+                InlineKeyboardButton("👍", callback_data=feedback_up_data(run_id)),
+                InlineKeyboardButton("👎", callback_data=feedback_down_data(run_id)),
+            ]
+        ]
+        return {"reply_markup": InlineKeyboardMarkup(keyboard)}
 
     def _require_started(
         self,
@@ -369,6 +433,19 @@ class TelegramBotOrchestrator:
             )
             self._channel.set_schedule_action_handler(self._handle_schedule_action)
             logger.info("Telegram schedule consent callbacks wired (store=%s)", sched_db)
+
+        # B-121 / DC-025a: 👍/👎 feedback store + callback handler. Runs
+        # independently of scheduler — feedback is always available when
+        # settings.feedback.enabled (default True). The store path resolves the
+        # same way scheduler.db does (PROJECT_ROOT-relative).
+        fb_settings = self._settings.feedback
+        if fb_settings.enabled:
+            fb_db = Path(fb_settings.db_path)
+            if not fb_db.is_absolute():
+                fb_db = (PROJECT_ROOT / fb_db).resolve()
+            self._feedback_store = FeedbackStore(fb_db)
+            self._channel.set_feedback_handler(self._handle_feedback)
+            logger.info("Telegram feedback callbacks wired (store=%s)", fb_db)
 
         self._cleanup_task = asyncio.create_task(self._rate_limit_cleanup_loop())
 
@@ -784,7 +861,7 @@ class TelegramBotOrchestrator:
             )
 
         try:
-            await channel.send_message(user, reply)
+            await channel.send_message(user, reply, **self._feedback_opts(run_stats))
         finally:
             await self._finish_user_request(user.id)
 

@@ -12,6 +12,7 @@ import { ActivityCard } from "./ActivityCard";
 import { ContextSizeBar } from "./ContextSizeBar";
 import { MarkdownMessage } from "./MarkdownMessage";
 import { parseScheduleConfirmMeta, ScheduleConfirmCard } from "./ScheduleConfirmCard";
+import { FeedbackButtons } from "./FeedbackButtons";
 import type { WebChatSession } from "./useWebChatSession";
 
 type ChatPanelProps = {
@@ -262,6 +263,13 @@ function MessageBubble({
     message.role === "user" ? "Вы" : message.role === "assistant" ? "CorpClaw" : "Система";
   const filePath = message.file?.path || "";
   const scheduleMeta = parseScheduleConfirmMeta(message.metadata ?? null);
+  // B-121: run_id is the JOIN key against logs/llm_payloads.jsonl. Only
+  // assistant messages that went through AgentLoop.run carry it; the 👍/👎
+  // buttons attach to those messages. No run_id → no feedback affordance.
+  const feedbackRunId = (() => {
+    const raw = message.metadata?.run_id;
+    return typeof raw === "string" && raw.length > 0 ? raw : null;
+  })();
   return (
     <article className={`message ${message.role} ${message.tone || "normal"}`}>
       <div className="message-role">{roleLabel}</div>
@@ -302,6 +310,9 @@ function MessageBubble({
           {...(onOpenSchedule !== undefined ? { onOpenSchedule } : {})}
           {...(onScheduleResolved !== undefined ? { onResolved: onScheduleResolved } : {})}
         />
+      )}
+      {feedbackRunId && csrf && message.role === "assistant" && (
+        <FeedbackButtons csrf={csrf} runId={feedbackRunId} />
       )}
     </article>
   );

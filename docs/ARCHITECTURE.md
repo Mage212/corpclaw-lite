@@ -1,7 +1,7 @@
 # CorpClaw Lite — Архитектура проекта
 
-> Версия документа: 2026-07-23
-> Версия проекта: 0.3.0 — Security hardening (Sprint 1–3), deterministic Excel-fill pipeline, cloud judge, scheduler, memory worker
+> Версия документа: 2026-07-27
+> Версия проекта: 0.3.1 — Security hardening (Sprint 1–3), deterministic Excel-fill pipeline, cloud judge, scheduler, memory worker, user feedback pipeline (👍/👎 + LLM payload capture)
 
 ---
 
@@ -1432,3 +1432,63 @@ Background curation: периодически читает recent transcripts и
 session (notify-user). Используется scheduler'ом и для admin-уведомлений.
 
 **Ключевые модули:** `channels/service.py` (run_headless), `channels/user_notifier.py`
+
+## 18. User Feedback Pipeline (B-121 / DC-025a, v0.3.1)
+
+Петля обратной связи для осмысленного live-теста: сырые LLM-payload'ы +
+пользовательская оценка 👍/👎, с JOIN по `run_id`.
+
+```
+LLM-вызов → logs/llm_payloads.jsonl (run_id) ─────┐
+                                                  │  JOIN по run_id (офлайн, B-122)
+Пользователь тапает 👍/👎 → data/feedback.db (run_id) ┘
+```
+
+**LLM payload capture** — `logging/payload.py`, одна JSONL-запись на LLM-вызов,
+allowlist-фильтрованная (`capture_fields`), с двойным credential-scrubbing
+(formatter + filter). Каждая запись несёт `run_id`, `user_id`, `session_id`,
+фазу, `finish_reason`, request/response. Управляется `logging.capture_enabled`
+(по умолчанию OFF; включён в `settings.yaml` для фазы live-теста).
+
+**User feedback 👍/👎** — `feedback/store.py`, бинарная оценка (MVP, без
+комментария). Хранение в отдельной `data/feedback.db` (mirror `scheduler.db`),
+schema `feedback_labels` с `UNIQUE(run_id, user_id)` + UPSERT (`allow_change`
+по умолчанию True — пользователь может передумать).
+
+**Каналы:**
+
+- **Telegram** — inline-кнопки 👍/👎 на финальном ответе агента. Stateless
+  `callback_data` формата `fb:up:<run_id>` / `fb:down:<run_id>` (run_id —
+  32-char hex, влезает в 64-байтный лимит Telegram). После тапа клавиатура
+  убирается. Не требует side-dict — mapping переживает рестарт (в отличие от
+  `_pending_approvals`).
+- **Web** — кнопки под assistant-сообщением (`FeedbackButtons.tsx`), POST
+  `/api/feedback` с CSRF. `run_id` прокидывается от `AgentLoop.run` до сообщения
+  через `metadata.run_id` (один ключ для DB и WebSocket-payload).
+
+**Scope limitation (явная):** feedback покрывает только полные agent runs
+(`handle_message` в Telegram, `AgentLoop.run` в Web). Vision-only ответы
+(`handle_image`, отдельный `run_id` без полного цикла) НЕ помечаются — расширение
+отдельной задачей при необходимости.
+
+**Ключевые модули:**
+- `feedback/store.py` + `feedback/models.py` — `FeedbackStore` (async SQLite)
+- `channels/telegram/callback_data.py` — `feedback_up_data`/`feedback_down_data`/`parse_feedback_callback`
+- `channels/telegram/channel.py` — `_handle_feedback_callback`, `send_message` (расширен: `reply_markup` + возврат `Message|None`)
+- `channels/telegram/orchestrator.py` — `_handle_feedback`, `_feedback_opts`
+- `channels/web/orchestrator.py` — `_handle_feedback`, `_require_feedback_store`, `run_id` в `metadata`
+- `frontend/web/src/chat/FeedbackButtons.tsx` — 👍/👎 UI
+
+**Конфигурация** (`config/settings.yaml` → `feedback`):
+```yaml
+feedback:
+  enabled: true              # default ON — сбор меток raison d'être live-теста
+  db_path: "data/feedback.db"
+  allow_change: true         # UPSERT: переголосование разрешено
+```
+
+**Что НЕ входит (отложено):**
+- **B-122** — экспортёр датасета: JOIN `llm_payloads.jsonl` + `feedback.db` по
+  `run_id` → training-format. Отдельная задача, нужна после появления live-данных.
+- Опциональный текстовый комментарий к оценке — MVP только 👍/👎.
+- Feedback на vision-only ответы (`handle_image`).
