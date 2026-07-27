@@ -560,7 +560,12 @@ class LLMRequestQueue:
         self._emit_load_changed()
 
     def get_position(self, user_id: str) -> int | None:
-        """Return 0-based queue position for *user_id*, or ``None`` if not queued."""
+        """Return 0-based queue position for *user_id*, or ``None`` if not queued.
+
+        S2-16: assumes at most one waiting entry per user (the single-entry-per-user
+        model enforced by acquire/release). If two entries for the same user ever
+        coexist, only the first match's position is returned.
+        """
         for i, entry in enumerate(self._waiting):
             if entry.user_id == user_id:
                 return i

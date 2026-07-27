@@ -116,6 +116,23 @@ class TokenizerClient:
         self._cache_max_entries = cache_max_entries
         self._transport = transport
         self._cache: OrderedDict[str, TokenEstimate] = OrderedDict()
+        # S2-15: reuse a single AsyncClient for connection pooling instead of
+        # creating one per _tokenize_http call.
+        self._http_client: httpx.AsyncClient | None = None
+
+    async def _get_http_client(self) -> httpx.AsyncClient:
+        if self._http_client is None or self._http_client.is_closed:
+            self._http_client = httpx.AsyncClient(
+                timeout=self._timeout,
+                transport=self._transport,
+            )
+        return self._http_client
+
+    async def aclose(self) -> None:
+        """Close the reusable HTTP client (S2-15)."""
+        if self._http_client is not None and not self._http_client.is_closed:
+            await self._http_client.aclose()
+            self._http_client = None
 
     def clear_cache(self) -> None:
         """Drop all cached estimates."""
@@ -184,15 +201,12 @@ class TokenizerClient:
         if self._model:
             body["model"] = self._model
         try:
-            async with httpx.AsyncClient(
-                timeout=self._timeout,
-                transport=self._transport,
-            ) as client:
-                response = await client.post(
-                    url,
-                    json=body,
-                    headers=headers,
-                )
+            client = await self._get_http_client()
+            response = await client.post(
+                url,
+                json=body,
+                headers=headers,
+            )
         except httpx.HTTPError as exc:
             logger.warning(
                 "TokenizerClient /tokenize failed (%s): %s",
