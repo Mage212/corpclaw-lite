@@ -212,3 +212,98 @@ def test_fallback_recall_limit_constant_is_bounded() -> None:
     from corpclaw_lite.memory.sqlite import _FALLBACK_RECALL_LIMIT
 
     assert _FALLBACK_RECALL_LIMIT <= 1000
+
+
+# ── S1-09: legacy DROP migration gate ──────────────────────────────────────
+
+
+def test_legacy_drop_runs_once_then_marker_prevents_re_drop(tmp_path: Path) -> None:
+    """S1-09: the legacy messages/memory_facts DROP runs exactly once per DB.
+
+    First init drops legacy tables and sets the marker; a second init must NOT
+    re-run the DROPs (a second SQLiteMemory instance / CLI subcommand / restart
+    during an in-flight writer must not wipe live data).
+    """
+    db_file = tmp_path / "mem.db"
+
+    # Seed a DB with legacy tables + a marker that is ABSENT, simulating a
+    # pre-S1-09 database that still has messages/memory_facts.
+    with sqlite3.connect(str(db_file)) as conn:
+        conn.execute("CREATE TABLE messages (id INTEGER)")
+        conn.execute("CREATE TABLE memory_facts (id INTEGER)")
+        conn.execute("INSERT INTO memory_facts VALUES (42)")
+        conn.execute(
+            "CREATE TABLE memory_entries (id INTEGER PRIMARY KEY, user_id TEXT,"
+            " primary_abstraction TEXT, memory_value TEXT,"
+            " cue_indices_json TEXT DEFAULT '[]', created_at TIMESTAMP,"
+            " updated_at TIMESTAMP, UNIQUE(user_id, primary_abstraction))"
+        )
+        conn.execute("INSERT INTO memory_entries VALUES (1,'u','name','Alice','[]','t','t')")
+        conn.commit()
+
+    # First init: legacy tables dropped, marker set.
+    SQLiteMemory(str(db_file))
+    with sqlite3.connect(str(db_file)) as conn:
+        # Legacy tables gone.
+        assert (
+            conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_facts'"
+            ).fetchone()
+            is None
+        )
+        assert (
+            conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='messages'"
+            ).fetchone()
+            is None
+        )
+        # Marker present.
+        assert (
+            conn.execute("SELECT 1 FROM app_metadata WHERE key='memory_legacy_drop_v1'").fetchone()
+            is not None
+        )
+        # memory_entries survived.
+        assert conn.execute("SELECT COUNT(*) FROM memory_entries").fetchone()[0] == 1
+
+    # Second init: marker present → no re-drop attempt (and no error).
+    SQLiteMemory(str(db_file))
+    with sqlite3.connect(str(db_file)) as conn:
+        assert (
+            conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_facts'"
+            ).fetchone()
+            is None
+        )
+
+
+def test_fresh_db_sets_marker_without_legacy_tables(tmp_path: Path) -> None:
+    """S1-09: a brand-new DB (no legacy tables) still gets the marker on first init."""
+    db_file = tmp_path / "fresh.db"
+    SQLiteMemory(str(db_file))
+    with sqlite3.connect(str(db_file)) as conn:
+        assert (
+            conn.execute("SELECT 1 FROM app_metadata WHERE key='memory_legacy_drop_v1'").fetchone()
+            is not None
+        )
+        # memory_entries created normally.
+        assert (
+            conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_entries'"
+            ).fetchone()
+            is not None
+        )
+
+
+@pytest.mark.asyncio
+async def test_store_recall_survives_reinit(tmp_path: Path) -> None:
+    """S1-09 regression: facts stored before a re-init survive (no data loss)."""
+    db_file = tmp_path / "persist.db"
+    m1 = SQLiteMemory(str(db_file))
+    await m1.store_fact("u1", "role", "analyst")
+    assert await m1.recall_facts("u1", "role")
+
+    # A new instance on the same DB file — must not drop anything.
+    m2 = SQLiteMemory(str(db_file))
+    facts = await m2.recall_facts("u1", "role")
+    assert facts
+    assert any("analyst" in str(f) for f in facts)

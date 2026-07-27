@@ -263,6 +263,16 @@ scheduler:
   max_task_text_chars: 16000
   max_schedule_text_chars: 500
 
+# B-121 / DC-025a: user 👍/👎 labels on assistant runs. Each label carries
+# run_id — the JOIN key against logs/llm_payloads.jsonl (capture_enabled above).
+# MVP: binary up/down only (no comment). Dataset exporter for fine-tuning is
+# B-122. Default on — collecting labels is the whole point of the live-test
+# phase; flip to false to disable feedback buttons entirely.
+feedback:
+  enabled: true
+  db_path: "data/feedback.db"
+  allow_change: true
+
 # B-109 / DC-027 Layer 2+3: background memory curator (web-owned; not consent UI).
 # Master switch off by default; each user must also opt in (CLI memory-worker enable).
 memory_worker:
@@ -284,7 +294,7 @@ memory_worker:
   poll_seconds: 300
 
 logging:
-  level: "DEBUG"
+  level: "INFO"  # S2-22: was DEBUG (closed-contour default; opt into DEBUG explicitly)
   console_level: "INFO"
   log_dir: "logs"
   health_port: 8080
@@ -293,13 +303,15 @@ logging:
   trace_level: "metadata"
   trace_preview_chars: 200
   # D-056 / DC-037: raw LLM request/response capture.
-  # Default OFF (closed-contour safety). Opt-in for diagnostics / fine-tuning
-  # dataset collection. When enabled, writes logs/llm_payloads.jsonl with one
-  # record per LLM call, filtered by capture_fields (allowlist).
+  # Default OFF for closed-contour safety. ENABLED for live-test phase (B-121):
+  # we are collecting raw payloads + 👍/👎 labels to diagnose model behaviour
+  # and build a fine-tuning dataset. Writes logs/llm_payloads.jsonl with one
+  # record per LLM call, filtered by capture_fields (allowlist). Each record
+  # carries run_id — the JOIN key against data/feedback.db.
   # Credentials are scrubbed (sk-*, Bearer, etc.) — still review capture_fields
   # before enabling in privacy-sensitive deployments. See AGENTS.md §"LLM payload
   # capture" for the rationale.
-  capture_enabled: false
+  capture_enabled: true
   capture_fields:
     - "request.model"           # model name
     - "request.messages"        # full messages array (system + user + history)

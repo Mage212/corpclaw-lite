@@ -36,6 +36,10 @@ def _load_columns(path: Path) -> tuple[list[str], list[tuple[Any, ...]]]:
 
     conn = duckdb.connect(":memory:")
     try:
+        # chart_generate runs only fixed chart queries (no user SQL), and the
+        # data load itself requires external access, so we deliberately do not
+        # disable enable_external_access here. The read path is safe by
+        # construction (no user-controlled SQL reaches DuckDB).
         ext = path.suffix.lower()
         # Escape single quotes in path to prevent SQL injection via file names.
         p = str(path).replace("'", "''")

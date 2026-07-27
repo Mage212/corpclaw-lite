@@ -395,3 +395,136 @@ class TestOpenAIProvider:
         kwargs = mock_client.chat.completions.create.call_args.kwargs
         sent_messages = kwargs["messages"]
         assert sent_messages[0] == {"role": "system", "content": "You are helpful."}
+
+
+# ── S1-01: provider aclose ────────────────────────────────────────────────────────
+
+
+class TestProviderAclose:
+    """S1-01: providers must close their underlying SDK HTTP client via aclose()."""
+
+    @pytest.mark.asyncio
+    async def test_openai_provider_aclose_closes_client(self) -> None:
+        from corpclaw_lite.llm.openai import OpenAIProvider
+
+        mock_client = MagicMock()
+        mock_client.close = AsyncMock()
+        with patch("corpclaw_lite.llm.openai.openai") as mock_mod:
+            mock_mod.AsyncOpenAI.return_value = mock_client
+            provider = OpenAIProvider(_openai_settings())
+
+        await provider.aclose()
+        mock_client.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_anthropic_provider_aclose_closes_client(self) -> None:
+        from corpclaw_lite.llm.anthropic import AnthropicProvider
+
+        mock_client = MagicMock()
+        mock_client.close = AsyncMock()
+        with patch("corpclaw_lite.llm.anthropic.anthropic") as mock_mod:
+            mock_mod.AsyncAnthropic.return_value = mock_client
+            provider = AnthropicProvider(_anthropic_settings())
+
+        await provider.aclose()
+        mock_client.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_openai_provider_implements_async_closeable(self) -> None:
+        from corpclaw_lite.llm.base import AsyncCloseable
+        from corpclaw_lite.llm.openai import OpenAIProvider
+
+        mock_client = MagicMock()
+        mock_client.close = AsyncMock()
+        with patch("corpclaw_lite.llm.openai.openai") as mock_mod:
+            mock_mod.AsyncOpenAI.return_value = mock_client
+            provider = OpenAIProvider(_openai_settings())
+
+        assert isinstance(provider, AsyncCloseable)
+
+    @pytest.mark.asyncio
+    async def test_anthropic_provider_implements_async_closeable(self) -> None:
+        from corpclaw_lite.llm.anthropic import AnthropicProvider
+        from corpclaw_lite.llm.base import AsyncCloseable
+
+        mock_client = MagicMock()
+        mock_client.close = AsyncMock()
+        with patch("corpclaw_lite.llm.anthropic.anthropic") as mock_mod:
+            mock_mod.AsyncAnthropic.return_value = mock_client
+            provider = AnthropicProvider(_anthropic_settings())
+
+        assert isinstance(provider, AsyncCloseable)
+
+
+# ── S1-02: timeout/retry wiring ───────────────────────────────────────────────────
+
+
+class TestProviderTimeoutRetry:
+    """S1-02: provider constructors forward timeout/max_retries to the SDK client."""
+
+    def test_openai_provider_passes_timeout_and_max_retries(self) -> None:
+        import httpx
+
+        from corpclaw_lite.llm.openai import OpenAIProvider
+
+        settings = ProviderSettings(
+            type="openai",
+            model="qwen2.5:7b",
+            api_key="ollama",
+            base_url="http://localhost:11434/v1",
+            connect_timeout=5.0,
+            read_timeout=300.0,
+            write_timeout=250.0,
+            pool_timeout=200.0,
+            max_retries=3,
+        )
+        with patch("corpclaw_lite.llm.openai.openai") as mock_mod:
+            mock_mod.AsyncOpenAI.return_value = MagicMock()
+            OpenAIProvider(settings)
+
+        kwargs = mock_mod.AsyncOpenAI.call_args.kwargs
+        assert isinstance(kwargs["timeout"], httpx.Timeout)
+        assert kwargs["timeout"].write == 250.0
+        assert kwargs["timeout"].pool == 200.0
+        assert kwargs["max_retries"] == 3
+
+    def test_anthropic_provider_passes_timeout_and_max_retries(self) -> None:
+        import httpx
+
+        from corpclaw_lite.llm.anthropic import AnthropicProvider
+
+        settings = ProviderSettings(
+            type="anthropic",
+            model="claude-3-haiku-20240307",
+            api_key="sk-ant-test123",
+            connect_timeout=7.0,
+            read_timeout=120.0,
+            write_timeout=110.0,
+            pool_timeout=90.0,
+            max_retries=2,
+        )
+        with patch("corpclaw_lite.llm.anthropic.anthropic") as mock_mod:
+            mock_mod.AsyncAnthropic.return_value = MagicMock()
+            AnthropicProvider(settings)
+
+        kwargs = mock_mod.AsyncAnthropic.call_args.kwargs
+        assert isinstance(kwargs["timeout"], httpx.Timeout)
+        assert kwargs["timeout"].write == 110.0
+        assert kwargs["timeout"].pool == 90.0
+        assert kwargs["max_retries"] == 2
+
+    def test_default_timeouts_when_unset(self) -> None:
+        """Defaults match the OpenAI/Anthropic SDK exactly (no regression)."""
+        from corpclaw_lite.config.providers import ProviderConnection
+
+        conn = ProviderConnection(type="openai", api_key="x", base_url="http://x")
+        # Defaults mirror the SDK: connect 5s, read/write/pool 600s, 2 retries.
+        assert conn.connect_timeout == 5.0
+        assert conn.read_timeout == 600.0
+        assert conn.write_timeout == 600.0
+        assert conn.pool_timeout == 600.0
+        assert conn.max_retries == 2
+        # Regression guard: write/pool must NOT be tied to connect (a prior bug
+        # set write=connect=10s, breaking large request bodies for all deploys).
+        assert conn.write_timeout != conn.connect_timeout
+        assert conn.pool_timeout != conn.connect_timeout

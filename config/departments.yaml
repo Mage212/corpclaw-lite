@@ -209,6 +209,9 @@ departments:
       - data-agent
       - research-agent
 
+  # S2-23: intentionally duplicates 'engineering' for onboarding compatibility —
+  # both slugs map to the same permissions. Do not remove without auditing
+  # onboarding mapping references.
   development:
     description: "Software development team"
     allowed_skills: ["*"]

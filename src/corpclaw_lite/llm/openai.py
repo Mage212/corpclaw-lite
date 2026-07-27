@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator, Callable
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import openai
 
 from corpclaw_lite.config.providers import ProviderSettings
@@ -133,6 +134,23 @@ def _enable_stream_usage(kwargs: dict[str, Any]) -> None:
     kwargs["stream_options"] = stream_options
 
 
+def _deep_merge_extra_body(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Deep-merge ``override`` onto ``base`` for the backend extra_body layer.
+
+    S2-04: nested dicts (e.g. ``chat_template_kwargs``) merge key-by-key so a
+    backend-supplied nested dict does not replace the whole sub-dict built by
+    sampling/request-options. Scalars and lists from ``override`` win (matching
+    the prior shallow ``.update()`` behaviour at the leaf level).
+    """
+    merged = dict(base)
+    for key, value in override.items():
+        if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
+            merged[key] = _deep_merge_extra_body(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
 class OpenAIProvider(Provider):
     """LLM Provider passing through to OpenAI-compatible models."""
 
@@ -156,11 +174,25 @@ class OpenAIProvider(Provider):
         self._preset = preset  # kept for back-compat introspection (deprecated)
         self._model_profile = model_profile
         self._sampling = sampling
+        # S1-02: explicit transport timeout + retry. Defaults mirror the OpenAI
+        # SDK exactly (connect 5s, read/write/pool 600s, max_retries 2) so
+        # existing deployments are unaffected. Local-LLM stacks with large
+        # contexts should raise READ_TIMEOUT via env.
+        timeout = httpx.Timeout(
+            connect=settings.connect_timeout,
+            read=settings.read_timeout,
+            write=settings.write_timeout,
+            pool=settings.pool_timeout,
+        )
         api_key = settings.api_key or "dummy"  # local models may not need a real key
+        client_kwargs: dict[str, Any] = {
+            "api_key": api_key,
+            "timeout": timeout,
+            "max_retries": settings.max_retries,
+        }
         if settings.base_url:
-            self._client = openai.AsyncOpenAI(api_key=api_key, base_url=settings.base_url)
-        else:
-            self._client = openai.AsyncOpenAI(api_key=api_key)
+            client_kwargs["base_url"] = settings.base_url
+        self._client = openai.AsyncOpenAI(**client_kwargs)
 
     # OpenAI SDK accepts these top-level params in chat.completions.create().
     # Everything else (top_k, min_p, repeat_penalty, etc.) must go into
@@ -187,6 +219,15 @@ class OpenAIProvider(Provider):
             "parallel_tool_calls",
         }
     )
+
+    async def aclose(self) -> None:
+        """Close the underlying ``AsyncOpenAI`` HTTP client (S1-01).
+
+        Idempotent: the SDK client tolerates repeated close. Required so
+        transient provider instances (override-routers, calibration, tests) do
+        not leak connection pools / keepalive tasks.
+        """
+        await self._client.close()
 
     def _thinking_disabled(self) -> bool:
         """Return True if thinking is turned off by sampling or per-call override.
@@ -610,12 +651,21 @@ class OpenAIProvider(Provider):
         return kwargs, final_messages
 
     def _apply_backend_options(self, kwargs: dict[str, Any]) -> None:
-        """Merge request-local backend-specific options into OpenAI kwargs."""
+        """Merge request-local backend-specific options into OpenAI kwargs.
+
+        S2-04: backend extra_body is deep-merged onto the existing extra_body so
+        nested dicts (e.g. ``chat_template_kwargs``) combine keys instead of the
+        backend clobbering the whole sub-dict. Top-level scalar keys from the
+        backend win (consistent with the prior ``.update()`` behaviour); nested
+        dict values merge recursively. This keeps the merge-priority contract
+        (model < sampling < request_options < backend) intact at the top level
+        while preserving sampling-set nested keys (like ``enable_thinking``).
+        """
         options = get_backend_request_options()
         if options is None or not options.extra_body:
             return
         extra_body: dict[str, Any] = dict(kwargs.pop("extra_body", None) or {})
-        extra_body.update(options.extra_body)
+        extra_body = _deep_merge_extra_body(extra_body, options.extra_body)
         kwargs["extra_body"] = extra_body
 
     def _tool_calls_from_native(
@@ -878,9 +928,22 @@ class OpenAIProvider(Provider):
             reasoning_content="".join(reasoning_parts),
             tool_calls=native_tool_calls,
         )
+        # S2-02: single source of truth per thinking_parser.source. _parse_reasoning
+        # already selects native (reasoning_content) vs content (tag parsing). The
+        # fallback that pulled stray reasoning_content into a content-source model
+        # is removed to avoid mixing sources. BUT when there is NO thinking config
+        # (cfg is None), _parse_reasoning returns ("", content) and a model that
+        # still emits reasoning_content unprompted loses its reasoning — preserve
+        # it in that no-config case only.
         reasoning, content = self._parse_reasoning(raw_message)
         if not reasoning and raw_message.reasoning_content:
-            reasoning = raw_message.reasoning_content
+            cfg = None
+            if self._model_profile is not None:
+                cfg = self._model_profile.thinking_parser
+            elif self._preset is not None:
+                cfg = self._preset.thinking
+            if cfg is None:
+                reasoning = raw_message.reasoning_content
         response = self._finalize_response(
             content=content,
             reasoning=reasoning,

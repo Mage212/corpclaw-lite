@@ -49,6 +49,8 @@ _COUNT_ASSERTION_RE = re.compile(
 # After this many failed finalize retries, the next call returns a deterministic skeleton
 # instead of another Error string (prevents LLM finalize loops; coexists with ProgressGuard).
 _FINALIZE_MAX_ATTEMPTS = 2
+# S2-10: minimum seconds between cleanup_user runs for the same user.
+_CLEANUP_INTERVAL_SECONDS = 300.0
 
 
 # B-052: after this many consecutive web-search infrastructure failures, the run is
@@ -331,6 +333,10 @@ class ResearchRuntime:
         self._workspace_base = (
             Path(workspace_base) if workspace_base else PROJECT_ROOT / "workspaces"
         )
+        # S2-10: throttle cleanup_user — run_dir() is called on nearly every
+        # research tool invocation; cleanup iterates all historical run dirs.
+        # Gate it to at most once per user per CLEANUP_INTERVAL.
+        self._last_cleanup_at: dict[str, float] = {}
 
     @property
     def settings(self) -> ResearchSettings:
@@ -398,8 +404,13 @@ class ResearchRuntime:
         return bool(state.get("list_sources_called"))
 
     def run_dir(self, user: User, run_id: str | None) -> Path:
-        self.cleanup_user(user)
+        # S2-10: throttle cleanup — at most once per user per 5 minutes.
         user_key = user.workspace_key()
+        now = time.time()
+        last = self._last_cleanup_at.get(user_key, 0.0)
+        if now - last > _CLEANUP_INTERVAL_SECONDS:
+            self.cleanup_user(user)
+            self._last_cleanup_at[user_key] = now
         safe_run_id = _SAFE_ID_RE.sub("_", run_id or "unknown")[:80] or "unknown"
         path = self._workspace_base / f"user_{user_key}" / ".research" / safe_run_id
         path.mkdir(parents=True, exist_ok=True)

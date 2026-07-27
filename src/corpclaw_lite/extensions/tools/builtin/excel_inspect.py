@@ -208,6 +208,10 @@ def _inspect_parquet(path: Path) -> str:
 
     conn = duckdb.connect(":memory:")
     try:
+        # excel_inspect runs only fixed inspection queries (no user SQL), and
+        # the parquet load itself requires external access, so we deliberately
+        # do not disable enable_external_access here. The read path is safe by
+        # construction (no user-controlled SQL reaches DuckDB).
         p = str(path).replace("'", "''")
         conn.execute(f"CREATE TABLE _insp AS SELECT * FROM read_parquet('{p}')")
         result = conn.execute("SELECT COUNT(*) FROM _insp").fetchone()

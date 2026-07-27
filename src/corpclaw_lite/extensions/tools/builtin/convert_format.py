@@ -156,7 +156,9 @@ def _apply_cell_value(cell: Any, value: Any) -> None:
         cell.value = value
         cell.number_format = "DD.MM.YYYY"
     else:
-        cell.value = value
+        from corpclaw_lite.extensions.tools.builtin.excel_workbook import sanitize_cell_value
+
+        cell.value = sanitize_cell_value(value)
         cell.number_format = "@"
 
 

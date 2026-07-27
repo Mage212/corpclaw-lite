@@ -339,7 +339,12 @@ class WebFetchTool(Tool):
             parsed_u = urlparse(current_url)
             if current_ips and parsed_u.scheme != "https":
                 hostname = parsed_u.hostname or ""
-                url_to_fetch = current_url.replace(f"://{hostname}", f"://{current_ips[0]}", 1)
+                # S2-03: bracket IPv6 addresses so the URL is well-formed.
+                ip = current_ips[0]
+                if ":" in ip:
+                    url_to_fetch = current_url.replace(f"://{hostname}", f"://[{ip}]", 1)
+                else:
+                    url_to_fetch = current_url.replace(f"://{hostname}", f"://{ip}", 1)
                 headers = {"Host": hostname, "User-Agent": self._settings.user_agent}
                 verify = False
             else:
@@ -475,7 +480,8 @@ class WebSearchTool(Tool):
 
     def __init__(self, settings: WebSettings | None = None) -> None:
         self._settings = settings or WebSettings()
-        self._semaphore = asyncio.Semaphore(max(1, self._settings.search_max_concurrent))
+        # S2-13: no semaphore — parallel_safe=False means the executor never
+        # runs this tool concurrently, so a semaphore would be dead code.
 
     async def execute(self, **kwargs: Any) -> str:
         query = kwargs.get("query")
@@ -507,14 +513,13 @@ class WebSearchTool(Tool):
             return "Error: 'timelimit' must be one of: d, w, m, y."
 
         try:
-            async with self._semaphore:
-                results = await run_in_thread(
-                    self._search_sync,
-                    query,
-                    max_results,
-                    region.strip(),
-                    timelimit if isinstance(timelimit, str) else None,
-                )
+            results = await run_in_thread(
+                self._search_sync,
+                query,
+                max_results,
+                region.strip(),
+                timelimit if isinstance(timelimit, str) else None,
+            )
         except TimeoutException:
             # TimeoutException is also an infrastructure failure: the search endpoint did
             # not respond in time. Mark as unavailable so the research layer refunds the

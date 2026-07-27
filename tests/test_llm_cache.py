@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
 from corpclaw_lite.llm.base import LLMResponse, TokenUsage
-from corpclaw_lite.llm.cache import LLMCacheManager, PersistentCacheConfig, SlotCacheActionResult
+from corpclaw_lite.llm.cache import (
+    LLMCacheManager,
+    LLMCacheMetadata,
+    LLMCacheScope,
+    PersistentCacheConfig,
+    SlotCacheActionResult,
+)
 from corpclaw_lite.llm.queue import LLMRequestQueue, SlotAffinityConfig
 
 
@@ -234,4 +242,204 @@ async def test_user_reset_skips_l2_restore_and_erases_slot(tmp_path: Path) -> No
     assert second_lease.hit_kind == "none"
     assert ("erase", 0, None) in client.calls
     assert ("restore", 0, scope.filename) not in client.calls
+    await second_queue.release(second_entry, 1.0)
+
+
+# ── S1-04: cache prune TOCTOU ────────────────────────────────────────────────
+
+
+async def _seed_old_entry(manager: LLMCacheManager, *, age_seconds: float) -> LLMCacheScope:
+    """Insert a cache metadata entry old enough to be pruned; return its scope."""
+    import time
+
+    scope = manager.build_scope(
+        user_id="u1",
+        conversation_id="default",
+        agent_id="main",
+        provider_name="llamacpp",
+        model="gpt-oss",
+        preset="default",
+        system="system",
+        tools=[],
+    )
+    now = time.time()
+    metadata = LLMCacheMetadata(
+        scope=scope,
+        filename=scope.filename,
+        token_count=1000,
+        file_size_bytes=100_000,
+        prompt_tokens=1000,
+        cached_tokens=800,
+        prompt_n=200,
+        created_at=now - age_seconds,
+        last_used_at=now - age_seconds,
+        last_saved_at=now - age_seconds,
+        save_count=1,
+        restore_count=0,
+    )
+    await cast(Any, manager)._store.upsert(metadata)
+    return scope
+
+
+@pytest.mark.asyncio
+async def test_prune_deletes_old_entry_when_not_active(tmp_path: Path) -> None:
+    """Baseline: prune removes an old entry when the scope is not active."""
+    client = FakeSlotCacheClient()
+    manager = LLMCacheManager(
+        _config(tmp_path),
+        provider_base_urls={"llamacpp": "http://llama:8080/v1"},
+        client=client,
+    )
+    scope = await _seed_old_entry(manager, age_seconds=31 * 24 * 3600)
+
+    await manager.prune()
+
+    store = cast(Any, manager)._store
+    remaining = await store.list_all()
+    assert not any(m.scope.key == scope.key for m in remaining)
+
+
+@pytest.mark.asyncio
+async def test_prune_skips_scope_that_became_active_mid_prune(tmp_path: Path) -> None:
+    """S1-04: TOCTOU fix — prune must not delete a scope that became active
+    between the active_keys snapshot and the per-entry re-check.
+
+    Reproduces the real race: ``prune`` takes the active_keys snapshot, then
+    iterates entries. The first entry's ``await _delete_cache_entry`` yields
+    control; a concurrent ``prepare()`` registers the SECOND entry's scope as
+    active during that await. By the time the second entry's re-check runs
+    (after the first delete's await), the scope is active and the re-check must
+    skip it.
+
+    Without the S1-04 re-check, the second entry is deleted (the snapshot missed
+    the late activation), so this test FAILS when the re-check is removed.
+    """
+    client = FakeSlotCacheClient()
+    manager = LLMCacheManager(
+        _config(tmp_path),
+        provider_base_urls={"llamacpp": "http://llama:8080/v1"},
+        client=client,
+    )
+    # Two old entries: "first" will be deleted (its delete await yields control,
+    # during which we activate "second"'s scope); "second" must survive.
+    first_scope = manager.build_scope(
+        user_id="u_first",
+        conversation_id="default",
+        agent_id="main",
+        provider_name="llamacpp",
+        model="gpt-oss",
+        preset="default",
+        system="s1",
+        tools=[],
+    )
+    second_scope = manager.build_scope(
+        user_id="u_second",
+        conversation_id="default",
+        agent_id="main",
+        provider_name="llamacpp",
+        model="gpt-oss",
+        preset="default",
+        system="s2",
+        tools=[],
+    )
+    import time
+
+    from corpclaw_lite.llm.cache import LLMCacheMetadata
+
+    now = time.time()
+    age = 31 * 24 * 3600
+    for scope in (first_scope, second_scope):
+        await cast(Any, manager)._store.upsert(
+            LLMCacheMetadata(
+                scope=scope,
+                filename=scope.filename,
+                token_count=1000,
+                file_size_bytes=100_000,
+                prompt_tokens=1000,
+                cached_tokens=800,
+                prompt_n=200,
+                created_at=now - age,
+                last_used_at=now - age,
+                last_saved_at=now - age,
+                save_count=1,
+                restore_count=0,
+            )
+        )
+
+    # Wrap _delete_cache_entry: when the FIRST entry is deleted, register the
+    # second scope active (simulating a concurrent prepare() during the await),
+    # then perform the real delete. The second entry's re-check then sees the
+    # active scope and skips it.
+    real_delete = manager._delete_cache_entry
+
+    async def racing_delete(entry: LLMCacheMetadata) -> bool:
+        if entry.scope.key == first_scope.key:
+            # Yield control so this is a real suspension point, then activate
+            # the second scope as a concurrent prepare() would.
+            await asyncio.sleep(0)
+            cast(Any, manager)._slot_scopes[0] = second_scope
+        return await real_delete(entry)
+
+    cast(Any, manager)._delete_cache_entry = racing_delete  # type: ignore[method-assign]
+
+    await manager.prune()
+
+    # first was deleted (its delete completed normally); second survived because
+    # its scope was activated during first's delete await — so by the time the
+    # second entry's re-check ran, the scope was active and the delete was
+    # skipped. Without the S1-04 re-check, second would have been deleted too.
+    store = cast(Any, manager)._store
+    remaining = await store.list_all()
+    remaining_keys = {m.scope.key for m in remaining}
+    assert first_scope.key not in remaining_keys  # genuinely deleted
+    assert second_scope.key in remaining_keys  # survived via late-activation re-check
+
+
+# ── S2-05: recompute_ratio in cache validation ─────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_high_recompute_ratio_invalidates_cache(tmp_path: Path) -> None:
+    """S2-05: a cache hit with high cached_tokens but also high prompt_n
+    (most of the prompt recomputed despite a formal hit) must be invalidated."""
+    client = FakeSlotCacheClient()
+    config = _config(tmp_path)
+    first_manager = LLMCacheManager(
+        config,
+        provider_base_urls={"llamacpp": "http://llama:8080/v1"},
+        client=client,
+    )
+    first_queue = _queue()
+    first_entry = await first_queue.acquire("u1", provider_name="llamacpp")
+    scope = first_manager.build_scope(
+        user_id="u1",
+        conversation_id="default",
+        agent_id="main",
+        provider_name="llamacpp",
+        model="gpt-oss",
+        preset=None,
+        system="system",
+        tools=[],
+    )
+    first_lease = await first_manager.prepare(first_entry, scope)
+    await first_manager.finalize(first_entry, first_lease, _response())
+    await first_queue.release(first_entry, 1.0)
+
+    second_manager = LLMCacheManager(
+        config,
+        provider_base_urls={"llamacpp": "http://llama:8080/v1"},
+        client=client,
+    )
+    second_queue = _queue()
+    second_entry = await second_queue.acquire("u1", provider_name="llamacpp")
+    second_lease = await second_manager.prepare(second_entry, scope)
+    # High cached (800/1000 = 0.8 reuse, passes the 0.70 threshold) BUT also
+    # high prompt_n (700/1000 = 0.7 recompute, exceeds the 0.5 cap).
+    result = await second_manager.finalize(
+        second_entry, second_lease, _response(cached=800, prompt=1000, prompt_n=700)
+    )
+
+    assert second_lease.hit_kind == "l2"
+    assert result.retry_without_cache is True
+    assert result.mismatch_reason == "high_recompute_ratio"
     await second_queue.release(second_entry, 1.0)

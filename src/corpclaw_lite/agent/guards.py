@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -29,7 +30,14 @@ class SimpleProgressGuardConfig:
 class SimpleProgressGuardState:
     """Mutable state for progress guard."""
 
-    last_tool_error_signature: tuple[tuple[str, str], ...] | None = None
+    # S1-13: sliding window of recent error signatures. A loop is detected when
+    # the SAME signature recurs within the window — this catches ping-pong
+    # between two distinct signatures (e.g. [A]→[B]→[A]→[B]…) which the old
+    # single-signature comparison missed. ``same_error_count`` accumulates
+    # recurrences; a fully-successful batch resets the window.
+    recent_signatures: deque[tuple[tuple[str, str], ...]] = field(
+        default_factory=lambda: deque(maxlen=3)
+    )
     same_error_count: int = 0
 
 
@@ -74,16 +82,21 @@ class SimpleProgressGuard:
                 signatures.append(signature)
 
         if not signatures:
-            self.state.last_tool_error_signature = None
+            self.state.recent_signatures.clear()
             self.state.same_error_count = 0
             return False
 
         action_signature = tuple(signatures)
 
-        if action_signature == self.state.last_tool_error_signature:
+        # S1-13: detect recurrence within the sliding window. This catches both
+        # exact repeats (the old behaviour) AND ping-pong between distinct
+        # signatures ([A]→[B]→[A]→[B]), which the single-signature comparison
+        # missed. A new signature enters the window and resets the streak only
+        # if it is not already present in the window.
+        if action_signature in self.state.recent_signatures:
             self.state.same_error_count += 1
         else:
-            self.state.last_tool_error_signature = action_signature
+            self.state.recent_signatures.append(action_signature)
             self.state.same_error_count = 1
 
         return self.state.same_error_count >= self.config.max_same_tool_error
@@ -128,13 +141,20 @@ class ResultDedupGuard:
 
     def __init__(self, config: ResultDedupGuardConfig | None = None) -> None:
         self.config = config or ResultDedupGuardConfig()
-        self._seen: dict[str, int] = {}
+        # S1-13: track CONSECUTIVE identical results, not cumulative. The old
+        # cumulative counter never decremented, so a legitimate repeat after
+        # productive work (e.g. list_files at the start and again later) would
+        # trip the guard even though the model was not stuck. Now a different
+        # result resets the streak for the previous key.
+        self._streak_key: str | None = None
+        self._streak_count: int = 0
 
     def _result_hash(self, result: str) -> str:
         return hashlib.sha256(result.encode("utf-8")).hexdigest()[:12]
 
     def detect(self, tool_name: str, result: str) -> bool:
-        """Record ``result`` and return True if it has now been seen ``max_repeats`` times.
+        """Record ``result`` and return True if it has now been seen ``max_repeats``
+        times **consecutively**.
 
         ``tool_name`` is accepted for symmetry with :meth:`SimpleProgressGuard.detect_loop`
         and for trace logging; the dedup key is the result hash only.
@@ -143,16 +163,25 @@ class ResultDedupGuard:
         if not self.config.enabled:
             return False
         key = self._result_hash(result)
-        self._seen[key] = self._seen.get(key, 0) + 1
-        return self._seen[key] >= self.config.max_repeats
+        if key == self._streak_key:
+            self._streak_count += 1
+        else:
+            # A different result resets the consecutive streak. This avoids
+            # false-positives when a tool legitimately returns the same value
+            # again after intervening productive work.
+            self._streak_key = key
+            self._streak_count = 1
+        return self._streak_count >= self.config.max_repeats
 
     def last_count(self, result: str) -> int:
-        """Return how many times ``result`` has been seen (for trace fields)."""
-        return self._seen.get(self._result_hash(result), 0)
+        """Return the consecutive count for ``result`` (for trace fields)."""
+        key = self._result_hash(result)
+        return self._streak_count if key == self._streak_key else 0
 
     def reset(self) -> None:
         """Reset guard state for new conversation."""
-        self._seen.clear()
+        self._streak_key = None
+        self._streak_count = 0
 
 
 @dataclass

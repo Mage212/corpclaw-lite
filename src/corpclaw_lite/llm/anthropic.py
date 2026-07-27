@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 import anthropic
+import httpx
 
 from corpclaw_lite.config.providers import ProviderSettings
 from corpclaw_lite.llm.base import (
@@ -98,7 +99,21 @@ class AnthropicProvider(Provider):
         if not settings.api_key:
             raise ValueError("Anthropic requires an API key in settings")
 
-        client_kwargs: dict[str, Any] = {"api_key": settings.api_key}
+        # S1-02: explicit transport timeout + retry. Defaults mirror the
+        # Anthropic SDK exactly (connect 5s, read/write/pool 600s,
+        # max_retries 2) so existing deployments are unaffected. Operators can
+        # still tune all four via env.
+        timeout = httpx.Timeout(
+            connect=settings.connect_timeout,
+            read=settings.read_timeout,
+            write=settings.write_timeout,
+            pool=settings.pool_timeout,
+        )
+        client_kwargs: dict[str, Any] = {
+            "api_key": settings.api_key,
+            "timeout": timeout,
+            "max_retries": settings.max_retries,
+        }
         if settings.base_url:
             client_kwargs["base_url"] = settings.base_url
         self._client = anthropic.AsyncAnthropic(**client_kwargs)
@@ -111,6 +126,15 @@ class AnthropicProvider(Provider):
             tuple[tuple[str | None, str | None, int | None], tuple[str, ...]],
             list[dict[str, str]],
         ] = OrderedDict()
+
+    async def aclose(self) -> None:
+        """Close the underlying ``AsyncAnthropic`` HTTP client (S1-01).
+
+        Idempotent: the SDK client tolerates repeated close. Required so
+        transient provider instances (override-routers, calibration, tests) do
+        not leak connection pools / keepalive tasks.
+        """
+        await self._client.close()
 
     @staticmethod
     def _convert_tool(tool: dict[str, Any]) -> dict[str, Any]:
@@ -898,11 +922,47 @@ class AnthropicProvider(Provider):
             try:
                 arguments = json.loads(raw_arguments)
             except json.JSONDecodeError as exc:
-                raise ValueError(f"Malformed streamed tool arguments for {part['name']}") from exc
+                # S2-01: degrade instead of crashing the run. The non-streamed
+                # path (_parse_response) already skips malformed tool calls with
+                # a warning; the streamed path must match so a single malformed
+                # streamed tool call does not crash the main-agent run
+                # (llm_streaming_enabled is the default main-agent path).
+                logger.warning(
+                    "Rejected streamed Anthropic tool call with malformed arguments: %s (%s)",
+                    part["name"],
+                    exc,
+                )
+                log_event(
+                    "native_tool_call_rejected",
+                    get_run_id() or "unknown",
+                    tool=part["name"],
+                    reason="malformed_streamed_arguments",
+                )
+                continue
             if not isinstance(arguments, dict):
-                raise ValueError(f"Tool arguments for {part['name']} must be an object")
+                logger.warning(
+                    "Rejected streamed Anthropic tool call with non-object arguments: %s",
+                    part["name"],
+                )
+                log_event(
+                    "native_tool_call_rejected",
+                    get_run_id() or "unknown",
+                    tool=part["name"],
+                    reason="non_object_streamed_arguments",
+                )
+                continue
             if not part["id"]:
-                raise ValueError("Anthropic streamed tool call requires a non-empty id")
+                logger.warning(
+                    "Rejected streamed Anthropic tool call without an id: %s",
+                    part["name"],
+                )
+                log_event(
+                    "native_tool_call_rejected",
+                    get_run_id() or "unknown",
+                    tool=part["name"],
+                    reason="missing_streamed_id",
+                )
+                continue
             tool_calls.append(
                 ToolCall(
                     id=part["id"],

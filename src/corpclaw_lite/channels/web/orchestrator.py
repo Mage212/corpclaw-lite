@@ -86,6 +86,7 @@ from corpclaw_lite.extensions.plugins.watcher import PluginHotReloader
 from corpclaw_lite.extensions.skills.watcher import SkillHotReloader
 from corpclaw_lite.extensions.subagents.watcher import SubagentHotReloader
 from corpclaw_lite.extensions.tools.builtin.send_file import SendFileTool
+from corpclaw_lite.feedback.store import FeedbackStore
 from corpclaw_lite.llm.tokenizer_client import TokenizerClient
 from corpclaw_lite.logging.agent_logger import AgentLogger, setup_logging
 from corpclaw_lite.memory.file_changes import FileChangeDAO
@@ -184,6 +185,8 @@ class WebChannelOrchestrator:
         self._scheduler: Any | None = None
         # B-109: background memory worker (web-owned; opt-in; quiet hours).
         self._memory_worker: Any | None = None
+        # B-121: 👍/👎 feedback store. None when settings.feedback.enabled=False.
+        self._feedback_store: FeedbackStore | None = None
         self._cleanup_task: asyncio.Task[None] | None = None
         self._container_prune_task: asyncio.Task[None] | None = None
         self._system_load_poll_task: asyncio.Task[None] | None = None
@@ -309,6 +312,15 @@ class WebChannelOrchestrator:
         ):
             stack.tool_registry.register(tool, allow_replace=True)
         self._scheduler.start()
+
+        # B-121: 👍/👎 feedback store. Created when settings.feedback.enabled
+        # (default True). Mirrors the scheduler.db path resolution.
+        if self._settings.feedback.enabled:
+            fb_db = Path(self._settings.feedback.db_path)
+            if not fb_db.is_absolute():
+                fb_db = (PROJECT_ROOT / fb_db).resolve()
+            self._feedback_store = FeedbackStore(fb_db)
+            logger.info("Web feedback store wired (store=%s)", fb_db)
 
         # B-109: memory worker (only if master switch is on).
         if self._settings.memory_worker.enabled and memory is not None:
@@ -449,6 +461,32 @@ class WebChannelOrchestrator:
                 logger.info("Web channel containers stopped.")
             except Exception as e:
                 logger.warning("Web container cleanup failed: %s", e)
+        # S1-01: close LLM provider HTTP clients (connection pools / keepalive
+        # tasks) so the process exits without "Task was destroyed but it is
+        # pending" warnings. ``getattr`` chain is defensive: partial stacks (e.g.
+        # in tests) may not carry a fully-wired loop/provider.
+        if self._stack is not None:
+            from corpclaw_lite.llm.base import AsyncCloseable
+
+            agent_loop = getattr(self._stack, "loop", None)
+            provider = getattr(agent_loop, "provider", None) if agent_loop is not None else None
+            if isinstance(provider, AsyncCloseable):
+                try:
+                    await provider.aclose()
+                except Exception as e:
+                    logger.warning("Provider close failed: %s", e)
+        # S2-11: kill plugin subprocess proxies so no orphaned processes remain.
+        if self._stack is not None:
+            from corpclaw_lite.extensions.plugins.sandbox_proxy import PluginToolProxy
+
+            tool_registry = getattr(self._stack, "tool_registry", None)
+            if tool_registry is not None:
+                for tool in tool_registry.list_all():
+                    if isinstance(tool, PluginToolProxy):
+                        try:
+                            await tool.kill()
+                        except Exception as e:
+                            logger.warning("Plugin proxy kill failed: %s", e)
         if self._started:
             logger.info("Web channel stopped cleanly.")
             self._started = False
@@ -486,6 +524,8 @@ class WebChannelOrchestrator:
         app.router.add_post("/api/schedule/{id}/resume", self._handle_schedule_resume)
         # B-143 PR3: optional LLM map free-form schedule → formula (human still accepts).
         app.router.add_post("/api/schedule/{id}/parse-assist", self._handle_schedule_parse_assist)
+        # B-121: user 👍/👎 on an assistant run (body: {run_id, rating}).
+        app.router.add_post("/api/feedback", self._handle_feedback)
         app.router.add_post("/api/chats/{id}/activate", self._handle_activate_chat)
         app.router.add_patch("/api/chats/{id}", self._handle_update_chat)
         app.router.add_delete("/api/chats/{id}", self._handle_delete_chat)
@@ -768,6 +808,29 @@ class WebChannelOrchestrator:
         for token in expired:
             self._ws_tickets.pop(token, None)
         return len(expired)
+
+    def _prune_login_attempts(self) -> int:
+        """S1-12: evict stale login-attempt tracking entries.
+
+        Removes entries whose lockout has expired AND whose 60s failure window
+        is empty after pruning old timestamps. Active lockouts are preserved so
+        brute-force protection is not weakened. Without this, username
+        enumeration / fuzzing grows ``_login_attempts`` unboundedly.
+        """
+        now = time.time()
+        window_start = now - 60
+        stale: list[str] = []
+        for key, state in self._login_attempts.items():
+            # Prune old failures within the window for an accurate count.
+            state.failures = [ts for ts in state.failures if ts >= window_start]
+            if state.lockout_until > now:
+                continue  # active lockout — keep
+            if state.failures:
+                continue  # recent failures within the window — keep
+            stale.append(key)
+        for key in stale:
+            self._login_attempts.pop(key, None)
+        return len(stale)
 
     @staticmethod
     def _origin_matches_request(request: web.Request) -> bool:
@@ -2149,9 +2212,15 @@ class WebChannelOrchestrator:
             instructions = ""
         if not isinstance(tone, str):
             tone = "default"
-        await self._stack.user_manager.async_set_agent_context(
-            user.id, instructions=instructions, tone=tone
-        )
+        # S1-11: set_agent_context now propagates DB errors; map to 5xx so the
+        # user is not silently told "ok" when the write failed.
+        try:
+            await self._stack.user_manager.async_set_agent_context(
+                user.id, instructions=instructions, tone=tone
+            )
+        except Exception:
+            logger.exception("Failed to persist agent context for user %s", user.id)
+            raise web.HTTPInternalServerError(reason="Failed to save agent context") from None
         return web.json_response({"ok": True})
 
     async def _handle_preview_agent_context(self, request: web.Request) -> web.Response:
@@ -2287,6 +2356,46 @@ class WebChannelOrchestrator:
             status = 404 if "not found" in msg.lower() else 400
             return web.json_response({"error": msg}, status=status)
         return web.json_response({"task": self._schedule_task_payload(task)})
+
+    def _require_feedback_store(self) -> FeedbackStore:
+        """Return the feedback store or 503 if feedback is disabled/unwired."""
+        store = self._feedback_store
+        if store is None:
+            raise web.HTTPServiceUnavailable(text="Feedback is not available.")
+        return store
+
+    async def _handle_feedback(self, request: web.Request) -> web.Response:
+        """B-121: record a 👍/👎 label for an assistant run.
+
+        Body: ``{"run_id": str, "rating": "up"|"down"}``. Returns the persisted
+        rating so the frontend can reflect the choice immediately.
+        """
+        user = self._require_user(request)
+        store = self._require_feedback_store()
+        try:
+            raw_body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON body."}, status=400)
+        body: dict[str, object] = raw_body if isinstance(raw_body, dict) else {}
+        run_id_raw = body.get("run_id")
+        rating_raw = body.get("rating")
+        if not isinstance(run_id_raw, str) or not run_id_raw:
+            return web.json_response({"error": "run_id is required."}, status=400)
+        if not isinstance(rating_raw, str) or rating_raw not in {"up", "down"}:
+            return web.json_response({"error": "rating must be 'up' or 'down'."}, status=400)
+        allow_change = self._settings.feedback.allow_change
+        try:
+            label = await store.record(
+                run_id=run_id_raw,
+                user_id=str(user.id),
+                rating=rating_raw,
+                channel="web",
+                message_ref=None,
+                allow_change=allow_change,
+            )
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        return web.json_response({"ok": True, "rating": label.rating})
 
     async def _handle_schedule_pause(self, request: web.Request) -> web.Response:
         from corpclaw_lite.scheduler.service import SchedulerError
@@ -2905,6 +3014,10 @@ class WebChannelOrchestrator:
                         "usage": usage,
                         "status": result.stats.status,
                         "tools_used": result.stats.tools_used,
+                        # B-121: run_id is the JOIN key against
+                        # logs/llm_payloads.jsonl. The frontend reads it from
+                        # metadata.run_id to build 👍/👎 callback_data.
+                        "run_id": result.stats.run_id,
                     },
                 )
                 await self._broadcast_to_user(
@@ -3254,6 +3367,7 @@ class WebChannelOrchestrator:
             removed = self._stack.user_manager.prune_expired_web_sessions()
             grants_removed = self._prune_download_grants()
             tickets_removed = self._prune_ws_tickets()
+            login_removed = self._prune_login_attempts()
             chat_removed = 0
             if self._chat_store is not None:
                 try:
@@ -3271,6 +3385,8 @@ class WebChannelOrchestrator:
                 logger.info("Pruned %d expired web download grants", grants_removed)
             if tickets_removed:
                 logger.info("Pruned %d expired web socket tickets", tickets_removed)
+            if login_removed:
+                logger.info("Pruned %d stale login-attempt entries", login_removed)
             if chat_removed:
                 logger.info("Pruned %d archived web chat session(s)", chat_removed)
 

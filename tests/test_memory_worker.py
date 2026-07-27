@@ -262,8 +262,8 @@ def test_user_memory_worker_table_crud(tmp_path: Path) -> None:
     assert state.enabled is True
     assert 1 in um.list_memory_worker_enabled_users()
 
-    # Update run
-    um.update_memory_worker_run(1, status="ok")
+    # Update run — a completed run advances last_run_at (S1-11)
+    um.update_memory_worker_run(1, status="ok", advance_last_run_at=True)
     state = um.get_memory_worker_state(1)
     assert state is not None
     assert state.last_status == "ok"
@@ -576,3 +576,65 @@ def test_quiet_hours_same_day() -> None:
     tz = ZoneInfo("UTC")
     assert worker._is_quiet_hours(now=datetime(2026, 1, 1, 12, 0, tzinfo=tz)) is True
     assert worker._is_quiet_hours(now=datetime(2026, 1, 1, 20, 0, tzinfo=tz)) is False
+
+
+# ── S1-11: scheduler starvation + error propagation ────────────────────────
+
+
+def test_skip_does_not_advance_last_run_at(tmp_path: Path) -> None:
+    """S1-11: a skipped/error run must NOT bump last_run_at.
+
+    Otherwise a consistently-busy user (always skipped at poll time) gets a
+    fresh timestamp every tick and is demoted to the back of the run queue
+    forever — starving it.
+    """
+    um = UserManager(str(tmp_path / "users.db"))
+    um.set_memory_worker_enabled(1, True)
+    # A genuine completed run advances last_run_at.
+    um.update_memory_worker_run(1, status="ok", advance_last_run_at=True)
+    after_ok = um.get_memory_worker_state(1)
+    assert after_ok is not None and after_ok.last_run_at is not None
+    ok_ts = after_ok.last_run_at
+
+    # A skipped run records status but does NOT change last_run_at.
+    um.update_memory_worker_run(1, status="skipped", error="user_busy")
+    after_skip = um.get_memory_worker_state(1)
+    assert after_skip is not None
+    assert after_skip.last_status == "skipped"
+    assert after_skip.last_error == "user_busy"
+    assert after_skip.last_run_at == ok_ts  # unchanged
+
+    # An error run likewise does not advance last_run_at.
+    um.update_memory_worker_run(1, status="error", error="boom")
+    after_err = um.get_memory_worker_state(1)
+    assert after_err is not None
+    assert after_err.last_status == "error"
+    assert after_err.last_run_at == ok_ts  # unchanged
+
+
+def test_set_memory_worker_enabled_propagates_db_error(tmp_path: Path) -> None:
+    """S1-11: set_memory_worker_enabled raises on DB failure (no silent swallow)."""
+    import sqlite3
+    from unittest.mock import patch
+
+    um = UserManager(str(tmp_path / "users.db"))
+    err = sqlite3.OperationalError("locked")
+    with (
+        patch("corpclaw_lite.users.manager.db_connect", side_effect=err),
+        pytest.raises(sqlite3.OperationalError),
+    ):
+        um.set_memory_worker_enabled(1, True)
+
+
+def test_set_agent_context_propagates_db_error(tmp_path: Path) -> None:
+    """S1-11: set_agent_context raises on DB failure (no silent swallow)."""
+    import sqlite3
+    from unittest.mock import patch
+
+    um = UserManager(str(tmp_path / "users.db"))
+    err = sqlite3.OperationalError("disk full")
+    with (
+        patch("corpclaw_lite.users.manager.db_connect", side_effect=err),
+        pytest.raises(sqlite3.OperationalError),
+    ):
+        um.set_agent_context(1, instructions="x", tone="default")

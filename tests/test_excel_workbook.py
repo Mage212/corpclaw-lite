@@ -898,3 +898,68 @@ class TestExcelWorkbookErrors:
         assert "Error" in result
         assert "NoSuchSheet" in result
         assert "not found" in result
+
+
+# ── S1-06: Excel formula injection sanitization ─────────────────────────────
+
+
+class TestSanitizeCellValue:
+    """S1-06: sanitize_cell_value neutralises CSV/Formula injection (CWE-1236)."""
+
+    def test_equals_prefixed_string_gets_quote(self) -> None:
+        from corpclaw_lite.extensions.tools.builtin.excel_workbook import sanitize_cell_value
+
+        assert sanitize_cell_value("=cmd|'/c calc'!A1") == "'=cmd|'/c calc'!A1"
+        assert sanitize_cell_value('=HYPERLINK("http://evil")') == '\'=HYPERLINK("http://evil")'
+
+    def test_plus_and_at_prefixed_strings_get_quote(self) -> None:
+        from corpclaw_lite.extensions.tools.builtin.excel_workbook import sanitize_cell_value
+
+        assert sanitize_cell_value("+1+1") == "'+1+1"
+        assert sanitize_cell_value("@SUM(A1:A2)") == "'@SUM(A1:A2)"
+
+    def test_negative_number_string_passes_through(self) -> None:
+        from corpclaw_lite.extensions.tools.builtin.excel_workbook import sanitize_cell_value
+
+        # Plain negative-number strings are NOT injection vectors.
+        assert sanitize_cell_value("-5") == "-5"
+        assert sanitize_cell_value("-5.5") == "-5.5"
+
+    def test_non_injection_minus_string_gets_quote(self) -> None:
+        from corpclaw_lite.extensions.tools.builtin.excel_workbook import sanitize_cell_value
+
+        assert sanitize_cell_value("-1+cmd") == "'-1+cmd"
+
+    def test_plain_strings_and_numbers_unchanged(self) -> None:
+        from corpclaw_lite.extensions.tools.builtin.excel_workbook import sanitize_cell_value
+
+        assert sanitize_cell_value("hello") == "hello"
+        assert sanitize_cell_value(42) == 42
+        assert sanitize_cell_value(3.14) == 3.14
+        assert sanitize_cell_value("") == ""
+        assert sanitize_cell_value(None) is None
+
+    @pytest.mark.asyncio
+    async def test_fill_action_writes_injection_value_as_text(
+        self, tool: ExcelWorkbookTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Integration: a formula-injection value is stored as text, not a formula."""
+        monkeypatch.chdir(tmp_path)
+        _create_basic_xlsx(tmp_path / "data.xlsx", ["Name", "Value"], [["x", ""]])
+
+        # Fill an empty cell (B2) with a formula-injection payload.
+        await tool.execute(
+            path="data.xlsx",
+            action="fill",
+            cells={"B2": "=cmd|'/c calc'!A1"},
+            in_place=True,
+        )
+
+        wb = openpyxl.load_workbook(tmp_path / "data.xlsx")
+        ws = wb.active
+        cell = ws["B2"]
+        # The leading quote forces text: data_type is a string variant
+        # ('s' or 'inlineStr'), never a formula ('f').
+        assert cell.data_type in ("s", "inlineStr")
+        assert cell.data_type != "f"
+        assert str(cell.value).startswith("'")

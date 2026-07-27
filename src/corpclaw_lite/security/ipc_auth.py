@@ -25,7 +25,7 @@ class IPCAuthError(Exception):
 
 
 MAX_NONCES = 100_000
-_MIN_SECRET_LENGTH = 16
+_MIN_SECRET_LENGTH = 32  # S2-20: aligned with .env.example (was 16)
 
 
 class IPCAuth:

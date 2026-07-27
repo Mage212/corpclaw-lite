@@ -108,10 +108,7 @@ sampling:
       repetition_penalty: 1.0
 
   # ── Auxiliary: thinking off for extraction / summarization ──────────────
-  # Used by vision / compress / consolidate routes (when on qwen) — extraction
-  # does not need reasoning, only speed. Low temperature for deterministic output.
-  aux-no-thinking:
-    model: qwen3.6-35b-a3b
-    thinking_mode: off
-    inference_overrides:
-      temperature: 0.2
+  # S2-25: this profile was defined but never referenced by any routing rule
+  # in settings.yaml (vision/compress/consolidate routes use gemma4-fast or
+  # qwen-instruct-* profiles instead). Removed to avoid dead config; re-add
+  # and wire it to a route if extraction-on-qwen becomes needed.

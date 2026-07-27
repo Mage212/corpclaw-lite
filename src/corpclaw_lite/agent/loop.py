@@ -76,6 +76,7 @@ from corpclaw_lite.exceptions import ContainerIPCError, StorageError
 from corpclaw_lite.extensions.tools.base import TOOL_ERROR_PREFIX
 from corpclaw_lite.extensions.tools.registry import ToolRegistry
 from corpclaw_lite.llm.base import (
+    AsyncCloseable,
     LLMResponse,
     LLMStreamEvent,
     Provider,
@@ -789,6 +790,11 @@ class AgentLoop:
         emit_status("model_waiting")
 
         if not self._settings.llm_streaming_enabled or not isinstance(provider, StreamingProvider):
+            # The caller wraps this whole call in asyncio.wait_for(timeout=
+            # llm_timeout_seconds) (see the call sites below), which is the
+            # single source of bounding — a TimeoutError there finalizes the run
+            # with status="timeout". No inner wait_for is needed (and an inner
+            # one with the same timeout would be shadowed dead code).
             return await provider.chat(messages=messages, tools=tools, system=system)
 
         health.increment("llm_stream_calls")
@@ -950,6 +956,8 @@ class AgentLoop:
                 elapsed_ms=round((time.monotonic() - started_at) * 1000, 1),
             )
             logger.warning("LLM streaming failed; falling back to chat(): %s", e)
+            # Same as the non-streaming path: the caller's outer wait_for bounds
+            # this fallback chat() — no inner wait_for needed.
             return await provider.chat(messages=messages, tools=tools, system=system)
         finally:
             monitor_task.cancel()
@@ -1848,6 +1856,17 @@ class AgentLoop:
             return msg, state.stats
         finally:
             self._finalize_turn(tokens)
+            # S1-01: close the run-scoped override-router (depth-mode / headless
+            # path) so its freshly-built provider HTTP clients do not leak on
+            # every run. ``self._provider`` is the shared process-lifetime router
+            # and is closed by the orchestrator at shutdown — never here.
+            if effective_provider is not self._provider and isinstance(
+                effective_provider, AsyncCloseable
+            ):
+                try:
+                    await effective_provider.aclose()
+                except Exception:
+                    logger.debug("Failed to close override provider", exc_info=True)
 
     async def _build_turn_context(
         self,

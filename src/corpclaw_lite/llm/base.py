@@ -8,6 +8,7 @@ from typing import Any, Literal, Protocol, runtime_checkable
 from pydantic import BaseModel, Field
 
 __all__ = [
+    "AsyncCloseable",
     "BackendRequestOptions",
     "LLMResponse",
     "LLMStreamEvent",
@@ -137,7 +138,9 @@ class RequestOptions:
             < RequestOptions.inference / RequestOptions.thinking
               (per-call, highest among inference)
             < BackendRequestOptions.extra_body
-              (transport, lowest of its own layer)
+              (transport; top-level keys win over the layers below, nested dict
+              values are deep-merged so backend sub-dicts do not clobber
+              sampling-set keys such as ``enable_thinking``)
 
     Merge order is implemented in ``OpenAIProvider._build_chat_kwargs``; see
     ``tests/test_request_options.py`` for the contract.
@@ -327,4 +330,19 @@ class VisionProvider(Protocol):
         system: str | None = None,
     ) -> LLMResponse:
         """Send a chat request with an inline base64 image."""
+        ...
+
+
+@runtime_checkable
+class AsyncCloseable(Protocol):
+    """Optional lifecycle contract: close underlying resources (HTTP clients).
+
+    Providers and routers implement this so orchestrators and run-scoped
+    override-routers can release ``httpx.AsyncClient`` connection pools at
+    shutdown instead of leaking them. Aditive to ``Provider`` — objects that do
+    not implement it are left untouched by callers.
+    """
+
+    async def aclose(self) -> None:
+        """Close underlying resources. Idempotent."""
         ...

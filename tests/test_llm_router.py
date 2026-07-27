@@ -12,6 +12,8 @@ Covers:
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -338,7 +340,6 @@ def test_different_providers_different_instances() -> None:
 def test_preset_applied_from_routing_rule(tmp_path: None) -> None:  # type: ignore[misc]
     """Routing rule with preset name → preset resolved and passed to provider."""
     import textwrap
-    from pathlib import Path
 
     registry = _make_registry()
 
@@ -352,7 +353,7 @@ def test_preset_applied_from_routing_rule(tmp_path: None) -> None:  # type: igno
             inference_params:
               temperature: 0.42
     """)
-    preset_path = Path("/tmp/_test_presets_router.yaml")
+    preset_path = tmp_path / "_test_presets_router.yaml"
     preset_path.write_text(preset_yaml, encoding="utf-8")
     try:
         preset_reg = PresetRegistry.from_yaml(preset_path)
@@ -378,7 +379,6 @@ def test_preset_applied_from_routing_rule(tmp_path: None) -> None:  # type: igno
 def test_sampling_rule_resolves_split_profiles(tmp_path: None) -> None:  # type: ignore[misc]
     """D-056 PR2: routing rule with sampling: → SamplingProfile resolved on provider."""
     import textwrap
-    from pathlib import Path
 
     registry = _make_registry()
 
@@ -398,7 +398,7 @@ def test_sampling_rule_resolves_split_profiles(tmp_path: None) -> None:  # type:
             inference_overrides:
               temperature: 0.2
     """)
-    preset_path = Path("/tmp/_test_sampling_router.yaml")
+    preset_path = tmp_path / "_test_sampling_router.yaml"
     preset_path.write_text(preset_yaml, encoding="utf-8")
     try:
         preset_reg = PresetRegistry.from_yaml(preset_path)
@@ -428,10 +428,9 @@ def test_sampling_rule_resolves_split_profiles(tmp_path: None) -> None:  # type:
         preset_path.unlink(missing_ok=True)
 
 
-def test_sampling_wins_over_legacy_preset_field() -> None:
+def test_sampling_wins_over_legacy_preset_field(tmp_path: Path) -> None:
     """When a rule has both sampling and preset, sampling wins (D-056)."""
     import textwrap
-    from pathlib import Path
 
     from corpclaw_lite.llm.presets import PresetRegistry
 
@@ -450,7 +449,7 @@ def test_sampling_wins_over_legacy_preset_field() -> None:
             inference_params:
               temperature: 0.9
     """)
-    preset_path = Path("/tmp/_test_sampling_wins.yaml")
+    preset_path = tmp_path / "_test_sampling_wins.yaml"
     preset_path.write_text(preset_yaml, encoding="utf-8")
     try:
         preset_reg = PresetRegistry.from_yaml(preset_path)
@@ -726,8 +725,8 @@ def _agent_routes_settings() -> LLMSettings:
 
 def _preset_registry_for_overrides() -> PresetRegistry:
     """A split-format registry with a model profile and two sampling profiles."""
+    import tempfile
     import textwrap
-    from pathlib import Path
 
     yaml = textwrap.dedent("""\
         models:
@@ -745,12 +744,12 @@ def _preset_registry_for_overrides() -> PresetRegistry:
             model: qwen3.5-4b
             thinking_mode: off
     """)
-    p = Path("/tmp/_test_overrides_presets.yaml")
+    p = Path(tempfile.gettempdir()) / "_test_overrides_presets.yaml"
     p.write_text(yaml, encoding="utf-8")
     return PresetRegistry.from_yaml(p)
 
 
-def test_with_overrides_applies_to_all_agent_routes() -> None:
+def test_with_overrides_applies_to_all_agent_routes(tmp_path: Path) -> None:
     """with_overrides(apply_to=all_agent_routes) overrides default/vision/compress/consolidate,
     leaving the non-agent 'eval' route untouched."""
     registry = _make_registry()
@@ -920,7 +919,6 @@ def test_model_match_guard_strips_inference_on_mismatch(tmp_path: None) -> None:
     """A sampling profile authored for model A on a route using model B:
     inference_overrides are stripped, thinking_mode preserved, warning logged."""
     import textwrap
-    from pathlib import Path
 
     from corpclaw_lite.llm.presets import PresetRegistry
 
@@ -940,7 +938,7 @@ def test_model_match_guard_strips_inference_on_mismatch(tmp_path: None) -> None:
             inference_overrides:
               temperature: 0.4
     """)
-    preset_path = Path("/tmp/_test_model_match.yaml")
+    preset_path = tmp_path / "_test_model_match.yaml"
     preset_path.write_text(preset_yaml, encoding="utf-8")
     try:
         preset_reg = PresetRegistry.from_yaml(preset_path)
@@ -970,7 +968,6 @@ def test_model_match_guard_strips_inference_on_mismatch(tmp_path: None) -> None:
 def test_model_match_guard_passes_on_match(tmp_path: None) -> None:
     """When sampling.model == route model, inference_overrides are applied normally."""
     import textwrap
-    from pathlib import Path
 
     from corpclaw_lite.llm.presets import PresetRegistry
 
@@ -987,7 +984,7 @@ def test_model_match_guard_passes_on_match(tmp_path: None) -> None:
             inference_overrides:
               temperature: 0.4
     """)
-    preset_path = Path("/tmp/_test_model_match_ok.yaml")
+    preset_path = tmp_path / "_test_model_match_ok.yaml"
     preset_path.write_text(preset_yaml, encoding="utf-8")
     try:
         preset_reg = PresetRegistry.from_yaml(preset_path)
@@ -1014,7 +1011,6 @@ def test_model_match_guard_passes_on_match(tmp_path: None) -> None:
 def test_model_match_guard_allows_no_model_field(tmp_path: None) -> None:
     """A sampling profile with no `model:` field (legacy-split) is left untouched."""
     import textwrap
-    from pathlib import Path
 
     from corpclaw_lite.llm.presets import PresetRegistry
 
@@ -1030,7 +1026,7 @@ def test_model_match_guard_allows_no_model_field(tmp_path: None) -> None:
             inference_overrides:
               temperature: 0.3
     """)
-    preset_path = Path("/tmp/_test_model_match_none.yaml")
+    preset_path = tmp_path / "_test_model_match_none.yaml"
     preset_path.write_text(preset_yaml, encoding="utf-8")
     try:
         preset_reg = PresetRegistry.from_yaml(preset_path)
@@ -1057,7 +1053,6 @@ def test_model_match_guard_allows_no_model_field(tmp_path: None) -> None:
 def test_with_overrides_model_match_guard(tmp_path: None) -> None:
     """with_overrides(sampling_name=...) also enforces model-match."""
     import textwrap
-    from pathlib import Path
 
     from corpclaw_lite.llm.presets import PresetRegistry
 
@@ -1074,7 +1069,7 @@ def test_with_overrides_model_match_guard(tmp_path: None) -> None:
             inference_overrides:
               temperature: 0.4
     """)
-    preset_path = Path("/tmp/_test_overrides_match.yaml")
+    preset_path = tmp_path / "_test_overrides_match.yaml"
     preset_path.write_text(preset_yaml, encoding="utf-8")
     try:
         preset_reg = PresetRegistry.from_yaml(preset_path)
@@ -1097,3 +1092,124 @@ def test_with_overrides_model_match_guard(tmp_path: None) -> None:
         assert dp._sampling.inference_overrides["temperature"] == 0.4  # type: ignore[attr-defined]
     finally:
         preset_path.unlink(missing_ok=True)
+
+
+# ── S1-01: LLMRouter aclose + ownership ─────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_router_aclose_closes_owned_providers_only() -> None:
+    """S1-01: with_overrides owns only freshly-built providers.
+
+    The override-router must close the providers it built (overridden routes)
+    but NOT the parent's providers reused for non-overridden routes (e.g. eval).
+    Closing a shared parent provider twice is a double-close leak.
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    registry = _make_registry()
+    settings = _agent_routes_settings()
+    preset_reg = _preset_registry_for_overrides()
+
+    # Patch BOTH SDKs so constructed providers wrap mock clients with a close().
+    openai_clients: list[MagicMock] = []
+    anthropic_clients: list[MagicMock] = []
+
+    def _make_openai_client(*_a: object, **_k: object) -> MagicMock:
+        c = MagicMock()
+        c.close = AsyncMock()
+        openai_clients.append(c)
+        return c
+
+    def _make_anthropic_client(*_a: object, **_k: object) -> MagicMock:
+        c = MagicMock()
+        c.close = AsyncMock()
+        anthropic_clients.append(c)
+        return c
+
+    with (
+        patch("corpclaw_lite.llm.openai.openai") as oai_mod,
+        patch("corpclaw_lite.llm.anthropic.anthropic") as ant_mod,
+    ):
+        oai_mod.AsyncOpenAI.side_effect = _make_openai_client
+        ant_mod.AsyncAnthropic.side_effect = _make_anthropic_client
+
+        router = LLMRouter.from_settings(settings, registry, preset_reg)
+        # Parent providers: ollama (openai-compatible) routes + anthropic eval.
+        parent_default_provider = router.for_task("default")
+        parent_eval_provider = router.for_task("eval")
+
+        overridden = router.with_overrides(
+            provider_registry=registry,
+            preset_registry=preset_reg,
+            sampling_name="off-profile",
+            apply_to="all_agent_routes",
+        )
+        # Override-router's default is freshly built (≠ parent's default).
+        overridden_default_provider = overridden.for_task("default")
+        assert overridden_default_provider is not parent_default_provider
+        # eval route is shared with the parent.
+        assert overridden.for_task("eval") is parent_eval_provider
+
+        await overridden.aclose()
+
+    # The override-router closed only the providers it owns (overridden routes).
+    # parent_default/eval clients must NOT have been closed by the override.
+    overridden_client: Any = cast(Any, overridden_default_provider)._client
+    overridden_client.close.assert_awaited_once()
+
+    parent_default_client: Any = cast(Any, parent_default_provider)._client
+    parent_default_client.close.assert_not_awaited()
+    parent_eval_client: Any = cast(Any, parent_eval_provider)._client
+    parent_eval_client.close.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_router_from_settings_aclose_closes_all_owned() -> None:
+    """S1-01: a router built via from_settings owns ALL its providers."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    registry = _make_registry()
+    settings = _agent_routes_settings()
+    preset_reg = _preset_registry_for_overrides()
+
+    with (
+        patch("corpclaw_lite.llm.openai.openai") as oai_mod,
+        patch("corpclaw_lite.llm.anthropic.anthropic") as ant_mod,
+    ):
+        oai_mod.AsyncOpenAI.return_value = MagicMock(close=AsyncMock())
+        ant_mod.AsyncAnthropic.return_value = MagicMock(close=AsyncMock())
+
+        router = LLMRouter.from_settings(settings, registry, preset_reg)
+        default_client: Any = cast(Any, router.for_task("default"))._client
+        eval_client: Any = cast(Any, router.for_task("eval"))._client
+
+        await router.aclose()
+
+    default_client.close.assert_awaited_once()
+    eval_client.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_router_aclose_is_idempotent() -> None:
+    """S1-01: calling aclose twice does not double-close providers."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    registry = _make_registry()
+    settings = _agent_routes_settings()
+    preset_reg = _preset_registry_for_overrides()
+
+    with (
+        patch("corpclaw_lite.llm.openai.openai") as oai_mod,
+        patch("corpclaw_lite.llm.anthropic.anthropic") as ant_mod,
+    ):
+        oai_mod.AsyncOpenAI.return_value = MagicMock(close=AsyncMock())
+        ant_mod.AsyncAnthropic.return_value = MagicMock(close=AsyncMock())
+
+        router = LLMRouter.from_settings(settings, registry, preset_reg)
+        await router.aclose()
+        await router.aclose()  # second call is a no-op
+
+    # Each provider's client closed exactly once despite two aclose() calls.
+    default_client: Any = cast(Any, router.for_task("default"))._client
+    default_client.close.assert_awaited_once()

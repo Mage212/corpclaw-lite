@@ -479,6 +479,19 @@ export function parseOkPayload(value: unknown): { ok: boolean } {
   return { ok: requiredBoolean(source, "ok", "ok payload") };
 }
 
+// B-121: response of POST /api/feedback — {ok, rating} where rating is the
+// persisted choice ("up" | "down"). rating is returned (not echoed from the
+// request body) so the frontend reflects server-side UPSERT / allow_change.
+export function parseFeedbackPayload(value: unknown): { ok: boolean; rating: "up" | "down" } {
+  const source = record(value, "feedback payload");
+  const ok = requiredBoolean(source, "ok", "feedback payload");
+  const ratingRaw = requiredString(source, "rating", "feedback payload");
+  if (ratingRaw !== "up" && ratingRaw !== "down") {
+    throw new Error("feedback payload: rating must be 'up' or 'down'");
+  }
+  return { ok, rating: ratingRaw };
+}
+
 export function parsePathPayload(value: unknown): { path: string } {
   const source = record(value, "path payload");
   return { path: requiredString(source, "path", "path payload") };
