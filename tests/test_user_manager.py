@@ -534,3 +534,312 @@ def test_create_user_username_with_password_works(tmp_path) -> None:
     mgr = UserManager(db_path=db)
     user = mgr.create_user(department="eng", username="alice", password="good-pass-123")
     assert user.username == "alice"
+
+
+# ── H-4 (code review): merge must reparent ALL user-keyed tables ────────────
+
+
+def _setup_merge_full(tmp_path):
+    """Build a users.db + memory.db + feedback.db + scheduler.db + workspace with
+    one row for the source user in every user-keyed table. Used by the H-4
+    reparent tests so each can focus on one table's post-merge state.
+    """
+    db = tmp_path / "users.db"
+    memory_db = tmp_path / "memory.db"
+    feedback_db = tmp_path / "feedback.db"
+    scheduler_db = tmp_path / "scheduler.db"
+    workspace_base = tmp_path / "workspaces"
+    bootstrap_dir = tmp_path / "bootstrap"
+    bootstrap_dir.mkdir()
+
+    mgr = UserManager(db_path=str(db))
+    target = mgr.create_user(telegram_id=100, department="eng", name="T")
+    source = mgr.create_web_user(username="src", password=PASSWORD, department="eng")
+
+    # Workspace + bootstrap artefacts.
+    (workspace_base / f"user_{source.id}").mkdir(parents=True)
+    (bootstrap_dir / f"{source.id}.md").write_text("bootstrap source", encoding="utf-8")
+
+    # memory.db: every user-keyed table with one source row each.
+    src = str(source.id)
+    with sqlite3.connect(memory_db) as conn:
+        conn.execute(
+            "CREATE TABLE memory_entries (id INTEGER PRIMARY KEY, user_id TEXT, "
+            "primary_abstraction TEXT, memory_value TEXT, cue_indices_json TEXT, "
+            "UNIQUE(user_id, primary_abstraction))"
+        )
+        conn.execute(
+            "CREATE TABLE web_chat_sessions "
+            "(id INTEGER PRIMARY KEY, user_id TEXT, ended_at DATETIME)"
+        )
+        conn.execute(
+            "CREATE TABLE web_chat_messages (id INTEGER PRIMARY KEY, "
+            "session_id INTEGER, user_id TEXT, role TEXT, content TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE web_chat_context (id INTEGER PRIMARY KEY, "
+            "session_id INTEGER, user_id TEXT, role TEXT, content TEXT, "
+            "tool_calls TEXT, tool_call_id TEXT, name TEXT, reasoning TEXT, seq INTEGER)"
+        )
+        conn.execute(
+            "CREATE TABLE web_chat_pins (id INTEGER PRIMARY KEY, session_id INTEGER, "
+            "user_id TEXT, path TEXT, kind TEXT, tokens INTEGER, approximate INTEGER, "
+            "mode TEXT, content TEXT, label TEXT)"
+        )
+        conn.execute("CREATE TABLE agent_change_sets (run_id TEXT PRIMARY KEY, user_id TEXT)")
+        conn.execute(
+            "CREATE TABLE agent_file_changes (id INTEGER PRIMARY KEY, user_id TEXT, run_id TEXT)"
+        )
+        conn.execute("INSERT INTO web_chat_sessions (id, user_id) VALUES (1, ?)", (src,))
+        conn.execute(
+            "INSERT INTO web_chat_messages (session_id, user_id, role, content) "
+            "VALUES (1, ?, 'user', 'hi')",
+            (src,),
+        )
+        conn.execute(
+            "INSERT INTO web_chat_context (session_id, user_id, role, content, seq) "
+            "VALUES (1, ?, 'user', 'ctx', 1)",
+            (src,),
+        )
+        conn.execute(
+            "INSERT INTO web_chat_pins (session_id, user_id, path, kind, tokens, "
+            "approximate, mode, content, label) "
+            "VALUES (1, ?, '/p', 'file', 10, 1, 'auto', 'c', 'l')",
+            (src,),
+        )
+        conn.execute("INSERT INTO agent_change_sets (run_id, user_id) VALUES ('r1', ?)", (src,))
+        conn.execute("INSERT INTO agent_file_changes (user_id, run_id) VALUES (?, 'r1')", (src,))
+
+    # feedback.db: one source row.
+    with sqlite3.connect(feedback_db) as conn:
+        conn.execute(
+            "CREATE TABLE feedback_labels (id TEXT PRIMARY KEY, run_id TEXT, "
+            "user_id TEXT, rating TEXT, channel TEXT, message_ref TEXT, "
+            "created_at TEXT, updated_at TEXT, UNIQUE(run_id, user_id))"
+        )
+        conn.execute(
+            "INSERT INTO feedback_labels (id, run_id, user_id, rating, channel, "
+            "created_at, updated_at) VALUES ('f1', 'run1', ?, 'up', 'web', 't', 't')",
+            (src,),
+        )
+
+    # scheduler.db: one source task. user_id is INTEGER here.
+    with sqlite3.connect(scheduler_db) as conn:
+        conn.execute(
+            "CREATE TABLE scheduled_tasks "
+            "(id INTEGER PRIMARY KEY, user_id INTEGER, status TEXT, dedup_key TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO scheduled_tasks (user_id, status) VALUES (?, 'pending')",
+            (source.id,),
+        )
+
+    return mgr, source, target, memory_db, feedback_db, scheduler_db, workspace_base, bootstrap_dir
+
+
+def test_merge_web_user_reparents_all_memory_db_tables(tmp_path) -> None:
+    """H-4: web_chat_context, web_chat_pins, agent_change_sets, agent_file_changes
+    move to target alongside sessions/messages (these were silently orphaned)."""
+    (
+        mgr,
+        source,
+        target,
+        memory_db,
+        _feedback_db,
+        _scheduler_db,
+        workspace_base,
+        bootstrap_dir,
+    ) = _setup_merge_full(tmp_path)
+
+    result = mgr.merge_web_user(
+        source_user_id=source.id,
+        target_user_id=target.id,
+        workspace_base=workspace_base,
+        memory_db_path=memory_db,
+        bootstrap_users_dir=bootstrap_dir,
+    )
+    assert result["source_disabled"] is True
+
+    with sqlite3.connect(memory_db) as conn:
+        for table in (
+            "web_chat_context",
+            "web_chat_pins",
+            "agent_change_sets",
+            "agent_file_changes",
+        ):
+            rows = conn.execute(f"SELECT user_id FROM {table}").fetchall()
+            assert rows == [(str(target.id),)], f"{table} not reparented to target: {rows}"
+
+
+def test_merge_web_user_reparents_feedback_labels(tmp_path) -> None:
+    """H-4: feedback_labels (separate DB) move to target."""
+    (
+        mgr,
+        source,
+        target,
+        memory_db,
+        feedback_db,
+        scheduler_db,
+        workspace_base,
+        bootstrap_dir,
+    ) = _setup_merge_full(tmp_path)
+
+    result = mgr.merge_web_user(
+        source_user_id=source.id,
+        target_user_id=target.id,
+        workspace_base=workspace_base,
+        memory_db_path=memory_db,
+        feedback_db_path=feedback_db,
+        scheduler_db_path=scheduler_db,
+        bootstrap_users_dir=bootstrap_dir,
+    )
+    assert result["moved_feedback_labels"] == 1
+
+    with sqlite3.connect(feedback_db) as conn:
+        rows = conn.execute("SELECT user_id FROM feedback_labels").fetchall()
+    assert rows == [(str(target.id),)]
+
+
+def test_merge_web_user_reparents_scheduler_tasks(tmp_path) -> None:
+    """H-4: scheduled_tasks (separate DB, INTEGER user_id) move to target."""
+    (
+        mgr,
+        source,
+        target,
+        memory_db,
+        feedback_db,
+        scheduler_db,
+        workspace_base,
+        bootstrap_dir,
+    ) = _setup_merge_full(tmp_path)
+
+    result = mgr.merge_web_user(
+        source_user_id=source.id,
+        target_user_id=target.id,
+        workspace_base=workspace_base,
+        memory_db_path=memory_db,
+        feedback_db_path=feedback_db,
+        scheduler_db_path=scheduler_db,
+        bootstrap_users_dir=bootstrap_dir,
+    )
+    assert result["moved_scheduler_tasks"] == 1
+
+    with sqlite3.connect(scheduler_db) as conn:
+        rows = conn.execute("SELECT user_id FROM scheduled_tasks").fetchall()
+    assert rows == [(target.id,)]
+
+
+def test_merge_web_user_migrates_onboarding_and_bootstrap(tmp_path) -> None:
+    """H-4: merge_web_user (not just migrate_canonical_ids) reparents onboarding
+    state and the bootstrap .md file — previously these were skipped."""
+    (
+        mgr,
+        source,
+        target,
+        memory_db,
+        _feedback_db,
+        _scheduler_db,
+        workspace_base,
+        bootstrap_dir,
+    ) = _setup_merge_full(tmp_path)
+
+    # onboarding_state lives in users.db; seed a row for the source.
+    with sqlite3.connect(str(mgr._db)) as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS onboarding_state (user_id INTEGER PRIMARY KEY, state TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO onboarding_state (user_id, state) VALUES (?, ?)",
+            (source.id, "in_progress"),
+        )
+
+    result = mgr.merge_web_user(
+        source_user_id=source.id,
+        target_user_id=target.id,
+        workspace_base=workspace_base,
+        memory_db_path=memory_db,
+        bootstrap_users_dir=bootstrap_dir,
+    )
+    assert result["moved_onboarding_states"] == 1
+    assert result["moved_bootstrap_files"] == 1
+
+    with sqlite3.connect(str(mgr._db)) as conn:
+        onb = conn.execute("SELECT user_id FROM onboarding_state").fetchall()
+    assert onb == [(target.id,)]
+    assert (bootstrap_dir / f"{target.id}.md").exists()
+    assert not (bootstrap_dir / f"{source.id}.md").exists()
+
+
+def test_merge_web_user_is_idempotent_second_run_moves_nothing(tmp_path) -> None:
+    """H-4: re-running merge after the first one moved everything reports zeros."""
+    (
+        mgr,
+        source,
+        target,
+        memory_db,
+        feedback_db,
+        scheduler_db,
+        workspace_base,
+        bootstrap_dir,
+    ) = _setup_merge_full(tmp_path)
+
+    mgr.merge_web_user(
+        source_user_id=source.id,
+        target_user_id=target.id,
+        workspace_base=workspace_base,
+        memory_db_path=memory_db,
+        feedback_db_path=feedback_db,
+        scheduler_db_path=scheduler_db,
+        bootstrap_users_dir=bootstrap_dir,
+    )
+    # Second pass: source has no rows left anywhere; all counters zero.
+    # (merge_web_user raises on a disabled source only if re-invoked directly —
+    # but the underlying reparent methods are idempotent, which is what matters
+    # for re-running migrate_canonical_ids.)
+    assert (
+        mgr._reparent_feedback(
+            feedback_db_path=feedback_db,
+            source_key=str(source.id),
+            target_key=str(target.id),
+        )
+        == 0
+    )
+    assert (
+        mgr._reparent_scheduler(
+            scheduler_db_path=scheduler_db,
+            source_key=str(source.id),
+            target_key=str(target.id),
+        )
+        == 0
+    )
+
+
+def test_merge_reparents_silently_skip_missing_tables(tmp_path) -> None:
+    """H-4: a brand-new memory.db without the newer tables does not crash merge."""
+    db = tmp_path / "users.db"
+    memory_db = tmp_path / "memory.db"
+    workspace_base = tmp_path / "workspaces"
+    mgr = UserManager(db_path=str(db))
+    target = mgr.create_user(telegram_id=1, department="eng")
+    source = mgr.create_web_user(username="s", password=PASSWORD, department="eng")
+    (workspace_base / f"user_{source.id}").mkdir(parents=True)
+
+    # memory.db exists but has none of the new tables.
+    with sqlite3.connect(memory_db) as conn:
+        conn.execute(
+            "CREATE TABLE memory_entries (id INTEGER PRIMARY KEY, user_id TEXT, "
+            "primary_abstraction TEXT, memory_value TEXT, cue_indices_json TEXT, "
+            "UNIQUE(user_id, primary_abstraction))"
+        )
+
+    # Must not raise.
+    result = mgr.merge_web_user(
+        source_user_id=source.id,
+        target_user_id=target.id,
+        workspace_base=workspace_base,
+        memory_db_path=memory_db,
+        feedback_db_path=tmp_path / "absent_feedback.db",  # does not exist
+        scheduler_db_path=tmp_path / "absent_scheduler.db",  # does not exist
+    )
+    assert result["moved_feedback_labels"] == 0
+    assert result["moved_scheduler_tasks"] == 0

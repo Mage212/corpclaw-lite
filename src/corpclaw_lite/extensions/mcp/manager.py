@@ -176,6 +176,9 @@ class MCPManager:
 
         client = MCPClient()
         try:
+            # Per-server env declared in mcp_servers.yaml. The client filters
+            # this through a secret denylist and only inherits an allowlist
+            # base (PATH/HOME/locale/...) — see mcp/env.py (H-3, code review).
             await client.connect(command, env=env_vars if env_vars else None)
             tools = await client.list_tools()
             registered: list[str] = []

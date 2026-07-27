@@ -11,7 +11,6 @@ import asyncio
 import contextlib
 import json
 import logging
-import os
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -105,12 +104,18 @@ class MCPClient:
 
         Args:
             command: The server executable and its arguments.
-            env: Extra environment variables to pass to the server process.
-                 These are merged with the current process environment.
+            env: Extra environment variables declared in ``mcp_servers.yaml``.
+                 These are layered on top of an allowlist-inherited base env
+                 (PATH/HOME/locale/...) and filtered through a secret denylist
+                 so provider keys / ``CORPCLAW_IPC_SECRET`` never leak to an
+                 external executable fetched on demand (H-3, code review).
         """
-        proc_env: dict[str, str] | None = None
-        if env:
-            proc_env = {**os.environ, **env}
+        # Always pass an explicit env: inheriting the full parent os.environ
+        # would leak OPENAI_API_KEY / CORPCLAW_IPC_SECRET / ... to npx/uvx and
+        # any transitive dependency they pull. See mcp/env.py for the policy.
+        from corpclaw_lite.extensions.mcp.env import build_subprocess_env
+
+        proc_env = build_subprocess_env(env)
 
         self._process = await asyncio.create_subprocess_exec(
             *command,

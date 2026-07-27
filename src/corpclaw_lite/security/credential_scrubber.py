@@ -49,6 +49,18 @@ class CredentialScrubber(logging.Filter):
         re.compile(r"xox[bprs]-[a-zA-Z0-9\-]+"),  # Slack tokens
         re.compile(r"://[^:\s]+:[^@\s]+@"),  # URL embedded credentials
         re.compile(r"-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----"),  # PEM private keys
+        # H-7 (code review): additional credential formats previously missed.
+        re.compile(r"AIza[0-9A-Za-z_-]{35}"),  # Google API key (39 chars total)
+        re.compile(  # JWT (three base64url segments separated by dots)
+            r"eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"
+        ),
+        # HTTP auth headers carrying a raw token (case-insensitive header name).
+        # `Authorization: Bearer ...` is covered by the Bearer pattern above;
+        # these catch non-Bearer schemes (Token, Basic, custom) and x-api-key.
+        # The optional scheme word (e.g. "Token", "Basic") is skipped before the
+        # token so "authorization: Token <token>" still matches.
+        re.compile(r"(?i)x-api-key:\s*[A-Za-z0-9_.-]{20,}"),
+        re.compile(r"(?i)authorization:\s*(?:[A-Za-z][A-Za-z0-9]*\s+)?[A-Za-z0-9_.-]{20,}"),
     )
 
     MASK = "***REDACTED***"

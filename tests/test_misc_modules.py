@@ -340,15 +340,39 @@ def test_safety_critical_settings_forbid_unknown_keys() -> None:
         ContainerSettings,
         ExtensionsSettings,
         LLMSettings,
+        Settings,
         WebChannelSettings,
     )
 
+    # M-10 (code review): Settings (top-level) is now in the forbid-set too,
+    # so a typo like ``agem:`` instead of ``agent:`` is rejected rather than
+    # silently dropping the agent subsystem to defaults.
     for model in (
         LLMSettings,
         ContainerSettings,
         AgentSettings,
         WebChannelSettings,
         ExtensionsSettings,
+        Settings,
     ):
         with pytest.raises(ValidationError, match="extra_forbidden"):
             model.model_validate({"totally_unknown_field": 1})
+
+
+def test_container_settings_rejects_ipc_timeout_below_overhead() -> None:
+    """M-12 (code review): ipc_timeout_seconds < 5s is rejected.
+
+    The container-side tool timeout is ipc_timeout_seconds - 5s; a value below
+    5s would make it negative and every tool call fail instantly with an opaque
+    "timed out". Reject at config-load time instead.
+    """
+    import pytest
+    from pydantic import ValidationError
+
+    from corpclaw_lite.config.settings import ContainerSettings
+
+    with pytest.raises(ValidationError):
+        ContainerSettings(ipc_timeout_seconds=3.0)
+    # Default and the boundary value are accepted.
+    assert ContainerSettings().ipc_timeout_seconds == 120.0
+    assert ContainerSettings(ipc_timeout_seconds=5.0).ipc_timeout_seconds == 5.0

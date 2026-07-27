@@ -91,3 +91,84 @@ def test_ipc_auth_missing_secret_raises_ipc_auth_error(monkeypatch: pytest.Monke
     monkeypatch.delenv("CORPCLAW_IPC_SECRET", raising=False)
     with pytest.raises(IPCAuthError):
         IPCAuth(secret=None)
+
+
+# ── H-1 (code review): persistent nonce store for cross-process replay protection ──
+
+
+def test_ipc_auth_persistent_nonce_store_detects_replay_across_instances(tmp_path):
+    """Two IPCAuth instances on the same nonce-store file share replay state.
+
+    This is the regression test for H-1: the container worker is recreated per
+    ``docker exec``, so an in-memory store starts empty on each call. A
+    persistent store lets a second worker process detect a nonce already seen
+    by the first within the TTL window.
+    """
+    store_path = tmp_path / "nonces.db"
+    payload = {"command": "do_work"}
+
+    # First worker process: signs, verifies, marks the nonce, exits.
+    auth1 = IPCAuth(secret=_TEST_SECRET, nonce_ttl_seconds=60, nonce_store_path=store_path)
+    signed = auth1.sign(payload)
+    auth1.verify(signed)
+
+    # Second worker process — fresh IPCAuth, same nonce-store file + secret.
+    auth2 = IPCAuth(secret=_TEST_SECRET, nonce_ttl_seconds=60, nonce_store_path=store_path)
+    with pytest.raises(IPCAuthError, match="Replay attack detected"):
+        auth2.verify(signed)
+
+
+def test_ipc_auth_in_memory_nonce_store_is_default(tmp_path):
+    """Without nonce_store_path the legacy in-memory behaviour is unchanged.
+
+    A second instance does NOT see the first's nonces — this is the pre-H-1
+    behaviour, preserved for the long-lived host-side IPCAuth and for callers
+    that have not opted into the persistent store.
+    """
+    payload = {"command": "do_work"}
+    auth1 = IPCAuth(secret=_TEST_SECRET, nonce_ttl_seconds=60)
+    signed = auth1.sign(payload)
+    auth1.verify(signed)
+
+    auth2 = IPCAuth(secret=_TEST_SECRET, nonce_ttl_seconds=60)
+    # No replay error — separate in-memory stores.
+    auth2.verify(signed)
+
+
+def test_ipc_auth_persistent_nonce_store_ttl_cleanup(tmp_path):
+    """Expired nonces are cleaned up, so the store does not grow unbounded."""
+    import sqlite3
+
+    store_path = tmp_path / "nonces.db"
+    ttl = 60
+    auth = IPCAuth(secret=_TEST_SECRET, nonce_ttl_seconds=ttl, nonce_store_path=store_path)
+    payload = {"command": "do_work"}
+    signed = auth.sign(payload)
+    auth.verify(signed)
+
+    # Manually backdate the stored nonce past the TTL.
+    with sqlite3.connect(str(store_path)) as conn:
+        conn.execute("UPDATE seen_nonces SET ts = ?", (time.time() - ttl - 1,))
+
+    # A new auth opens the store and runs cleanup on init; the stale entry is gone.
+    auth2 = IPCAuth(secret=_TEST_SECRET, nonce_ttl_seconds=ttl, nonce_store_path=store_path)
+    with sqlite3.connect(str(store_path)) as conn:
+        count = conn.execute("SELECT COUNT(*) FROM seen_nonces").fetchone()[0]
+    assert count == 0
+    # And the backdated nonce is now acceptable again.
+    auth2.verify(signed)
+
+
+def test_ipc_auth_persistent_nonce_store_fallback_on_unwritable_path(tmp_path):
+    """If the nonce-store file cannot be opened, auth degrades to in-memory.
+
+    Verification still works (sign/verify round-trip); only cross-process
+    replay protection is lost. The path pointing at a directory-of-a-file
+    simulates an unwritable location without depending on filesystem perms.
+    """
+    unwritable_path = tmp_path / "does_not_exist_dir" / "nonces.db"
+    auth = IPCAuth(secret=_TEST_SECRET, nonce_ttl_seconds=60, nonce_store_path=unwritable_path)
+    payload = {"command": "do_work"}
+    signed = auth.sign(payload)
+    # Round-trip succeeds despite the bad path.
+    assert auth.verify(signed) == payload

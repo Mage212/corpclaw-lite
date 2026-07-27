@@ -511,12 +511,19 @@ class UserManager:
         target_user_id: int,
         workspace_base: Path | None = None,
         memory_db_path: Path | None = None,
+        feedback_db_path: Path | None = None,
+        scheduler_db_path: Path | None = None,
+        bootstrap_users_dir: Path | None = None,
     ) -> dict[str, int | str | bool]:
         """Merge a duplicate web-only user into the canonical user.
 
         The target user keeps its canonical Telegram identity. Web credentials are copied
         from source when target has no credentials, sessions are moved to target, source
         is disabled, and optional workspace/memory records are moved conservatively.
+
+        H-4 (code review): also reparents feedback_labels, scheduled_tasks, and
+        onboarding state/bootstrap file so the merge does not silently orphan
+        user-keyed data outside memory.db.
         """
         if source_user_id == target_user_id:
             raise ValueError("source and target users must be different")
@@ -592,6 +599,35 @@ class UserManager:
                 target_key=target_after.memory_key(),
             )
 
+        # H-4 (code review): reparent user-keyed data in the other DBs and the
+        # onboarding/bootstrap artefacts so the merge does not orphan them.
+        # All best-effort: a missing DB (lazy creation) or table is a no-op.
+        moved_feedback = 0
+        if feedback_db_path is not None:
+            moved_feedback = self._reparent_feedback(
+                feedback_db_path=feedback_db_path,
+                source_key=source_after.memory_key(),
+                target_key=target_after.memory_key(),
+            )
+        moved_scheduler = 0
+        if scheduler_db_path is not None:
+            moved_scheduler = self._reparent_scheduler(
+                scheduler_db_path=scheduler_db_path,
+                source_key=str(source_user_id),
+                target_key=str(target_user_id),
+            )
+        moved_onboarding = self._migrate_onboarding_state(
+            legacy_user_id=source_user_id,
+            canonical_user_id=target_user_id,
+        )
+        moved_bootstrap = 0
+        if bootstrap_users_dir is not None:
+            moved_bootstrap = self._migrate_bootstrap_file(
+                users_dir=bootstrap_users_dir,
+                legacy_key=source_after.memory_key(),
+                canonical_key=target_after.memory_key(),
+            )
+
         # B-074/M4: disable the source only after all sub-migrations succeeded.
         # A failure above propagates with the source still enabled and its data
         # intact (recoverable), rather than disabled with half-moved memory.
@@ -612,6 +648,10 @@ class UserManager:
             "moved_workspace_items": moved_workspace_items,
             "moved_messages": moved_messages,
             "moved_facts": moved_facts,
+            "moved_feedback_labels": moved_feedback,
+            "moved_scheduler_tasks": moved_scheduler,
+            "moved_onboarding_states": moved_onboarding,
+            "moved_bootstrap_files": moved_bootstrap,
             "source_disabled": True,
         }
 
@@ -621,14 +661,22 @@ class UserManager:
         workspace_base: Path | None = None,
         memory_db_path: Path | None = None,
         bootstrap_users_dir: Path | None = None,
+        feedback_db_path: Path | None = None,
+        scheduler_db_path: Path | None = None,
     ) -> dict[str, int]:
-        """Move legacy telegram_id-keyed user data to canonical DB id keys."""
+        """Move legacy telegram_id-keyed user data to canonical DB id keys.
+
+        H-4 (code review): also reparents feedback_labels and scheduled_tasks
+        (in their own DBs) so the migration does not silently orphan them.
+        """
         users = [user for user in self.list_users() if user.telegram_id is not None]
         moved_workspaces = 0
         moved_messages = 0
         moved_facts = 0
         moved_onboarding = 0
         moved_bootstrap = 0
+        moved_feedback = 0
+        moved_scheduler = 0
 
         for user in users:
             assert user.telegram_id is not None
@@ -662,6 +710,20 @@ class UserManager:
                     legacy_key=legacy_key,
                     canonical_key=canonical_key,
                 )
+            # H-4: feedback.db user_id is TEXT (memory-key-shaped).
+            if feedback_db_path is not None:
+                moved_feedback += self._reparent_feedback(
+                    feedback_db_path=feedback_db_path,
+                    source_key=legacy_key,
+                    target_key=canonical_key,
+                )
+            # H-4: scheduler.db user_id is INTEGER (telegram_id-shaped).
+            if scheduler_db_path is not None:
+                moved_scheduler += self._reparent_scheduler(
+                    scheduler_db_path=scheduler_db_path,
+                    source_key=legacy_key,
+                    target_key=canonical_key,
+                )
 
         return {
             "users": len(users),
@@ -670,6 +732,8 @@ class UserManager:
             "facts": moved_facts,
             "onboarding_states": moved_onboarding,
             "bootstrap_files": moved_bootstrap,
+            "feedback_labels": moved_feedback,
+            "scheduler_tasks": moved_scheduler,
         }
 
     def get_by_telegram_id(self, telegram_id: int) -> User | None:
@@ -962,10 +1026,72 @@ class UserManager:
                     "UPDATE web_chat_messages SET user_id = ? WHERE user_id = ?",
                     (target_key, source_key),
                 )
+                # H-4 (code review): the user-keyed tables below were silently
+                # orphaned on merge — sessions moved to target but their child
+                # rows stayed on source, and list_context / list_pins filter by
+                # user_id, so target never saw them. Reparent each in turn; a
+                # missing table on an older DB is a no-op (skip, not raise).
+                for table in (
+                    "web_chat_context",
+                    "web_chat_pins",
+                    "agent_change_sets",
+                    "agent_file_changes",
+                ):
+                    try:
+                        conn.execute(
+                            f"UPDATE {table} SET user_id = ? WHERE user_id = ?",
+                            (target_key, source_key),
+                        )
+                    except sqlite3.OperationalError as e:
+                        if "no such table" not in str(e).lower():
+                            raise
             except sqlite3.OperationalError as e:
                 if "no such table" not in str(e).lower():
                     raise
         return moved_messages, moved_facts
+
+    @staticmethod
+    def _reparent_feedback(*, feedback_db_path: Path, source_key: str, target_key: str) -> int:
+        """Move feedback_labels rows for source user to target (H-4, code review).
+
+        Lives in a separate DB (data/feedback.db), so not covered by _merge_memory.
+        Best-effort: a missing DB (lazy creation) or table is a no-op.
+        """
+        if source_key == target_key or not feedback_db_path.exists():
+            return 0
+        try:
+            with db_connect(feedback_db_path) as conn:
+                cur = conn.execute(
+                    "UPDATE feedback_labels SET user_id = ? WHERE user_id = ?",
+                    (target_key, source_key),
+                )
+                return int(cur.rowcount or 0)
+        except sqlite3.OperationalError as e:
+            if "no such table" not in str(e).lower():
+                raise
+            return 0
+
+    @staticmethod
+    def _reparent_scheduler(*, scheduler_db_path: Path, source_key: str, target_key: str) -> int:
+        """Move scheduled_tasks rows for source user to target (H-4, code review).
+
+        Lives in a separate DB (data/scheduler.db), so not covered by _merge_memory.
+        Best-effort: a missing DB (lazy creation) or table is a no-op. ``run_log``
+        rows are FK-CASCADEd to their task, so they follow automatically.
+        """
+        if source_key == target_key or not scheduler_db_path.exists():
+            return 0
+        try:
+            with db_connect(scheduler_db_path) as conn:
+                cur = conn.execute(
+                    "UPDATE scheduled_tasks SET user_id = ? WHERE user_id = ?",
+                    (target_key, source_key),
+                )
+                return int(cur.rowcount or 0)
+        except sqlite3.OperationalError as e:
+            if "no such table" not in str(e).lower():
+                raise
+            return 0
 
     def _migrate_onboarding_state(self, *, legacy_user_id: int, canonical_user_id: int) -> int:
         if legacy_user_id == canonical_user_id:
