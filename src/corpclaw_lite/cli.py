@@ -1122,13 +1122,20 @@ def cmd_web_user_merge(
         target_user_id=target_user_id,
         workspace_base=(PROJECT_ROOT / "workspaces") if move_files else None,
         memory_db_path=(DATA_DIR / "memory.db") if move_memory else None,
+        feedback_db_path=DATA_DIR / "feedback.db",
+        scheduler_db_path=DATA_DIR / "scheduler.db",
+        bootstrap_users_dir=PROJECT_ROOT / "config" / "bootstrap" / "users",
     )
     print(
         "Merged web user "
         f"#{result['source_user_id']} into #{result['target_user_id']} "
         f"(workspace=user_{result['target_workspace_key']}, "
         f"files={result['moved_workspace_items']}, "
-        f"messages={result['moved_messages']}, facts={result['moved_facts']}). "
+        f"messages={result['moved_messages']}, facts={result['moved_facts']}, "
+        f"feedback={result['moved_feedback_labels']}, "
+        f"scheduler={result['moved_scheduler_tasks']}, "
+        f"onboarding={result['moved_onboarding_states']}, "
+        f"bootstrap={result['moved_bootstrap_files']}). "
         "Source user disabled."
     )
 
@@ -1234,13 +1241,17 @@ def cmd_user_migrate_canonical_ids() -> None:
         workspace_base=PROJECT_ROOT / "workspaces",
         memory_db_path=DATA_DIR / "memory.db",
         bootstrap_users_dir=PROJECT_ROOT / "config" / "bootstrap" / "users",
+        feedback_db_path=DATA_DIR / "feedback.db",
+        scheduler_db_path=DATA_DIR / "scheduler.db",
     )
     print(
         "Migrated canonical user IDs: "
         f"users={result['users']}, workspace_items={result['workspace_items']}, "
         f"messages={result['messages']}, facts={result['facts']}, "
         f"onboarding_states={result['onboarding_states']}, "
-        f"bootstrap_files={result['bootstrap_files']}"
+        f"bootstrap_files={result['bootstrap_files']}, "
+        f"feedback_labels={result['feedback_labels']}, "
+        f"scheduler_tasks={result['scheduler_tasks']}"
     )
 
 
