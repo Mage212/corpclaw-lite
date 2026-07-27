@@ -50,6 +50,12 @@ def build_docker_args(
         "environment": {
             "CORPCLAW_USER_ID": str(user_id),
             "PYTHONUNBUFFERED": "1",
+            # H-1 (code review): persistent nonce-store path for the container
+            # worker. Lives on the writable /tmp tmpfs so seen-nonces survive
+            # across the short-lived docker-exec processes sharing one
+            # container — without this, each worker restarts with an empty
+            # nonce store and inbound replay protection is inert. Not a secret.
+            "CORPCLAW_IPC_NONCE_STORE": "/tmp/corpclaw_nonces.db",
         },
         # Generation label lets ensure_running detect a container created under a
         # different policy/image and recreate it, so a pre-existing or stale

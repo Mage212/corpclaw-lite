@@ -9,7 +9,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sys
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from corpclaw_lite.security.ipc_auth import IPCAuth
@@ -23,6 +25,27 @@ __all__ = ["process_request"]
 # Should not happen in normal operation (ContainerIPC always sends it),
 # but acts as a safety net for ad-hoc calls or older host versions.
 _DEFAULT_TOOL_TIMEOUT = 25.0
+
+# Where the persistent nonce store lives inside the container. Set into the
+# container env by container/policies.py; lives on the writable /tmp tmpfs so
+# it survives across the short-lived docker-exec processes sharing one
+# container (H-1, code review). Not a secret — safe in the long-lived env.
+_DEFAULT_NONCE_STORE_PATH = "/tmp/corpclaw_nonces.db"
+
+
+def _resolve_nonce_store_path() -> Path | None:
+    """Resolve the persistent nonce-store path, or None to use in-memory.
+
+    Reads ``CORPCLAW_IPC_NONCE_STORE`` (set by container/policies.py). Returns
+    None when explicitly empty so host-side callers without the env var keep
+    the legacy in-memory behaviour.
+    """
+    raw = os.environ.get("CORPCLAW_IPC_NONCE_STORE")
+    if raw is None:
+        return Path(_DEFAULT_NONCE_STORE_PATH)
+    if raw == "":
+        return None
+    return Path(raw)
 
 
 def _init_logging() -> None:
@@ -120,7 +143,20 @@ def process_request() -> None:
 
         # Verify — secret is provided on stdin for this docker-exec process only,
         # not in the long-lived container create environment.
-        auth = IPCAuth(secret=secret_from_stdin or None)
+        #
+        # H-1 (code review): use a persistent nonce store so replay protection
+        # works across the short-lived docker-exec processes that share one
+        # running container. An in-memory store would start empty on every call
+        # and never detect a replayed request within the 300s TTL. The path is
+        # set into the container env by container/policies.py and lives on the
+        # writable /tmp tmpfs. If the file cannot be opened, IPCAuth degrades to
+        # an in-memory store (verification still works, just without cross-
+        # process replay protection).
+        nonce_store_path = _resolve_nonce_store_path()
+        auth = IPCAuth(
+            secret=secret_from_stdin or None,
+            nonce_store_path=nonce_store_path,
+        )
         payload = auth.verify(req)
 
         if payload.get("type") != "tool_call":

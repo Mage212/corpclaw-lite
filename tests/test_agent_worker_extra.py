@@ -180,8 +180,14 @@ def test_process_request_reads_secret_from_stdin():
 
         process_request()
 
-        # IPCAuth was constructed with the stdin secret, not None/env.
-        mock_auth_cls.assert_called_once_with(secret=secret)
+        # IPCAuth was constructed with the stdin secret (not None/env) plus the
+        # persistent nonce-store path (H-1, code review). The exact path comes
+        # from _resolve_nonce_store_path(); assert on secret primarily and
+        # confirm nonce_store_path was passed.
+        assert mock_auth_cls.call_count == 1
+        call_kwargs = mock_auth_cls.call_args.kwargs
+        assert call_kwargs["secret"] == secret
+        assert "nonce_store_path" in call_kwargs
 
 
 def test_process_request_uses_tool_timeout_from_payload():
