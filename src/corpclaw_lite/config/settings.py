@@ -163,6 +163,7 @@ class PersistentCacheSettings(BaseModel):
     validation_min_reuse_ratio: float = 0.70
     validation_large_context_tokens: int = 16000
     validation_large_reuse_ratio: float = 0.90
+    validation_max_recompute_ratio: float = 0.5
     strict_mismatch_retry: bool = True
     prune_interval_seconds: float = 600.0
     http_timeout_seconds: float = 30.0

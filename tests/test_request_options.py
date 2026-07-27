@@ -382,3 +382,45 @@ def test_per_call_thinking_off_suppresses_prefix() -> None:
     finally:
         reset_request_options(tok)
     assert "<|think|>" not in (out or "")
+
+
+# ── S2-04: backend extra_body deep-merge ────────────────────────────────────
+
+
+def test_backend_extra_body_deep_merges_nested_dicts() -> None:
+    """S2-04: a backend chat_template_kwargs must not clobber sampling's.
+
+    The backend layer deep-merges onto the existing extra_body so nested dicts
+    combine keys instead of the backend replacing the whole sub-dict.
+    """
+    provider = _provider(sampling=SamplingProfile(thinking_mode="off"))
+    # Build the base kwargs (sampling sets chat_template_kwargs.enable_thinking=False).
+    kwargs: dict[str, Any] = {}
+    provider._apply_sampling(kwargs)
+    base_ctk = dict(kwargs["extra_body"].get("chat_template_kwargs") or {})
+    assert base_ctk.get("enable_thinking") is False
+
+    # Backend supplies its own chat_template_kwargs with a different key.
+    backend = BackendRequestOptions(extra_body={"chat_template_kwargs": {"custom_param": 7}})
+    btok = set_backend_request_options(backend)
+    try:
+        provider._apply_backend_options(kwargs)
+    finally:
+        reset_backend_request_options(btok)
+
+    merged_ctk = kwargs["extra_body"]["chat_template_kwargs"]
+    # Both keys survive — sampling's enable_thinking was NOT clobbered.
+    assert merged_ctk["enable_thinking"] is False
+    assert merged_ctk["custom_param"] == 7
+
+
+def test_backend_extra_body_top_level_scalar_wins() -> None:
+    """S2-04: top-level scalar keys from backend override (matching old .update)."""
+    from corpclaw_lite.llm.openai import _deep_merge_extra_body
+
+    base = {"id_slot": 0, "chat_template_kwargs": {"enable_thinking": False}}
+    override = {"id_slot": 3, "cache_prompt": True}
+    merged = _deep_merge_extra_body(base, override)
+    assert merged["id_slot"] == 3  # backend scalar wins
+    assert merged["cache_prompt"] is True  # new backend key
+    assert merged["chat_template_kwargs"]["enable_thinking"] is False  # preserved

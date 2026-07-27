@@ -393,3 +393,53 @@ async def test_prune_skips_scope_that_became_active_mid_prune(tmp_path: Path) ->
     remaining_keys = {m.scope.key for m in remaining}
     assert first_scope.key not in remaining_keys  # genuinely deleted
     assert second_scope.key in remaining_keys  # survived via late-activation re-check
+
+
+# ── S2-05: recompute_ratio in cache validation ─────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_high_recompute_ratio_invalidates_cache(tmp_path: Path) -> None:
+    """S2-05: a cache hit with high cached_tokens but also high prompt_n
+    (most of the prompt recomputed despite a formal hit) must be invalidated."""
+    client = FakeSlotCacheClient()
+    config = _config(tmp_path)
+    first_manager = LLMCacheManager(
+        config,
+        provider_base_urls={"llamacpp": "http://llama:8080/v1"},
+        client=client,
+    )
+    first_queue = _queue()
+    first_entry = await first_queue.acquire("u1", provider_name="llamacpp")
+    scope = first_manager.build_scope(
+        user_id="u1",
+        conversation_id="default",
+        agent_id="main",
+        provider_name="llamacpp",
+        model="gpt-oss",
+        preset=None,
+        system="system",
+        tools=[],
+    )
+    first_lease = await first_manager.prepare(first_entry, scope)
+    await first_manager.finalize(first_entry, first_lease, _response())
+    await first_queue.release(first_entry, 1.0)
+
+    second_manager = LLMCacheManager(
+        config,
+        provider_base_urls={"llamacpp": "http://llama:8080/v1"},
+        client=client,
+    )
+    second_queue = _queue()
+    second_entry = await second_queue.acquire("u1", provider_name="llamacpp")
+    second_lease = await second_manager.prepare(second_entry, scope)
+    # High cached (800/1000 = 0.8 reuse, passes the 0.70 threshold) BUT also
+    # high prompt_n (700/1000 = 0.7 recompute, exceeds the 0.5 cap).
+    result = await second_manager.finalize(
+        second_entry, second_lease, _response(cached=800, prompt=1000, prompt_n=700)
+    )
+
+    assert second_lease.hit_kind == "l2"
+    assert result.retry_without_cache is True
+    assert result.mismatch_reason == "high_recompute_ratio"
+    await second_queue.release(second_entry, 1.0)

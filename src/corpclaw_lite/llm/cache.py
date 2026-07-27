@@ -59,6 +59,11 @@ class PersistentCacheConfig:
     validation_min_reuse_ratio: float = 0.70
     validation_large_context_tokens: int = 16_000
     validation_large_reuse_ratio: float = 0.90
+    # S2-05: also gate on recompute ratio. A cache hit can report high
+    # cached_tokens yet still recompute most of the prompt (high prompt_n) — the
+    # cache is then effectively useless. If recompute_ratio exceeds this cap the
+    # restore is invalidated (retry without the stale/leaky cache).
+    validation_max_recompute_ratio: float = 0.5
     strict_mismatch_retry: bool = True
     prune_interval_seconds: float = 600.0
     http_timeout_seconds: float = 30.0
@@ -833,6 +838,21 @@ class LLMCacheManager:
                 threshold=threshold,
             )
             return "low_cache_reuse_ratio"
+        # S2-05: a cache hit can report high cached_tokens yet still recompute
+        # most of the prompt (high prompt_n) — the cache is then effectively
+        # useless. Invalidate when recompute_ratio exceeds the configured cap.
+        if recompute_ratio > self._config.validation_max_recompute_ratio:
+            log_event(
+                "llm_cache_restore_validation_failed",
+                entry.run_id or "unknown",
+                user_id=entry.user_id,
+                slot_id=lease.slot_id,
+                scope_key=lease.scope.key if lease.scope else "",
+                cache_reuse_ratio=round(reuse_ratio, 4),
+                prompt_recompute_ratio=round(recompute_ratio, 4),
+                threshold=self._config.validation_max_recompute_ratio,
+            )
+            return "high_recompute_ratio"
         log_event(
             "llm_cache_restore_validation_passed",
             entry.run_id or "unknown",
@@ -1082,6 +1102,7 @@ def config_from_settings(value: Any) -> PersistentCacheConfig:
         validation_min_reuse_ratio=float(value.validation_min_reuse_ratio),
         validation_large_context_tokens=int(value.validation_large_context_tokens),
         validation_large_reuse_ratio=float(value.validation_large_reuse_ratio),
+        validation_max_recompute_ratio=float(value.validation_max_recompute_ratio),
         strict_mismatch_retry=bool(value.strict_mismatch_retry),
         prune_interval_seconds=float(value.prune_interval_seconds),
         http_timeout_seconds=float(value.http_timeout_seconds),

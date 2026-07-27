@@ -440,6 +440,76 @@ async def test_chat_streamed_total_argument_limit_bounds_many_calls() -> None:
 
 
 @pytest.mark.asyncio
+async def test_chat_streamed_malformed_tool_arguments_skipped_not_raised() -> None:
+    """S2-01: a malformed streamed tool call must be skipped, not crash the run.
+
+    The non-streamed path (_parse_response) already skips malformed tool calls
+    with a warning; the streamed path must match so a single malformed streamed
+    tool call does not crash the main-agent run (llm_streaming_enabled default).
+    """
+    events = [
+        _event(
+            "content_block_start",
+            index=0,
+            content_block=SimpleNamespace(type="tool_use", id="toolu_1", name="read_file"),
+        ),
+        _event(
+            "content_block_delta",
+            index=0,
+            # malformed JSON — not a valid object
+            delta=SimpleNamespace(type="input_json_delta", partial_json="{not valid json"),
+        ),
+        _event(
+            "content_block_delta",
+            index=1,
+            delta=SimpleNamespace(type="text_delta", text="partial answer"),
+        ),
+        _event(
+            "message_delta",
+            delta=SimpleNamespace(stop_reason="end_turn"),
+            usage=SimpleNamespace(output_tokens=5),
+        ),
+    ]
+    client = MagicMock()
+    client.messages.stream = MagicMock(return_value=_StreamManager(events))
+    provider = _provider(client)
+
+    # Must NOT raise — the malformed tool call is skipped, the run continues.
+    result = await provider.chat_streamed([], tools=_tools("read_file"))
+
+    assert result.content == "partial answer"
+    assert result.tool_calls == []  # malformed call dropped, no crash
+
+
+@pytest.mark.asyncio
+async def test_chat_streamed_tool_call_without_id_skipped_not_raised() -> None:
+    """S2-01: a streamed tool call missing an id is skipped, not raised."""
+    events = [
+        _event(
+            "content_block_start",
+            index=0,
+            content_block=SimpleNamespace(type="tool_use", id="", name="read_file"),
+        ),
+        _event(
+            "content_block_delta",
+            index=0,
+            delta=SimpleNamespace(type="input_json_delta", partial_json='{"path":"a"}'),
+        ),
+        _event(
+            "message_delta",
+            delta=SimpleNamespace(stop_reason="end_turn"),
+            usage=SimpleNamespace(output_tokens=3),
+        ),
+    ]
+    client = MagicMock()
+    client.messages.stream = MagicMock(return_value=_StreamManager(events))
+    provider = _provider(client)
+
+    result = await provider.chat_streamed([], tools=_tools("read_file"))
+    assert result.tool_calls == []  # missing-id call dropped, no crash
+
+
+@pytest.mark.asyncio
 async def test_payload_capture_keeps_run_user_and_session_correlation() -> None:
     client = MagicMock()
     client.messages.create = AsyncMock(return_value=_text_response())
